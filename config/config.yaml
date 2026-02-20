@@ -6,6 +6,18 @@
 universe_csv: "data/etf_screened_today.csv"
 inverse_etf_csv: "config/inverse_etfs.csv"
 
+# ── GitHub sync (pull latest universe from ls-algo repo) ──
+github:
+  enabled: true
+  repo: "GoldmanDrew/ls-algo"
+  branch: "main"
+  remote_path: "data/etf_screened_today.csv"
+  # token: ""              # optional: set here or via GITHUB_TOKEN env var
+  #                        # not needed for public repos
+  sync_on_startup: true    # pull latest on server start
+  sync_interval_seconds: 3600   # re-sync every hour (0 = disabled)
+  backup_dir: "data/universe_history"  # keep dated backups of old CSVs
+
 # ── IBKR connection ─────────────────────────
 ibkr:
   ftp_host: "ftp2.interactivebrokers.com"
@@ -38,6 +50,18 @@ server:
 # ── Database ─────────────────────────────────
 database:
   path: "data/dashboard.db"
+
+# ── GitHub Universe Sync ─────────────────────
+github:
+  enabled: true
+  repo: "GoldmanDrew/ls-algo"
+  branch: "main"
+  remote_path: "data/etf_screened_today.csv"
+  backup_dir: "data/universe_history"
+  sync_on_startup: true
+  sync_interval_seconds: 3600   # re-pull every hour
+  # token: null                 # set for private repos or higher rate limits
+                                # or use GITHUB_TOKEN env var
 
 # ── Blacklist (symbols to exclude) ───────────
 blacklist: []

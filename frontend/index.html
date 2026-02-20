@@ -564,8 +564,9 @@ function TableRow({ record, expanded, onToggle, history }) {
 }
 
 // ── Status Page ──────────────────────────────
-function StatusPage({ status }) {
+function StatusPage({ status, onSync }) {
   if (!status) return <div className="loading"><div className="spinner" />Loading…</div>;
+  const gh = status.github_sync;
   const rows = [
     ['IBKR Connected', status.ibkr_connected ? '✓ Connected' : '✗ Disconnected'],
     ['Last Fetch', fmtTime(status.last_fetch_time)],
@@ -576,6 +577,9 @@ function StatusPage({ status }) {
     ['Missing', fmtNum(status.symbols_missing)],
     ['Uptime', `${(status.uptime_seconds / 60).toFixed(1)} min`],
   ];
+
+  const ghSync = status.github_sync;
+
   return (
     <div className="status-page">
       <h2 style={{ marginBottom: 16, fontSize: 18, fontWeight: 700 }}>System Status</h2>
@@ -585,6 +589,103 @@ function StatusPage({ status }) {
           <span className="status-val">{v}</span>
         </div>
       ))}
+
+      {/* GitHub Sync Section */}
+      <h3 style={{ marginTop: 24, marginBottom: 12, fontSize: 15, fontWeight: 700,
+        color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 16 }}>⬡</span> GitHub Universe Sync
+      </h3>
+      {ghSync ? (
+        <>
+          {[
+            ['Status', ghSync.success
+              ? (ghSync.updated ? '✓ Updated' : '✓ Up to date')
+              : `✗ ${ghSync.error || 'Failed'}`],
+            ['Last Sync', ghSync.timestamp ? new Date(ghSync.timestamp).toLocaleString() : '—'],
+            ['Remote SHA', ghSync.remote_sha ? ghSync.remote_sha.slice(0, 12) : '—'],
+            ['File Size', ghSync.size_bytes ? `${(ghSync.size_bytes / 1024).toFixed(1)} KB` : '—'],
+            ...(ghSync.backup_path ? [['Backup', ghSync.backup_path]] : []),
+            ...(ghSync.last_commit ? [
+              ['Last Screener Run', ghSync.last_commit.date
+                ? new Date(ghSync.last_commit.date).toLocaleString() : '—'],
+              ['Commit', ghSync.last_commit.message || '—'],
+              ['Author', ghSync.last_commit.author || '—'],
+            ] : []),
+          ].map(([k, v]) => (
+            <div className="status-row" key={k}>
+              <span className="status-key">{k}</span>
+              <span className="status-val">{v}</span>
+            </div>
+          ))}
+        </>
+      ) : (
+        <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '8px 0' }}>
+          No sync has run yet. Enable in config/config.yaml → github.enabled: true
+        </div>
+      )}
+
+      {/* GitHub Sync Section */}
+      <h3 style={{ marginTop: 24, marginBottom: 12, fontSize: 15, fontWeight: 700,
+        display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ color: 'var(--accent-purple)' }}>⬡</span> GitHub Universe Sync
+        <button className="topbar-btn" onClick={onSync} style={{ marginLeft: 'auto', fontSize: 11 }}>
+          ↻ Sync Now
+        </button>
+      </h3>
+      {gh ? (
+        <>
+          <div className="status-row">
+            <span className="status-key">Status</span>
+            <span className="status-val" style={{ color: gh.success ? 'var(--positive)' : 'var(--negative)' }}>
+              {gh.success ? '✓ OK' : '✗ Failed'}
+            </span>
+          </div>
+          <div className="status-row">
+            <span className="status-key">Last Sync</span>
+            <span className="status-val">{fmtTime(gh.timestamp)}</span>
+          </div>
+          <div className="status-row">
+            <span className="status-key">File Updated</span>
+            <span className="status-val">{gh.updated ? '✓ Yes (new data loaded)' : 'No change'}</span>
+          </div>
+          <div className="status-row">
+            <span className="status-key">Source</span>
+            <span className="status-val" style={{ fontSize: 11, wordBreak: 'break-all' }}>
+              {gh.source_url || '—'}
+            </span>
+          </div>
+          <div className="status-row">
+            <span className="status-key">File Size</span>
+            <span className="status-val">{gh.file_size ? `${(gh.file_size / 1024).toFixed(1)} KB` : '—'}</span>
+          </div>
+          {gh.last_commit && (
+            <>
+              <div className="status-row">
+                <span className="status-key">Last Screener Run</span>
+                <span className="status-val">{gh.last_commit.date || '—'}</span>
+              </div>
+              <div className="status-row">
+                <span className="status-key">Commit</span>
+                <span className="status-val" style={{ fontSize: 11 }}>
+                  {gh.last_commit.sha} — {gh.last_commit.message}
+                </span>
+              </div>
+            </>
+          )}
+          {gh.error && (
+            <div style={{
+              padding: '8px 12px', marginTop: 8, borderRadius: 4,
+              background: 'rgba(239,68,68,0.08)', fontSize: 12,
+              fontFamily: "'JetBrains Mono', monospace", color: 'var(--accent-red)',
+            }}>
+              {gh.error}
+            </div>
+          )}
+        </>
+      ) : (
+        <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>No sync has run yet.</div>
+      )}
+
       {status.errors?.length > 0 && (
         <>
           <h3 style={{ marginTop: 20, marginBottom: 8, fontSize: 14, color: 'var(--accent-red)' }}>
@@ -705,6 +806,20 @@ function App() {
     } catch (err) { console.error(err); }
   };
 
+  const triggerGitHubSync = async () => {
+    try {
+      await fetch(`${API}/api/sync/github`, { method: 'POST' });
+      await fetchAll();
+    } catch (err) { console.error(err); }
+  };
+
+  const triggerSync = async () => {
+    try {
+      await fetch(`${API}/api/sync/github`, { method: 'POST' });
+      await fetchAll();
+    } catch (err) { console.error(err); }
+  };
+
   const tabCounts = useMemo(() => {
     const c = { all: records.length, bucket_1: 0, bucket_2: 0, bucket_3: 0 };
     records.forEach(r => {
@@ -739,6 +854,7 @@ function App() {
         </div>
         <div className="topbar-right">
           <button className="topbar-btn" onClick={triggerRefresh}>↻ Refresh</button>
+          <button className="topbar-btn" onClick={triggerGitHubSync}>⬡ Sync GitHub</button>
           <button
             className={cls('topbar-btn', showStatus && 'active')}
             onClick={() => setShowStatus(s => !s)}
@@ -748,7 +864,7 @@ function App() {
         </div>
       </div>
 
-      {showStatus ? <StatusPage status={status} /> : (
+      {showStatus ? <StatusPage status={status} onSync={triggerSync} /> : (
         <>
           {/* ── Summary Strip ─────── */}
           <div className="summary-strip">

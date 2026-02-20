@@ -32,6 +32,7 @@ from backend.universe import load_universe, load_inverse_etfs, assign_buckets, n
 from backend.ibkr_fetcher import fetch_ibkr_ftp, fetch_mock, BorrowSnapshot
 from backend.decay import compute_mock_decay_for_universe
 from backend.db import DashboardDB
+from backend.github_sync import sync_universe_from_github, get_last_commit_info, resolve_github_token
 
 # ──────────────────────────────────────────────
 # Logging
@@ -54,6 +55,7 @@ DECAY_DATA: dict = {}    # symbol → decay dict
 DB: Optional[DashboardDB] = None
 START_TIME = time.monotonic()
 ERRORS: list[str] = []
+GITHUB_SYNC_STATUS: dict = {}  # last sync result
 
 
 def load_config(path: str = "config/config.yaml") -> dict:
@@ -65,11 +67,89 @@ def load_config(path: str = "config/config.yaml") -> dict:
     return {}
 
 
+def sync_github_universe() -> dict:
+    """Pull latest etf_screened_today.csv from GitHub and reload if changed."""
+    global GITHUB_SYNC_STATUS
+
+    gh_cfg = CONFIG.get("github", {})
+    if not gh_cfg.get("enabled", False):
+        logger.info("GitHub sync disabled in config")
+        return {"success": True, "updated": False, "error": "disabled"}
+
+    token = resolve_github_token(CONFIG)
+
+    result = sync_universe_from_github(
+        repo=gh_cfg.get("repo", "GoldmanDrew/ls-algo"),
+        branch=gh_cfg.get("branch", "main"),
+        remote_path=gh_cfg.get("remote_path", "data/etf_screened_today.csv"),
+        local_path=CONFIG.get("universe_csv", "data/etf_screened_today.csv"),
+        backup_dir=gh_cfg.get("backup_dir", "data/universe_history"),
+        github_token=token,
+    )
+
+    # Try to get last commit info (when was the screener last run?)
+    commit_info = get_last_commit_info(
+        repo=gh_cfg.get("repo", "GoldmanDrew/ls-algo"),
+        file_path=gh_cfg.get("remote_path", "data/etf_screened_today.csv"),
+        github_token=token,
+    )
+    result["last_commit"] = commit_info
+
+    GITHUB_SYNC_STATUS = result
+
+    # If file was updated, reload universe + rebucket + recompute
+    if result.get("updated"):
+        logger.info("Universe file updated from GitHub — reloading data pipeline")
+        try:
+            _reload_universe()
+            refresh_borrow()
+            refresh_decay()
+        except Exception as e:
+            msg = f"Reload after GitHub sync failed: {e}"
+            logger.exception(msg)
+            ERRORS.append(msg)
+
+    return result
+
+
+def _reload_universe():
+    """Reload universe from CSV and reassign buckets (after a GitHub sync)."""
+    global UNIVERSE_DF, INVERSE_SET
+    universe_path = CONFIG.get("universe_csv", "data/etf_screened_today.csv")
+    UNIVERSE_DF = load_universe(universe_path)
+
+    inverse_path = CONFIG.get("inverse_etf_csv", "config/inverse_etfs.csv")
+    INVERSE_SET = load_inverse_etfs(inverse_path)
+
+    bucket_cfg = CONFIG.get("buckets", {})
+    threshold = bucket_cfg.get("high_beta_threshold", 1.5)
+    blacklist = CONFIG.get("blacklist", [])
+    UNIVERSE_DF = assign_buckets(UNIVERSE_DF, INVERSE_SET, threshold, blacklist)
+
+    _build_records_from_csv()
+
+
 def init_data():
     """Load universe, assign buckets, compute initial decay."""
     global UNIVERSE_DF, INVERSE_SET, RECORDS, DECAY_DATA, DB
 
     cfg = CONFIG
+
+    # ── GitHub sync on startup ──
+    gh_cfg = cfg.get("github", {})
+    if gh_cfg.get("enabled") and gh_cfg.get("sync_on_startup", True):
+        logger.info("Syncing universe from GitHub on startup…")
+        try:
+            result = sync_github_universe()
+            if result.get("success"):
+                if result.get("updated"):
+                    logger.info("Universe updated from GitHub")
+                else:
+                    logger.info("Universe unchanged on GitHub")
+            else:
+                logger.warning(f"GitHub sync issue: {result.get('error')}")
+        except Exception as e:
+            logger.warning(f"GitHub sync failed on startup (using local file): {e}")
 
     # Load universe
     universe_path = cfg.get("universe_csv", "data/etf_screened_today.csv")
@@ -247,6 +327,14 @@ def start_scheduler():
 
     scheduler.add_job(refresh_borrow, "interval", seconds=borrow_interval, id="borrow_refresh")
     scheduler.add_job(refresh_decay, "interval", seconds=decay_interval, id="decay_refresh")
+
+    # GitHub universe sync
+    gh_cfg = CONFIG.get("github", {})
+    gh_interval = gh_cfg.get("sync_interval_seconds", 3600)
+    if gh_cfg.get("enabled") and gh_interval > 0:
+        scheduler.add_job(sync_github_universe, "interval", seconds=gh_interval, id="github_sync")
+        logger.info(f"GitHub sync scheduled every {gh_interval}s")
+
     scheduler.start()
     logger.info(f"Scheduler started: borrow every {borrow_interval}s, decay every {decay_interval}s")
 
@@ -362,17 +450,19 @@ def get_summary() -> dict:
 def get_status() -> dict:
     """System health / status page."""
     all_recs = list(RECORDS.values())
-    return SystemStatus(
-        ibkr_connected=LAST_SNAPSHOT.success if LAST_SNAPSHOT else False,
-        last_fetch_time=LAST_SNAPSHOT.timestamp if LAST_SNAPSHOT else None,
-        last_fetch_duration_ms=LAST_SNAPSHOT.duration_ms if LAST_SNAPSHOT else None,
-        total_symbols=len(all_recs),
-        symbols_with_borrow=sum(1 for r in all_recs if r.borrow_net_annual is not None),
-        symbols_stale=sum(1 for r in all_recs if r.is_stale),
-        symbols_missing=sum(1 for r in all_recs if r.borrow_missing),
-        errors=ERRORS[-20:],
-        uptime_seconds=round(time.monotonic() - START_TIME, 1),
-    ).model_dump()
+    status = {
+        "ibkr_connected": LAST_SNAPSHOT.success if LAST_SNAPSHOT else False,
+        "last_fetch_time": LAST_SNAPSHOT.timestamp.isoformat() if LAST_SNAPSHOT and LAST_SNAPSHOT.timestamp else None,
+        "last_fetch_duration_ms": LAST_SNAPSHOT.duration_ms if LAST_SNAPSHOT else None,
+        "total_symbols": len(all_recs),
+        "symbols_with_borrow": sum(1 for r in all_recs if r.borrow_net_annual is not None),
+        "symbols_stale": sum(1 for r in all_recs if r.is_stale),
+        "symbols_missing": sum(1 for r in all_recs if r.borrow_missing),
+        "errors": ERRORS[-20:],
+        "uptime_seconds": round(time.monotonic() - START_TIME, 1),
+        "github_sync": GITHUB_SYNC_STATUS or None,
+    }
+    return status
 
 
 @app.get("/api/history/{symbol}")
@@ -395,6 +485,19 @@ def trigger_decay_refresh():
     """Manually trigger a decay recalculation."""
     refresh_decay()
     return {"status": "ok", "timestamp": dt.datetime.utcnow().isoformat()}
+
+
+@app.post("/api/sync/github")
+def trigger_github_sync():
+    """Manually trigger a GitHub universe sync."""
+    result = sync_github_universe()
+    return result
+
+
+@app.get("/api/sync/status")
+def get_github_sync_status():
+    """Get the last GitHub sync result."""
+    return GITHUB_SYNC_STATUS or {"success": False, "error": "No sync has run yet"}
 
 
 # ── Serve Frontend ─────────────────────────────
