@@ -298,13 +298,12 @@ const COLS = [
   { key: 'symbol', label: 'Symbol', w: 90 },
   { key: 'underlying', label: 'Underlying', w: 85 },
   { key: 'beta', label: 'Beta', w: 65 },
-  { key: 'leverage', label: 'Lev', w: 50 },
   { key: 'borrow_net_annual', label: 'Borrow Rate', w: 105 },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross Decay', w: 100 },
-  { key: 'spread', label: 'Spread', w: 90 },
-  { key: 'decay_3m', label: '3M Decay', w: 80 },
-  { key: 'decay_6m', label: '6M Decay', w: 80 },
+  { key: 'net_decay', label: 'Net Decay', w: 100 },
+  { key: 'vol_underlying_annual', label: 'Vol Und', w: 80 },
+  { key: 'vol_etf_annual', label: 'Vol ETF', w: 80 },
   { key: 'include_for_algo', label: 'Algo', w: 50 },
 ];
 
@@ -338,8 +337,8 @@ function DetailRow({ r }) {
             <div className={cls('dval', borrowCls(r.borrow_net_annual))}>{fmt(r.borrow_net_annual)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Spread (Decay − Borrow)</div>
-            <div className={cls('dval', spreadCls(r.spread))}>{fmt(r.spread)}</div>
+            <div className="dlabel">Net Decay (Decay − Borrow/|β|)</div>
+            <div className={cls('dval', spreadCls(r.net_decay))}>{fmt(r.net_decay)}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Shares Available</div>
@@ -350,8 +349,12 @@ function DetailRow({ r }) {
             <div className="dval">{r.beta?.toFixed(3) ?? '—'}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">12M Decay</div>
-            <div className="dval">{fmt(r.decay_12m)}</div>
+            <div className="dlabel">Vol Underlying</div>
+            <div className="dval">{fmt(r.vol_underlying_annual)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Vol ETF</div>
+            <div className="dval">{fmt(r.vol_etf_annual)}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Spiking</div>
@@ -430,7 +433,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('all');
   const [search, setSearch] = useState('');
-  const [sortKey, setSortKey] = useState('spread');
+  const [sortKey, setSortKey] = useState('net_decay');
   const [sortDesc, setSortDesc] = useState(true);
   const [algoOnly, setAlgoOnly] = useState(false);
   const [expandedSym, setExpandedSym] = useState(null);
@@ -522,8 +525,8 @@ function App() {
           <div className="summary-strip">
             <SummaryCard label="Total Symbols" value={fmtNum(summary.total_symbols)} />
             <SummaryCard
-              label="Best Spread"
-              value={summary.best_spreads?.[0] ? fmt(summary.best_spreads[0].spread) : '—'}
+              label="Best Net Decay"
+              value={summary.best_spreads?.[0] ? fmt(summary.best_spreads[0].net_decay) : '—'}
               sub={summary.best_spreads?.[0]?.symbol || ''}
               color="var(--positive)"
             />
@@ -538,12 +541,12 @@ function App() {
               color={data.ibkr_ftp_success ? 'var(--positive)' : 'var(--warning)'}
             />
             <div className="summary-card">
-              <div className="label">Top 5 Spreads</div>
+              <div className="label">Top 5 Net Decay</div>
               <ul className="highlight-list">
                 {(summary.best_spreads || []).map(s => (
                   <li key={s.symbol}>
                     <span className="sym">{s.symbol}</span>
-                    <span className="val-positive">{fmt(s.spread)}</span>
+                    <span className="val-positive">{fmt(s.net_decay)}</span>
                   </li>
                 ))}
               </ul>
@@ -620,15 +623,14 @@ function App() {
                         <td><span className="sym-cell">{r.symbol}</span></td>
                         <td className="underlying-cell">{r.underlying}</td>
                         <td>{r.beta?.toFixed(2) ?? '—'}</td>
-                        <td>{r.leverage?.toFixed(0) ?? '—'}x</td>
                         <td className={borrowCls(r.borrow_net_annual)}>
                           {fmt(r.borrow_net_annual)} {borrowBadge(r.borrow_net_annual)}
                         </td>
                         <td>{fmtNum(r.shares_available)}</td>
                         <td>{fmt(r.gross_decay_annual)}</td>
-                        <td className={spreadCls(r.spread)}>{fmt(r.spread)}</td>
-                        <td>{fmt(r.decay_3m)}</td>
-                        <td>{fmt(r.decay_6m)}</td>
+                        <td className={spreadCls(r.net_decay)}>{fmt(r.net_decay)}</td>
+                        <td>{fmt(r.vol_underlying_annual)}</td>
+                        <td>{fmt(r.vol_etf_annual)}</td>
                         <td>
                           {r.include_for_algo
                             ? <span className="badge badge-algo">YES</span>
