@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ETF Borrow Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-primary: #0a0e17;
+    --bg-secondary: #111827;
+    --bg-card: #151d2e;
+    --bg-card-hover: #1a2438;
+    --bg-input: #0d1424;
+    --border: #1e2d46;
+    --border-active: #3b82f6;
+    --text-primary: #e8ecf4;
+    --text-secondary: #8896ae;
+    --text-muted: #566580;
+    --accent-blue: #3b82f6;
+    --accent-green: #10b981;
+    --accent-red: #ef4444;
+    --accent-amber: #f59e0b;
+    --accent-purple: #8b5cf6;
+    --accent-cyan: #06b6d4;
+    --positive: #10b981;
+    --negative: #ef4444;
+    --warning: #f59e0b;
+    --stale: #6b7280;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'DM Sans', -apple-system, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.5;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  #root { min-height: 100vh; }
+
+  /* ── Scrollbar ───────────────────── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg-primary); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+  /* ── Layout ──────────────────────── */
+  .app { display: flex; flex-direction: column; min-height: 100vh; }
+
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 24px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .topbar-left { display: flex; align-items: center; gap: 16px; }
+  .topbar-logo {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700; font-size: 16px;
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    letter-spacing: -0.5px;
+  }
+  .topbar-status {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .status-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    animation: pulse 2s infinite;
+  }
+  .status-dot.connected { background: var(--accent-green); }
+  .status-dot.disconnected { background: var(--accent-red); }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .topbar-right { display: flex; align-items: center; gap: 12px; }
+  .topbar-btn {
+    padding: 6px 14px; border-radius: 6px;
+    font-size: 12px; font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    cursor: pointer; transition: all 0.15s;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .topbar-btn:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+  .topbar-btn.active { background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }
+
+  /* ── Summary Cards ───────────────── */
+  .summary-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    padding: 16px 24px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+  }
+  .summary-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    transition: border-color 0.15s;
+  }
+  .summary-card:hover { border-color: var(--border-active); }
+  .summary-card .label {
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.6px;
+    color: var(--text-muted); margin-bottom: 6px;
+  }
+  .summary-card .value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 22px; font-weight: 700;
+    color: var(--text-primary);
+  }
+  .summary-card .sub {
+    font-size: 11px; color: var(--text-muted); margin-top: 4px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* ── Tabs ─────────────────────────── */
+  .tab-bar {
+    display: flex; align-items: center; gap: 4px;
+    padding: 12px 24px 0;
+  }
+  .tab {
+    padding: 10px 20px; border-radius: 8px 8px 0 0;
+    font-size: 13px; font-weight: 600;
+    color: var(--text-muted); cursor: pointer;
+    border: 1px solid transparent; border-bottom: none;
+    transition: all 0.15s;
+    background: transparent;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .tab:hover { color: var(--text-secondary); background: var(--bg-card); }
+  .tab.active {
+    color: var(--text-primary);
+    background: var(--bg-card);
+    border-color: var(--border);
+  }
+  .tab .count {
+    display: inline-block; margin-left: 6px;
+    padding: 1px 7px; border-radius: 10px;
+    font-size: 11px; font-weight: 600;
+    background: var(--bg-primary); color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .tab.active .count { background: var(--accent-blue); color: #fff; }
+
+  /* ── Controls ────────────────────── */
+  .controls-bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 24px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-top: none;
+    margin: 0 0 0 0;
+  }
+  .search-box {
+    flex: 1; max-width: 360px;
+    padding: 8px 14px 8px 36px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+    outline: none; transition: border-color 0.15s;
+  }
+  .search-box:focus { border-color: var(--accent-blue); }
+  .search-wrapper { position: relative; flex: 1; max-width: 360px; }
+  .search-icon {
+    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    color: var(--text-muted); font-size: 13px; pointer-events: none;
+  }
+  .toggle-label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-secondary); cursor: pointer;
+    user-select: none;
+  }
+  .toggle-label input[type="checkbox"] {
+    accent-color: var(--accent-blue);
+    width: 14px; height: 14px;
+  }
+
+  /* ── Table ────────────────────────── */
+  .table-container {
+    padding: 0 24px 24px;
+    overflow-x: auto;
+  }
+  table {
+    width: 100%; border-collapse: collapse;
+    font-size: 13px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-top: none;
+  }
+  thead th {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--bg-secondary);
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    cursor: pointer; user-select: none;
+    white-space: nowrap;
+    transition: color 0.15s;
+  }
+  thead th:hover { color: var(--text-primary); }
+  thead th.sorted { color: var(--accent-blue); }
+  thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+  }
+  tbody tr:hover { background: var(--bg-card-hover); }
+  tbody tr.stale { opacity: 0.5; }
+  tbody td {
+    padding: 10px 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .sym-cell {
+    font-weight: 700; color: var(--text-primary);
+    font-size: 13px;
+  }
+  .underlying-cell { color: var(--text-secondary); }
+
+  /* ── Value Colors ────────────────── */
+  .val-positive { color: var(--positive); }
+  .val-negative { color: var(--negative); }
+  .val-warning { color: var(--warning); }
+  .val-muted { color: var(--text-muted); }
+  .val-stale { color: var(--stale); font-style: italic; }
+
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .badge-good { background: rgba(16,185,129,0.12); color: var(--positive); }
+  .badge-bad { background: rgba(239,68,68,0.12); color: var(--negative); }
+  .badge-warn { background: rgba(245,158,11,0.12); color: var(--warning); }
+  .badge-stale { background: rgba(107,114,128,0.12); color: var(--stale); }
+  .badge-algo { background: rgba(59,130,246,0.12); color: var(--accent-blue); }
+
+  /* ── Sparkline ───────────────────── */
+  .sparkline { display: inline-block; vertical-align: middle; }
+  .sparkline svg { display: block; }
+
+  /* ── Best/Worst Lists ────────────── */
+  .highlight-list { list-style: none; padding: 0; }
+  .highlight-list li {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 4px 0; font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .highlight-list .sym { font-weight: 600; color: var(--text-primary); }
+  .highlight-list .val { }
+
+  /* ── Status Page ─────────────────── */
+  .status-page {
+    padding: 24px;
+    max-width: 800px;
+  }
+  .status-row {
+    display: flex; justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .status-key { color: var(--text-muted); }
+  .status-val { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); }
+
+  /* ── Expand Row Detail ───────────── */
+  .detail-row td {
+    padding: 16px 24px;
+    background: var(--bg-primary);
+    border-bottom: 2px solid var(--border);
+  }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+  }
+  .detail-item .dlabel {
+    font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--text-muted);
+    margin-bottom: 2px;
+  }
+  .detail-item .dval {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px; font-weight: 600;
+  }
+
+  /* ── Responsive ──────────────────── */
+  @media (max-width: 768px) {
+    .summary-strip { grid-template-columns: repeat(2, 1fr); }
+    .topbar { padding: 10px 12px; }
+    .tab-bar, .controls-bar, .table-container { padding-left: 12px; padding-right: 12px; }
+  }
+
+  /* ── Loading ─────────────────────── */
+  .loading {
+    display: flex; align-items: center; justify-content: center;
+    height: 400px; color: var(--text-muted); font-size: 14px;
+  }
+  .spinner {
+    width: 24px; height: 24px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent-blue);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-right: 10px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+// ── Helpers ──────────────────────────────────
+const API = '';  // same origin
+const fmt = (v, decimals = 2) => {
+  if (v === null || v === undefined || !isFinite(v)) return '—';
+  return (v * 100).toFixed(decimals) + '%';
+};
+const fmtNum = (v, d = 0) => {
+  if (v === null || v === undefined || !isFinite(v)) return '—';
+  return v.toLocaleString(undefined, { maximumFractionDigits: d });
+};
+const fmtTime = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+};
+const cls = (...classes) => classes.filter(Boolean).join(' ');
+
+// ── Sparkline SVG ────────────────────────────
+function Sparkline({ data, width = 80, height = 20, color = '#3b82f6' }) {
+  if (!data || data.length < 2) return null;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const points = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * width;
+    const y = height - ((v - min) / range) * (height - 2) - 1;
+    return `${x},${y}`;
+  }).join(' ');
+
+  return (
+    <span className="sparkline">
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+        <polyline
+          points={points}
+          fill="none"
+          stroke={color}
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </span>
+  );
+}
+
+// ── Summary Card ─────────────────────────────
+function SummaryCard({ label, value, sub, color }) {
+  return (
+    <div className="summary-card">
+      <div className="label">{label}</div>
+      <div className="value" style={color ? { color } : {}}>{value}</div>
+      {sub && <div className="sub">{sub}</div>}
+    </div>
+  );
+}
+
+// ── Table Header ─────────────────────────────
+const COLUMNS = [
+  { key: 'symbol', label: 'Symbol', w: 90 },
+  { key: 'underlying', label: 'Underlying', w: 90 },
+  { key: 'beta', label: 'Beta', w: 70, numeric: true },
+  { key: 'leverage', label: 'Lev', w: 55, numeric: true },
+  { key: 'borrow_net_annual', label: 'Borrow Rate', w: 100, numeric: true },
+  { key: 'shares_available', label: 'Shares Avail', w: 100, numeric: true },
+  { key: 'gross_decay_annual', label: 'Gross Decay', w: 100, numeric: true },
+  { key: 'spread', label: 'Spread', w: 90, numeric: true },
+  { key: 'decay_3m', label: '3M Decay', w: 85, numeric: true },
+  { key: 'decay_6m', label: '6M Decay', w: 85, numeric: true },
+  { key: 'include_for_algo', label: 'Algo', w: 55 },
+  { key: 'last_updated', label: 'Updated', w: 90 },
+];
+
+function TableHeader({ sortKey, sortDesc, onSort }) {
+  return (
+    <thead>
+      <tr>
+        <th style={{ width: 32 }}></th>
+        {COLUMNS.map(col => (
+          <th
+            key={col.key}
+            style={{ width: col.w }}
+            className={sortKey === col.key ? 'sorted' : ''}
+            onClick={() => onSort(col.key)}
+          >
+            {col.label}
+            {sortKey === col.key && (
+              <span className="sort-arrow">{sortDesc ? '▼' : '▲'}</span>
+            )}
+          </th>
+        ))}
+      </tr>
+    </thead>
+  );
+}
+
+// ── Color logic ──────────────────────────────
+function borrowClass(v) {
+  if (v === null || v === undefined) return 'val-muted';
+  if (v > 0.15) return 'val-negative';
+  if (v > 0.08) return 'val-warning';
+  return 'val-positive';
+}
+function spreadClass(v) {
+  if (v === null || v === undefined) return 'val-muted';
+  if (v > 0.05) return 'val-positive';
+  if (v > 0) return 'val-warning';
+  return 'val-negative';
+}
+function borrowBadge(v) {
+  if (v === null || v === undefined) return null;
+  if (v > 0.15) return <span className="badge badge-bad">HIGH</span>;
+  if (v > 0.08) return <span className="badge badge-warn">MED</span>;
+  return null;
+}
+
+// ── Detail Expand Row ────────────────────────
+function DetailRow({ record, history }) {
+  const histVals = useMemo(() => {
+    if (!history || !history.length) return [];
+    return history.map(h => h.borrow_net).filter(v => v !== null);
+  }, [history]);
+
+  return (
+    <tr className="detail-row">
+      <td colSpan={COLUMNS.length + 1}>
+        <div className="detail-grid">
+          <div className="detail-item">
+            <div className="dlabel">Borrow Fee (Gross)</div>
+            <div className="dval">{fmt(record.borrow_fee_annual)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Rebate</div>
+            <div className="dval">{fmt(record.borrow_rebate_annual)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Net Borrow</div>
+            <div className={cls('dval', borrowClass(record.borrow_net_annual))}>
+              {fmt(record.borrow_net_annual)}
+            </div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Spread (Decay − Borrow)</div>
+            <div className={cls('dval', spreadClass(record.spread))}>
+              {fmt(record.spread)}
+            </div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Shares Available</div>
+            <div className="dval">{fmtNum(record.shares_available)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Beta (obs: {fmtNum(record.beta_n_obs)})</div>
+            <div className="dval">{record.beta?.toFixed(3) ?? '—'}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">12M Decay</div>
+            <div className="dval">{fmt(record.decay_12m)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Borrow History</div>
+            <div className="dval">
+              <Sparkline data={histVals} width={120} height={28} color="#3b82f6" />
+            </div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Spiking</div>
+            <div className="dval">
+              {record.borrow_spiking
+                ? <span className="badge badge-bad">YES</span>
+                : <span className="badge badge-good">NO</span>}
+            </div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">CAGR Positive</div>
+            <div className="dval">
+              {record.cagr_positive === true ? <span className="badge badge-good">YES</span>
+               : record.cagr_positive === false ? <span className="badge badge-bad">NO</span>
+               : '—'}
+            </div>
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// ── Table Row ────────────────────────────────
+function TableRow({ record, expanded, onToggle, history }) {
+  const stale = record.is_stale;
+  return (
+    <>
+      <tr className={stale ? 'stale' : ''} onClick={onToggle} style={{ cursor: 'pointer' }}>
+        <td style={{ textAlign: 'center', fontSize: 10, color: 'var(--text-muted)' }}>
+          {expanded ? '▾' : '▸'}
+        </td>
+        <td>
+          <span className="sym-cell">{record.symbol}</span>
+          {stale && <span className="badge badge-stale" style={{ marginLeft: 6 }}>STALE</span>}
+        </td>
+        <td className="underlying-cell">{record.underlying}</td>
+        <td>{record.beta?.toFixed(2) ?? '—'}</td>
+        <td>{record.leverage?.toFixed(0) ?? '—'}x</td>
+        <td className={borrowClass(record.borrow_net_annual)}>
+          {fmt(record.borrow_net_annual)} {borrowBadge(record.borrow_net_annual)}
+        </td>
+        <td>{fmtNum(record.shares_available)}</td>
+        <td>{fmt(record.gross_decay_annual)}</td>
+        <td className={spreadClass(record.spread)}>
+          {fmt(record.spread)}
+        </td>
+        <td>{fmt(record.decay_3m)}</td>
+        <td>{fmt(record.decay_6m)}</td>
+        <td>
+          {record.include_for_algo
+            ? <span className="badge badge-algo">YES</span>
+            : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+        </td>
+        <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          {fmtTime(record.last_updated)}
+        </td>
+      </tr>
+      {expanded && <DetailRow record={record} history={history} />}
+    </>
+  );
+}
+
+// ── Status Page ──────────────────────────────
+function StatusPage({ status }) {
+  if (!status) return <div className="loading"><div className="spinner" />Loading…</div>;
+  const rows = [
+    ['IBKR Connected', status.ibkr_connected ? '✓ Connected' : '✗ Disconnected'],
+    ['Last Fetch', fmtTime(status.last_fetch_time)],
+    ['Fetch Duration', status.last_fetch_duration_ms ? `${status.last_fetch_duration_ms.toFixed(0)} ms` : '—'],
+    ['Total Symbols', fmtNum(status.total_symbols)],
+    ['With Borrow Data', fmtNum(status.symbols_with_borrow)],
+    ['Stale', fmtNum(status.symbols_stale)],
+    ['Missing', fmtNum(status.symbols_missing)],
+    ['Uptime', `${(status.uptime_seconds / 60).toFixed(1)} min`],
+  ];
+  return (
+    <div className="status-page">
+      <h2 style={{ marginBottom: 16, fontSize: 18, fontWeight: 700 }}>System Status</h2>
+      {rows.map(([k, v]) => (
+        <div className="status-row" key={k}>
+          <span className="status-key">{k}</span>
+          <span className="status-val">{v}</span>
+        </div>
+      ))}
+      {status.errors?.length > 0 && (
+        <>
+          <h3 style={{ marginTop: 20, marginBottom: 8, fontSize: 14, color: 'var(--accent-red)' }}>
+            Recent Errors
+          </h3>
+          {status.errors.map((e, i) => (
+            <div key={i} style={{
+              padding: '6px 10px', marginBottom: 4, borderRadius: 4,
+              background: 'rgba(239,68,68,0.08)', fontSize: 12,
+              fontFamily: "'JetBrains Mono', monospace", color: 'var(--accent-red)',
+            }}>
+              {e}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Main App ─────────────────────────────────
+function App() {
+  const [records, setRecords] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState('all');
+  const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState('spread');
+  const [sortDesc, setSortDesc] = useState(true);
+  const [algoOnly, setAlgoOnly] = useState(false);
+  const [expandedSym, setExpandedSym] = useState(null);
+  const [historyCache, setHistoryCache] = useState({});
+  const [showStatus, setShowStatus] = useState(false);
+  const refreshTimer = useRef(null);
+
+  // Fetch data
+  const fetchAll = useCallback(async () => {
+    try {
+      const [recRes, sumRes, statRes] = await Promise.all([
+        fetch(`${API}/api/records`),
+        fetch(`${API}/api/summary`),
+        fetch(`${API}/api/status`),
+      ]);
+      setRecords(await recRes.json());
+      setSummary(await sumRes.json());
+      setStatus(await statRes.json());
+    } catch (err) {
+      console.error('Fetch error:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAll();
+    refreshTimer.current = setInterval(fetchAll, 15000); // refresh UI every 15s
+    return () => clearInterval(refreshTimer.current);
+  }, [fetchAll]);
+
+  // Fetch history when expanding
+  const fetchHistory = useCallback(async (sym) => {
+    if (historyCache[sym]) return;
+    try {
+      const res = await fetch(`${API}/api/history/${sym}?limit=50`);
+      const data = await res.json();
+      setHistoryCache(prev => ({ ...prev, [sym]: data }));
+    } catch (err) {
+      console.error('History fetch error:', err);
+    }
+  }, [historyCache]);
+
+  const handleExpand = useCallback((sym) => {
+    if (expandedSym === sym) {
+      setExpandedSym(null);
+    } else {
+      setExpandedSym(sym);
+      fetchHistory(sym);
+    }
+  }, [expandedSym, fetchHistory]);
+
+  // Filter + sort
+  const bucketMap = {
+    all: null,
+    bucket_1: 'bucket_1_high_beta',
+    bucket_2: 'bucket_2_low_beta',
+    bucket_3: 'bucket_3_inverse',
+  };
+
+  const filtered = useMemo(() => {
+    let data = [...records];
+    const bucketFilter = bucketMap[activeTab];
+    if (bucketFilter) data = data.filter(r => r.bucket === bucketFilter);
+    if (algoOnly) data = data.filter(r => r.include_for_algo);
+    if (search) {
+      const s = search.toUpperCase();
+      data = data.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
+    }
+    data.sort((a, b) => {
+      let av = a[sortKey], bv = b[sortKey];
+      if (av === null || av === undefined) av = sortDesc ? -Infinity : Infinity;
+      if (bv === null || bv === undefined) bv = sortDesc ? -Infinity : Infinity;
+      if (typeof av === 'string') return sortDesc ? bv.localeCompare(av) : av.localeCompare(bv);
+      return sortDesc ? bv - av : av - bv;
+    });
+    return data;
+  }, [records, activeTab, algoOnly, search, sortKey, sortDesc]);
+
+  const handleSort = useCallback((key) => {
+    if (sortKey === key) setSortDesc(d => !d);
+    else { setSortKey(key); setSortDesc(true); }
+  }, [sortKey]);
+
+  const triggerRefresh = async () => {
+    try {
+      await fetch(`${API}/api/refresh/borrow`, { method: 'POST' });
+      await fetchAll();
+    } catch (err) { console.error(err); }
+  };
+
+  const tabCounts = useMemo(() => {
+    const c = { all: records.length, bucket_1: 0, bucket_2: 0, bucket_3: 0 };
+    records.forEach(r => {
+      if (r.bucket === 'bucket_1_high_beta') c.bucket_1++;
+      if (r.bucket === 'bucket_2_low_beta') c.bucket_2++;
+      if (r.bucket === 'bucket_3_inverse') c.bucket_3++;
+    });
+    return c;
+  }, [records]);
+
+  if (loading) {
+    return (
+      <div className="app">
+        <div className="loading"><div className="spinner" />Loading dashboard…</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app">
+      {/* ── Top Bar ──────────── */}
+      <div className="topbar">
+        <div className="topbar-left">
+          <div className="topbar-logo">ETF BORROW DASH</div>
+          <div className="topbar-status">
+            <span className={cls('status-dot', status?.ibkr_connected ? 'connected' : 'disconnected')} />
+            {status?.ibkr_connected ? 'IBKR Connected' : 'IBKR Disconnected'}
+            {summary?.last_refresh && (
+              <span style={{ marginLeft: 8 }}>· Last: {fmtTime(summary.last_refresh)}</span>
+            )}
+          </div>
+        </div>
+        <div className="topbar-right">
+          <button className="topbar-btn" onClick={triggerRefresh}>↻ Refresh</button>
+          <button
+            className={cls('topbar-btn', showStatus && 'active')}
+            onClick={() => setShowStatus(s => !s)}
+          >
+            ◉ Status
+          </button>
+        </div>
+      </div>
+
+      {showStatus ? <StatusPage status={status} /> : (
+        <>
+          {/* ── Summary Strip ─────── */}
+          <div className="summary-strip">
+            <SummaryCard label="Total Symbols" value={fmtNum(summary?.total_symbols)} />
+            <SummaryCard
+              label="Best Spread"
+              value={summary?.best_spreads?.[0] ? fmt(summary.best_spreads[0].spread) : '—'}
+              sub={summary?.best_spreads?.[0]?.symbol || ''}
+              color="var(--positive)"
+            />
+            <SummaryCard
+              label="Worst Borrow"
+              value={summary?.worst_borrows?.[0] ? fmt(summary.worst_borrows[0].borrow) : '—'}
+              sub={summary?.worst_borrows?.[0]?.symbol || ''}
+              color="var(--negative)"
+            />
+            <SummaryCard
+              label="Stale / Missing"
+              value={`${summary?.pct_stale?.toFixed(1) ?? 0}% / ${summary?.pct_missing?.toFixed(1) ?? 0}%`}
+              color={summary?.pct_stale > 10 ? 'var(--warning)' : 'var(--text-muted)'}
+            />
+            <div className="summary-card">
+              <div className="label">Top 5 Spreads</div>
+              <ul className="highlight-list">
+                {(summary?.best_spreads || []).map(s => (
+                  <li key={s.symbol}>
+                    <span className="sym">{s.symbol}</span>
+                    <span className="val val-positive">{fmt(s.spread)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="summary-card">
+              <div className="label">Top 5 Worst Borrows</div>
+              <ul className="highlight-list">
+                {(summary?.worst_borrows || []).map(s => (
+                  <li key={s.symbol}>
+                    <span className="sym">{s.symbol}</span>
+                    <span className="val val-negative">{fmt(s.borrow)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+
+          {/* ── Tabs ──────────────── */}
+          <div className="tab-bar">
+            {[
+              { key: 'all', label: 'All ETFs' },
+              { key: 'bucket_1', label: 'Bucket 1 — High β' },
+              { key: 'bucket_2', label: 'Bucket 2 — Low β' },
+              { key: 'bucket_3', label: 'Bucket 3 — Inverse' },
+            ].map(t => (
+              <div
+                key={t.key}
+                className={cls('tab', activeTab === t.key && 'active')}
+                onClick={() => setActiveTab(t.key)}
+              >
+                {t.label}
+                <span className="count">{tabCounts[t.key]}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* ── Controls ──────────── */}
+          <div className="controls-bar">
+            <div className="search-wrapper">
+              <span className="search-icon">⌕</span>
+              <input
+                className="search-box"
+                placeholder="Search symbol or underlying…"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+              />
+            </div>
+            <label className="toggle-label">
+              <input type="checkbox" checked={algoOnly} onChange={e => setAlgoOnly(e.target.checked)} />
+              Algo-eligible only
+            </label>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
+              {filtered.length} results
+            </span>
+          </div>
+
+          {/* ── Table ─────────────── */}
+          <div className="table-container">
+            <table>
+              <TableHeader sortKey={sortKey} sortDesc={sortDesc} onSort={handleSort} />
+              <tbody>
+                {filtered.map(rec => (
+                  <TableRow
+                    key={rec.symbol}
+                    record={rec}
+                    expanded={expandedSym === rec.symbol}
+                    onToggle={() => handleExpand(rec.symbol)}
+                    history={historyCache[rec.symbol]}
+                  />
+                ))}
+                {filtered.length === 0 && (
+                  <tr>
+                    <td colSpan={COLUMNS.length + 1} style={{
+                      textAlign: 'center', padding: 40,
+                      color: 'var(--text-muted)', fontSize: 14,
+                    }}>
+                      No matching ETFs found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

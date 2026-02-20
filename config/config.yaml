@@ -1,0 +1,43 @@
+# ──────────────────────────────────────────────
+# ETF Borrow Dashboard — Configuration
+# ──────────────────────────────────────────────
+
+# ── Data files ───────────────────────────────
+universe_csv: "data/etf_screened_today.csv"
+inverse_etf_csv: "config/inverse_etfs.csv"
+
+# ── IBKR connection ─────────────────────────
+ibkr:
+  ftp_host: "ftp2.interactivebrokers.com"
+  ftp_user: "shortstock"
+  ftp_pass: ""
+  filename: "usa.txt"
+  use_mock: true          # set false to fetch live from IBKR FTP
+
+# ── Refresh cadence ─────────────────────────
+refresh:
+  borrow_interval_seconds: 60     # how often to refresh borrow rates
+  decay_interval_seconds: 86400   # daily decay recalc
+  stale_threshold_seconds: 300    # mark data stale after 5 min
+
+# ── Bucket thresholds ───────────────────────
+buckets:
+  high_beta_threshold: 1.5        # Beta > this → Bucket 1
+
+# ── Analytics ────────────────────────────────
+analytics:
+  trading_days: 252
+  default_borrow_annual: 0.05
+  decay_windows_months: [3, 6, 12]
+
+# ── Server ───────────────────────────────────
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+# ── Database ─────────────────────────────────
+database:
+  path: "data/dashboard.db"
+
+# ── Blacklist (symbols to exclude) ───────────
+blacklist: []
