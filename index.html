@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ETF Borrow Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='85'>⚡</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-primary: #0a0e17;
+    --bg-secondary: #111827;
+    --bg-card: #151d2e;
+    --bg-card-hover: #1a2438;
+    --bg-input: #0d1424;
+    --border: #1e2d46;
+    --border-active: #3b82f6;
+    --text-primary: #e8ecf4;
+    --text-secondary: #8896ae;
+    --text-muted: #566580;
+    --accent-blue: #3b82f6;
+    --accent-green: #10b981;
+    --accent-red: #ef4444;
+    --accent-amber: #f59e0b;
+    --accent-purple: #8b5cf6;
+    --accent-cyan: #06b6d4;
+    --positive: #10b981;
+    --negative: #ef4444;
+    --warning: #f59e0b;
+    --stale: #6b7280;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'DM Sans', -apple-system, sans-serif;
+    background: var(--bg-primary); color: var(--text-primary);
+    line-height: 1.5; min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  #root { min-height: 100vh; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg-primary); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .app { display: flex; flex-direction: column; min-height: 100vh; }
+
+  /* ── Topbar ──────────────── */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 24px; background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .topbar-left { display: flex; align-items: center; gap: 16px; }
+  .topbar-logo {
+    font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 16px;
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    letter-spacing: -0.5px;
+  }
+  .topbar-meta {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11px; color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .topbar-meta a { color: var(--accent-purple); text-decoration: none; }
+  .topbar-meta a:hover { text-decoration: underline; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .dot-green { background: var(--accent-green); }
+  .dot-amber { background: var(--accent-amber); }
+  .topbar-right { display: flex; align-items: center; gap: 10px; }
+  .topbar-btn {
+    padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--border); background: var(--bg-card);
+    color: var(--text-secondary); cursor: pointer; transition: all 0.15s;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .topbar-btn:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+  .topbar-btn.active { background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }
+
+  /* ── Summary ─────────────── */
+  .summary-strip {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
+    gap: 10px; padding: 14px 24px;
+    background: var(--bg-secondary); border-bottom: 1px solid var(--border);
+  }
+  .summary-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px; transition: border-color 0.15s;
+  }
+  .summary-card:hover { border-color: var(--border-active); }
+  .summary-card .label {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.6px; color: var(--text-muted); margin-bottom: 5px;
+  }
+  .summary-card .value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 20px; font-weight: 700;
+  }
+  .summary-card .sub {
+    font-size: 11px; color: var(--text-muted); margin-top: 3px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .highlight-list { list-style: none; padding: 0; }
+  .highlight-list li {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 3px 0; font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .highlight-list .sym { font-weight: 600; color: var(--text-primary); }
+
+  /* ── Tabs ─────────────────── */
+  .tab-bar { display: flex; align-items: center; gap: 4px; padding: 12px 24px 0; }
+  .tab {
+    padding: 10px 18px; border-radius: 8px 8px 0 0;
+    font-size: 13px; font-weight: 600; color: var(--text-muted);
+    cursor: pointer; border: 1px solid transparent; border-bottom: none;
+    transition: all 0.15s; background: transparent;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .tab:hover { color: var(--text-secondary); background: var(--bg-card); }
+  .tab.active { color: var(--text-primary); background: var(--bg-card); border-color: var(--border); }
+  .tab .count {
+    display: inline-block; margin-left: 6px; padding: 1px 7px;
+    border-radius: 10px; font-size: 11px; font-weight: 600;
+    background: var(--bg-primary); color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .tab.active .count { background: var(--accent-blue); color: #fff; }
+
+  /* ── Controls ────────────── */
+  .controls-bar {
+    display: flex; align-items: center; gap: 12px; padding: 12px 24px;
+    background: var(--bg-card); border: 1px solid var(--border); border-top: none;
+  }
+  .search-wrapper { position: relative; flex: 1; max-width: 360px; }
+  .search-icon {
+    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    color: var(--text-muted); font-size: 13px; pointer-events: none;
+  }
+  .search-box {
+    width: 100%; padding: 8px 14px 8px 36px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg-input);
+    color: var(--text-primary); font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+    outline: none; transition: border-color 0.15s;
+  }
+  .search-box:focus { border-color: var(--accent-blue); }
+  .toggle-label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-secondary); cursor: pointer; user-select: none;
+  }
+  .toggle-label input[type="checkbox"] { accent-color: var(--accent-blue); width: 14px; height: 14px; }
+
+  /* ── Table ────────────────── */
+  .table-container { padding: 0 24px 24px; overflow-x: auto; }
+  table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    background: var(--bg-card); border: 1px solid var(--border); border-top: none;
+  }
+  thead th {
+    position: sticky; top: 0; z-index: 10; background: var(--bg-secondary);
+    padding: 10px 12px; text-align: left; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted);
+    border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
+    white-space: nowrap; transition: color 0.15s;
+  }
+  thead th:hover { color: var(--text-primary); }
+  thead th.sorted { color: var(--accent-blue); }
+  thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background 0.1s; cursor: pointer; }
+  tbody tr:hover { background: var(--bg-card-hover); }
+  tbody td {
+    padding: 9px 12px; font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; white-space: nowrap;
+  }
+  .sym-cell { font-weight: 700; color: var(--text-primary); font-size: 13px; }
+  .underlying-cell { color: var(--text-secondary); }
+
+  /* ── Value Colors ────────── */
+  .val-positive { color: var(--positive); }
+  .val-negative { color: var(--negative); }
+  .val-warning { color: var(--warning); }
+  .val-muted { color: var(--text-muted); }
+
+  .badge {
+    display: inline-block; padding: 2px 7px; border-radius: 4px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .badge-good { background: rgba(16,185,129,0.12); color: var(--positive); }
+  .badge-bad { background: rgba(239,68,68,0.12); color: var(--negative); }
+  .badge-warn { background: rgba(245,158,11,0.12); color: var(--warning); }
+  .badge-stale { background: rgba(107,114,128,0.12); color: var(--stale); }
+  .badge-algo { background: rgba(59,130,246,0.12); color: var(--accent-blue); }
+  .badge-ftp { background: rgba(6,182,212,0.12); color: var(--accent-cyan); }
+
+  /* ── Detail Expand ───────── */
+  .detail-row td {
+    padding: 16px 24px; background: var(--bg-primary);
+    border-bottom: 2px solid var(--border);
+  }
+  .detail-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 12px;
+  }
+  .detail-item .dlabel {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); margin-bottom: 2px;
+  }
+  .detail-item .dval { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 600; }
+
+  /* ── Info Page ────────────── */
+  .info-page { padding: 24px; max-width: 860px; }
+  .info-row {
+    display: flex; justify-content: space-between; padding: 10px 0;
+    border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .info-key { color: var(--text-muted); }
+  .info-val { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); }
+  .info-section {
+    margin-top: 24px; margin-bottom: 10px; font-size: 15px; font-weight: 700;
+    display: flex; align-items: center; gap: 8px;
+  }
+
+  /* ── Loading / Error ─────── */
+  .loading {
+    display: flex; align-items: center; justify-content: center;
+    height: 400px; color: var(--text-muted); font-size: 14px;
+  }
+  .spinner {
+    width: 24px; height: 24px; border: 2px solid var(--border);
+    border-top-color: var(--accent-blue); border-radius: 50%;
+    animation: spin 0.8s linear infinite; margin-right: 10px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-banner {
+    margin: 24px; padding: 16px 20px; border-radius: 8px;
+    background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2);
+    color: var(--accent-red); font-size: 14px;
+  }
+
+  @media (max-width: 768px) {
+    .summary-strip { grid-template-columns: repeat(2, 1fr); }
+    .topbar { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
+    .tab-bar, .controls-bar, .table-container { padding-left: 12px; padding-right: 12px; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useMemo } = React;
+
+const DATA_URL = "data/dashboard_data.json";
+
+// ── Formatters ──────────────────────────────
+const fmt = (v, d = 2) => {
+  if (v === null || v === undefined || !isFinite(v)) return '—';
+  return (v * 100).toFixed(d) + '%';
+};
+const fmtNum = (v, d = 0) => {
+  if (v === null || v === undefined || !isFinite(v)) return '—';
+  return v.toLocaleString(undefined, { maximumFractionDigits: d });
+};
+const fmtTime = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+const cls = (...c) => c.filter(Boolean).join(' ');
+
+// ── Value classifiers ───────────────────────
+const borrowCls = v => {
+  if (v == null) return 'val-muted';
+  if (v > 0.15) return 'val-negative';
+  if (v > 0.08) return 'val-warning';
+  return 'val-positive';
+};
+const spreadCls = v => {
+  if (v == null) return 'val-muted';
+  if (v > 0.05) return 'val-positive';
+  if (v > 0) return 'val-warning';
+  return 'val-negative';
+};
+const borrowBadge = v => {
+  if (v == null) return null;
+  if (v > 0.15) return <span className="badge badge-bad">HIGH</span>;
+  if (v > 0.08) return <span className="badge badge-warn">MED</span>;
+  return null;
+};
+
+// ── Columns ─────────────────────────────────
+const COLS = [
+  { key: 'symbol', label: 'Symbol', w: 90 },
+  { key: 'underlying', label: 'Underlying', w: 85 },
+  { key: 'beta', label: 'Beta', w: 65 },
+  { key: 'leverage', label: 'Lev', w: 50 },
+  { key: 'borrow_net_annual', label: 'Borrow Rate', w: 105 },
+  { key: 'shares_available', label: 'Shares Avail', w: 100 },
+  { key: 'gross_decay_annual', label: 'Gross Decay', w: 100 },
+  { key: 'spread', label: 'Spread', w: 90 },
+  { key: 'decay_3m', label: '3M Decay', w: 80 },
+  { key: 'decay_6m', label: '6M Decay', w: 80 },
+  { key: 'include_for_algo', label: 'Algo', w: 50 },
+];
+
+// ── Summary Card ────────────────────────────
+function SummaryCard({ label, value, sub, color }) {
+  return (
+    <div className="summary-card">
+      <div className="label">{label}</div>
+      <div className="value" style={color ? { color } : {}}>{value}</div>
+      {sub && <div className="sub">{sub}</div>}
+    </div>
+  );
+}
+
+// ── Detail Row ──────────────────────────────
+function DetailRow({ r }) {
+  return (
+    <tr className="detail-row">
+      <td colSpan={COLS.length + 1}>
+        <div className="detail-grid">
+          <div className="detail-item">
+            <div className="dlabel">Borrow Fee (Gross)</div>
+            <div className="dval">{fmt(r.borrow_fee_annual)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Rebate</div>
+            <div className="dval">{fmt(r.borrow_rebate_annual)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Net Borrow</div>
+            <div className={cls('dval', borrowCls(r.borrow_net_annual))}>{fmt(r.borrow_net_annual)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Spread (Decay − Borrow)</div>
+            <div className={cls('dval', spreadCls(r.spread))}>{fmt(r.spread)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Shares Available</div>
+            <div className="dval">{fmtNum(r.shares_available)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Beta (obs: {fmtNum(r.beta_n_obs)})</div>
+            <div className="dval">{r.beta?.toFixed(3) ?? '—'}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">12M Decay</div>
+            <div className="dval">{fmt(r.decay_12m)}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Spiking</div>
+            <div className="dval">
+              {r.borrow_spiking ? <span className="badge badge-bad">YES</span>
+                : <span className="badge badge-good">NO</span>}
+            </div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Data Source</div>
+            <div className="dval">
+              {r.borrow_source === 'ibkr_ftp'
+                ? <span className="badge badge-ftp">IBKR FTP</span>
+                : <span className="badge badge-stale">CSV</span>}
+            </div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">CAGR Positive</div>
+            <div className="dval">
+              {r.cagr_positive === true ? <span className="badge badge-good">YES</span>
+               : r.cagr_positive === false ? <span className="badge badge-bad">NO</span>
+               : '—'}
+            </div>
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// ── Info Page ────────────────────────────────
+function InfoPage({ data }) {
+  if (!data) return null;
+  const s = data.summary;
+  const c = data.last_commit;
+  return (
+    <div className="info-page">
+      <div className="info-section"><span style={{ color: 'var(--accent-cyan)' }}>◈</span> Build Info</div>
+      <div className="info-row"><span className="info-key">Data Built</span><span className="info-val">{fmtTime(data.build_time)}</span></div>
+      <div className="info-row"><span className="info-key">Source Repo</span><span className="info-val"><a href={`https://github.com/${data.source_repo}`} target="_blank" style={{ color: 'var(--accent-purple)' }}>{data.source_repo}</a></span></div>
+      <div className="info-row"><span className="info-key">Branch</span><span className="info-val">{data.source_branch}</span></div>
+
+      <div className="info-section"><span style={{ color: 'var(--accent-green)' }}>◈</span> Screener</div>
+      {c && <>
+        <div className="info-row"><span className="info-key">Last Screener Run</span><span className="info-val">{fmtTime(c.date)}</span></div>
+        <div className="info-row"><span className="info-key">Commit</span><span className="info-val">{c.sha} — {c.message}</span></div>
+      </>}
+      <div className="info-row"><span className="info-key">Total Symbols</span><span className="info-val">{s.total_symbols}</span></div>
+
+      <div className="info-section"><span style={{ color: 'var(--accent-blue)' }}>◈</span> IBKR Borrow Data</div>
+      <div className="info-row">
+        <span className="info-key">IBKR FTP Status</span>
+        <span className="info-val" style={{ color: data.ibkr_ftp_success ? 'var(--positive)' : 'var(--warning)' }}>
+          {data.ibkr_ftp_success ? `✓ Live (${data.ibkr_symbols_fetched} symbols)` : '✗ Using CSV fallback'}
+        </span>
+      </div>
+
+      <div className="info-section"><span style={{ color: 'var(--accent-purple)' }}>◈</span> Buckets</div>
+      <div className="info-row"><span className="info-key">Bucket 1 (High β &gt; 1.5)</span><span className="info-val">{s.bucket_1_count}</span></div>
+      <div className="info-row"><span className="info-key">Bucket 2 (Low β ≤ 1.5)</span><span className="info-val">{s.bucket_2_count}</span></div>
+      <div className="info-row"><span className="info-key">Bucket 3 (Inverse)</span><span className="info-val">{s.bucket_3_count}</span></div>
+
+      <div style={{ marginTop: 24, padding: 14, borderRadius: 8, background: 'var(--bg-card)', border: '1px solid var(--border)', fontSize: 12, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
+        Data auto-refreshes 3× daily via GitHub Actions. Borrow rates come from
+        IBKR's public FTP when reachable, otherwise from the screener CSV.
+        Decay is estimated via volatility drag model.
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ────────────────────────────────
+function App() {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState('all');
+  const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState('spread');
+  const [sortDesc, setSortDesc] = useState(true);
+  const [algoOnly, setAlgoOnly] = useState(false);
+  const [expandedSym, setExpandedSym] = useState(null);
+  const [showInfo, setShowInfo] = useState(false);
+
+  useEffect(() => {
+    const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`; // bust every minute
+    fetch(DATA_URL + cacheBust)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => { setData(d); setLoading(false); })
+      .catch(e => { setError(e.message); setLoading(false); });
+  }, []);
+
+  const records = data?.records || [];
+  const summary = data?.summary || {};
+
+  const bucketMap = {
+    all: null,
+    bucket_1: 'bucket_1_high_beta',
+    bucket_2: 'bucket_2_low_beta',
+    bucket_3: 'bucket_3_inverse',
+  };
+
+  const filtered = useMemo(() => {
+    let d = [...records];
+    const bf = bucketMap[activeTab];
+    if (bf) d = d.filter(r => r.bucket === bf);
+    if (algoOnly) d = d.filter(r => r.include_for_algo);
+    if (search) {
+      const s = search.toUpperCase();
+      d = d.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
+    }
+    d.sort((a, b) => {
+      let av = a[sortKey], bv = b[sortKey];
+      if (av == null) av = sortDesc ? -Infinity : Infinity;
+      if (bv == null) bv = sortDesc ? -Infinity : Infinity;
+      if (typeof av === 'string') return sortDesc ? bv.localeCompare(av) : av.localeCompare(bv);
+      if (typeof av === 'boolean') { av = av ? 1 : 0; bv = bv ? 1 : 0; }
+      return sortDesc ? bv - av : av - bv;
+    });
+    return d;
+  }, [records, activeTab, algoOnly, search, sortKey, sortDesc]);
+
+  const tabCounts = useMemo(() => {
+    const c = { all: records.length, bucket_1: 0, bucket_2: 0, bucket_3: 0 };
+    records.forEach(r => {
+      if (r.bucket === 'bucket_1_high_beta') c.bucket_1++;
+      if (r.bucket === 'bucket_2_low_beta') c.bucket_2++;
+      if (r.bucket === 'bucket_3_inverse') c.bucket_3++;
+    });
+    return c;
+  }, [records]);
+
+  const handleSort = key => {
+    if (sortKey === key) setSortDesc(d => !d);
+    else { setSortKey(key); setSortDesc(true); }
+  };
+
+  if (loading) return <div className="app"><div className="loading"><div className="spinner"/>Loading dashboard data…</div></div>;
+  if (error) return <div className="app"><div className="error-banner">Failed to load data: {error}. Make sure <code>data/dashboard_data.json</code> exists. Run <code>python scripts/build_data.py</code> to generate it.</div></div>;
+
+  return (
+    <div className="app">
+      {/* ── Topbar ──────── */}
+      <div className="topbar">
+        <div className="topbar-left">
+          <div className="topbar-logo">ETF BORROW DASH</div>
+          <div className="topbar-meta">
+            <span className={cls('dot', data.ibkr_ftp_success ? 'dot-green' : 'dot-amber')} />
+            {data.ibkr_ftp_success ? 'IBKR Live' : 'CSV Data'}
+            <span style={{ margin: '0 4px' }}>·</span>
+            Built {fmtTime(data.build_time)}
+            {data.last_commit && <>
+              <span style={{ margin: '0 4px' }}>·</span>
+              Screener: <a href={`https://github.com/${data.source_repo}/blob/${data.source_branch}/${data.source_path || 'data/etf_screened_today.csv'}`} target="_blank">{data.last_commit.sha}</a>
+            </>}
+          </div>
+        </div>
+        <div className="topbar-right">
+          <button className={cls('topbar-btn', showInfo && 'active')} onClick={() => setShowInfo(s => !s)}>
+            ◉ Info
+          </button>
+        </div>
+      </div>
+
+      {showInfo ? <InfoPage data={data} /> : (
+        <>
+          {/* ── Summary ──────── */}
+          <div className="summary-strip">
+            <SummaryCard label="Total Symbols" value={fmtNum(summary.total_symbols)} />
+            <SummaryCard
+              label="Best Spread"
+              value={summary.best_spreads?.[0] ? fmt(summary.best_spreads[0].spread) : '—'}
+              sub={summary.best_spreads?.[0]?.symbol || ''}
+              color="var(--positive)"
+            />
+            <SummaryCard
+              label="Worst Borrow"
+              value={summary.worst_borrows?.[0] ? fmt(summary.worst_borrows[0].borrow) : '—'}
+              sub={summary.worst_borrows?.[0]?.symbol || ''}
+              color="var(--negative)"
+            />
+            <SummaryCard label="IBKR FTP" value={data.ibkr_ftp_success ? `${data.ibkr_symbols_fetched}` : 'Offline'}
+              sub={data.ibkr_ftp_success ? 'symbols live' : 'using CSV'}
+              color={data.ibkr_ftp_success ? 'var(--positive)' : 'var(--warning)'}
+            />
+            <div className="summary-card">
+              <div className="label">Top 5 Spreads</div>
+              <ul className="highlight-list">
+                {(summary.best_spreads || []).map(s => (
+                  <li key={s.symbol}>
+                    <span className="sym">{s.symbol}</span>
+                    <span className="val-positive">{fmt(s.spread)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="summary-card">
+              <div className="label">Top 5 Worst Borrows</div>
+              <ul className="highlight-list">
+                {(summary.worst_borrows || []).map(s => (
+                  <li key={s.symbol}>
+                    <span className="sym">{s.symbol}</span>
+                    <span className="val-negative">{fmt(s.borrow)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+
+          {/* ── Tabs ──────────── */}
+          <div className="tab-bar">
+            {[
+              { key: 'all', label: 'All ETFs' },
+              { key: 'bucket_1', label: 'Bucket 1 — High β' },
+              { key: 'bucket_2', label: 'Bucket 2 — Low β' },
+              { key: 'bucket_3', label: 'Bucket 3 — Inverse' },
+            ].map(t => (
+              <div key={t.key} className={cls('tab', activeTab === t.key && 'active')}
+                onClick={() => setActiveTab(t.key)}>
+                {t.label}<span className="count">{tabCounts[t.key]}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* ── Controls ──────── */}
+          <div className="controls-bar">
+            <div className="search-wrapper">
+              <span className="search-icon">⌕</span>
+              <input className="search-box" placeholder="Search symbol or underlying…"
+                value={search} onChange={e => setSearch(e.target.value)} />
+            </div>
+            <label className="toggle-label">
+              <input type="checkbox" checked={algoOnly} onChange={e => setAlgoOnly(e.target.checked)} />
+              Algo-eligible only
+            </label>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
+              {filtered.length} results
+            </span>
+          </div>
+
+          {/* ── Table ─────────── */}
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th style={{ width: 30 }}></th>
+                  {COLS.map(col => (
+                    <th key={col.key} style={{ width: col.w }}
+                      className={sortKey === col.key ? 'sorted' : ''}
+                      onClick={() => handleSort(col.key)}>
+                      {col.label}
+                      {sortKey === col.key && <span className="sort-arrow">{sortDesc ? '▼' : '▲'}</span>}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map(r => {
+                  const expanded = expandedSym === r.symbol;
+                  return (
+                    <React.Fragment key={r.symbol}>
+                      <tr onClick={() => setExpandedSym(expanded ? null : r.symbol)}>
+                        <td style={{ textAlign: 'center', fontSize: 10, color: 'var(--text-muted)' }}>
+                          {expanded ? '▾' : '▸'}
+                        </td>
+                        <td><span className="sym-cell">{r.symbol}</span></td>
+                        <td className="underlying-cell">{r.underlying}</td>
+                        <td>{r.beta?.toFixed(2) ?? '—'}</td>
+                        <td>{r.leverage?.toFixed(0) ?? '—'}x</td>
+                        <td className={borrowCls(r.borrow_net_annual)}>
+                          {fmt(r.borrow_net_annual)} {borrowBadge(r.borrow_net_annual)}
+                        </td>
+                        <td>{fmtNum(r.shares_available)}</td>
+                        <td>{fmt(r.gross_decay_annual)}</td>
+                        <td className={spreadCls(r.spread)}>{fmt(r.spread)}</td>
+                        <td>{fmt(r.decay_3m)}</td>
+                        <td>{fmt(r.decay_6m)}</td>
+                        <td>
+                          {r.include_for_algo
+                            ? <span className="badge badge-algo">YES</span>
+                            : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                        </td>
+                      </tr>
+                      {expanded && <DetailRow r={r} />}
+                    </React.Fragment>
+                  );
+                })}
+                {filtered.length === 0 && (
+                  <tr>
+                    <td colSpan={COLS.length + 1} style={{
+                      textAlign: 'center', padding: 40, color: 'var(--text-muted)', fontSize: 14,
+                    }}>
+                      No matching ETFs found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
