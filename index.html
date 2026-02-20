@@ -526,8 +526,8 @@ function App() {
             <SummaryCard label="Total Symbols" value={fmtNum(summary.total_symbols)} />
             <SummaryCard
               label="Best Net Decay"
-              value={summary.best_spreads?.[0] ? fmt(summary.best_spreads[0].net_decay) : '—'}
-              sub={summary.best_spreads?.[0]?.symbol || ''}
+              value={summary.best_net_decay?.[0] ? fmt(summary.best_net_decay[0].net_decay) : '—'}
+              sub={summary.best_net_decay?.[0]?.symbol || ''}
               color="var(--positive)"
             />
             <SummaryCard
@@ -543,7 +543,7 @@ function App() {
             <div className="summary-card">
               <div className="label">Top 5 Net Decay</div>
               <ul className="highlight-list">
-                {(summary.best_spreads || []).map(s => (
+                {(summary.best_net_decay || []).map(s => (
                   <li key={s.symbol}>
                     <span className="sym">{s.symbol}</span>
                     <span className="val-positive">{fmt(s.net_decay)}</span>

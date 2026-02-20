@@ -54,9 +54,12 @@ def norm_sym(s: str) -> str:
 def _safe_float(row, key):
     """Read a float from a row, returning None if missing."""
     v = row.get(key)
-    if pd.isna(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
         return None
-    return round(float(v), 6)
+    try:
+        return round(float(v), 6)
+    except (ValueError, TypeError):
+        return None
 
 
 def fetch_csv_from_github() -> pd.DataFrame:
@@ -194,17 +197,14 @@ def build():
     # 1. Fetch universe CSV from GitHub
     df = fetch_csv_from_github()
     df["symbol"] = df["ETF"].apply(norm_sym)
-    df["underlying"] = df["Underlying"].apply(norm_sym)
+    df["underlying_sym"] = df["Underlying"].apply(norm_sym)
     print(f"Universe: {len(df)} ETFs loaded")
 
     # Check which analytics columns are present
-    has_decay = "gross_decay_annual" in df.columns
-    has_vol = "vol_underlying_annual" in df.columns and "vol_etf_annual" in df.columns
-    print(f"  CSV has gross_decay_annual: {has_decay}")
-    print(f"  CSV has vol columns: {has_vol}")
-    if has_decay:
-        n_valid = df["gross_decay_annual"].notna().sum()
-        print(f"  Decay populated: {n_valid}/{len(df)}")
+    for col in ["gross_decay_annual", "net_decay_annual", "borrow_drag_annual",
+                 "vol_underlying_annual", "vol_etf_annual"]:
+        n = df[col].notna().sum() if col in df.columns else 0
+        print(f"  {col}: {n}/{len(df)}" if col in df.columns else f"  {col}: MISSING")
 
     # 2. Fetch last commit info
     commit_info = fetch_last_commit_info()
@@ -238,20 +238,19 @@ def build():
             shares_avail = int(row["shares_available"]) if pd.notna(row.get("shares_available")) else None
             borrow_source = "csv"
 
-        # Decay + vol from CSV (computed by etf_analytics.py in ls-algo)
+        # Analytics from CSV (computed by etf_analytics.py in ls-algo)
         gross_decay = _safe_float(row, "gross_decay_annual")
+        net_decay = _safe_float(row, "net_decay_annual")
+        borrow_drag = _safe_float(row, "borrow_drag_annual")
         vol_und = _safe_float(row, "vol_underlying_annual")
         vol_etf = _safe_float(row, "vol_etf_annual")
-        # net = gross_decay - borrow_net/|beta| (borrow scaled by hedge ratio)
-        # Pre-computed in etf_screener CSV
-        net_decay = _safe_float(row, "net")
 
         if gross_decay is not None:
             decay_count += 1
 
         rec = {
             "symbol": sym,
-            "underlying": row["underlying"],
+            "underlying": row["underlying_sym"],
             "beta": round(beta, 4) if beta else None,
             "beta_n_obs": int(row["Beta_n_obs"]) if pd.notna(row.get("Beta_n_obs")) else None,
             "bucket": bucket,
@@ -263,6 +262,7 @@ def build():
             "borrow_missing": bool(row.get("borrow_missing_from_ftp", False)),
             "gross_decay_annual": gross_decay,
             "net_decay": net_decay,
+            "borrow_drag_annual": borrow_drag,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
             "include_for_algo": bool(row.get("include_for_algo", False)),
@@ -277,14 +277,14 @@ def build():
     b2 = [r for r in records if r["bucket"] == "bucket_2_low_beta"]
     b3 = [r for r in records if r["bucket"] == "bucket_3_inverse"]
 
-    with_spread = sorted(
+    with_net = sorted(
         [r for r in records if r["net_decay"] is not None],
         key=lambda r: r["net_decay"], reverse=True,
     )
-    best_spreads = [
+    best_net_decay = [
         {"symbol": r["symbol"], "net_decay": r["net_decay"],
          "borrow": r["borrow_net_annual"], "decay": r["gross_decay_annual"]}
-        for r in with_spread[:5]
+        for r in with_net[:5]
     ]
 
     with_borrow = sorted(
@@ -313,7 +313,7 @@ def build():
             "bucket_1_count": len(b1),
             "bucket_2_count": len(b2),
             "bucket_3_count": len(b3),
-            "best_spreads": best_spreads,
+            "best_net_decay": best_net_decay,
             "worst_borrows": worst_borrows,
             "pct_missing": round(missing / len(records) * 100, 1) if records else 0,
             "decay_computed_count": decay_count,
