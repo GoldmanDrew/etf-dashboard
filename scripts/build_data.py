@@ -201,7 +201,7 @@ def build():
     print(f"Universe: {len(df)} ETFs loaded")
 
     # Check which analytics columns are present
-    for col in ["gross_decay_annual", "net_decay_annual", "borrow_drag_annual",
+    for col in ["gross_decay_annual", "net_decay_annual",
                  "vol_underlying_annual", "vol_etf_annual"]:
         n = df[col].notna().sum() if col in df.columns else 0
         print(f"  {col}: {n}/{len(df)}" if col in df.columns else f"  {col}: MISSING")
@@ -241,7 +241,6 @@ def build():
         # Analytics from CSV (computed by etf_analytics.py in ls-algo)
         gross_decay = _safe_float(row, "gross_decay_annual")
         net_decay = _safe_float(row, "net_decay_annual")
-        borrow_drag = _safe_float(row, "borrow_drag_annual")
         vol_und = _safe_float(row, "vol_underlying_annual")
         vol_etf = _safe_float(row, "vol_etf_annual")
 
@@ -262,7 +261,6 @@ def build():
             "borrow_missing": bool(row.get("borrow_missing_from_ftp", False)),
             "gross_decay_annual": gross_decay,
             "net_decay": net_decay,
-            "borrow_drag_annual": borrow_drag,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
             "include_for_algo": bool(row.get("include_for_algo", False)),

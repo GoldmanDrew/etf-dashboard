@@ -441,7 +441,7 @@ function DetailRow({ r }) {
             <div className={cls('dval', borrowCls(r.borrow_net_annual))}>{fmt(r.borrow_net_annual)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Net Decay (Decay − Borrow/|β|)</div>
+            <div className="dlabel">Net Decay (Gross − Borrow)</div>
             <div className={cls('dval', spreadCls(r.net_decay))}>{fmt(r.net_decay)}</div>
           </div>
           <div className="detail-item">
@@ -632,7 +632,7 @@ function ChartPage({ record, onBack }) {
         <div className="chart-stat">
           <div className="cs-label">Net Decay</div>
           <div className={cls('cs-value', spreadCls(r.net_decay))}>{fmt(r.net_decay)}</div>
-          <div className="cs-sub">decay − borrow/|β|</div>
+          <div className="cs-sub">gross − borrow</div>
         </div>
         <div className="chart-stat">
           <div className="cs-label">Vol Underlying</div>
