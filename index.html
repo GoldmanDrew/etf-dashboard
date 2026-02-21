@@ -244,11 +244,15 @@
   }
 
   /* ── Chart Page ─────────── */
-  .chart-page { padding: 0 24px 24px; flex: 1; display: flex; flex-direction: column; }
+  .chart-page {
+    padding: 0 24px 12px; flex: 1; display: flex; flex-direction: column;
+    height: calc(100vh - 50px); /* viewport minus topbar */
+    min-height: 0;
+  }
 
   .chart-header {
     display: flex; align-items: center; gap: 16px;
-    padding: 16px 0 12px; flex-wrap: wrap;
+    padding: 12px 0 8px; flex-wrap: wrap; flex-shrink: 0;
   }
   .back-btn {
     display: flex; align-items: center; gap: 6px;
@@ -282,9 +286,12 @@
   .chart-container {
     border-radius: 10px; overflow: hidden;
     border: 1px solid var(--border); background: var(--bg-card);
-    flex: 1; min-height: 70vh; position: relative;
+    flex: 1; min-height: 0; position: relative;
   }
-  .chart-container iframe { border: none; width: 100%; height: 100%; display: block; }
+  .chart-container iframe {
+    border: none; display: block;
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  }
   .chart-loading {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     background: var(--bg-card); color: var(--text-muted); font-size: 13px;
@@ -292,12 +299,12 @@
   }
 
   .chart-stats {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 8px; margin-top: 12px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 6px; margin-top: 8px; flex-shrink: 0;
   }
   .chart-stat {
-    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
-    padding: 12px 14px; transition: border-color 0.15s;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; transition: border-color 0.15s;
   }
   .chart-stat:hover { border-color: var(--border-active); }
   .chart-stat .cs-label {
@@ -305,7 +312,7 @@
     letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 3px;
   }
   .chart-stat .cs-value {
-    font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 700;
+    font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700;
   }
   .chart-stat .cs-sub {
     font-size: 10px; color: var(--text-muted); margin-top: 2px;
@@ -313,9 +320,10 @@
   }
 
   .chart-note {
-    margin-top: 12px; padding: 10px 14px; border-radius: 8px;
+    margin-top: 6px; padding: 6px 12px; border-radius: 6px;
     background: var(--bg-card); border: 1px solid var(--border);
-    font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
+    flex-shrink: 0;
   }
 
   .tf-group {
@@ -337,7 +345,7 @@
     .topbar { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
     .tab-bar, .controls-bar, .table-container { padding-left: 12px; padding-right: 12px; }
     .chart-page { padding: 0 12px 16px; }
-    .chart-container { min-height: 55vh; }
+    .chart-container { min-height: 50vh; }
     .chart-stats { grid-template-columns: repeat(2, 1fr); }
     .chart-title { font-size: 17px; }
     .chart-header { gap: 10px; }
