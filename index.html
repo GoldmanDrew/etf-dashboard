@@ -282,7 +282,7 @@
   .chart-container {
     border-radius: 10px; overflow: hidden;
     border: 1px solid var(--border); background: var(--bg-card);
-    flex: 1; min-height: 480px; position: relative;
+    flex: 1; min-height: 70vh; position: relative;
   }
   .chart-container iframe { border: none; width: 100%; height: 100%; display: block; }
   .chart-loading {
@@ -337,7 +337,7 @@
     .topbar { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
     .tab-bar, .controls-bar, .table-container { padding-left: 12px; padding-right: 12px; }
     .chart-page { padding: 0 12px 16px; }
-    .chart-container { min-height: 360px; }
+    .chart-container { min-height: 55vh; }
     .chart-stats { grid-template-columns: repeat(2, 1fr); }
     .chart-title { font-size: 17px; }
     .chart-header { gap: 10px; }
@@ -483,57 +483,48 @@ function DetailRow({ r }) {
 
 // ── Chart Page ──────────────────────────────
 const TIMEFRAMES = [
-  { label: '1M',  range: '1m|1D' },
-  { label: '3M',  range: '3m|1D' },
-  { label: '6M',  range: '6m|1D' },
-  { label: 'YTD', range: 'ytd|1D' },
-  { label: '1Y',  range: '12m|1W' },
-  { label: 'ALL', range: 'all|1M' },
+  { label: '1M',  range: '1M',  interval: 'D' },
+  { label: '3M',  range: '3M',  interval: 'D' },
+  { label: '6M',  range: '6M',  interval: 'D' },
+  { label: 'YTD', range: 'YTD', interval: 'D' },
+  { label: '1Y',  range: '12M', interval: 'W' },
+  { label: 'ALL', range: 'ALL', interval: 'W' },
 ];
 
-function buildWidgetHtml(symbol, compareSymbol, dateRange) {
+function buildWidgetHtml(symbol, compareSymbol, range, interval) {
   const config = JSON.stringify({
-    symbols: [[symbol, symbol]],
-    chartOnly: false,
-    width: '100%',
-    height: '100%',
-    locale: 'en',
-    colorTheme: 'dark',
     autosize: true,
-    showVolume: false,
-    showMA: false,
-    hideDateRanges: true,
-    hideMarketStatus: true,
-    hideSymbolLogo: false,
-    scalePosition: 'right',
-    scaleMode: 'Normal',
-    fontFamily: '-apple-system, BlinkMacSystemFont, Trebuchet MS, Roboto, Ubuntu, sans-serif',
-    fontSize: '10',
-    noTimeScale: false,
-    valuesTracking: '1',
-    changeMode: 'price-and-percent',
-    chartType: 'line',
-    lineWidth: 2,
-    lineType: 0,
-    dateRanges: ['1m|1D', '3m|1D', '6m|1D', 'ytd|1D', '12m|1W', '60m|1W', 'all|1M'],
-    ...(dateRange ? { dateRange } : {}),
-    ...(compareSymbol ? { compareSymbols: [{ symbol: compareSymbol, lineColor: 'rgba(245, 158, 11, 1)' }] } : {}),
-    lineColor: 'rgba(59, 130, 246, 1)',
-    topColor: 'rgba(59, 130, 246, 0.12)',
-    bottomColor: 'rgba(59, 130, 246, 0)',
+    symbol: symbol,
+    interval: interval || 'D',
+    range: range || '6M',
+    timezone: 'exchange',
+    theme: 'dark',
+    style: '2',
+    locale: 'en',
+    allow_symbol_change: false,
+    compareSymbols: compareSymbol
+      ? [{ symbol: compareSymbol, position: 'SameScale' }]
+      : [],
     backgroundColor: 'rgba(10, 14, 23, 1)',
-    gridLineColor: 'rgba(30, 45, 70, 0.5)',
+    gridColor: 'rgba(30, 45, 70, 0.4)',
+    hide_top_toolbar: false,
+    hide_legend: false,
+    hide_side_toolbar: true,
+    save_image: false,
+    calendar: false,
+    hide_volume: true,
+    support_host: 'https://www.tradingview.com',
   });
 
-  // Self-contained HTML page for the iframe
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
   html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#0a0e17}
   .tradingview-widget-container{height:100%;width:100%}
+  .tradingview-widget-container__widget{height:100%;width:100%}
 </style></head><body>
 <div class="tradingview-widget-container">
-  <div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>
-  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-symbol-overview.js" async>
+  <div class="tradingview-widget-container__widget"></div>
+  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
   ${config}
   \x3c/script>
 </div>
@@ -541,7 +532,7 @@ function buildWidgetHtml(symbol, compareSymbol, dateRange) {
 }
 
 function ChartPage({ record, onBack }) {
-  const [activeRange, setActiveRange] = useState('6m|1D');
+  const [activeTf, setActiveTf] = useState(TIMEFRAMES[2]); // 6M
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -558,8 +549,8 @@ function ChartPage({ record, onBack }) {
 
   const widgetHtml = useMemo(() => {
     keyRef.current++;
-    return buildWidgetHtml(etfSym, undSym, activeRange);
-  }, [etfSym, undSym, activeRange]);
+    return buildWidgetHtml(etfSym, undSym, activeTf.range, activeTf.interval);
+  }, [etfSym, undSym, activeTf]);
 
   // Reset loaded state when widget changes
   useEffect(() => { setIframeLoaded(false); }, [widgetHtml]);
@@ -586,8 +577,8 @@ function ChartPage({ record, onBack }) {
         <div className="tf-group">
           {TIMEFRAMES.map(tf => (
             <button key={tf.range}
-              className={cls('tf-btn', activeRange === tf.range && 'tf-active')}
-              onClick={() => setActiveRange(tf.range)}>
+              className={cls('tf-btn', activeTf.range === tf.range && 'tf-active')}
+              onClick={() => setActiveTf(tf)}>
               {tf.label}
             </button>
           ))}
