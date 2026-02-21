@@ -3,7 +3,8 @@
 build_data.py — Static data builder for GitHub Pages deployment.
 
 Fetches etf_screened_today.csv from GoldmanDrew/ls-algo,
-computes bucket assignments, mock decay, spreads, and summary stats,
+reads real decay + volatility from CSV (computed by etf_analytics.py),
+fetches live IBKR borrow rates, assigns buckets, builds summary stats,
 then writes data/dashboard_data.json for the frontend to consume.
 
 Run locally:   python scripts/build_data.py
@@ -12,10 +13,8 @@ Run in CI:     github actions calls this on a schedule
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
 import os
-import random
 import sys
 from pathlib import Path
 
@@ -32,8 +31,6 @@ UNIVERSE_PATH = os.environ.get("UNIVERSE_PATH", "data/etf_screened_today.csv")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 HIGH_BETA_THRESHOLD = float(os.environ.get("HIGH_BETA_THRESHOLD", "1.5"))
-DEFAULT_BORROW_ANNUAL = float(os.environ.get("DEFAULT_BORROW_ANNUAL", "0.05"))
-TRADING_DAYS = 252
 
 OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
@@ -54,6 +51,17 @@ def norm_sym(s: str) -> str:
     return str(s).strip().upper().replace(".", "-")
 
 
+def _safe_float(row, key):
+    """Read a float from a row, returning None if missing."""
+    v = row.get(key)
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    try:
+        return round(float(v), 6)
+    except (ValueError, TypeError):
+        return None
+
+
 def fetch_csv_from_github() -> pd.DataFrame:
     """Download etf_screened_today.csv from the ls-algo repo."""
     url = f"https://raw.githubusercontent.com/{UNIVERSE_REPO}/{UNIVERSE_BRANCH}/{UNIVERSE_PATH}"
@@ -61,31 +69,19 @@ def fetch_csv_from_github() -> pd.DataFrame:
     if GITHUB_TOKEN:
         headers["Authorization"] = f"token {GITHUB_TOKEN}"
 
+    print(f"Fetching {url} ...")
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+
+    # Write to local file for reference
     csv_path = OUTPUT_DIR / "etf_screened_today.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.write_text(resp.text)
+    print(f"  → {len(resp.text):,} bytes, saved to {csv_path}")
 
-    try:
-        print(f"Fetching {url} ...")
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        csv_path.write_text(resp.text)
-        print(f"  → {len(resp.text):,} bytes, saved to {csv_path}")
-
-        from io import StringIO
-        return pd.read_csv(StringIO(resp.text))
-
-    except Exception as e:
-        print(f"  → GitHub fetch failed: {e}")
-        # Fallback: use local file if it exists
-        if csv_path.exists():
-            print(f"  → Using local fallback: {csv_path}")
-            return pd.read_csv(csv_path)
-        else:
-            raise RuntimeError(
-                f"Cannot fetch from GitHub and no local file at {csv_path}. "
-                "Place etf_screened_today.csv in data/ to run offline."
-            )
+    from io import StringIO
+    df = pd.read_csv(StringIO(resp.text))
+    return df
 
 
 def fetch_last_commit_info() -> dict | None:
@@ -191,18 +187,6 @@ def assign_bucket(sym: str, beta: float) -> str:
 
 
 # ──────────────────────────────────────────────
-# Decay estimation (mock — volatility drag formula)
-# ──────────────────────────────────────────────
-def estimate_decay(leverage: float, beta: float, vol: float = 0.20) -> float:
-    L = abs(leverage) if leverage else 2.0
-    sigma = vol * abs(beta) / L if L > 0 else vol
-    drag = (L * L - L) * sigma * sigma / 2.0
-    expense = 0.009 * L
-    tracking = random.uniform(0.002, 0.015)
-    return max(drag + expense + tracking, 0.001)
-
-
-# ──────────────────────────────────────────────
 # Main build
 # ──────────────────────────────────────────────
 def build():
@@ -213,8 +197,14 @@ def build():
     # 1. Fetch universe CSV from GitHub
     df = fetch_csv_from_github()
     df["symbol"] = df["ETF"].apply(norm_sym)
-    df["underlying"] = df["Underlying"].apply(norm_sym)
+    df["underlying_sym"] = df["Underlying"].apply(norm_sym)
     print(f"Universe: {len(df)} ETFs loaded")
+
+    # Check which analytics columns are present
+    for col in ["gross_decay_annual", "net_decay_annual", "borrow_drag_annual",
+                 "vol_underlying_annual", "vol_etf_annual"]:
+        n = df[col].notna().sum() if col in df.columns else 0
+        print(f"  {col}: {n}/{len(df)}" if col in df.columns else f"  {col}: MISSING")
 
     # 2. Fetch last commit info
     commit_info = fetch_last_commit_info()
@@ -225,14 +215,12 @@ def build():
     ibkr = try_fetch_ibkr_ftp()
 
     # 4. Build records
-    np.random.seed(42)
-    random.seed(42)
     records = []
+    decay_count = 0
 
     for _, row in df.iterrows():
         sym = row["symbol"]
         beta = float(row["Beta"]) if pd.notna(row.get("Beta")) else None
-        leverage = float(row["Leverage"]) if pd.notna(row.get("Leverage")) else 2.0
 
         bucket = assign_bucket(sym, beta or 0)
 
@@ -244,26 +232,25 @@ def build():
             shares_avail = ibkr["available_map"].get(sym)
             borrow_source = "ibkr_ftp"
         else:
-            borrow_net = float(row["borrow_net_annual"]) if pd.notna(row.get("borrow_net_annual")) else None
-            borrow_fee = float(row["borrow_fee_annual"]) if pd.notna(row.get("borrow_fee_annual")) else None
-            borrow_rebate = float(row["borrow_rebate_annual"]) if pd.notna(row.get("borrow_rebate_annual")) else None
+            borrow_net = _safe_float(row, "borrow_net_annual")
+            borrow_fee = _safe_float(row, "borrow_fee_annual")
+            borrow_rebate = _safe_float(row, "borrow_rebate_annual")
             shares_avail = int(row["shares_available"]) if pd.notna(row.get("shares_available")) else None
             borrow_source = "csv"
 
-        # Decay estimation
-        random.seed(hash(sym) % 100000)
-        underlying_vol = 0.18 + 0.03 * np.random.randn()
-        gross_decay = round(estimate_decay(leverage, beta or leverage, underlying_vol), 6)
+        # Analytics from CSV (computed by etf_analytics.py in ls-algo)
+        gross_decay = _safe_float(row, "gross_decay_annual")
+        net_decay = _safe_float(row, "net_decay_annual")
+        borrow_drag = _safe_float(row, "borrow_drag_annual")
+        vol_und = _safe_float(row, "vol_underlying_annual")
+        vol_etf = _safe_float(row, "vol_etf_annual")
 
-        spread = round(gross_decay - (borrow_net or DEFAULT_BORROW_ANNUAL), 6) if gross_decay else None
-        decay_3m = round(gross_decay * (1 + random.uniform(-0.15, 0.15)), 6)
-        decay_6m = round(gross_decay * (1 + random.uniform(-0.10, 0.10)), 6)
-        decay_12m = round(gross_decay * (1 + random.uniform(-0.05, 0.05)), 6)
+        if gross_decay is not None:
+            decay_count += 1
 
         rec = {
             "symbol": sym,
-            "underlying": row["underlying"],
-            "leverage": leverage,
+            "underlying": row["underlying_sym"],
             "beta": round(beta, 4) if beta else None,
             "beta_n_obs": int(row["Beta_n_obs"]) if pd.notna(row.get("Beta_n_obs")) else None,
             "bucket": bucket,
@@ -274,10 +261,10 @@ def build():
             "borrow_spiking": bool(row.get("borrow_spiking", False)),
             "borrow_missing": bool(row.get("borrow_missing_from_ftp", False)),
             "gross_decay_annual": gross_decay,
-            "spread": spread,
-            "decay_3m": decay_3m,
-            "decay_6m": decay_6m,
-            "decay_12m": decay_12m,
+            "net_decay": net_decay,
+            "borrow_drag_annual": borrow_drag,
+            "vol_underlying_annual": vol_und,
+            "vol_etf_annual": vol_etf,
             "include_for_algo": bool(row.get("include_for_algo", False)),
             "protected": bool(row.get("protected", False)),
             "cagr_positive": bool(row.get("cagr_positive")) if pd.notna(row.get("cagr_positive")) else None,
@@ -290,13 +277,14 @@ def build():
     b2 = [r for r in records if r["bucket"] == "bucket_2_low_beta"]
     b3 = [r for r in records if r["bucket"] == "bucket_3_inverse"]
 
-    with_spread = sorted(
-        [r for r in records if r["spread"] is not None],
-        key=lambda r: r["spread"], reverse=True,
+    with_net = sorted(
+        [r for r in records if r["net_decay"] is not None],
+        key=lambda r: r["net_decay"], reverse=True,
     )
-    best_spreads = [
-        {"symbol": r["symbol"], "spread": r["spread"], "borrow": r["borrow_net_annual"], "decay": r["gross_decay_annual"]}
-        for r in with_spread[:5]
+    best_net_decay = [
+        {"symbol": r["symbol"], "net_decay": r["net_decay"],
+         "borrow": r["borrow_net_annual"], "decay": r["gross_decay_annual"]}
+        for r in with_net[:5]
     ]
 
     with_borrow = sorted(
@@ -319,14 +307,16 @@ def build():
         "last_commit": commit_info,
         "ibkr_ftp_success": ibkr["success"],
         "ibkr_symbols_fetched": len(ibkr["borrow_map"]) if ibkr["success"] else 0,
+        "decay_method": "linear_daily_pnl_1_over_beta_hedge",
         "summary": {
             "total_symbols": len(records),
             "bucket_1_count": len(b1),
             "bucket_2_count": len(b2),
             "bucket_3_count": len(b3),
-            "best_spreads": best_spreads,
+            "best_net_decay": best_net_decay,
             "worst_borrows": worst_borrows,
             "pct_missing": round(missing / len(records) * 100, 1) if records else 0,
+            "decay_computed_count": decay_count,
         },
         "records": records,
     }
@@ -339,6 +329,7 @@ def build():
     file_size = OUTPUT_FILE.stat().st_size
     print(f"\n✓ Wrote {OUTPUT_FILE} ({file_size:,} bytes)")
     print(f"  {len(records)} records | B1={len(b1)} B2={len(b2)} B3={len(b3)}")
+    print(f"  Decay: {decay_count}/{len(records)} ({100*decay_count/len(records):.0f}%)")
     print(f"  IBKR FTP: {'✓' if ibkr['success'] else '✗'}")
     print(f"  Build time: {build_time}")
     print("=" * 60)
