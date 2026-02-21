@@ -318,6 +318,20 @@
     font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
   }
 
+  .tf-group {
+    display: flex; gap: 3px; margin-left: auto;
+    background: var(--bg-primary); border-radius: 6px; padding: 3px;
+    border: 1px solid var(--border);
+  }
+  .tf-btn {
+    padding: 5px 12px; border-radius: 4px; font-size: 11px; font-weight: 600;
+    border: none; background: transparent;
+    color: var(--text-muted); cursor: pointer; transition: all 0.15s;
+    font-family: 'JetBrains Mono', monospace; letter-spacing: 0.3px;
+  }
+  .tf-btn:hover { color: var(--text-primary); background: var(--bg-card); }
+  .tf-active { background: var(--accent-blue) !important; color: #fff !important; }
+
   @media (max-width: 768px) {
     .summary-strip { grid-template-columns: repeat(2, 1fr); }
     .topbar { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
@@ -326,6 +340,9 @@
     .chart-container { min-height: 360px; }
     .chart-stats { grid-template-columns: repeat(2, 1fr); }
     .chart-title { font-size: 17px; }
+    .chart-header { gap: 10px; }
+    .tf-group { margin-left: 0; width: 100%; justify-content: center; }
+    .tf-btn { padding: 5px 8px; font-size: 10px; }
   }
 </style>
 </head>
@@ -465,10 +482,69 @@ function DetailRow({ r }) {
 }
 
 // ── Chart Page ──────────────────────────────
+const TIMEFRAMES = [
+  { label: '1M',  range: '1m|1D' },
+  { label: '3M',  range: '3m|1D' },
+  { label: '6M',  range: '6m|1D' },
+  { label: 'YTD', range: 'ytd|1D' },
+  { label: '1Y',  range: '12m|1W' },
+  { label: 'ALL', range: 'all|1M' },
+];
+
+function buildWidgetHtml(symbol, compareSymbol, dateRange) {
+  const config = JSON.stringify({
+    symbols: [[symbol, symbol]],
+    chartOnly: false,
+    width: '100%',
+    height: '100%',
+    locale: 'en',
+    colorTheme: 'dark',
+    autosize: true,
+    showVolume: false,
+    showMA: false,
+    hideDateRanges: true,
+    hideMarketStatus: true,
+    hideSymbolLogo: false,
+    scalePosition: 'right',
+    scaleMode: 'Normal',
+    fontFamily: '-apple-system, BlinkMacSystemFont, Trebuchet MS, Roboto, Ubuntu, sans-serif',
+    fontSize: '10',
+    noTimeScale: false,
+    valuesTracking: '1',
+    changeMode: 'price-and-percent',
+    chartType: 'line',
+    lineWidth: 2,
+    lineType: 0,
+    dateRanges: ['1m|1D', '3m|1D', '6m|1D', 'ytd|1D', '12m|1W', '60m|1W', 'all|1M'],
+    ...(dateRange ? { dateRange } : {}),
+    ...(compareSymbol ? { compareSymbols: [{ symbol: compareSymbol, lineColor: 'rgba(245, 158, 11, 1)' }] } : {}),
+    lineColor: 'rgba(59, 130, 246, 1)',
+    topColor: 'rgba(59, 130, 246, 0.12)',
+    bottomColor: 'rgba(59, 130, 246, 0)',
+    backgroundColor: 'rgba(10, 14, 23, 1)',
+    gridLineColor: 'rgba(30, 45, 70, 0.5)',
+  });
+
+  // Self-contained HTML page for the iframe
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#0a0e17}
+  .tradingview-widget-container{height:100%;width:100%}
+</style></head><body>
+<div class="tradingview-widget-container">
+  <div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>
+  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-symbol-overview.js" async>
+  ${config}
+  </script>
+</div>
+</body></html>`;
+}
+
 function ChartPage({ record, onBack }) {
-  const containerRef = useRef(null);
-  const [chartLoaded, setChartLoaded] = useState(false);
-  const widgetIdRef = useRef(0);
+  const [activeRange, setActiveRange] = useState('6m|1D');
+  const [iframeLoaded, setIframeLoaded] = useState(false);
+  const iframeRef = useRef(null);
+  const keyRef = useRef(0);
 
   const r = record;
   const etfSym = r.symbol;
@@ -480,102 +556,13 @@ function ChartPage({ record, onBack }) {
   const bucketCls = r.bucket === 'bucket_1_high_beta' ? 'b1'
     : r.bucket === 'bucket_2_low_beta' ? 'b2' : 'b3';
 
-  useEffect(() => {
-    if (!containerRef.current) return;
+  const widgetHtml = useMemo(() => {
+    keyRef.current++;
+    return buildWidgetHtml(etfSym, undSym, activeRange);
+  }, [etfSym, undSym, activeRange]);
 
-    setChartLoaded(false);
-    const thisWidget = ++widgetIdRef.current;
-
-    // Clear previous widget
-    const el = containerRef.current;
-    el.innerHTML = '';
-
-    // Create unique container id
-    const chartDivId = `tv_chart_${thisWidget}`;
-    const chartDiv = document.createElement('div');
-    chartDiv.id = chartDivId;
-    chartDiv.style.width = '100%';
-    chartDiv.style.height = '100%';
-    el.appendChild(chartDiv);
-
-    // Load TradingView widget script
-    const script = document.createElement('script');
-    script.src = 'https://s.tradingview.com/tv.js';
-    script.async = true;
-    script.onload = () => {
-      if (widgetIdRef.current !== thisWidget) return;
-      if (typeof TradingView === 'undefined') return;
-
-      try {
-        new TradingView.widget({
-          autosize: true,
-          symbol: etfSym,
-          interval: 'D',
-          timezone: 'exchange',
-          theme: 'dark',
-          style: '2',  // Line chart — best for comparison
-          locale: 'en',
-          toolbar_bg: '#111827',
-          enable_publishing: false,
-          allow_symbol_change: true,
-          hide_top_toolbar: false,
-          hide_legend: false,
-          save_image: false,
-          compareSymbols: undSym ? [{ symbol: undSym, position: 'SameScale' }] : [],
-          container_id: chartDivId,
-          withdateranges: true,
-          details: false,
-          studies: [],
-          disabled_features: [
-            'header_symbol_search',
-            'header_saveload',
-            'header_screenshot',
-            'header_compare',
-            'header_undo_redo',
-            'header_fullscreen_button',
-            'use_localstorage_for_settings',
-            'left_toolbar',
-            'context_menus',
-            'control_bar',
-            'timeframes_toolbar',
-          ],
-          enabled_features: ['hide_left_toolbar_by_default'],
-          overrides: {
-            'paneProperties.background': '#0a0e17',
-            'paneProperties.backgroundType': 'solid',
-            'scalesProperties.backgroundColor': '#0a0e17',
-            'mainSeriesProperties.lineStyle.color': '#3b82f6',
-            'mainSeriesProperties.lineStyle.linewidth': 2,
-          },
-          loading_screen: { backgroundColor: '#0a0e17', foregroundColor: '#3b82f6' },
-        });
-        setChartLoaded(true);
-      } catch (e) {
-        console.error('TradingView widget error:', e);
-      }
-    };
-    script.onerror = () => {
-      // Fallback: show link to TradingView
-      if (widgetIdRef.current !== thisWidget) return;
-      el.innerHTML = `
-        <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;gap:12px;color:#8896ae;font-size:13px;font-family:'JetBrains Mono',monospace">
-          <div style="font-size:28px;opacity:0.3">📊</div>
-          <div>Chart widget unavailable</div>
-          <a href="https://www.tradingview.com/chart/?symbol=${etfSym}&compare=${undSym || ''}"
-             target="_blank" rel="noopener"
-             style="color:#3b82f6;text-decoration:underline;font-size:12px">
-            Open on TradingView →
-          </a>
-        </div>`;
-    };
-    document.head.appendChild(script);
-
-    return () => {
-      widgetIdRef.current++;
-      // Cleanup
-      try { script.remove(); } catch(e) {}
-    };
-  }, [etfSym, undSym]);
+  // Reset loaded state when widget changes
+  useEffect(() => { setIframeLoaded(false); }, [widgetHtml]);
 
   return (
     <div className="chart-page">
@@ -594,16 +581,36 @@ function ChartPage({ record, onBack }) {
         </div>
         {bucketLabel && <span className={cls('chart-bucket-badge', bucketCls)}>{bucketLabel}</span>}
         {r.include_for_algo && <span className="badge badge-algo">ALGO ELIGIBLE</span>}
+
+        {/* Timeframe buttons */}
+        <div className="tf-group">
+          {TIMEFRAMES.map(tf => (
+            <button key={tf.range}
+              className={cls('tf-btn', activeRange === tf.range && 'tf-active')}
+              onClick={() => setActiveRange(tf.range)}>
+              {tf.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* TradingView Chart */}
-      <div className="chart-container" ref={containerRef}>
-        {!chartLoaded && (
+      {/* TradingView chart in sandboxed iframe via srcdoc */}
+      <div className="chart-container">
+        {!iframeLoaded && (
           <div className="chart-loading">
             <div className="spinner" style={{ marginRight: 8 }} />
             Loading chart…
           </div>
         )}
+        <iframe
+          key={keyRef.current}
+          ref={iframeRef}
+          srcDoc={widgetHtml}
+          style={{ opacity: iframeLoaded ? 1 : 0, transition: 'opacity 0.3s' }}
+          onLoad={() => setTimeout(() => setIframeLoaded(true), 600)}
+          sandbox="allow-scripts allow-same-origin allow-popups"
+          loading="eager"
+        />
       </div>
 
       {/* Stats Grid */}
@@ -651,9 +658,9 @@ function ChartPage({ record, onBack }) {
       </div>
 
       <div className="chart-note">
-        Chart shows % change comparison (line mode). Use the toolbar above the chart
-        to change timeframe (1D, 1W, 1M, 3M, 6M, 12M) and toggle between line/candle views.
-        Both series are plotted on the same % scale for direct comparison.
+        Chart shows % change comparison with {etfSym} (blue) vs {undSym || 'underlying'} (orange).
+        Use the timeframe buttons above or the widget's built-in controls to change the date range.
+        Both series are plotted on the same scale for direct visual comparison of decay.
       </div>
     </div>
   );
