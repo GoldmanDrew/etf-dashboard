@@ -55,7 +55,7 @@
     font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 16px;
     background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    letter-spacing: -0.5px;
+    letter-spacing: -0.5px; cursor: pointer;
   }
   .topbar-meta {
     display: flex; align-items: center; gap: 6px;
@@ -173,7 +173,12 @@
     padding: 9px 12px; font-family: 'JetBrains Mono', monospace;
     font-size: 12px; white-space: nowrap;
   }
-  .sym-cell { font-weight: 700; color: var(--text-primary); font-size: 13px; }
+  .sym-cell {
+    font-weight: 700; color: var(--accent-cyan); font-size: 13px;
+    text-decoration: underline; text-decoration-color: rgba(6,182,212,0.3);
+    text-underline-offset: 2px; cursor: pointer; transition: color 0.15s;
+  }
+  .sym-cell:hover { color: var(--accent-blue); text-decoration-color: var(--accent-blue); }
   .underlying-cell { color: var(--text-secondary); }
 
   /* ── Value Colors ────────── */
@@ -238,10 +243,89 @@
     color: var(--accent-red); font-size: 14px;
   }
 
+  /* ── Chart Page ─────────── */
+  .chart-page { padding: 0 24px 24px; flex: 1; display: flex; flex-direction: column; }
+
+  .chart-header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 16px 0 12px; flex-wrap: wrap;
+  }
+  .back-btn {
+    display: flex; align-items: center; gap: 6px;
+    padding: 7px 14px; border-radius: 6px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--border); background: var(--bg-card);
+    color: var(--text-secondary); cursor: pointer; transition: all 0.15s;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .back-btn:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+  .back-btn svg { width: 14px; height: 14px; }
+
+  .chart-title {
+    font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700;
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  .chart-title .etf-sym {
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .chart-title .vs { color: var(--text-muted); font-size: 14px; font-weight: 400; }
+  .chart-title .und-sym { color: var(--accent-amber); }
+
+  .chart-bucket-badge {
+    padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 600;
+    font-family: 'JetBrains Mono', monospace; letter-spacing: 0.3px;
+  }
+  .chart-bucket-badge.b1 { background: rgba(59,130,246,0.12); color: var(--accent-blue); }
+  .chart-bucket-badge.b2 { background: rgba(139,92,246,0.12); color: var(--accent-purple); }
+  .chart-bucket-badge.b3 { background: rgba(245,158,11,0.12); color: var(--accent-amber); }
+
+  .chart-container {
+    border-radius: 10px; overflow: hidden;
+    border: 1px solid var(--border); background: var(--bg-card);
+    flex: 1; min-height: 480px; position: relative;
+  }
+  .chart-container iframe { border: none; width: 100%; height: 100%; display: block; }
+  .chart-loading {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: var(--bg-card); color: var(--text-muted); font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .chart-stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px; margin-top: 12px;
+  }
+  .chart-stat {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; transition: border-color 0.15s;
+  }
+  .chart-stat:hover { border-color: var(--border-active); }
+  .chart-stat .cs-label {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 3px;
+  }
+  .chart-stat .cs-value {
+    font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 700;
+  }
+  .chart-stat .cs-sub {
+    font-size: 10px; color: var(--text-muted); margin-top: 2px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .chart-note {
+    margin-top: 12px; padding: 10px 14px; border-radius: 8px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
+  }
+
   @media (max-width: 768px) {
     .summary-strip { grid-template-columns: repeat(2, 1fr); }
     .topbar { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
     .tab-bar, .controls-bar, .table-container { padding-left: 12px; padding-right: 12px; }
+    .chart-page { padding: 0 12px 16px; }
+    .chart-container { min-height: 360px; }
+    .chart-stats { grid-template-columns: repeat(2, 1fr); }
+    .chart-title { font-size: 17px; }
   }
 </style>
 </head>
@@ -253,27 +337,22 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
 <script type="text/babel">
-const { useState, useEffect, useCallback, useMemo } = React;
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 const DATA_URL = "data/dashboard_data.json";
 
 // ── Formatters ──────────────────────────────
-const fmt = (v, d = 2) => {
-  if (v === null || v === undefined || !isFinite(v)) return '—';
-  return (v * 100).toFixed(d) + '%';
-};
-const fmtNum = (v, d = 0) => {
-  if (v === null || v === undefined || !isFinite(v)) return '—';
-  return v.toLocaleString(undefined, { maximumFractionDigits: d });
-};
-const fmtTime = (iso) => {
+const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
+const fmtNum = v => v == null ? '—' : Number(v).toLocaleString();
+const fmtTime = iso => {
   if (!iso) return '—';
   const d = new Date(iso);
-  return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
 };
 const cls = (...c) => c.filter(Boolean).join(' ');
 
-// ── Value classifiers ───────────────────────
+const HIGH_BETA_THRESHOLD = 1.5;
+
 const borrowCls = v => {
   if (v == null) return 'val-muted';
   if (v > 0.15) return 'val-negative';
@@ -385,6 +464,201 @@ function DetailRow({ r }) {
   );
 }
 
+// ── Chart Page ──────────────────────────────
+function ChartPage({ record, onBack }) {
+  const containerRef = useRef(null);
+  const [chartLoaded, setChartLoaded] = useState(false);
+  const widgetIdRef = useRef(0);
+
+  const r = record;
+  const etfSym = r.symbol;
+  const undSym = r.underlying;
+
+  const bucketLabel = r.bucket === 'bucket_1_high_beta' ? 'Bucket 1 — High β'
+    : r.bucket === 'bucket_2_low_beta' ? 'Bucket 2 — Low β'
+    : r.bucket === 'bucket_3_inverse' ? 'Bucket 3 — Inverse' : '';
+  const bucketCls = r.bucket === 'bucket_1_high_beta' ? 'b1'
+    : r.bucket === 'bucket_2_low_beta' ? 'b2' : 'b3';
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    setChartLoaded(false);
+    const thisWidget = ++widgetIdRef.current;
+
+    // Clear previous widget
+    const el = containerRef.current;
+    el.innerHTML = '';
+
+    // Create unique container id
+    const chartDivId = `tv_chart_${thisWidget}`;
+    const chartDiv = document.createElement('div');
+    chartDiv.id = chartDivId;
+    chartDiv.style.width = '100%';
+    chartDiv.style.height = '100%';
+    el.appendChild(chartDiv);
+
+    // Load TradingView widget script
+    const script = document.createElement('script');
+    script.src = 'https://s.tradingview.com/tv.js';
+    script.async = true;
+    script.onload = () => {
+      if (widgetIdRef.current !== thisWidget) return;
+      if (typeof TradingView === 'undefined') return;
+
+      try {
+        new TradingView.widget({
+          autosize: true,
+          symbol: etfSym,
+          interval: 'D',
+          timezone: 'exchange',
+          theme: 'dark',
+          style: '2',  // Line chart — best for comparison
+          locale: 'en',
+          toolbar_bg: '#111827',
+          enable_publishing: false,
+          allow_symbol_change: true,
+          hide_top_toolbar: false,
+          hide_legend: false,
+          save_image: false,
+          compareSymbols: undSym ? [{ symbol: undSym, position: 'SameScale' }] : [],
+          container_id: chartDivId,
+          withdateranges: true,
+          details: false,
+          studies: [],
+          disabled_features: [
+            'header_symbol_search',
+            'header_saveload',
+            'header_screenshot',
+            'header_compare',
+            'header_undo_redo',
+            'header_fullscreen_button',
+            'use_localstorage_for_settings',
+            'left_toolbar',
+            'context_menus',
+            'control_bar',
+            'timeframes_toolbar',
+          ],
+          enabled_features: ['hide_left_toolbar_by_default'],
+          overrides: {
+            'paneProperties.background': '#0a0e17',
+            'paneProperties.backgroundType': 'solid',
+            'scalesProperties.backgroundColor': '#0a0e17',
+            'mainSeriesProperties.lineStyle.color': '#3b82f6',
+            'mainSeriesProperties.lineStyle.linewidth': 2,
+          },
+          loading_screen: { backgroundColor: '#0a0e17', foregroundColor: '#3b82f6' },
+        });
+        setChartLoaded(true);
+      } catch (e) {
+        console.error('TradingView widget error:', e);
+      }
+    };
+    script.onerror = () => {
+      // Fallback: show link to TradingView
+      if (widgetIdRef.current !== thisWidget) return;
+      el.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;gap:12px;color:#8896ae;font-size:13px;font-family:'JetBrains Mono',monospace">
+          <div style="font-size:28px;opacity:0.3">📊</div>
+          <div>Chart widget unavailable</div>
+          <a href="https://www.tradingview.com/chart/?symbol=${etfSym}&compare=${undSym || ''}"
+             target="_blank" rel="noopener"
+             style="color:#3b82f6;text-decoration:underline;font-size:12px">
+            Open on TradingView →
+          </a>
+        </div>`;
+    };
+    document.head.appendChild(script);
+
+    return () => {
+      widgetIdRef.current++;
+      // Cleanup
+      try { script.remove(); } catch(e) {}
+    };
+  }, [etfSym, undSym]);
+
+  return (
+    <div className="chart-page">
+      {/* Header */}
+      <div className="chart-header">
+        <button className="back-btn" onClick={onBack}>
+          <svg viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M17 10a.75.75 0 01-.75.75H5.612l4.158 3.96a.75.75 0 11-1.04 1.08l-5.5-5.25a.75.75 0 010-1.08l5.5-5.25a.75.75 0 111.04 1.08L5.612 9.25H16.25A.75.75 0 0117 10z" clipRule="evenodd"/></svg>
+          Back
+        </button>
+        <div className="chart-title">
+          <span className="etf-sym">{etfSym}</span>
+          {undSym && <>
+            <span className="vs">vs</span>
+            <span className="und-sym">{undSym}</span>
+          </>}
+        </div>
+        {bucketLabel && <span className={cls('chart-bucket-badge', bucketCls)}>{bucketLabel}</span>}
+        {r.include_for_algo && <span className="badge badge-algo">ALGO ELIGIBLE</span>}
+      </div>
+
+      {/* TradingView Chart */}
+      <div className="chart-container" ref={containerRef}>
+        {!chartLoaded && (
+          <div className="chart-loading">
+            <div className="spinner" style={{ marginRight: 8 }} />
+            Loading chart…
+          </div>
+        )}
+      </div>
+
+      {/* Stats Grid */}
+      <div className="chart-stats">
+        <div className="chart-stat">
+          <div className="cs-label">Beta</div>
+          <div className="cs-value">{r.beta?.toFixed(3) ?? '—'}</div>
+          <div className="cs-sub">{fmtNum(r.beta_n_obs)} obs</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Gross Decay</div>
+          <div className="cs-value" style={{ color: 'var(--positive)' }}>{fmt(r.gross_decay_annual)}</div>
+          <div className="cs-sub">annual (linear)</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Borrow Rate</div>
+          <div className={cls('cs-value', borrowCls(r.borrow_net_annual))}>{fmt(r.borrow_net_annual)}</div>
+          <div className="cs-sub">net annual</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Net Decay</div>
+          <div className={cls('cs-value', spreadCls(r.net_decay))}>{fmt(r.net_decay)}</div>
+          <div className="cs-sub">decay − borrow/|β|</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Vol Underlying</div>
+          <div className="cs-value">{fmt(r.vol_underlying_annual)}</div>
+          <div className="cs-sub">{undSym || '—'}</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Vol ETF</div>
+          <div className="cs-value">{fmt(r.vol_etf_annual)}</div>
+          <div className="cs-sub">{etfSym}</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Shares Available</div>
+          <div className="cs-value">{fmtNum(r.shares_available)}</div>
+          <div className="cs-sub">{r.borrow_source === 'ibkr_ftp' ? 'IBKR Live' : 'CSV'}</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Borrow Fee / Rebate</div>
+          <div className="cs-value" style={{ fontSize: 14 }}>{fmt(r.borrow_fee_annual)} / {fmt(r.borrow_rebate_annual)}</div>
+          <div className="cs-sub">gross / rebate</div>
+        </div>
+      </div>
+
+      <div className="chart-note">
+        Chart shows % change comparison (line mode). Use the toolbar above the chart
+        to change timeframe (1D, 1W, 1M, 3M, 6M, 12M) and toggle between line/candle views.
+        Both series are plotted on the same % scale for direct comparison.
+      </div>
+    </div>
+  );
+}
+
 // ── Info Page ────────────────────────────────
 function InfoPage({ data }) {
   if (!data) return null;
@@ -420,7 +694,7 @@ function InfoPage({ data }) {
       <div style={{ marginTop: 24, padding: 14, borderRadius: 8, background: 'var(--bg-card)', border: '1px solid var(--border)', fontSize: 12, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
         Data auto-refreshes 3× daily via GitHub Actions. Borrow rates come from
         IBKR's public FTP when reachable, otherwise from the screener CSV.
-        Decay is estimated via volatility drag model.
+        Decay is measured as simple linear annualized rate from total-return series.
       </div>
     </div>
   );
@@ -438,13 +712,42 @@ function App() {
   const [algoOnly, setAlgoOnly] = useState(false);
   const [expandedSym, setExpandedSym] = useState(null);
   const [showInfo, setShowInfo] = useState(false);
+  const [chartRecord, setChartRecord] = useState(null);
 
   useEffect(() => {
-    const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`; // bust every minute
+    const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
     fetch(DATA_URL + cacheBust)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(d => { setData(d); setLoading(false); })
       .catch(e => { setError(e.message); setLoading(false); });
+  }, []);
+
+  // Hash-based routing for chart page
+  useEffect(() => {
+    const handleHash = () => {
+      const hash = window.location.hash;
+      if (hash.startsWith('#/chart/') && data) {
+        const sym = decodeURIComponent(hash.slice(8)).toUpperCase();
+        const rec = (data.records || []).find(r => r.symbol === sym);
+        if (rec) {
+          setChartRecord(rec);
+          setShowInfo(false);
+          return;
+        }
+      }
+      setChartRecord(null);
+    };
+    handleHash();
+    window.addEventListener('hashchange', handleHash);
+    return () => window.removeEventListener('hashchange', handleHash);
+  }, [data]);
+
+  const navigateToChart = useCallback((record) => {
+    window.location.hash = `/chart/${encodeURIComponent(record.symbol)}`;
+  }, []);
+
+  const navigateBack = useCallback(() => {
+    window.location.hash = '';
   }, []);
 
   const records = data?.records || [];
@@ -500,7 +803,7 @@ function App() {
       {/* ── Topbar ──────── */}
       <div className="topbar">
         <div className="topbar-left">
-          <div className="topbar-logo">ETF BORROW DASH</div>
+          <div className="topbar-logo" onClick={() => { navigateBack(); setShowInfo(false); }}>ETF BORROW DASH</div>
           <div className="topbar-meta">
             <span className={cls('dot', data.ibkr_ftp_success ? 'dot-green' : 'dot-amber')} />
             {data.ibkr_ftp_success ? 'IBKR Live' : 'CSV Data'}
@@ -513,13 +816,18 @@ function App() {
           </div>
         </div>
         <div className="topbar-right">
-          <button className={cls('topbar-btn', showInfo && 'active')} onClick={() => setShowInfo(s => !s)}>
+          <button className={cls('topbar-btn', showInfo && !chartRecord && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
             ◉ Info
           </button>
         </div>
       </div>
 
-      {showInfo ? <InfoPage data={data} /> : (
+      {/* ── Chart Page ──────── */}
+      {chartRecord ? (
+        <ChartPage record={chartRecord} onBack={navigateBack} />
+      ) : showInfo ? (
+        <InfoPage data={data} />
+      ) : (
         <>
           {/* ── Summary ──────── */}
           <div className="summary-strip">
@@ -620,7 +928,11 @@ function App() {
                         <td style={{ textAlign: 'center', fontSize: 10, color: 'var(--text-muted)' }}>
                           {expanded ? '▾' : '▸'}
                         </td>
-                        <td><span className="sym-cell">{r.symbol}</span></td>
+                        <td>
+                          <span className="sym-cell" onClick={e => { e.stopPropagation(); navigateToChart(r); }}>
+                            {r.symbol}
+                          </span>
+                        </td>
                         <td className="underlying-cell">{r.underlying}</td>
                         <td>{r.beta?.toFixed(2) ?? '—'}</td>
                         <td className={borrowCls(r.borrow_net_annual)}>
