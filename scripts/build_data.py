@@ -179,6 +179,10 @@ def try_fetch_ibkr_ftp() -> dict:
 # Bucketing
 # ──────────────────────────────────────────────
 def assign_bucket(sym: str, beta: float) -> str:
+    # Primary check: negative beta → inverse (matches ibkr_accounting.py)
+    if pd.notna(beta) and beta < 0:
+        return "bucket_3_inverse"
+    # Fallback: hardcoded list catches inverse ETFs with missing/zero beta
     if sym in INVERSE_ETFS:
         return "bucket_3_inverse"
     if pd.notna(beta) and beta > HIGH_BETA_THRESHOLD:
