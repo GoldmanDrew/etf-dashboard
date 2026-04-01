@@ -200,9 +200,17 @@ def _build_records_from_csv():
             bucket=str(row.get("bucket", Bucket.LOW_BETA.value)),
             borrow_fee_annual=float(row["borrow_fee_annual"]) if not _isnan(row.get("borrow_fee_annual")) else None,
             borrow_rebate_annual=float(row["borrow_rebate_annual"]) if not _isnan(row.get("borrow_rebate_annual")) else None,
-            borrow_net_annual=float(row["borrow_net_annual"]) if not _isnan(row.get("borrow_net_annual")) else None,
+            borrow_net_annual=(
+                float(row["borrow_current"]) if not _isnan(row.get("borrow_current"))
+                else (float(row["borrow_fee_annual"]) if not _isnan(row.get("borrow_fee_annual"))
+                      else (float(row["borrow_net_annual"]) if not _isnan(row.get("borrow_net_annual")) else None))
+            ),
             shares_available=int(row["shares_available"]) if not _isnan(row.get("shares_available")) else None,
-            borrow_current=float(row["borrow_current"]) if not _isnan(row.get("borrow_current")) else None,
+            borrow_current=(
+                float(row["borrow_current"]) if not _isnan(row.get("borrow_current"))
+                else (float(row["borrow_fee_annual"]) if not _isnan(row.get("borrow_fee_annual"))
+                      else (float(row["borrow_net_annual"]) if not _isnan(row.get("borrow_net_annual")) else None))
+            ),
             borrow_spiking=bool(row.get("borrow_spiking", False)),
             borrow_missing=bool(row.get("borrow_missing_from_ftp", False)),
             include_for_algo=bool(row.get("include_for_algo", False)),
@@ -322,7 +330,7 @@ scheduler = BackgroundScheduler()
 
 def start_scheduler():
     refresh_cfg = CONFIG.get("refresh", {})
-    borrow_interval = refresh_cfg.get("borrow_interval_seconds", 60)
+    borrow_interval = refresh_cfg.get("borrow_interval_seconds", 1800)
     decay_interval = refresh_cfg.get("decay_interval_seconds", 86400)
 
     scheduler.add_job(refresh_borrow, "interval", seconds=borrow_interval, id="borrow_refresh")

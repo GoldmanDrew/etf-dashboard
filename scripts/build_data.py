@@ -12,6 +12,7 @@ Run in CI:     github actions calls this on a schedule
 """
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import json
 import os
@@ -77,7 +78,7 @@ def fetch_csv_from_github() -> pd.DataFrame:
     csv_path = OUTPUT_DIR / "etf_screened_today.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path.write_text(resp.text)
-    print(f"  → {len(resp.text):,} bytes, saved to {csv_path}")
+    print(f"  -> {len(resp.text):,} bytes, saved to {csv_path}")
 
     from io import StringIO
     df = pd.read_csv(StringIO(resp.text))
@@ -152,12 +153,13 @@ def try_fetch_ibkr_ftp() -> dict:
         df["rebate_annual"] = pd.to_numeric(df.get("rebaterate", pd.Series(dtype=float)), errors="coerce") / 100.0
         df["fee_annual"] = pd.to_numeric(df.get("feerate", pd.Series(dtype=float)), errors="coerce") / 100.0
         df["available_int"] = pd.to_numeric(df.get("available", pd.Series(dtype=float)), errors="coerce")
-        df["net_borrow"] = (df["fee_annual"] - df["rebate_annual"]).clip(lower=0)
+        # Dashboard borrow should reflect fee only (not fee - rebate).
+        df["borrow_current"] = df["fee_annual"]
 
         for _, row in df.iterrows():
             sym = norm_sym(row["sym"])
-            if pd.notna(row["net_borrow"]):
-                result["borrow_map"][sym] = round(float(row["net_borrow"]), 6)
+            if pd.notna(row["borrow_current"]):
+                result["borrow_map"][sym] = round(float(row["borrow_current"]), 6)
             if pd.notna(row["fee_annual"]):
                 result["fee_map"][sym] = round(float(row["fee_annual"]), 6)
             if pd.notna(row["rebate_annual"]):
@@ -166,10 +168,10 @@ def try_fetch_ibkr_ftp() -> dict:
                 result["available_map"][sym] = int(row["available_int"])
 
         result["success"] = True
-        print(f"  → IBKR FTP: {len(result['borrow_map'])} symbols fetched")
+        print(f"  -> IBKR FTP: {len(result['borrow_map'])} symbols fetched")
 
     except Exception as e:
-        print(f"  → IBKR FTP failed: {e}. Using CSV borrow values.")
+        print(f"  -> IBKR FTP failed: {e}. Using CSV borrow values.")
         result["success"] = False
 
     return result
@@ -188,6 +190,115 @@ def assign_bucket(sym: str, beta: float) -> str:
     if pd.notna(beta) and beta > HIGH_BETA_THRESHOLD:
         return "bucket_1_high_beta"
     return "bucket_2_low_beta"
+
+
+def _calc_summary(records: list[dict]) -> dict:
+    b1 = [r for r in records if r["bucket"] == "bucket_1_high_beta"]
+    b2 = [r for r in records if r["bucket"] == "bucket_2_low_beta"]
+    b3 = [r for r in records if r["bucket"] == "bucket_3_inverse"]
+
+    with_net = sorted(
+        [r for r in records if r.get("net_decay") is not None],
+        key=lambda r: r["net_decay"], reverse=True,
+    )
+    best_net_decay = [
+        {"symbol": r["symbol"], "net_decay": r["net_decay"],
+         "borrow": r.get("borrow_current"), "decay": r.get("gross_decay_annual")}
+        for r in with_net[:5]
+    ]
+
+    with_borrow = sorted(
+        [r for r in records if r.get("borrow_current") is not None],
+        key=lambda r: r["borrow_current"], reverse=True,
+    )
+    worst_borrows = [
+        {"symbol": r["symbol"], "borrow": r.get("borrow_current"), "shares": r.get("shares_available")}
+        for r in with_borrow[:5]
+    ]
+
+    missing = sum(1 for r in records if r.get("borrow_missing"))
+    decay_count = sum(1 for r in records if r.get("gross_decay_annual") is not None)
+
+    return {
+        "total_symbols": len(records),
+        "bucket_1_count": len(b1),
+        "bucket_2_count": len(b2),
+        "bucket_3_count": len(b3),
+        "best_net_decay": best_net_decay,
+        "worst_borrows": worst_borrows,
+        "pct_missing": round(missing / len(records) * 100, 1) if records else 0,
+        "decay_computed_count": decay_count,
+    }
+
+
+def _normalize_borrow_fields(rec: dict) -> None:
+    """Keep borrow fields internally consistent (borrow_current = fee-only)."""
+    borrow_current = rec.get("borrow_current")
+    if borrow_current is None:
+        borrow_current = rec.get("borrow_fee_annual")
+    if borrow_current is None:
+        borrow_current = rec.get("borrow_net_annual")
+
+    rec["borrow_current"] = round(float(borrow_current), 6) if borrow_current is not None else None
+    # Keep net field as backward-compatible alias of borrow_current.
+    rec["borrow_net_annual"] = rec["borrow_current"]
+
+    gross = rec.get("gross_decay_annual")
+    if gross is not None and rec["borrow_current"] is not None:
+        rec["net_decay"] = round(float(gross) - float(rec["borrow_current"]), 6)
+
+
+def refresh_borrow_only() -> None:
+    """Update borrow + shares in existing dashboard JSON without re-pulling universe."""
+    if not OUTPUT_FILE.exists():
+        raise FileNotFoundError(
+            f"Cannot run --borrow-only because {OUTPUT_FILE} does not exist. Run full build first."
+        )
+
+    with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+        output = json.load(f)
+
+    records = output.get("records", [])
+    if not isinstance(records, list):
+        raise ValueError("dashboard_data.json is malformed: missing records list")
+
+    ibkr = try_fetch_ibkr_ftp()
+    updated = 0
+
+    for rec in records:
+        sym = norm_sym(rec.get("symbol", ""))
+        if not sym:
+            continue
+
+        if ibkr["success"] and sym in ibkr["borrow_map"]:
+            borrow_current = ibkr["borrow_map"][sym]
+            rec["borrow_fee_annual"] = ibkr["fee_map"].get(sym)
+            rec["borrow_rebate_annual"] = ibkr["rebate_map"].get(sym)
+            rec["shares_available"] = ibkr["available_map"].get(sym)
+            rec["borrow_current"] = round(float(borrow_current), 6)
+            rec["borrow_source"] = "ibkr_ftp"
+            rec["borrow_missing"] = False
+            updated += 1
+        else:
+            # Keep existing record values, but normalize borrowed field aliases.
+            rec["borrow_source"] = rec.get("borrow_source", "csv")
+            rec["borrow_missing"] = bool(rec.get("borrow_missing", False))
+
+        _normalize_borrow_fields(rec)
+
+    output["summary"] = _calc_summary(records)
+    output["build_time"] = dt.datetime.utcnow().isoformat() + "Z"
+    output["ibkr_ftp_success"] = ibkr["success"]
+    output["ibkr_symbols_fetched"] = len(ibkr["borrow_map"]) if ibkr["success"] else 0
+    output["refresh_type"] = "borrow_only"
+    output["borrow_refresh_interval_minutes"] = 30
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=None, separators=(",", ":"))
+
+    print(f"[OK] Borrow-only refresh wrote {OUTPUT_FILE}")
+    print(f"  Updated from IBKR FTP: {updated}/{len(records)} symbols")
 
 
 # ──────────────────────────────────────────────
@@ -230,21 +341,27 @@ def build():
 
         # Borrow data: prefer IBKR FTP, fall back to CSV
         if ibkr["success"] and sym in ibkr["borrow_map"]:
-            borrow_net = ibkr["borrow_map"][sym]
+            borrow_current = ibkr["borrow_map"][sym]
             borrow_fee = ibkr["fee_map"].get(sym)
             borrow_rebate = ibkr["rebate_map"].get(sym)
             shares_avail = ibkr["available_map"].get(sym)
             borrow_source = "ibkr_ftp"
         else:
-            borrow_net = _safe_float(row, "borrow_net_annual")
             borrow_fee = _safe_float(row, "borrow_fee_annual")
             borrow_rebate = _safe_float(row, "borrow_rebate_annual")
+            borrow_current = _safe_float(row, "borrow_current")
+            if borrow_current is None:
+                borrow_current = borrow_fee
+            if borrow_current is None:
+                borrow_current = _safe_float(row, "borrow_net_annual")
             shares_avail = int(row["shares_available"]) if pd.notna(row.get("shares_available")) else None
             borrow_source = "csv"
 
         # Analytics from CSV (computed by etf_analytics.py in ls-algo)
         gross_decay = _safe_float(row, "gross_decay_annual")
         net_decay = _safe_float(row, "net_decay_annual")
+        if gross_decay is not None and borrow_current is not None:
+            net_decay = round(gross_decay - borrow_current, 6)
         vol_und = _safe_float(row, "vol_underlying_annual")
         vol_etf = _safe_float(row, "vol_etf_annual")
 
@@ -259,7 +376,8 @@ def build():
             "bucket": bucket,
             "borrow_fee_annual": round(borrow_fee, 6) if borrow_fee is not None else None,
             "borrow_rebate_annual": round(borrow_rebate, 6) if borrow_rebate is not None else None,
-            "borrow_net_annual": round(borrow_net, 6) if borrow_net is not None else None,
+            "borrow_current": round(borrow_current, 6) if borrow_current is not None else None,
+            "borrow_net_annual": round(borrow_current, 6) if borrow_current is not None else None,
             "shares_available": shares_avail,
             "borrow_spiking": bool(row.get("borrow_spiking", False)),
             "borrow_missing": bool(row.get("borrow_missing_from_ftp", False)),
@@ -275,30 +393,7 @@ def build():
         records.append(rec)
 
     # 5. Compute summary
-    b1 = [r for r in records if r["bucket"] == "bucket_1_high_beta"]
-    b2 = [r for r in records if r["bucket"] == "bucket_2_low_beta"]
-    b3 = [r for r in records if r["bucket"] == "bucket_3_inverse"]
-
-    with_net = sorted(
-        [r for r in records if r["net_decay"] is not None],
-        key=lambda r: r["net_decay"], reverse=True,
-    )
-    best_net_decay = [
-        {"symbol": r["symbol"], "net_decay": r["net_decay"],
-         "borrow": r["borrow_net_annual"], "decay": r["gross_decay_annual"]}
-        for r in with_net[:5]
-    ]
-
-    with_borrow = sorted(
-        [r for r in records if r["borrow_net_annual"] is not None],
-        key=lambda r: r["borrow_net_annual"], reverse=True,
-    )
-    worst_borrows = [
-        {"symbol": r["symbol"], "borrow": r["borrow_net_annual"], "shares": r["shares_available"]}
-        for r in with_borrow[:5]
-    ]
-
-    missing = sum(1 for r in records if r["borrow_missing"])
+    summary = _calc_summary(records)
 
     build_time = dt.datetime.utcnow().isoformat() + "Z"
 
@@ -309,17 +404,9 @@ def build():
         "last_commit": commit_info,
         "ibkr_ftp_success": ibkr["success"],
         "ibkr_symbols_fetched": len(ibkr["borrow_map"]) if ibkr["success"] else 0,
+        "refresh_type": "full",
         "decay_method": "linear_daily_pnl_1_over_beta_hedge",
-        "summary": {
-            "total_symbols": len(records),
-            "bucket_1_count": len(b1),
-            "bucket_2_count": len(b2),
-            "bucket_3_count": len(b3),
-            "best_net_decay": best_net_decay,
-            "worst_borrows": worst_borrows,
-            "pct_missing": round(missing / len(records) * 100, 1) if records else 0,
-            "decay_computed_count": decay_count,
-        },
+        "summary": summary,
         "records": records,
     }
 
@@ -329,13 +416,24 @@ def build():
         json.dump(output, f, indent=None, separators=(",", ":"))
 
     file_size = OUTPUT_FILE.stat().st_size
-    print(f"\n✓ Wrote {OUTPUT_FILE} ({file_size:,} bytes)")
-    print(f"  {len(records)} records | B1={len(b1)} B2={len(b2)} B3={len(b3)}")
+    print(f"\n[OK] Wrote {OUTPUT_FILE} ({file_size:,} bytes)")
+    print(f"  {len(records)} records | B1={summary['bucket_1_count']} B2={summary['bucket_2_count']} B3={summary['bucket_3_count']}")
     print(f"  Decay: {decay_count}/{len(records)} ({100*decay_count/len(records):.0f}%)")
-    print(f"  IBKR FTP: {'✓' if ibkr['success'] else '✗'}")
+    print(f"  IBKR FTP: {'OK' if ibkr['success'] else 'FAIL'}")
     print(f"  Build time: {build_time}")
     print("=" * 60)
 
 
 if __name__ == "__main__":
-    build()
+    parser = argparse.ArgumentParser(description="Build ETF dashboard static JSON")
+    parser.add_argument(
+        "--borrow-only",
+        action="store_true",
+        help="Only refresh borrow rate + shares available in existing dashboard_data.json",
+    )
+    args = parser.parse_args()
+
+    if args.borrow_only:
+        refresh_borrow_only()
+    else:
+        build()

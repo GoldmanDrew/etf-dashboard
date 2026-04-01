@@ -28,9 +28,9 @@ ibkr:
 
 # ── Refresh cadence ─────────────────────────
 refresh:
-  borrow_interval_seconds: 60     # how often to refresh borrow rates
+  borrow_interval_seconds: 1800   # refresh borrow + shares every 30 minutes
   decay_interval_seconds: 86400   # daily decay recalc
-  stale_threshold_seconds: 300    # mark data stale after 5 min
+  stale_threshold_seconds: 3600   # mark data stale after 60 min
 
 # ── Bucket thresholds ───────────────────────
 buckets:

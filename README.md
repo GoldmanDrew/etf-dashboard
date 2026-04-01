@@ -13,15 +13,20 @@ Real-time IBKR short stock borrow rate monitoring with decay-vs-borrow spread an
 └────────────────────────────┬─────────────────────────────────┘
                              │  raw.githubusercontent.com
 ┌────────────────────────────▼─────────────────────────────────┐
-│  GoldmanDrew/etf-dashboard  (GitHub Action, 3×/day)          │
+│  GoldmanDrew/etf-dashboard  (GitHub Actions)                  │
 │                                                              │
 │  scripts/build_data.py:                                      │
-│    1. Fetch CSV from ls-algo                                 │
-│    2. Fetch IBKR FTP borrow rates (live, if reachable)       │
-│    3. Assign buckets (High β / Low β / Inverse)              │
-│    4. Compute decay estimates + spreads                      │
-│    5. Write data/dashboard_data.json                         │
-│    6. Commit + Deploy to GitHub Pages                        │
+│    Daily full build:                                          │
+│      1. Fetch CSV from ls-algo                                │
+│      2. Fetch IBKR FTP borrow rates + shares available        │
+│      3. Assign buckets (High β / Low β / Inverse)             │
+│      4. Compute decay estimates + spreads                     │
+│      5. Write data/dashboard_data.json                        │
+│      6. Commit + Deploy to GitHub Pages                       │
+│                                                                │
+│    30-min refresh:                                             │
+│      - Refresh borrow rates + shares only                     │
+│      - Keep prior universe/analytics data                     │
 │                                                              │
 │  index.html (React SPA):                                     │
 │    Reads dashboard_data.json → renders interactive dashboard │
@@ -46,12 +51,8 @@ The `build-and-deploy.yml` Action will run automatically on push, build the data
 
 ## Schedule
 
-The Action runs automatically 3× daily on weekdays:
-- **2:30 AM ET** — pre-market
-- **11:30 AM ET** — midday
-- **4:30 PM ET** — after close
-
-Plus on every push to `main` and via manual trigger (Actions → Run workflow).
+- `build-and-deploy.yml` runs once daily on weekdays (plus push/manual) for full rebuild.
+- `refresh-borrow.yml` runs every 30 minutes on weekdays for borrow + shares refresh.
 
 ## Running Locally
 
@@ -92,8 +93,17 @@ etf-dashboard/
 ## Data Sources
 
 - **Universe**: `GoldmanDrew/ls-algo` → `data/etf_screened_today.csv`
-- **Borrow rates**: IBKR public FTP (`ftp2.interactivebrokers.com/usa.txt`) — falls back to CSV if FTP is unreachable from GitHub Actions
+- **Borrow rates**: IBKR public FTP (`ftp2.interactivebrokers.com/usa.txt`) — dashboard uses fee-only borrow (not net of rebate), with shares available
 - **Decay**: Volatility drag model estimate (plug in real Stahl metrics when price data is available)
+
+## Expected Decay Calculator
+
+The dashboard includes an **Expected Decay Calculator** using:
+
+`expected_decay(T) = 0.5 * abs(beta) * abs(beta - 1) * (sigma_annual^2) * T_years`
+
+Where `T_years = days/252`, `weeks/52`, `months/12`, or `years`.
+Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 
 ## Environment Variables (optional)
 

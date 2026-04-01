@@ -225,6 +225,93 @@
     display: flex; align-items: center; gap: 8px;
   }
 
+  /* ── Expected Decay Calculator ── */
+  .calc-card {
+    margin: 10px 24px 0;
+    padding: 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+  }
+  .calc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .calc-helper {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+  }
+  .calc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+  }
+  .calc-field label {
+    display: block;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+  .calc-field input, .calc-field select {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+  }
+  .calc-field input:focus, .calc-field select:focus {
+    border-color: var(--accent-blue);
+    outline: none;
+  }
+  .calc-error {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--accent-red);
+  }
+  .calc-out-grid {
+    margin-top: 12px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+  }
+  .calc-out {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    padding: 8px 10px;
+  }
+  .calc-out .k {
+    color: var(--text-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .calc-out .v {
+    font-family: 'JetBrains Mono', monospace;
+    margin-top: 2px;
+    font-size: 14px;
+    font-weight: 700;
+  }
+  .calc-formula {
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .calc-example {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
   /* ── Loading / Error ─────── */
   .loading {
     display: flex; align-items: center; justify-content: center;
@@ -359,6 +446,7 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="assets/expected_decay.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
 <script type="text/babel">
@@ -375,6 +463,7 @@ const fmtTime = iso => {
   return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
 };
 const cls = (...c) => c.filter(Boolean).join(' ');
+const getBorrowRate = r => (r?.borrow_current ?? r?.borrow_net_annual ?? null);
 
 const HIGH_BETA_THRESHOLD = 1.5;
 
@@ -402,7 +491,7 @@ const COLS = [
   { key: 'symbol', label: 'Symbol', w: 90 },
   { key: 'underlying', label: 'Underlying', w: 85 },
   { key: 'beta', label: 'Beta', w: 65 },
-  { key: 'borrow_net_annual', label: 'Borrow Rate', w: 105 },
+  { key: 'borrow_current', label: 'Borrow Rate', w: 105 },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross Decay', w: 100 },
   { key: 'net_decay', label: 'Net Decay', w: 100 },
@@ -422,6 +511,85 @@ function SummaryCard({ label, value, sub, color }) {
   );
 }
 
+function ExpectedDecayCalculator() {
+  const [beta, setBeta] = useState('2');
+  const [sigmaAnnual, setSigmaAnnual] = useState('130');
+  const [periodValue, setPeriodValue] = useState('1');
+  const [periodUnit, setPeriodUnit] = useState('months');
+
+  const result = useMemo(() => {
+    const fn = window.computeExpectedDecay;
+    if (typeof fn !== 'function') {
+      return { ok: false, error: 'Calculator utility unavailable.' };
+    }
+    return fn({ beta, sigmaAnnual, periodValue, periodUnit });
+  }, [beta, sigmaAnnual, periodValue, periodUnit]);
+
+  return (
+    <div className="calc-card">
+      <div className="calc-title">Expected Decay Calculator</div>
+      <div className="calc-helper">
+        This is theoretical gross decay from volatility drag; not a forecast of realized returns.
+      </div>
+
+      <div className="calc-grid">
+        <div className="calc-field">
+          <label>Beta</label>
+          <input value={beta} onChange={e => setBeta(e.target.value)} placeholder="-2, 1.5, 2" />
+        </div>
+        <div className="calc-field">
+          <label>Annualized Volatility (%)</label>
+          <input value={sigmaAnnual} onChange={e => setSigmaAnnual(e.target.value)} placeholder="130 or 1.3" />
+        </div>
+        <div className="calc-field">
+          <label>Time Period Value</label>
+          <input type="number" min="0" step="any" value={periodValue} onChange={e => setPeriodValue(e.target.value)} />
+        </div>
+        <div className="calc-field">
+          <label>Time Unit</label>
+          <select value={periodUnit} onChange={e => setPeriodUnit(e.target.value)}>
+            <option value="days">Days</option>
+            <option value="weeks">Weeks</option>
+            <option value="months">Months</option>
+            <option value="years">Years</option>
+          </select>
+        </div>
+      </div>
+
+      {!result.ok ? (
+        <div className="calc-error">{result.error || 'Invalid input(s).'}</div>
+      ) : (
+        <>
+          <div className="calc-out-grid">
+            <div className="calc-out">
+              <div className="k">Period Expected Decay (%)</div>
+              <div className="v">{(result.periodExpectedDecay * 100).toFixed(2)}%</div>
+            </div>
+            <div className="calc-out">
+              <div className="k">Period Expected Decay (decimal)</div>
+              <div className="v">{result.periodExpectedDecay.toFixed(6)}</div>
+            </div>
+            <div className="calc-out">
+              <div className="k">Annual Expected Decay (%)</div>
+              <div className="v">{(result.annualExpectedDecay * 100).toFixed(2)}%</div>
+            </div>
+          </div>
+
+          <div className="calc-formula">
+            expected_decay(T) = 0.5 × |beta| × |beta − 1| × sigma_annual² × T_years
+          </div>
+          <div className="calc-formula">
+            0.5 × |{Number(result.beta).toFixed(4)}| × |{(Number(result.beta) - 1).toFixed(4)}| × {Number(result.sigmaAnnual).toFixed(4)}² × {Number(result.periodYears).toFixed(6)}
+          </div>
+          <div className="calc-example">
+            Example: beta=2, sigma=130%, T=1 month → {(0.5 * Math.abs(2) * Math.abs(1) * (1.3 ** 2) / 12 * 100).toFixed(2)}%
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Detail Row ──────────────────────────────
 function DetailRow({ r }) {
   return (
@@ -437,8 +605,8 @@ function DetailRow({ r }) {
             <div className="dval">{fmt(r.borrow_rebate_annual)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Net Borrow</div>
-            <div className={cls('dval', borrowCls(r.borrow_net_annual))}>{fmt(r.borrow_net_annual)}</div>
+            <div className="dlabel">Borrow Rate (Fee Only)</div>
+            <div className={cls('dval', borrowCls(getBorrowRate(r)))}>{fmt(getBorrowRate(r))}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Net Decay (Gross − Borrow)</div>
@@ -626,8 +794,8 @@ function ChartPage({ record, onBack }) {
         </div>
         <div className="chart-stat">
           <div className="cs-label">Borrow Rate</div>
-          <div className={cls('cs-value', borrowCls(r.borrow_net_annual))}>{fmt(r.borrow_net_annual)}</div>
-          <div className="cs-sub">net annual</div>
+          <div className={cls('cs-value', borrowCls(getBorrowRate(r)))}>{fmt(getBorrowRate(r))}</div>
+          <div className="cs-sub">annual fee-only</div>
         </div>
         <div className="chart-stat">
           <div className="cs-label">Net Decay</div>
@@ -698,7 +866,8 @@ function InfoPage({ data }) {
       <div className="info-row"><span className="info-key">Bucket 3 (Inverse)</span><span className="info-val">{s.bucket_3_count}</span></div>
 
       <div style={{ marginTop: 24, padding: 14, borderRadius: 8, background: 'var(--bg-card)', border: '1px solid var(--border)', fontSize: 12, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
-        Data auto-refreshes 3× daily via GitHub Actions. Borrow rates come from
+        Universe/analytics refresh daily via GitHub Actions. Borrow rates and shares available refresh every 30 minutes.
+        Borrow shown in the dashboard is fee-only (not net of rebate). Data comes from
         IBKR's public FTP when reachable, otherwise from the screener CSV.
         Decay is measured as simple linear annualized rate from total-return series.
       </div>
@@ -878,6 +1047,8 @@ function App() {
             </div>
           </div>
 
+          <ExpectedDecayCalculator />
+
           {/* ── Tabs ──────────── */}
           <div className="tab-bar">
             {[
@@ -941,8 +1112,8 @@ function App() {
                         </td>
                         <td className="underlying-cell">{r.underlying}</td>
                         <td>{r.beta?.toFixed(2) ?? '—'}</td>
-                        <td className={borrowCls(r.borrow_net_annual)}>
-                          {fmt(r.borrow_net_annual)} {borrowBadge(r.borrow_net_annual)}
+                        <td className={borrowCls(getBorrowRate(r))}>
+                          {fmt(getBorrowRate(r))} {borrowBadge(getBorrowRate(r))}
                         </td>
                         <td>{fmtNum(r.shares_available)}</td>
                         <td>{fmt(r.gross_decay_annual)}</td>

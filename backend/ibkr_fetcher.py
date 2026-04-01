@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BorrowSnapshot:
     """Result of a single borrow-rate fetch cycle."""
-    borrow_map: dict[str, float] = field(default_factory=dict)      # sym → net annual rate
+    borrow_map: dict[str, float] = field(default_factory=dict)      # sym → borrow fee annual (fee-only)
     rebate_map: dict[str, float] = field(default_factory=dict)      # sym → rebate annual
     fee_map: dict[str, float] = field(default_factory=dict)         # sym → fee annual
     available_map: dict[str, int] = field(default_factory=dict)     # sym → shares available
@@ -91,12 +91,13 @@ def fetch_ibkr_ftp(
         df["fee_annual"] = pd.to_numeric(df.get("feerate", pd.Series(dtype=float)), errors="coerce") / 100.0
         df["available_int"] = pd.to_numeric(df.get("available", pd.Series(dtype=float)), errors="coerce")
 
-        df["net_borrow"] = (df["fee_annual"] - df["rebate_annual"]).clip(lower=0)
+        # Borrow rate for dashboard is fee-only (not net of rebate).
+        df["borrow_current"] = df["fee_annual"]
 
         for _, row in df.iterrows():
             sym = _norm(row["sym"])
-            if pd.notna(row["net_borrow"]):
-                snap.borrow_map[sym] = float(row["net_borrow"])
+            if pd.notna(row["borrow_current"]):
+                snap.borrow_map[sym] = float(row["borrow_current"])
             if pd.notna(row["fee_annual"]):
                 snap.fee_map[sym] = float(row["fee_annual"])
             if pd.notna(row["rebate_annual"]):
@@ -142,7 +143,6 @@ def fetch_mock(
             jitter = 1.0 + random.uniform(-0.05, 0.05)
             fee = float(row["borrow_fee_annual"]) * jitter
             rebate = float(row.get("borrow_rebate_annual", 0.0) or 0.0) * jitter
-            net = max(fee - rebate, 0.0)
             avail = int(row.get("shares_available", 0) or 0)
             # Jitter availability ±10%
             avail = max(0, int(avail * (1 + random.uniform(-0.1, 0.1))))
@@ -150,12 +150,11 @@ def fetch_mock(
             # Fully random
             fee = random.uniform(0.005, 0.15)
             rebate = random.uniform(-0.02, fee * 0.3)
-            net = max(fee - rebate, 0.0)
             avail = random.choice([0, 5000, 10000, 50000, 100000, 500000, 1000000])
 
         snap.fee_map[sym] = round(fee, 6)
         snap.rebate_map[sym] = round(rebate, 6)
-        snap.borrow_map[sym] = round(net, 6)
+        snap.borrow_map[sym] = round(fee, 6)
         snap.available_map[sym] = avail
 
     snap.success = True
