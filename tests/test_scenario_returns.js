@@ -155,13 +155,13 @@ test("monte carlo path/step sizing and risk stats", () => {
   assert.ok(out.summary.short.probRuin >= 0 && out.summary.short.probRuin <= 1);
 });
 
-test("short-loss probability aligns with ETF-up probability", () => {
+test("short-loss probability aligns with ETF-up probability when borrow is zero", () => {
   const out = simulateMonteCarloPaths({
     pathCount: 400,
     sigmaAnnual: 0.9,
     leverage: -2,
     horizonYears: 0.5,
-    annualCarryDrag: 0.03,
+    annualCarryDrag: 0,
     seed: 7,
     ruinThreshold: -0.8,
     upsideThresholds: [0],
@@ -169,6 +169,32 @@ test("short-loss probability aligns with ETF-up probability", () => {
   assert.equal(out.ok, true);
   const pEtfUpTerminal = out.summary.upsideTerminalCounts[0].pct;
   assert.ok(Math.abs(out.summary.short.probLoss - pEtfUpTerminal) < 1e-12);
+});
+
+test("positive borrow drag reduces short mean return in Monte Carlo", () => {
+  const base = simulateMonteCarloPaths({
+    pathCount: 400,
+    sigmaAnnual: 0.9,
+    leverage: -2,
+    horizonYears: 0.5,
+    annualCarryDrag: 0,
+    seed: 17,
+    ruinThreshold: -0.8,
+    upsideThresholds: [0.25, 0.5, 1.0],
+  });
+  const withBorrow = simulateMonteCarloPaths({
+    pathCount: 400,
+    sigmaAnnual: 0.9,
+    leverage: -2,
+    horizonYears: 0.5,
+    annualCarryDrag: 0.2,
+    seed: 17,
+    ruinThreshold: -0.8,
+    upsideThresholds: [0.25, 0.5, 1.0],
+  });
+  assert.equal(base.ok, true);
+  assert.equal(withBorrow.ok, true);
+  assert.ok(withBorrow.summary.short.meanTerminal < base.summary.short.meanTerminal);
 });
 
 test("upside thresholds from decimal array are not re-scaled", () => {

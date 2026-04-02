@@ -257,7 +257,7 @@
     const dt = horizonYears / steps;
     const sdStep = sigmaAnnual * Math.sqrt(dt);
     const dragStep = 0.5 * leverage * (leverage - 1) * (sigmaAnnual ** 2) * dt;
-    const carryStep = (Number.isFinite(annualCarryDrag) ? annualCarryDrag : 0) * dt;
+    const carryAnnual = Number.isFinite(annualCarryDrag) ? annualCarryDrag : 0;
     const rng = mulberry32(seed);
     const randn = normalFactory(rng);
 
@@ -281,14 +281,15 @@
       for (let t = 1; t <= steps; t += 1) {
         const z = randn();
         const undLogRet = sdStep * z;
-        const etfLogRet = (leverage * undLogRet) - dragStep - carryStep;
+        const etfLogRet = (leverage * undLogRet) - dragStep;
         const next = wealthPath[t - 1] * Math.exp(etfLogRet);
         wealthPath[t] = Number.isFinite(next) ? next : wealthPath[t - 1];
         pathLogRets.push(etfLogRet);
         stepValues[t].push(wealthPath[t]);
 
         const simpleRet = wealthPath[t] - 1;
-        const shortRet = -simpleRet;
+        const carryAccrued = carryAnnual * (t * dt);
+        const shortRet = -simpleRet - carryAccrued;
         if (!breachedShort && shortRet <= ruinThreshold) breachedShort = true;
         for (let k = 0; k < upsideThresholds.length; k += 1) {
           if (!crossed[k] && simpleRet >= upsideThresholds[k]) crossed[k] = true;
@@ -309,7 +310,8 @@
     }
 
     const sortedTerm = terminalReturns.slice().sort((a, b) => a - b);
-    const shortTerminalReturns = terminalReturns.map((x) => -x);
+    const carryOverHorizon = carryAnnual * horizonYears;
+    const shortTerminalReturns = terminalReturns.map((x) => -x - carryOverHorizon);
     const sortedShort = shortTerminalReturns.slice().sort((a, b) => a - b);
     const sortedDd = maxDrawdowns.slice().sort((a, b) => a - b);
     const worstN = Math.max(1, Math.floor(0.05 * sortedTerm.length));

@@ -742,17 +742,26 @@ function MonteCarloPlot({ result, mode = 'short' }) {
   for (let i = 0; i < totalPts; i += stride) pickIdx.push(i);
   if (pickIdx[pickIdx.length - 1] !== totalPts - 1) pickIdx.push(totalPts - 1);
 
-  const toRet = (w) => {
+  const carryAnnual = Number.isFinite(Number(result?.settings?.annualCarryDrag))
+    ? Number(result.settings.annualCarryDrag)
+    : 0;
+  const horizonYears = Number.isFinite(Number(result?.settings?.horizonYears))
+    ? Number(result.settings.horizonYears)
+    : 0;
+  const steps = Math.max(1, Number(result?.settings?.steps) || 1);
+  const carryAtIdx = (idxOriginal) => carryAnnual * ((idxOriginal / steps) * horizonYears);
+  const toRet = (w, idxOriginal = 0) => {
     const etfRet = Number.isFinite(w) ? (w - 1) : 0;
-    return mode === 'short' ? -etfRet : etfRet;
+    if (mode === 'short') return -etfRet - carryAtIdx(idxOriginal);
+    return etfRet;
   };
-  const allSeries = result.paths.map(p => pickIdx.map(i => toRet(p[i])));
+  const allSeries = result.paths.map(p => pickIdx.map(i => toRet(p[i], i)));
   const sampleStride = Math.max(1, Math.floor(allSeries.length / 50));
   const series = allSeries.filter((_, i) => i % sampleStride === 0).slice(0, 50);
-  const mean = pickIdx.map(i => toRet(result.overlays.mean[i]));
-  const median = pickIdx.map(i => toRet(result.overlays.p50[i]));
-  const p05 = pickIdx.map(i => toRet(result.overlays.p05[i]));
-  const p95 = pickIdx.map(i => toRet(result.overlays.p95[i]));
+  const mean = pickIdx.map(i => toRet(result.overlays.mean[i], i));
+  const median = pickIdx.map(i => toRet(result.overlays.p50[i], i));
+  const p05 = pickIdx.map(i => toRet(result.overlays.p05[i], i));
+  const p95 = pickIdx.map(i => toRet(result.overlays.p95[i], i));
   const meanCenter = mean.reduce((a, b) => a + b, 0) / Math.max(1, mean.length);
   const spreadSeries = p95.map((hi, i) => Math.abs(hi - p05[i])).filter(Number.isFinite);
   const spreadP75 = spreadSeries.length
@@ -1269,7 +1278,7 @@ function ChartPage({ record, onBack }) {
       leverage: scenarioLeverage,
       bestVolAnnual: Number(ewmaUnd),
       horizonYears,
-      annualCarryDrag,
+      annualCarryDrag: 0,
       volMultipliers: SCENARIO_VOL_MULTIPLIERS,
       shockMultipliers: SCENARIO_SHOCK_MULTIPLIERS,
       minReturn: -0.9999,
@@ -1452,7 +1461,7 @@ function ChartPage({ record, onBack }) {
                   Lookback: {activeTf.label} | best vol (underlying EWMA): {fmt(ewmaUnd)} | reference realized: {fmt(realizedUnd)}
                 </div>
                 <div className="scenario-sub">
-                  Leverage input: {Number.isFinite(Number(scenarioLeverage)) ? scenarioLeverage.toFixed(3) : '—'} | carry drag: {fmt(annualCarryDrag)} annual
+                  Leverage input: {Number.isFinite(Number(scenarioLeverage)) ? scenarioLeverage.toFixed(3) : '—'} | scenario table excludes borrow/carry drag
                 </div>
               </div>
               <div className="tf-group" style={{ marginLeft: 0 }}>
@@ -1501,13 +1510,13 @@ function ChartPage({ record, onBack }) {
               </div>
             )}
             <div className="scenario-formula">
-          log(1 + ETF return) approx = L * log(1 + R_underlying) - 0.5 * L * (L - 1) * sigma^2 * T - carry * T
+          log(1 + ETF return) approx = L * log(1 + R_underlying) - 0.5 * L * (L - 1) * sigma^2 * T
             </div>
             <div className="scenario-formula">
           Then ETF return = exp(log(1 + ETF return)) - 1. Shock mapping: R_underlying = exp(k * sigma * sqrt(T)) - 1.
             </div>
             <div className="scenario-formula">
-          Carry term note: annual carry is multiplied by horizon T; when available, borrow uses average historical fee-only borrow for the ETF (otherwise current borrow fallback).
+          Borrow note: scenario table excludes borrow/carry drag. Monte Carlo short-return metrics include borrow cost over horizon.
             </div>
           </div>
 
