@@ -686,6 +686,8 @@ def build():
     borrow_history = build_borrow_history_from_commits(set(df["symbol"].dropna().tolist()))
     borrow_history_symbols = borrow_history.get("symbols", {})
 
+    today_utc = dt.datetime.now(dt.UTC).date().isoformat()
+
     # 5. Build records
     records = []
     decay_count = 0
@@ -748,7 +750,17 @@ def build():
         if vol_etf is None:
             vol_etf = vol_etf_csv
 
+        # Append/overwrite today's most recent borrow snapshot in history.
         hist_rows = borrow_history_symbols.get(sym, [])
+        by_day = {str(x.get("date")): x for x in hist_rows if x.get("date")}
+        if borrow_current is not None or shares_avail is not None:
+            by_day[today_utc] = {
+                "date": today_utc,
+                "borrow_current": round(float(borrow_current), 6) if borrow_current is not None else None,
+                "shares_available": shares_avail,
+            }
+        hist_rows = sorted(by_day.values(), key=lambda x: x["date"])
+        borrow_history_symbols[sym] = hist_rows
         hist_borrows = [float(x["borrow_current"]) for x in hist_rows if x.get("borrow_current") is not None]
         borrow_avg_annual = round(float(np.mean(hist_borrows)), 6) if hist_borrows else None
 
