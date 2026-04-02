@@ -613,7 +613,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="assets/expected_decay.js"></script>
-<script src="assets/scenario_returns.js"></script>
+<script src="assets/scenario_returns.js?v=mc-v2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
 <script type="text/babel">
@@ -1311,7 +1311,12 @@ function ChartPage({ record, onBack }) {
             </div>
 
             {!monteCarloResult.ok ? (
-              <div className="scenario-warning">{monteCarloResult.error || 'Monte Carlo unavailable.'}</div>
+              <div className="scenario-warning">
+                {monteCarloResult.error || 'Monte Carlo unavailable.'}
+                {String(monteCarloResult.error || '').toLowerCase().includes('utility')
+                  ? ' Try hard refresh (Ctrl+F5) to reload latest scenario script.'
+                  : ''}
+              </div>
             ) : (
               <>
                 <MonteCarloPlot result={monteCarloResult} />
