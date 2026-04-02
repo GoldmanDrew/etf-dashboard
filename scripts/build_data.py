@@ -35,6 +35,7 @@ HIGH_BETA_THRESHOLD = float(os.environ.get("HIGH_BETA_THRESHOLD", "1.5"))
 REALIZED_VOL_TIMEOUT_SEC = int(os.environ.get("REALIZED_VOL_TIMEOUT_SEC", "20"))
 REALIZED_VOL_RETRIES = int(os.environ.get("REALIZED_VOL_RETRIES", "2"))
 REALIZED_VOL_RANGE = os.environ.get("REALIZED_VOL_RANGE", "2y")
+REALIZED_VOL_EWMA_LAMBDA = float(os.environ.get("REALIZED_VOL_EWMA_LAMBDA", "0.94"))
 
 OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
@@ -186,18 +187,31 @@ def try_fetch_ibkr_ftp() -> dict:
 # ──────────────────────────────────────────────
 # Realized volatility (server-side canonical)
 # ──────────────────────────────────────────────
-def _compute_annualized_realized_vol_from_closes(closes: list[float]) -> tuple[float | None, int]:
-    """Sample stdev of log returns annualized by sqrt(252)."""
+def _compute_vol_stats_from_closes(closes: list[float]) -> dict:
+    """Compute realized and EWMA annualized vol from closes."""
     if len(closes) < 3:
-        return None, 0
+        return {"vol_annual": None, "ewma_vol_annual": None, "n_returns": 0}
     arr = np.asarray(closes, dtype=float)
     if not np.all(np.isfinite(arr)) or np.any(arr <= 0):
-        return None, 0
+        return {"vol_annual": None, "ewma_vol_annual": None, "n_returns": 0}
     rets = np.diff(np.log(arr))
-    if rets.size < 2:
-        return None, int(rets.size)
+    n_returns = int(rets.size)
+    if n_returns < 2:
+        return {"vol_annual": None, "ewma_vol_annual": None, "n_returns": n_returns}
+
     vol = float(np.std(rets, ddof=1) * np.sqrt(252))
-    return round(vol, 6), int(rets.size)
+
+    lam = min(max(float(REALIZED_VOL_EWMA_LAMBDA), 0.0), 0.999999)
+    ewma_var = float(rets[0] * rets[0])
+    for r in rets[1:]:
+        ewma_var = lam * ewma_var + (1.0 - lam) * float(r * r)
+    ewma_vol = float(np.sqrt(max(ewma_var, 0.0)) * np.sqrt(252))
+
+    return {
+        "vol_annual": round(vol, 6),
+        "ewma_vol_annual": round(ewma_vol, 6),
+        "n_returns": n_returns,
+    }
 
 
 def _build_realized_vol_windows(points: list[tuple[dt.date, float]]) -> dict:
@@ -223,10 +237,11 @@ def _build_realized_vol_windows(points: list[tuple[dt.date, float]]) -> dict:
             scoped = points[-(lookback + 1):] if lookback else points
 
         closes = [c for _, c in scoped]
-        vol, n_returns = _compute_annualized_realized_vol_from_closes(closes)
+        stats = _compute_vol_stats_from_closes(closes)
         results[window] = {
-            "vol_annual": vol,
-            "n_returns": n_returns if n_returns > 0 else None,
+            "vol_annual": stats["vol_annual"],
+            "ewma_vol_annual": stats["ewma_vol_annual"],
+            "n_returns": stats["n_returns"] if stats["n_returns"] > 0 else None,
             "asof": asof,
         }
 
@@ -512,7 +527,9 @@ def build():
                 continue
             realized_vol[window] = {
                 "etf": etf_w.get("vol_annual"),
+                "etf_ewma": etf_w.get("ewma_vol_annual"),
                 "underlying": und_w.get("vol_annual"),
+                "underlying_ewma": und_w.get("ewma_vol_annual"),
                 "n_returns_etf": etf_w.get("n_returns"),
                 "n_returns_underlying": und_w.get("n_returns"),
                 "asof_etf": etf_w.get("asof"),

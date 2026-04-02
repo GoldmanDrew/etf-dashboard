@@ -412,6 +412,76 @@
     flex-shrink: 0;
   }
 
+  .scenario-card {
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    padding: 10px;
+    flex-shrink: 0;
+  }
+  .scenario-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .scenario-title {
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .scenario-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .scenario-table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .scenario-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    background: var(--bg-primary);
+  }
+  .scenario-table th, .scenario-table td {
+    border-bottom: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    padding: 6px 8px;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .scenario-table th:first-child, .scenario-table td:first-child {
+    text-align: left;
+    position: sticky;
+    left: 0;
+    background: var(--bg-secondary);
+    z-index: 2;
+  }
+  .scenario-table th {
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-size: 10px;
+  }
+  .scenario-formula {
+    margin-top: 6px;
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .scenario-warning {
+    font-size: 11px;
+    color: var(--warning);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
   .tf-group {
     display: flex; gap: 3px; margin-left: auto;
     background: var(--bg-primary); border-radius: 6px; padding: 3px;
@@ -446,6 +516,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="assets/expected_decay.js"></script>
+<script src="assets/scenario_returns.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
 <script type="text/babel">
@@ -492,6 +563,24 @@ const VOL_TF_KEY_BY_RANGE = {
   'YTD': 'YTD',
   '12M': '12M',
   'ALL': 'ALL',
+};
+
+const SCENARIO_VOL_MULTIPLIERS = [0.6, 0.8, 1.0, 1.2, 1.4];
+const SCENARIO_SHOCK_MULTIPLIERS = [-3, -2, -1, 0, 1, 2, 3];
+const SCENARIO_HORIZONS = [
+  { key: '1M', label: '1M' },
+  { key: '3M', label: '3M' },
+  { key: '6M', label: '6M' },
+  { key: '1Y', label: '1Y' },
+];
+
+const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const scenarioCellBg = val => {
+  if (val == null || !Number.isFinite(val)) return 'transparent';
+  const clipped = clampNum(val, -1, 1);
+  const intensity = 0.12 + 0.28 * Math.abs(clipped);
+  if (clipped >= 0) return `rgba(16,185,129,${intensity.toFixed(3)})`;
+  return `rgba(239,68,68,${intensity.toFixed(3)})`;
 };
 
 // ── Columns ─────────────────────────────────
@@ -716,6 +805,7 @@ function buildWidgetHtml(symbol, compareSymbol, range, interval) {
 
 function ChartPage({ record, onBack }) {
   const [activeTf, setActiveTf] = useState(TIMEFRAMES[2]); // 6M
+  const [scenarioHorizon, setScenarioHorizon] = useState('1Y');
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -741,9 +831,44 @@ function ChartPage({ record, onBack }) {
   const volPoint = r?.realized_vol?.[volWindowKey] || null;
   const realizedUnd = volPoint?.underlying ?? r.vol_underlying_annual ?? null;
   const realizedEtf = volPoint?.etf ?? r.vol_etf_annual ?? null;
+  const ewmaUnd = volPoint?.underlying_ewma ?? realizedUnd;
+  const ewmaEtf = volPoint?.etf_ewma ?? realizedEtf;
   const realizedLabel = volPoint ? `${activeTf.label} lookback` : 'screener snapshot';
   const realizedUndSub = volPoint?.n_returns_underlying ? `${realizedLabel} • ${fmtNum(volPoint.n_returns_underlying)} rets` : realizedLabel;
   const realizedEtfSub = volPoint?.n_returns_etf ? `${realizedLabel} • ${fmtNum(volPoint.n_returns_etf)} rets` : realizedLabel;
+  const scenarioFns = window.ScenarioReturns || {};
+  const horizonYears = typeof scenarioFns.horizonToYears === 'function'
+    ? scenarioFns.horizonToYears(scenarioHorizon)
+    : NaN;
+  const scenarioLeverage = Number.isFinite(Number(r.beta)) ? Number(r.beta) : 1;
+  const annualCarryDrag = Number.isFinite(Number(getBorrowRate(r))) ? Math.max(0, Number(getBorrowRate(r))) : 0;
+  const minObsForScenario = 10;
+  const undObs = Number(volPoint?.n_returns_underlying) || 0;
+
+  const scenarioGrid = useMemo(() => {
+    if (typeof scenarioFns.buildScenarioGrid !== 'function') {
+      return { ok: false, error: 'Scenario utility unavailable.' };
+    }
+    if (!Number.isFinite(Number(ewmaUnd)) || Number(ewmaUnd) <= 0) {
+      return { ok: false, error: 'Missing valid underlying EWMA volatility for this lookback.' };
+    }
+    if (!Number.isFinite(horizonYears) || horizonYears <= 0) {
+      return { ok: false, error: 'Invalid scenario horizon.' };
+    }
+    if (undObs < minObsForScenario) {
+      return { ok: false, error: `Insufficient lookback observations (${undObs}).` };
+    }
+    return scenarioFns.buildScenarioGrid({
+      leverage: scenarioLeverage,
+      bestVolAnnual: Number(ewmaUnd),
+      horizonYears,
+      annualCarryDrag,
+      volMultipliers: SCENARIO_VOL_MULTIPLIERS,
+      shockMultipliers: SCENARIO_SHOCK_MULTIPLIERS,
+      minReturn: -0.99,
+      maxReturn: 8.0,
+    });
+  }, [scenarioFns, ewmaUnd, horizonYears, undObs, scenarioLeverage, annualCarryDrag]);
 
   return (
     <div className="chart-page">
@@ -825,7 +950,7 @@ function ChartPage({ record, onBack }) {
           <div className="cs-value">
             {realizedUnd == null ? '—' : fmt(realizedUnd)}
           </div>
-          <div className="cs-sub">{realizedUndSub}</div>
+          <div className="cs-sub">{realizedUndSub}{Number.isFinite(Number(ewmaUnd)) ? ` • ewma ${fmt(ewmaUnd)}` : ''}</div>
         </div>
         <div className="chart-stat">
           <div className="cs-label">Vol ETF</div>
@@ -837,7 +962,7 @@ function ChartPage({ record, onBack }) {
           <div className="cs-value">
             {realizedEtf == null ? '—' : fmt(realizedEtf)}
           </div>
-          <div className="cs-sub">{realizedEtfSub}</div>
+          <div className="cs-sub">{realizedEtfSub}{Number.isFinite(Number(ewmaEtf)) ? ` • ewma ${fmt(ewmaEtf)}` : ''}</div>
         </div>
         <div className="chart-stat">
           <div className="cs-label">Shares Available</div>
@@ -851,10 +976,74 @@ function ChartPage({ record, onBack }) {
         </div>
       </div>
 
+      <div className="scenario-card">
+        <div className="scenario-head">
+          <div>
+            <div className="scenario-title">Scenario Returns</div>
+            <div className="scenario-sub">
+              Lookback: {activeTf.label} | best vol (underlying EWMA): {fmt(ewmaUnd)} | reference realized: {fmt(realizedUnd)}
+            </div>
+            <div className="scenario-sub">
+              Leverage input: {Number.isFinite(Number(scenarioLeverage)) ? scenarioLeverage.toFixed(3) : '—'} | carry drag: {fmt(annualCarryDrag)} annual
+            </div>
+          </div>
+          <div className="tf-group" style={{ marginLeft: 0 }}>
+            {SCENARIO_HORIZONS.map(h => (
+              <button
+                key={h.key}
+                className={cls('tf-btn', scenarioHorizon === h.key && 'tf-active')}
+                onClick={() => setScenarioHorizon(h.key)}
+              >
+                {h.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {!scenarioGrid.ok ? (
+          <div className="scenario-warning">{scenarioGrid.error || 'Scenario grid unavailable.'}</div>
+        ) : (
+          <div className="scenario-table-wrap">
+            <table className="scenario-table">
+              <thead>
+                <tr>
+                  <th>Underlying Shock</th>
+                  {scenarioGrid.volColumns.map((col, idx) => (
+                    <th key={idx}>{fmt(col.sigmaAnnual)} ({col.multiplier.toFixed(1)}x)</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {scenarioGrid.rows.map((row, ridx) => (
+                  <tr key={ridx}>
+                    <td>
+                      {`${row.sigmaMultiple > 0 ? '+' : ''}${row.sigmaMultiple.toFixed(0)}sigma`} ({fmt(row.underlyingReturn)})
+                    </td>
+                    {row.cells.map((cell, cidx) => (
+                      <td
+                        key={cidx}
+                        style={{ background: scenarioCellBg(cell?.value), color: 'var(--text-primary)' }}
+                        title={cell?.clamped ? 'Clamped display value' : ''}
+                      >
+                        {cell?.ok ? `${fmt(cell.value)}${cell.clamped ? '*' : ''}` : '—'}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="scenario-formula">
+          ETF return approx = L * R_underlying - 0.5 * L * (L - 1) * sigma^2 * T - carry * T
+        </div>
+      </div>
+
       <div className="chart-note">
         Chart shows % change comparison with {etfSym} (blue) vs {undSym || 'underlying'} (orange).
         Use the timeframe buttons above or the widget's built-in controls to change the date range.
         Both series are plotted on the same scale for direct visual comparison of decay.
+        Scenario table uses the same active lookback window for volatility inputs.
       </div>
     </div>
   );
