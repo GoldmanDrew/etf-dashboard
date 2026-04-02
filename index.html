@@ -153,25 +153,29 @@
 
   /* ── Table ────────────────── */
   .table-container { padding: 0 24px 24px; overflow-x: auto; }
-  table {
+  .etf-table {
     width: 100%; border-collapse: collapse; font-size: 13px;
     background: var(--bg-card); border: 1px solid var(--border); border-top: none;
+    table-layout: fixed;
   }
-  thead th {
+  .etf-table thead th {
     position: sticky; top: 0; z-index: 10; background: var(--bg-secondary);
     padding: 10px 12px; text-align: left; font-size: 11px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted);
     border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
     white-space: nowrap; transition: color 0.15s;
   }
-  thead th:hover { color: var(--text-primary); }
-  thead th.sorted { color: var(--accent-blue); }
-  thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
-  tbody tr { border-bottom: 1px solid var(--border); transition: background 0.1s; cursor: pointer; }
-  tbody tr:hover { background: var(--bg-card-hover); }
-  tbody td {
+  .etf-table thead th:hover { color: var(--text-primary); }
+  .etf-table thead th.sorted { color: var(--accent-blue); }
+  .etf-table thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
+  .etf-table tbody tr { border-bottom: 1px solid var(--border); transition: background 0.1s; cursor: pointer; }
+  .etf-table tbody tr:hover { background: var(--bg-card-hover); }
+  .etf-table tbody td {
     padding: 9px 12px; font-family: 'JetBrains Mono', monospace;
     font-size: 12px; white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
   }
   .sym-cell {
     font-weight: 700; color: var(--accent-cyan); font-size: 13px;
@@ -1886,7 +1890,7 @@ function App() {
 
           {/* ── Table ─────────── */}
           <div className="table-container">
-            <table>
+            <table className="etf-table">
               <thead>
                 <tr>
                   <th style={{ width: 30 }}></th>
