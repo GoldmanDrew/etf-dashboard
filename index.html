@@ -633,7 +633,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="assets/expected_decay.js"></script>
-<script src="assets/scenario_returns.js?v=mc-v2"></script>
+<script src="assets/scenario_returns.js?v=mc-v3"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
 <script type="text/babel">
@@ -753,27 +753,23 @@ function MonteCarloPlot({ result, mode = 'short' }) {
   const median = pickIdx.map(i => toRet(result.overlays.p50[i]));
   const p05 = pickIdx.map(i => toRet(result.overlays.p05[i]));
   const p95 = pickIdx.map(i => toRet(result.overlays.p95[i]));
-  const allMin = pickIdx.map((_, i) => {
-    let m = Infinity;
-    for (let j = 0; j < allSeries.length; j += 1) m = Math.min(m, allSeries[j][i]);
-    return m;
-  });
-  const allMax = pickIdx.map((_, i) => {
-    let m = -Infinity;
-    for (let j = 0; j < allSeries.length; j += 1) m = Math.max(m, allSeries[j][i]);
-    return m;
-  });
-
-  // Include full tail outcomes so the axis always reflects worst/best path scenarios.
-  let yMin = Math.min(0, ...allMin);
-  let yMax = Math.max(0, ...allMax);
+  const meanCenter = mean.reduce((a, b) => a + b, 0) / Math.max(1, mean.length);
+  const spreadSeries = p95.map((hi, i) => Math.abs(hi - p05[i])).filter(Number.isFinite);
+  const spreadP75 = spreadSeries.length
+    ? quantileSorted([...spreadSeries].sort((a, b) => a - b), 0.75)
+    : NaN;
+  const meanMaxDev = mean.reduce((m, v) => Math.max(m, Math.abs(v - meanCenter)), 0);
+  const halfRange = Math.max(
+    0.2,
+    Number.isFinite(spreadP75) ? spreadP75 * 1.7 : 0,
+    Number.isFinite(meanMaxDev) ? meanMaxDev * 1.35 : 0,
+  );
+  let yMin = meanCenter - halfRange;
+  let yMax = meanCenter + halfRange;
   if (!Number.isFinite(yMin) || !Number.isFinite(yMax) || yMin === yMax) {
     yMin = -1;
     yMax = 1;
   }
-  const pad = 0.08 * Math.max(1e-6, (yMax - yMin));
-  yMin -= pad;
-  yMax += pad;
 
   const W = 900;
   const H = 260;
@@ -784,27 +780,24 @@ function MonteCarloPlot({ result, mode = 'short' }) {
   const PW = W - L - R;
   const PH = H - T - B;
   const clipId = `mc-clip-${mode}-${result.settings.pathCount}-${result.settings.steps}`;
+  const linThresh = Math.max(0.02, halfRange / 12);
+  const symlog = (v) => Math.sign(v) * Math.log1p(Math.abs(v) / linThresh);
+  const symlogInv = (sv) => Math.sign(sv) * linThresh * (Math.exp(Math.abs(sv)) - 1);
+  const yMinS = symlog(yMin);
+  const yMaxS = symlog(yMax);
   const x = (i) => L + (i / (pickIdx.length - 1)) * PW;
-  const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, (yMax - yMin)))) * PH;
+  const y = (v) => {
+    const s = symlog(v);
+    return T + (1 - ((s - yMinS) / Math.max(1e-12, (yMaxS - yMinS)))) * PH;
+  };
   const linePath = (vals) => vals.map((v, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}`).join(' ');
   const bandPath = `M ${x(0)} ${y(p95[0])} ${p95.map((v, i) => `L ${x(i)} ${y(v)}`).join(' ')} ${[...p05].reverse().map((v, i) => `L ${x(p05.length - 1 - i)} ${y(v)}`).join(' ')} Z`;
-  const tailBandPath = `M ${x(0)} ${y(allMax[0])} ${allMax.map((v, i) => `L ${x(i)} ${y(v)}`).join(' ')} ${[...allMin].reverse().map((v, i) => `L ${x(allMin.length - 1 - i)} ${y(v)}`).join(' ')} Z`;
-  const buildNiceTicks = (lo, hi, count = 5) => {
-    const span = Math.max(1e-9, hi - lo);
-    const rawStep = span / Math.max(1, count - 1);
-    const pow10 = 10 ** Math.floor(Math.log10(rawStep));
-    const scaled = rawStep / pow10;
-    const stepMul = scaled <= 1 ? 1 : (scaled <= 2 ? 2 : (scaled <= 5 ? 5 : 10));
-    const step = stepMul * pow10;
-    const first = Math.ceil(lo / step) * step;
-    const ticks = [];
-    for (let v = first; v <= hi + step * 0.5; v += step) ticks.push(v);
-    if (!ticks.length) return [lo, hi];
-    if (ticks[0] > lo + 1e-9) ticks.unshift(lo);
-    if (ticks[ticks.length - 1] < hi - 1e-9) ticks.push(hi);
-    return ticks;
-  };
-  const yTicks = buildNiceTicks(yMin, yMax, 5).reverse();
+  const tickCount = 6;
+  const yTicks = Array.from({ length: tickCount }, (_, i) => {
+    const q = i / Math.max(1, tickCount - 1);
+    const sv = yMaxS - q * (yMaxS - yMinS);
+    return symlogInv(sv);
+  });
 
   return (
     <div className="mc-plot">
@@ -824,13 +817,10 @@ function MonteCarloPlot({ result, mode = 'short' }) {
           </g>
         ))}
         <text x="12" y={T + 10} fontSize="10" fill="#7f8ea8" fontFamily="JetBrains Mono">
-          {mode === 'short' ? 'Short return' : 'ETF return'}
+          {mode === 'short' ? 'Short return (log scale)' : 'ETF return (log scale)'}
         </text>
         <g clipPath={`url(#${clipId})`}>
-          <path d={tailBandPath} fill="rgba(148,163,184,0.08)" stroke="none" />
           <path d={bandPath} fill="rgba(59,130,246,0.14)" stroke="none" />
-          <path d={linePath(allMin)} fill="none" stroke="rgba(248,113,113,0.45)" strokeWidth="1.2" />
-          <path d={linePath(allMax)} fill="none" stroke="rgba(74,222,128,0.45)" strokeWidth="1.2" />
           {series.map((s, i) => (
             <path key={i} d={linePath(s)} fill="none" stroke="rgba(148,163,184,0.24)" strokeWidth="1" />
           ))}
