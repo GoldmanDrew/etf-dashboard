@@ -68,14 +68,14 @@ test("scenario grid deterministic shape and center shock", () => {
   assert.ok(Math.abs(cell.raw - (Math.exp(-3.0) - 1)) < 1e-12); // only drag remains in log space
 });
 
-test("shock mapping uses thirds and stays above -100%", () => {
-  const shocks = buildShockRows(1.2, 1, [-1, -2 / 3, -1 / 3, 0, 1 / 3, 2 / 3, 1]);
+test("shock mapping uses 1/3, 1, 3 sigma ladder and stays above -100%", () => {
+  const shocks = buildShockRows(1.2, 1, [-3, -1, -1 / 3, 0, 1 / 3, 1, 3]);
   assert.equal(shocks.length, 7);
   for (const row of shocks) {
     assert.ok(row.underlyingReturn > -1, `invalid underlying return ${row.underlyingReturn}`);
   }
   const mids = shocks.map((r) => r.sigmaMultiple);
-  assert.deepEqual(mids, [-1, -2 / 3, -1 / 3, 0, 1 / 3, 2 / 3, 1]);
+  assert.deepEqual(mids, [-3, -1, -1 / 3, 0, 1 / 3, 1, 3]);
 });
 
 test("monte carlo deterministic for same seed", () => {
@@ -143,4 +143,20 @@ test("short-loss probability aligns with ETF-up probability", () => {
   assert.equal(out.ok, true);
   const pEtfUpTerminal = out.summary.upsideTerminalCounts[0].pct;
   assert.ok(Math.abs(out.summary.short.probLoss - pEtfUpTerminal) < 1e-12);
+});
+
+test("upside thresholds from decimal array are not re-scaled", () => {
+  const out = simulateMonteCarloPaths({
+    pathCount: 50,
+    sigmaAnnual: 0.7,
+    leverage: -2,
+    horizonYears: 0.25,
+    annualCarryDrag: 0.02,
+    seed: 11,
+    ruinThreshold: -0.8,
+    upsideThresholds: [0.25, 1.0, 5.0], // 25%, 100%, 500%
+  });
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.settings.upsideThresholds, [0.25, 1.0, 5.0]);
+  assert.equal(out.summary.upsideTerminalCounts.length, 3);
 });

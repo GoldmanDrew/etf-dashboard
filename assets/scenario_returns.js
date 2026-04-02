@@ -2,7 +2,7 @@
 (function initScenarioReturns(globalObj) {
   const TRADING_DAYS = 252;
   const DEFAULT_VOL_MULTIPLIERS = [0.6, 0.8, 1.0, 1.2, 1.4];
-  const DEFAULT_SHOCK_MULTIPLIERS = [-1, -2 / 3, -1 / 3, 0, 1 / 3, 2 / 3, 1];
+  const DEFAULT_SHOCK_MULTIPLIERS = [-3, -1, -1 / 3, 0, 1 / 3, 1, 3];
 
   function toFiniteNumber(value) {
     if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
@@ -219,7 +219,8 @@
   function parseThresholdList(raw, fallback = [0.25, 0.5, 1.0]) {
     if (Array.isArray(raw)) {
       const vals = raw.map(toFiniteNumber).filter(Number.isFinite);
-      return vals.map((x) => (x > 2 ? x / 100 : x)).filter((x) => x >= 0).sort((a, b) => a - b);
+      // Array inputs are already decimals (e.g. 0.25 for 25%).
+      return vals.filter((x) => x >= 0).sort((a, b) => a - b);
     }
     if (typeof raw === "string") {
       const vals = raw
