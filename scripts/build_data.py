@@ -43,6 +43,12 @@ BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE
 OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
 BORROW_HISTORY_FILE = OUTPUT_DIR / "borrow_history.json"
+LS_ALGO_DATA_PATH = Path(
+    os.environ.get(
+        "LS_ALGO_DATA_PATH",
+        str((Path(__file__).resolve().parents[2] / "ls-algo" / "data")),
+    )
+)
 
 # Curated inverse ETF list (Bucket 3 source of truth)
 INVERSE_ETFS = {
@@ -236,6 +242,53 @@ def build_borrow_history_from_commits(universe_symbols: set[str]) -> dict:
         if idx % 25 == 0 or idx == len(commits):
             print(f"  Borrow history progress: {idx}/{len(commits)} commits (processed={processed})")
 
+    # Augment with local ls-algo run snapshots if available.
+    local_added = 0
+    local_files_scanned = 0
+    if LS_ALGO_DATA_PATH.exists():
+        run_files = list((LS_ALGO_DATA_PATH / "runs").glob("*/etf_screened_today.csv"))
+        current_file = LS_ALGO_DATA_PATH / "etf_screened_today.csv"
+        if current_file.exists():
+            run_files.append(current_file)
+
+        for path in run_files:
+            local_files_scanned += 1
+            snap = None
+            try:
+                snap = pd.read_csv(path)
+            except Exception:
+                snap = None
+            if snap is None or snap.empty or "ETF" not in snap.columns:
+                continue
+            day = path.parent.name if path.parent != LS_ALGO_DATA_PATH else dt.datetime.fromtimestamp(path.stat().st_mtime, dt.UTC).date().isoformat()
+            # Use file mtime as intra-day tie-breaker token.
+            ts_token = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.UTC).isoformat().replace("+00:00", "Z")
+            snap["symbol"] = snap["ETF"].apply(norm_sym)
+            filtered = snap[snap["symbol"].isin(symbols)]
+            for _, row in filtered.iterrows():
+                sym = row["symbol"]
+                borrow = _pick_borrow_fee_only(row)
+                shares = None
+                if pd.notna(row.get("shares_available")):
+                    try:
+                        shares = int(row.get("shares_available"))
+                    except (TypeError, ValueError):
+                        shares = None
+                if borrow is None and shares is None:
+                    continue
+                cur = by_symbol_day[sym].get(day)
+                if cur is None:
+                    by_symbol_day[sym][day] = {
+                        "date": day,
+                        "borrow_current": borrow,
+                        "shares_available": shares,
+                        "_commit_ts": ts_token,
+                        "_sha": "local",
+                    }
+                    local_added += 1
+    else:
+        print(f"  Note: local ls-algo data path not found: {LS_ALGO_DATA_PATH}")
+
     cleaned_symbols: dict[str, list[dict]] = {}
     for sym, by_day in by_symbol_day.items():
         rows = sorted(by_day.values(), key=lambda x: x["date"])
@@ -252,6 +305,8 @@ def build_borrow_history_from_commits(universe_symbols: set[str]) -> dict:
         "source_repo": UNIVERSE_REPO,
         "source_path": UNIVERSE_PATH,
         "snapshot_commits_used": processed,
+        "local_files_scanned": local_files_scanned,
+        "local_points_added": local_added,
         "symbols_with_history": sum(1 for v in cleaned_symbols.values() if v),
         "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
     }
