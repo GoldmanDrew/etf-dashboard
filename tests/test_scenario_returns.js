@@ -51,6 +51,32 @@ test("etf return model includes drag and carry", () => {
   assert.ok(Math.abs(out.raw - expected) < 1e-12);
 });
 
+test("scenario return floor is -99.99%", () => {
+  const out = estimateEtfReturn({
+    leverage: -3,
+    underlyingReturn: -0.95,
+    sigmaAnnual: 2.0,
+    horizonYears: 1,
+    annualCarryDrag: 0.5,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.value, -0.9999);
+  assert.equal(out.clamped, true);
+});
+
+test("scenario return has no default upside cap", () => {
+  const out = estimateEtfReturn({
+    leverage: 3,
+    underlyingReturn: 2.5,
+    sigmaAnnual: 0.1,
+    horizonYears: 1,
+    annualCarryDrag: 0,
+  });
+  assert.equal(out.ok, true);
+  assert.ok(out.value > 8.0, `expected > 800%, got ${out.value}`);
+  assert.equal(out.clamped, false);
+});
+
 test("scenario grid deterministic shape and center shock", () => {
   const grid = buildScenarioGrid({
     leverage: -2,

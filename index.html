@@ -753,11 +753,20 @@ function MonteCarloPlot({ result, mode = 'short' }) {
   const median = pickIdx.map(i => toRet(result.overlays.p50[i]));
   const p05 = pickIdx.map(i => toRet(result.overlays.p05[i]));
   const p95 = pickIdx.map(i => toRet(result.overlays.p95[i]));
+  const allMin = pickIdx.map((_, i) => {
+    let m = Infinity;
+    for (let j = 0; j < allSeries.length; j += 1) m = Math.min(m, allSeries[j][i]);
+    return m;
+  });
+  const allMax = pickIdx.map((_, i) => {
+    let m = -Infinity;
+    for (let j = 0; j < allSeries.length; j += 1) m = Math.max(m, allSeries[j][i]);
+    return m;
+  });
 
-  // Use robust percentile overlays for axis limits so one extreme path
-  // does not distort readability of the entire chart.
-  let yMin = Math.min(0, ...p05, ...mean, ...median);
-  let yMax = Math.max(0, ...p95, ...mean, ...median);
+  // Include full tail outcomes so the axis always reflects worst/best path scenarios.
+  let yMin = Math.min(0, ...allMin);
+  let yMax = Math.max(0, ...allMax);
   if (!Number.isFinite(yMin) || !Number.isFinite(yMax) || yMin === yMax) {
     yMin = -1;
     yMax = 1;
@@ -779,7 +788,23 @@ function MonteCarloPlot({ result, mode = 'short' }) {
   const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, (yMax - yMin)))) * PH;
   const linePath = (vals) => vals.map((v, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}`).join(' ');
   const bandPath = `M ${x(0)} ${y(p95[0])} ${p95.map((v, i) => `L ${x(i)} ${y(v)}`).join(' ')} ${[...p05].reverse().map((v, i) => `L ${x(p05.length - 1 - i)} ${y(v)}`).join(' ')} Z`;
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((q) => yMin + (yMax - yMin) * q).reverse();
+  const tailBandPath = `M ${x(0)} ${y(allMax[0])} ${allMax.map((v, i) => `L ${x(i)} ${y(v)}`).join(' ')} ${[...allMin].reverse().map((v, i) => `L ${x(allMin.length - 1 - i)} ${y(v)}`).join(' ')} Z`;
+  const buildNiceTicks = (lo, hi, count = 5) => {
+    const span = Math.max(1e-9, hi - lo);
+    const rawStep = span / Math.max(1, count - 1);
+    const pow10 = 10 ** Math.floor(Math.log10(rawStep));
+    const scaled = rawStep / pow10;
+    const stepMul = scaled <= 1 ? 1 : (scaled <= 2 ? 2 : (scaled <= 5 ? 5 : 10));
+    const step = stepMul * pow10;
+    const first = Math.ceil(lo / step) * step;
+    const ticks = [];
+    for (let v = first; v <= hi + step * 0.5; v += step) ticks.push(v);
+    if (!ticks.length) return [lo, hi];
+    if (ticks[0] > lo + 1e-9) ticks.unshift(lo);
+    if (ticks[ticks.length - 1] < hi - 1e-9) ticks.push(hi);
+    return ticks;
+  };
+  const yTicks = buildNiceTicks(yMin, yMax, 5).reverse();
 
   return (
     <div className="mc-plot">
@@ -802,7 +827,10 @@ function MonteCarloPlot({ result, mode = 'short' }) {
           {mode === 'short' ? 'Short return' : 'ETF return'}
         </text>
         <g clipPath={`url(#${clipId})`}>
+          <path d={tailBandPath} fill="rgba(148,163,184,0.08)" stroke="none" />
           <path d={bandPath} fill="rgba(59,130,246,0.14)" stroke="none" />
+          <path d={linePath(allMin)} fill="none" stroke="rgba(248,113,113,0.45)" strokeWidth="1.2" />
+          <path d={linePath(allMax)} fill="none" stroke="rgba(74,222,128,0.45)" strokeWidth="1.2" />
           {series.map((s, i) => (
             <path key={i} d={linePath(s)} fill="none" stroke="rgba(148,163,184,0.24)" strokeWidth="1" />
           ))}
@@ -846,6 +874,20 @@ function SimpleSeriesPlot({ series, valueKey, color, label, formatValue, zeroLab
     .map((v, i) => (Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : ''))
     .filter(Boolean)
     .join(' ');
+  let latestIdx = -1;
+  for (let i = lineVals.length - 1; i >= 0; i -= 1) {
+    if (Number.isFinite(lineVals[i])) {
+      latestIdx = i;
+      break;
+    }
+  }
+  const latestVal = latestIdx >= 0 ? lineVals[latestIdx] : NaN;
+  const latestLabel = Number.isFinite(latestVal)
+    ? `Current: ${formatValue ? formatValue(latestVal) : String(latestVal)}`
+    : '';
+  const latestLabelY = Number.isFinite(latestVal)
+    ? clampNum(y(latestVal) - 7, T + 11, H - B - 4)
+    : 0;
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(q => yMin + (yMax - yMin) * q).reverse();
   const yZero = y(0);
   const dateForIdx = (idx) => {
@@ -883,6 +925,21 @@ function SimpleSeriesPlot({ series, valueKey, color, label, formatValue, zeroLab
           {zeroLabel}
         </text>
         <path d={linePath} fill="none" stroke={color || "rgba(6,182,212,0.95)"} strokeWidth="2" />
+        {Number.isFinite(latestVal) && (
+          <>
+            <circle cx={x(latestIdx)} cy={y(latestVal)} r="3.2" fill={color || "rgba(6,182,212,0.95)"} />
+            <text
+              x={W - R - 6}
+              y={latestLabelY}
+              textAnchor="end"
+              fontSize="11"
+              fill="#d8e4f8"
+              fontFamily="DM Sans"
+            >
+              {latestLabel}
+            </text>
+          </>
+        )}
         <text x="14" y={T + 14} fontSize="12" fill="#c9d7ef" fontFamily="DM Sans">{label}</text>
         {xTickIdxUnique.map((idx, i) => (
           <g key={`x-${i}`}>
@@ -1225,8 +1282,7 @@ function ChartPage({ record, onBack }) {
       annualCarryDrag,
       volMultipliers: SCENARIO_VOL_MULTIPLIERS,
       shockMultipliers: SCENARIO_SHOCK_MULTIPLIERS,
-      minReturn: -0.99,
-      maxReturn: 8.0,
+      minReturn: -0.9999,
     });
   }, [scenarioFns, ewmaUnd, horizonYears, undObs, scenarioLeverage, annualCarryDrag]);
 

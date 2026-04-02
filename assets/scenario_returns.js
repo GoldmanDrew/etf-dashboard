@@ -84,8 +84,8 @@
     const sigmaAnnual = toFiniteNumber(params && params.sigmaAnnual);
     const horizonYears = toFiniteNumber(params && params.horizonYears);
     const annualCarryDrag = toFiniteNumber((params && params.annualCarryDrag) ?? 0);
-    const minReturn = toFiniteNumber((params && params.minReturn) ?? -0.99);
-    const maxReturn = toFiniteNumber((params && params.maxReturn) ?? 8.0);
+    const minReturn = toFiniteNumber((params && params.minReturn) ?? -0.9999);
+    const maxReturn = toFiniteNumber(params && params.maxReturn);
 
     if (
       !Number.isFinite(leverage) ||
@@ -107,9 +107,11 @@
     const raw = Math.exp(etfLog) - 1;
     if (!Number.isFinite(raw)) return { ok: false, error: "Non-finite model output." };
 
-    const lo = Number.isFinite(minReturn) ? minReturn : -0.99;
-    const hi = Number.isFinite(maxReturn) ? maxReturn : 8.0;
-    const value = clamp(raw, lo, hi);
+    const lo = Number.isFinite(minReturn) ? minReturn : -0.9999;
+    const hi = Number.isFinite(maxReturn) ? maxReturn : NaN;
+    let value = raw;
+    if (Number.isFinite(lo)) value = Math.max(value, lo);
+    if (Number.isFinite(hi)) value = Math.min(value, hi);
     return {
       ok: true,
       raw,
@@ -125,8 +127,8 @@
     const bestVolAnnual = toFiniteNumber(params && params.bestVolAnnual);
     const horizonYears = toFiniteNumber(params && params.horizonYears);
     const annualCarryDrag = toFiniteNumber((params && params.annualCarryDrag) ?? 0);
-    const minReturn = toFiniteNumber((params && params.minReturn) ?? -0.99);
-    const maxReturn = toFiniteNumber((params && params.maxReturn) ?? 8.0);
+    const minReturn = toFiniteNumber((params && params.minReturn) ?? -0.9999);
+    const maxReturn = toFiniteNumber(params && params.maxReturn);
 
     if (!Number.isFinite(leverage) || !Number.isFinite(bestVolAnnual) || bestVolAnnual <= 0 || !Number.isFinite(horizonYears) || horizonYears <= 0) {
       return { ok: false, error: "Missing required scenario inputs." };
