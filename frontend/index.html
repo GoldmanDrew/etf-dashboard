@@ -253,7 +253,6 @@
   .badge-bad { background: rgba(239,68,68,0.12); color: var(--negative); }
   .badge-warn { background: rgba(245,158,11,0.12); color: var(--warning); }
   .badge-stale { background: rgba(107,114,128,0.12); color: var(--stale); }
-  .badge-algo { background: rgba(59,130,246,0.12); color: var(--accent-blue); }
 
   /* ── Sparkline ───────────────────── */
   .sparkline { display: inline-block; vertical-align: middle; }
@@ -405,7 +404,6 @@ const COLUMNS = [
   { key: 'spread', label: 'Spread', w: 90, numeric: true },
   { key: 'decay_3m', label: '3M Decay', w: 85, numeric: true },
   { key: 'decay_6m', label: '6M Decay', w: 85, numeric: true },
-  { key: 'include_for_algo', label: 'Algo', w: 55 },
   { key: 'last_updated', label: 'Updated', w: 90 },
 ];
 
@@ -549,11 +547,6 @@ function TableRow({ record, expanded, onToggle, history }) {
         </td>
         <td>{fmt(record.decay_3m)}</td>
         <td>{fmt(record.decay_6m)}</td>
-        <td>
-          {record.include_for_algo
-            ? <span className="badge badge-algo">YES</span>
-            : <span style={{ color: 'var(--text-muted)' }}>—</span>}
-        </td>
         <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           {fmtTime(record.last_updated)}
         </td>
@@ -716,7 +709,6 @@ function App() {
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState('spread');
   const [sortDesc, setSortDesc] = useState(true);
-  const [algoOnly, setAlgoOnly] = useState(false);
   const [expandedSym, setExpandedSym] = useState(null);
   const [historyCache, setHistoryCache] = useState({});
   const [showStatus, setShowStatus] = useState(false);
@@ -779,7 +771,6 @@ function App() {
     let data = [...records];
     const bucketFilter = bucketMap[activeTab];
     if (bucketFilter) data = data.filter(r => r.bucket === bucketFilter);
-    if (algoOnly) data = data.filter(r => r.include_for_algo);
     if (search) {
       const s = search.toUpperCase();
       data = data.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
@@ -792,7 +783,7 @@ function App() {
       return sortDesc ? bv - av : av - bv;
     });
     return data;
-  }, [records, activeTab, algoOnly, search, sortKey, sortDesc]);
+  }, [records, activeTab, search, sortKey, sortDesc]);
 
   const handleSort = useCallback((key) => {
     if (sortKey === key) setSortDesc(d => !d);
@@ -940,10 +931,6 @@ function App() {
                 onChange={e => setSearch(e.target.value)}
               />
             </div>
-            <label className="toggle-label">
-              <input type="checkbox" checked={algoOnly} onChange={e => setAlgoOnly(e.target.checked)} />
-              Algo-eligible only
-            </label>
             <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
               {filtered.length} results
             </span>

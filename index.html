@@ -195,7 +195,6 @@
   .badge-bad { background: rgba(239,68,68,0.12); color: var(--negative); }
   .badge-warn { background: rgba(245,158,11,0.12); color: var(--warning); }
   .badge-stale { background: rgba(107,114,128,0.12); color: var(--stale); }
-  .badge-algo { background: rgba(59,130,246,0.12); color: var(--accent-blue); }
   .badge-ftp { background: rgba(6,182,212,0.12); color: var(--accent-cyan); }
 
   /* ── Detail Expand ───────── */
@@ -486,6 +485,44 @@ const borrowBadge = v => {
   return null;
 };
 
+const YAHOO_RANGE_BY_TF = {
+  '1M': '1mo',
+  '3M': '3mo',
+  '6M': '6mo',
+  'YTD': 'ytd',
+  '12M': '1y',
+  'ALL': 'max',
+};
+
+function computeAnnualizedRealizedVolFromCloses(closes) {
+  if (!Array.isArray(closes) || closes.length < 3) return null;
+  const rets = [];
+  for (let i = 1; i < closes.length; i++) {
+    const p0 = Number(closes[i - 1]);
+    const p1 = Number(closes[i]);
+    if (!Number.isFinite(p0) || !Number.isFinite(p1) || p0 <= 0 || p1 <= 0) continue;
+    rets.push(Math.log(p1 / p0));
+  }
+  if (rets.length < 2) return null;
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const varPop = rets.reduce((a, b) => a + ((b - mean) ** 2), 0) / (rets.length - 1);
+  return Math.sqrt(varPop) * Math.sqrt(252);
+}
+
+async function fetchYahooCloses(symbol, range) {
+  const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
+  url.searchParams.set('range', range);
+  url.searchParams.set('interval', '1d');
+  url.searchParams.set('events', 'div,splits');
+  const res = await fetch(url.toString(), { cache: 'no-store' });
+  if (!res.ok) throw new Error(`${symbol} HTTP ${res.status}`);
+  const j = await res.json();
+  const result = j?.chart?.result?.[0];
+  if (!result) throw new Error(`${symbol} no chart result`);
+  const closes = result?.indicators?.adjclose?.[0]?.adjclose || result?.indicators?.quote?.[0]?.close || [];
+  return closes.filter(v => Number.isFinite(v));
+}
+
 // ── Columns ─────────────────────────────────
 const COLS = [
   { key: 'symbol', label: 'Symbol', w: 90 },
@@ -497,7 +534,6 @@ const COLS = [
   { key: 'net_decay', label: 'Net Decay', w: 100 },
   { key: 'vol_underlying_annual', label: 'Vol Und', w: 80 },
   { key: 'vol_etf_annual', label: 'Vol ETF', w: 80 },
-  { key: 'include_for_algo', label: 'Algo', w: 50 },
 ];
 
 // ── Summary Card ────────────────────────────
@@ -710,6 +746,9 @@ function buildWidgetHtml(symbol, compareSymbol, range, interval) {
 function ChartPage({ record, onBack }) {
   const [activeTf, setActiveTf] = useState(TIMEFRAMES[2]); // 6M
   const [iframeLoaded, setIframeLoaded] = useState(false);
+  const [realizedVol, setRealizedVol] = useState({ loading: false, und: null, etf: null, error: null, label: '' });
+  const [volMode, setVolMode] = useState('chart');
+  const [customDays, setCustomDays] = useState(126);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
 
@@ -731,6 +770,49 @@ function ChartPage({ record, onBack }) {
   // Reset loaded state when widget changes
   useEffect(() => { setIframeLoaded(false); }, [widgetHtml]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setRealizedVol({ loading: true, und: null, etf: null, error: null, label: '' });
+      try {
+        const days = Math.max(10, parseInt(customDays, 10) || 126);
+        const chartRange = YAHOO_RANGE_BY_TF[activeTf.range] || '6mo';
+        const customRange = days <= 252 ? '2y' : days <= 756 ? '5y' : '10y';
+        const yahooRange = volMode === 'custom' ? customRange : chartRange;
+
+        const [etfClosesRaw, undClosesRaw] = await Promise.all([
+          fetchYahooCloses(etfSym, yahooRange),
+          undSym ? fetchYahooCloses(undSym, yahooRange) : Promise.resolve([]),
+        ]);
+
+        const etfCloses = volMode === 'custom' ? etfClosesRaw.slice(-(days + 1)) : etfClosesRaw;
+        const undCloses = volMode === 'custom' ? undClosesRaw.slice(-(days + 1)) : undClosesRaw;
+
+        const etfVol = computeAnnualizedRealizedVolFromCloses(etfCloses);
+        const undVol = computeAnnualizedRealizedVolFromCloses(undCloses);
+        const label = volMode === 'custom' ? `${days}d lookback` : `${activeTf.label} lookback`;
+
+        if (!cancelled) {
+          setRealizedVol({ loading: false, und: undVol, etf: etfVol, error: null, label });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setRealizedVol({
+            loading: false,
+            und: null,
+            etf: null,
+            error: e?.message || 'volatility fetch failed',
+            label: volMode === 'custom'
+              ? `${Math.max(10, parseInt(customDays, 10) || 126)}d lookback`
+              : `${activeTf.label} lookback`,
+          });
+        }
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, [etfSym, undSym, activeTf, volMode, customDays]);
+
   return (
     <div className="chart-page">
       {/* Header */}
@@ -747,7 +829,6 @@ function ChartPage({ record, onBack }) {
           </>}
         </div>
         {bucketLabel && <span className={cls('chart-bucket-badge', bucketCls)}>{bucketLabel}</span>}
-        {r.include_for_algo && <span className="badge badge-algo">ALGO ELIGIBLE</span>}
 
         {/* Timeframe buttons */}
         <div className="tf-group">
@@ -758,6 +839,25 @@ function ChartPage({ record, onBack }) {
               {tf.label}
             </button>
           ))}
+        </div>
+        <div className="tf-group" style={{ marginLeft: 8, gap: 6 }}>
+          <select className="tf-btn" value={volMode} onChange={e => setVolMode(e.target.value)}>
+            <option value="chart">Vol: chart window</option>
+            <option value="custom">Vol: custom days</option>
+          </select>
+          {volMode === 'custom' && (
+            <input
+              className="tf-btn"
+              type="number"
+              min="10"
+              max="2520"
+              step="1"
+              value={customDays}
+              onChange={e => setCustomDays(e.target.value)}
+              style={{ width: 110 }}
+              title="Custom lookback in trading days"
+            />
+          )}
         </div>
       </div>
 
@@ -808,9 +908,23 @@ function ChartPage({ record, onBack }) {
           <div className="cs-sub">{undSym || '—'}</div>
         </div>
         <div className="chart-stat">
+          <div className="cs-label">Realized Vol Underlying</div>
+          <div className="cs-value">
+            {realizedVol.loading ? '…' : (realizedVol.und == null ? '—' : fmt(realizedVol.und))}
+          </div>
+          <div className="cs-sub">{realizedVol.label || (undSym || '—')}</div>
+        </div>
+        <div className="chart-stat">
           <div className="cs-label">Vol ETF</div>
           <div className="cs-value">{fmt(r.vol_etf_annual)}</div>
           <div className="cs-sub">{etfSym}</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Realized Vol ETF</div>
+          <div className="cs-value">
+            {realizedVol.loading ? '…' : (realizedVol.etf == null ? '—' : fmt(realizedVol.etf))}
+          </div>
+          <div className="cs-sub">{realizedVol.label || etfSym}</div>
         </div>
         <div className="chart-stat">
           <div className="cs-label">Shares Available</div>
@@ -828,6 +942,7 @@ function ChartPage({ record, onBack }) {
         Chart shows % change comparison with {etfSym} (blue) vs {undSym || 'underlying'} (orange).
         Use the timeframe buttons above or the widget's built-in controls to change the date range.
         Both series are plotted on the same scale for direct visual comparison of decay.
+        {realizedVol.error ? ` Realized-vol fetch warning: ${realizedVol.error}.` : ''}
       </div>
     </div>
   );
@@ -884,7 +999,6 @@ function App() {
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState('net_decay');
   const [sortDesc, setSortDesc] = useState(true);
-  const [algoOnly, setAlgoOnly] = useState(false);
   const [expandedSym, setExpandedSym] = useState(null);
   const [showInfo, setShowInfo] = useState(false);
   const [chartRecord, setChartRecord] = useState(null);
@@ -939,7 +1053,6 @@ function App() {
     let d = [...records];
     const bf = bucketMap[activeTab];
     if (bf) d = d.filter(r => r.bucket === bf);
-    if (algoOnly) d = d.filter(r => r.include_for_algo);
     if (search) {
       const s = search.toUpperCase();
       d = d.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
@@ -953,7 +1066,7 @@ function App() {
       return sortDesc ? bv - av : av - bv;
     });
     return d;
-  }, [records, activeTab, algoOnly, search, sortKey, sortDesc]);
+  }, [records, activeTab, search, sortKey, sortDesc]);
 
   const tabCounts = useMemo(() => {
     const c = { all: records.length, bucket_1: 0, bucket_2: 0, bucket_3: 0 };
@@ -1071,10 +1184,6 @@ function App() {
               <input className="search-box" placeholder="Search symbol or underlying…"
                 value={search} onChange={e => setSearch(e.target.value)} />
             </div>
-            <label className="toggle-label">
-              <input type="checkbox" checked={algoOnly} onChange={e => setAlgoOnly(e.target.checked)} />
-              Algo-eligible only
-            </label>
             <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
               {filtered.length} results
             </span>
@@ -1120,11 +1229,6 @@ function App() {
                         <td className={spreadCls(r.net_decay)}>{fmt(r.net_decay)}</td>
                         <td>{fmt(r.vol_underlying_annual)}</td>
                         <td>{fmt(r.vol_etf_annual)}</td>
-                        <td>
-                          {r.include_for_algo
-                            ? <span className="badge badge-algo">YES</span>
-                            : <span style={{ color: 'var(--text-muted)' }}>—</span>}
-                        </td>
                       </tr>
                       {expanded && <DetailRow r={r} />}
                     </React.Fragment>
