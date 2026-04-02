@@ -241,6 +241,7 @@
     const horizonYears = toFiniteNumber(params && params.horizonYears);
     const annualCarryDrag = toFiniteNumber((params && params.annualCarryDrag) ?? 0);
     const seed = Math.round(toFiniteNumber((params && params.seed) ?? 42));
+    // Short-mode ruin threshold in short-return terms, e.g. -0.8 = -80% short return.
     const ruinThreshold = toFiniteNumber((params && params.ruinThreshold) ?? -0.8);
     const upsideThresholds = parseThresholdList((params && params.upsideThresholds), [0.25, 0.5, 1.0]);
 
@@ -254,7 +255,6 @@
     const sdStep = sigmaAnnual * Math.sqrt(dt);
     const dragStep = 0.5 * leverage * (leverage - 1) * (sigmaAnnual ** 2) * dt;
     const carryStep = (Number.isFinite(annualCarryDrag) ? annualCarryDrag : 0) * dt;
-    const ruinWealth = 1 + ruinThreshold;
     const rng = mulberry32(seed);
     const randn = normalFactory(rng);
 
@@ -262,7 +262,7 @@
     const terminalReturns = [];
     const maxDrawdowns = [];
     const pathVols = [];
-    const breachRuin = [];
+    const breachShortRuin = [];
     const upsideTerminalCounts = new Array(upsideThresholds.length).fill(0);
     const upsideAnyCounts = new Array(upsideThresholds.length).fill(0);
     const stepValues = Array.from({ length: steps + 1 }, () => []);
@@ -271,7 +271,7 @@
       const wealthPath = new Array(steps + 1);
       wealthPath[0] = 1;
       stepValues[0].push(1);
-      let breached = false;
+      let breachedShort = false;
       const pathLogRets = [];
       const crossed = new Array(upsideThresholds.length).fill(false);
 
@@ -284,8 +284,9 @@
         pathLogRets.push(etfLogRet);
         stepValues[t].push(wealthPath[t]);
 
-        if (!breached && wealthPath[t] <= ruinWealth) breached = true;
         const simpleRet = wealthPath[t] - 1;
+        const shortRet = -simpleRet;
+        if (!breachedShort && shortRet <= ruinThreshold) breachedShort = true;
         for (let k = 0; k < upsideThresholds.length; k += 1) {
           if (!crossed[k] && simpleRet >= upsideThresholds[k]) crossed[k] = true;
         }
@@ -297,7 +298,7 @@
       maxDrawdowns.push(computeMaxDrawdown(wealthPath));
       const pv = computeRealizedVolFromReturns(pathLogRets);
       pathVols.push(Number.isFinite(pv) ? pv : NaN);
-      breachRuin.push(breached ? 1 : 0);
+      breachShortRuin.push(breachedShort ? 1 : 0);
       for (let k = 0; k < upsideThresholds.length; k += 1) {
         if (terminal >= upsideThresholds[k]) upsideTerminalCounts[k] += 1;
         if (crossed[k]) upsideAnyCounts[k] += 1;
@@ -305,11 +306,15 @@
     }
 
     const sortedTerm = terminalReturns.slice().sort((a, b) => a - b);
+    const shortTerminalReturns = terminalReturns.map((x) => -x);
+    const sortedShort = shortTerminalReturns.slice().sort((a, b) => a - b);
     const sortedDd = maxDrawdowns.slice().sort((a, b) => a - b);
     const worstN = Math.max(1, Math.floor(0.05 * sortedTerm.length));
     const cvar5 = sortedTerm.slice(0, worstN).reduce((a, b) => a + b, 0) / worstN;
+    const cvar5Short = sortedShort.slice(0, worstN).reduce((a, b) => a + b, 0) / worstN;
     const finiteVols = pathVols.filter(Number.isFinite);
     const meanTerminal = sortedTerm.reduce((a, b) => a + b, 0) / sortedTerm.length;
+    const meanShort = sortedShort.reduce((a, b) => a + b, 0) / sortedShort.length;
 
     const overlays = {
       mean: [],
@@ -362,7 +367,7 @@
         p95: percentileFromSorted(sortedTerm, 0.95),
         cvar5,
         probLoss: terminalReturns.filter((x) => x < 0).length / terminalReturns.length,
-        probRuin: breachRuin.reduce((a, b) => a + b, 0) / breachRuin.length,
+        probRuin: breachShortRuin.reduce((a, b) => a + b, 0) / breachShortRuin.length,
         ddMean: maxDrawdowns.reduce((a, b) => a + b, 0) / maxDrawdowns.length,
         ddP50: percentileFromSorted(sortedDd, 0.5),
         ddP95: percentileFromSorted(sortedDd, 0.95),
@@ -377,6 +382,16 @@
           count: upsideAnyCounts[i],
           pct: upsideAnyCounts[i] / pathCount,
         })),
+        // Short-centric summary for short-ETF strategy interpretation.
+        short: {
+          meanTerminal: meanShort,
+          medianTerminal: percentileFromSorted(sortedShort, 0.5),
+          p05: percentileFromSorted(sortedShort, 0.05),
+          p95: percentileFromSorted(sortedShort, 0.95),
+          cvar5: cvar5Short,
+          probLoss: shortTerminalReturns.filter((x) => x < 0).length / shortTerminalReturns.length,
+          probRuin: breachShortRuin.reduce((a, b) => a + b, 0) / breachShortRuin.length,
+        },
       },
     };
   }

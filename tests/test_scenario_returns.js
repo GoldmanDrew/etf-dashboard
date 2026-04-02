@@ -125,4 +125,22 @@ test("monte carlo path/step sizing and risk stats", () => {
   assert.ok(out.summary.probRuin >= 0 && out.summary.probRuin <= 1);
   assert.equal(out.summary.upsideTerminalCounts.length, 3);
   assert.equal(out.summary.upsideAnyCounts.length, 3);
+  assert.ok(out.summary.short.probLoss >= 0 && out.summary.short.probLoss <= 1);
+  assert.ok(out.summary.short.probRuin >= 0 && out.summary.short.probRuin <= 1);
+});
+
+test("short-loss probability aligns with ETF-up probability", () => {
+  const out = simulateMonteCarloPaths({
+    pathCount: 400,
+    sigmaAnnual: 0.9,
+    leverage: -2,
+    horizonYears: 0.5,
+    annualCarryDrag: 0.03,
+    seed: 7,
+    ruinThreshold: -0.8,
+    upsideThresholds: [0],
+  });
+  assert.equal(out.ok, true);
+  const pEtfUpTerminal = out.summary.upsideTerminalCounts[0].pct;
+  assert.ok(Math.abs(out.summary.short.probLoss - pEtfUpTerminal) < 1e-12);
 });

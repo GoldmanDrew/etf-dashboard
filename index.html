@@ -711,7 +711,7 @@ const quantileSorted = (arr, q) => {
   const w = idx - lo;
   return arr[lo] * (1 - w) + arr[hi] * w;
 };
-function MonteCarloPlot({ result }) {
+function MonteCarloPlot({ result, mode = 'short' }) {
   if (!result?.ok) return null;
   const maxPoints = 180;
   const totalPts = result.settings.steps + 1;
@@ -720,8 +720,13 @@ function MonteCarloPlot({ result }) {
   for (let i = 0; i < totalPts; i += stride) pickIdx.push(i);
   if (pickIdx[pickIdx.length - 1] !== totalPts - 1) pickIdx.push(totalPts - 1);
 
-  const toRet = (w) => (Number.isFinite(w) ? w - 1 : 0);
-  const series = result.paths.map(p => pickIdx.map(i => toRet(p[i])));
+  const toRet = (w) => {
+    const etfRet = Number.isFinite(w) ? (w - 1) : 0;
+    return mode === 'short' ? -etfRet : etfRet;
+  };
+  const allSeries = result.paths.map(p => pickIdx.map(i => toRet(p[i])));
+  const sampleStride = Math.max(1, Math.floor(allSeries.length / 50));
+  const series = allSeries.filter((_, i) => i % sampleStride === 0).slice(0, 50);
   const mean = pickIdx.map(i => toRet(result.overlays.mean[i]));
   const median = pickIdx.map(i => toRet(result.overlays.p50[i]));
   const p05 = pickIdx.map(i => toRet(result.overlays.p05[i]));
@@ -739,17 +744,36 @@ function MonteCarloPlot({ result }) {
 
   const W = 900;
   const H = 260;
-  const x = (i) => (i / (pickIdx.length - 1)) * W;
-  const y = (v) => H - ((v - yMin) / (yMax - yMin)) * H;
+  const L = 60;
+  const R = 8;
+  const T = 8;
+  const B = 22;
+  const PW = W - L - R;
+  const PH = H - T - B;
+  const x = (i) => L + (i / (pickIdx.length - 1)) * PW;
+  const y = (v) => T + (1 - ((v - yMin) / (yMax - yMin))) * PH;
   const linePath = (vals) => vals.map((v, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}`).join(' ');
   const bandPath = `M ${x(0)} ${y(p95[0])} ${p95.map((v, i) => `L ${x(i)} ${y(v)}`).join(' ')} ${[...p05].reverse().map((v, i) => `L ${x(p05.length - 1 - i)} ${y(v)}`).join(' ')} Z`;
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((q) => yMin + (yMax - yMin) * q).reverse();
 
   return (
     <div className="mc-plot">
       <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+        <rect x={L} y={T} width={PW} height={PH} fill="rgba(11,19,34,0.2)" stroke="rgba(56,72,96,0.5)" />
+        {yTicks.map((tick, i) => (
+          <g key={i}>
+            <line x1={L} y1={y(tick)} x2={W - R} y2={y(tick)} stroke="rgba(56,72,96,0.35)" strokeWidth="1" />
+            <text x={L - 6} y={y(tick) + 3} textAnchor="end" fontSize="10" fill="#7f8ea8" fontFamily="JetBrains Mono">
+              {fmt(tick)}
+            </text>
+          </g>
+        ))}
+        <text x="12" y={T + 10} fontSize="10" fill="#7f8ea8" fontFamily="JetBrains Mono">
+          {mode === 'short' ? 'Short return' : 'ETF return'}
+        </text>
         <path d={bandPath} fill="rgba(59,130,246,0.14)" stroke="none" />
         {series.map((s, i) => (
-          <path key={i} d={linePath(s)} fill="none" stroke="rgba(148,163,184,0.12)" strokeWidth="1" />
+          <path key={i} d={linePath(s)} fill="none" stroke="rgba(148,163,184,0.24)" strokeWidth="1" />
         ))}
         <path d={linePath(median)} fill="none" stroke="rgba(139,92,246,0.95)" strokeWidth="2.2" />
         <path d={linePath(mean)} fill="none" stroke="rgba(6,182,212,0.95)" strokeWidth="2.2" />
@@ -1301,11 +1325,11 @@ function ChartPage({ record, onBack }) {
                 <input type="number" value={mcSeed} onChange={(e) => setMcSeed(Number(e.target.value || 0))} />
               </div>
               <div className="mc-field">
-                <label>Ruin Threshold (%)</label>
+                <label>Short Ruin Threshold (%)</label>
                 <input type="number" value={mcRuinThresholdPct} onChange={(e) => setMcRuinThresholdPct(Number(e.target.value || -80))} />
               </div>
               <div className="mc-field">
-                <label>Upside Thresholds (%)</label>
+                <label>ETF Upside Loss Levels (%)</label>
                 <input value={mcUpsideThresholdsText} onChange={(e) => setMcUpsideThresholdsText(e.target.value)} placeholder="25,50,100" />
               </div>
             </div>
@@ -1319,28 +1343,27 @@ function ChartPage({ record, onBack }) {
               </div>
             ) : (
               <>
-                <MonteCarloPlot result={monteCarloResult} />
+                <MonteCarloPlot result={monteCarloResult} mode="short" />
                 <div className="mc-stats-grid">
-                  <div className="mc-stat"><div className="k">Mean Terminal Return</div><div className="v">{fmt(monteCarloResult.summary.meanTerminal)}</div></div>
-                  <div className="mc-stat"><div className="k">Median Terminal Return</div><div className="v">{fmt(monteCarloResult.summary.medianTerminal)}</div></div>
-                  <div className="mc-stat"><div className="k">Std Dev Terminal Return</div><div className="v">{fmt(monteCarloResult.summary.stdTerminal)}</div></div>
-                  <div className="mc-stat"><div className="k">Avg Path Annualized Vol</div><div className="v">{fmt(monteCarloResult.summary.avgPathAnnVol)}</div></div>
-                  <div className="mc-stat"><div className="k">Terminal Min / Max</div><div className="v">{fmt(monteCarloResult.summary.minTerminal)} / {fmt(monteCarloResult.summary.maxTerminal)}</div></div>
-                  <div className="mc-stat"><div className="k">Terminal p5 / p25 / p50 / p75 / p95</div><div className="v">{fmt(monteCarloResult.summary.p05)} / {fmt(monteCarloResult.summary.p25)} / {fmt(monteCarloResult.summary.p50)} / {fmt(monteCarloResult.summary.p75)} / {fmt(monteCarloResult.summary.p95)}</div></div>
-                  <div className="mc-stat"><div className="k">Probability of Loss</div><div className="v">{fmt(monteCarloResult.summary.probLoss)}</div></div>
-                  <div className="mc-stat"><div className="k">Probability of Ruin</div><div className="v">{fmt(monteCarloResult.summary.probRuin)}</div></div>
-                  <div className="mc-stat"><div className="k">Max Drawdown Mean / p50 / p95</div><div className="v">{fmt(monteCarloResult.summary.ddMean)} / {fmt(monteCarloResult.summary.ddP50)} / {fmt(monteCarloResult.summary.ddP95)}</div></div>
-                  <div className="mc-stat"><div className="k">CVaR 5% (Terminal)</div><div className="v">{fmt(monteCarloResult.summary.cvar5)}</div></div>
+                  <div className="mc-stat"><div className="k">Prob Short Loss</div><div className="v">{fmt(monteCarloResult.summary.short?.probLoss)}</div></div>
+                  <div className="mc-stat"><div className="k">Prob Short Ruin</div><div className="v">{fmt(monteCarloResult.summary.short?.probRuin)}</div></div>
+                  <div className="mc-stat"><div className="k">Mean Short Return</div><div className="v">{fmt(monteCarloResult.summary.short?.meanTerminal)}</div></div>
+                  <div className="mc-stat"><div className="k">Median Short Return</div><div className="v">{fmt(monteCarloResult.summary.short?.medianTerminal)}</div></div>
+                  <div className="mc-stat"><div className="k">5% Worst Short Outcome (CVaR)</div><div className="v">{fmt(monteCarloResult.summary.short?.cvar5)}</div></div>
+                  <div className="mc-stat"><div className="k">Short Return p05 / p95</div><div className="v">{fmt(monteCarloResult.summary.short?.p05)} / {fmt(monteCarloResult.summary.short?.p95)}</div></div>
                 </div>
                 <div className="mc-list">
-                  <div><strong>Shorting Risk (Terminal Breach):</strong></div>
+                  <div><strong>Shorting Risk: Terminal ETF Upside Breach</strong></div>
                   {monteCarloResult.summary.upsideTerminalCounts.map((u, i) => (
                     <div key={`t-${i}`}>{`> ${fmt(u.threshold)}: ${u.count}/${monteCarloResult.settings.pathCount} (${fmt(u.pct)})`}</div>
                   ))}
-                  <div style={{ marginTop: 6 }}><strong>Shorting Risk (Any Time Breach):</strong></div>
+                  <div style={{ marginTop: 6 }}><strong>Shorting Risk: Any-Time ETF Upside Breach</strong></div>
                   {monteCarloResult.summary.upsideAnyCounts.map((u, i) => (
                     <div key={`a-${i}`}>{`> ${fmt(u.threshold)}: ${u.count}/${monteCarloResult.settings.pathCount} (${fmt(u.pct)})`}</div>
                   ))}
+                  <div style={{ marginTop: 6, color: 'var(--text-muted)' }}>
+                    Definitions: short return = -ETF return; short ruin when short return falls below threshold.
+                  </div>
                 </div>
               </>
             )}
