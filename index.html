@@ -494,22 +494,50 @@ const YAHOO_RANGE_BY_TF = {
   'ALL': 'max',
 };
 
-function computeAnnualizedRealizedVolFromCloses(closes) {
-  if (!Array.isArray(closes) || closes.length < 3) return null;
-  const rets = [];
-  for (let i = 1; i < closes.length; i++) {
-    const p0 = Number(closes[i - 1]);
-    const p1 = Number(closes[i]);
-    if (!Number.isFinite(p0) || !Number.isFinite(p1) || p0 <= 0 || p1 <= 0) continue;
-    rets.push(Math.log(p1 / p0));
-  }
-  if (rets.length < 2) return null;
-  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
-  const varPop = rets.reduce((a, b) => a + ((b - mean) ** 2), 0) / (rets.length - 1);
-  return Math.sqrt(varPop) * Math.sqrt(252);
+const LOOKBACK_DAYS_BY_TF = {
+  '1M': 21,
+  '3M': 63,
+  '6M': 126,
+  '12M': 252,
+};
+
+function sampleStd(values) {
+  if (!Array.isArray(values) || values.length < 2) return null;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((a, b) => a + ((b - mean) ** 2), 0) / (values.length - 1);
+  return Math.sqrt(variance);
 }
 
-async function fetchYahooCloses(symbol, range) {
+function computeAnnualizedRealizedVolFromSeries(series, { lookbackDays = null, startTs = null, endTs = null } = {}) {
+  if (!series || !Array.isArray(series.timestamps) || !Array.isArray(series.closes)) return null;
+
+  const points = [];
+  const n = Math.min(series.timestamps.length, series.closes.length);
+  for (let i = 0; i < n; i++) {
+    const ts = Number(series.timestamps[i]);
+    const close = Number(series.closes[i]);
+    if (!Number.isFinite(ts) || !Number.isFinite(close) || close <= 0) continue;
+    points.push({ ts, close });
+  }
+  if (points.length < 3) return null;
+
+  let scoped = points;
+  if (Number.isFinite(startTs)) scoped = scoped.filter(p => p.ts >= startTs);
+  if (Number.isFinite(endTs)) scoped = scoped.filter(p => p.ts <= endTs);
+  if (Number.isFinite(lookbackDays) && lookbackDays > 0) {
+    scoped = scoped.slice(-(lookbackDays + 1));
+  }
+  if (scoped.length < 3) return null;
+
+  const rets = [];
+  for (let i = 1; i < scoped.length; i++) {
+    rets.push(Math.log(scoped[i].close / scoped[i - 1].close));
+  }
+  const stdev = sampleStd(rets);
+  return stdev == null ? null : stdev * Math.sqrt(252);
+}
+
+async function fetchYahooSeries(symbol, range) {
   const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
   url.searchParams.set('range', range);
   url.searchParams.set('interval', '1d');
@@ -520,7 +548,8 @@ async function fetchYahooCloses(symbol, range) {
   const result = j?.chart?.result?.[0];
   if (!result) throw new Error(`${symbol} no chart result`);
   const closes = result?.indicators?.adjclose?.[0]?.adjclose || result?.indicators?.quote?.[0]?.close || [];
-  return closes.filter(v => Number.isFinite(v));
+  const timestamps = result?.timestamp || [];
+  return { timestamps, closes };
 }
 
 // ── Columns ─────────────────────────────────
@@ -780,16 +809,33 @@ function ChartPage({ record, onBack }) {
         const customRange = days <= 252 ? '2y' : days <= 756 ? '5y' : '10y';
         const yahooRange = volMode === 'custom' ? customRange : chartRange;
 
-        const [etfClosesRaw, undClosesRaw] = await Promise.all([
-          fetchYahooCloses(etfSym, yahooRange),
-          undSym ? fetchYahooCloses(undSym, yahooRange) : Promise.resolve([]),
+        const [etfSeries, undSeries] = await Promise.all([
+          fetchYahooSeries(etfSym, yahooRange),
+          undSym ? fetchYahooSeries(undSym, yahooRange) : Promise.resolve(null),
         ]);
 
-        const etfCloses = volMode === 'custom' ? etfClosesRaw.slice(-(days + 1)) : etfClosesRaw;
-        const undCloses = volMode === 'custom' ? undClosesRaw.slice(-(days + 1)) : undClosesRaw;
+        const etfLastTs = Array.isArray(etfSeries?.timestamps) && etfSeries.timestamps.length
+          ? Number(etfSeries.timestamps[etfSeries.timestamps.length - 1])
+          : null;
+        const undLastTs = Array.isArray(undSeries?.timestamps) && undSeries.timestamps.length
+          ? Number(undSeries.timestamps[undSeries.timestamps.length - 1])
+          : null;
+        const endTs = Number.isFinite(etfLastTs) && Number.isFinite(undLastTs)
+          ? Math.min(etfLastTs, undLastTs)
+          : (Number.isFinite(etfLastTs) ? etfLastTs : undLastTs);
 
-        const etfVol = computeAnnualizedRealizedVolFromCloses(etfCloses);
-        const undVol = computeAnnualizedRealizedVolFromCloses(undCloses);
+        let volArgs = { endTs };
+        if (volMode === 'custom') {
+          volArgs = { ...volArgs, lookbackDays: days };
+        } else if (activeTf.range === 'YTD') {
+          const startOfYearUtc = Date.UTC(new Date().getUTCFullYear(), 0, 1) / 1000;
+          volArgs = { ...volArgs, startTs: startOfYearUtc };
+        } else if (Number.isFinite(LOOKBACK_DAYS_BY_TF[activeTf.range])) {
+          volArgs = { ...volArgs, lookbackDays: LOOKBACK_DAYS_BY_TF[activeTf.range] };
+        }
+
+        const etfVol = computeAnnualizedRealizedVolFromSeries(etfSeries, volArgs);
+        const undVol = undSeries ? computeAnnualizedRealizedVolFromSeries(undSeries, volArgs) : null;
         const label = volMode === 'custom' ? `${days}d lookback` : `${activeTf.label} lookback`;
 
         if (!cancelled) {
