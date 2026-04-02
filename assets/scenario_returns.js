@@ -161,6 +161,226 @@
     };
   }
 
+  function percentileFromSorted(sortedVals, p) {
+    if (!Array.isArray(sortedVals) || sortedVals.length === 0) return NaN;
+    const pp = clamp(toFiniteNumber(p), 0, 1);
+    const idx = (sortedVals.length - 1) * pp;
+    const lo = Math.floor(idx);
+    const hi = Math.ceil(idx);
+    if (lo === hi) return sortedVals[lo];
+    const w = idx - lo;
+    return sortedVals[lo] * (1 - w) + sortedVals[hi] * w;
+  }
+
+  function mulberry32(seed) {
+    let a = (seed >>> 0) || 1;
+    return function next() {
+      a += 0x6D2B79F5;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function normalFactory(rng) {
+    let spare = null;
+    return function randn() {
+      if (spare != null) {
+        const v = spare;
+        spare = null;
+        return v;
+      }
+      let u = 0;
+      let v = 0;
+      while (u <= 1e-12) u = rng();
+      while (v <= 1e-12) v = rng();
+      const mag = Math.sqrt(-2.0 * Math.log(u));
+      const z0 = mag * Math.cos(2 * Math.PI * v);
+      const z1 = mag * Math.sin(2 * Math.PI * v);
+      spare = z1;
+      return z0;
+    };
+  }
+
+  function computeMaxDrawdown(pathWealth) {
+    if (!Array.isArray(pathWealth) || pathWealth.length < 2) return NaN;
+    let peak = pathWealth[0];
+    let maxDd = 0;
+    for (let i = 1; i < pathWealth.length; i += 1) {
+      const w = pathWealth[i];
+      if (w > peak) peak = w;
+      const dd = 1 - (w / peak);
+      if (dd > maxDd) maxDd = dd;
+    }
+    return maxDd;
+  }
+
+  function parseThresholdList(raw, fallback = [0.25, 0.5, 1.0]) {
+    if (Array.isArray(raw)) {
+      const vals = raw.map(toFiniteNumber).filter(Number.isFinite);
+      return vals.map((x) => (x > 2 ? x / 100 : x)).filter((x) => x >= 0).sort((a, b) => a - b);
+    }
+    if (typeof raw === "string") {
+      const vals = raw
+        .split(",")
+        .map((s) => toFiniteNumber(s))
+        .filter(Number.isFinite)
+        .map((x) => (x > 2 ? x / 100 : x))
+        .filter((x) => x >= 0)
+        .sort((a, b) => a - b);
+      return vals.length ? vals : fallback.slice();
+    }
+    return fallback.slice();
+  }
+
+  function simulateMonteCarloPaths(params) {
+    const pathCount = Math.round(toFiniteNumber((params && params.pathCount) ?? 500));
+    const sigmaAnnual = toFiniteNumber(params && params.sigmaAnnual);
+    const leverage = toFiniteNumber(params && params.leverage);
+    const horizonYears = toFiniteNumber(params && params.horizonYears);
+    const annualCarryDrag = toFiniteNumber((params && params.annualCarryDrag) ?? 0);
+    const seed = Math.round(toFiniteNumber((params && params.seed) ?? 42));
+    const ruinThreshold = toFiniteNumber((params && params.ruinThreshold) ?? -0.8);
+    const upsideThresholds = parseThresholdList((params && params.upsideThresholds), [0.25, 0.5, 1.0]);
+
+    if (!Number.isFinite(pathCount) || pathCount < 1) return { ok: false, error: "Invalid path count." };
+    if (!Number.isFinite(sigmaAnnual) || sigmaAnnual <= 0) return { ok: false, error: "Invalid sigma." };
+    if (!Number.isFinite(leverage)) return { ok: false, error: "Invalid leverage." };
+    if (!Number.isFinite(horizonYears) || horizonYears <= 0) return { ok: false, error: "Invalid horizon." };
+
+    const steps = Math.max(1, Math.round(horizonYears * TRADING_DAYS));
+    const dt = horizonYears / steps;
+    const sdStep = sigmaAnnual * Math.sqrt(dt);
+    const dragStep = 0.5 * leverage * (leverage - 1) * (sigmaAnnual ** 2) * dt;
+    const carryStep = (Number.isFinite(annualCarryDrag) ? annualCarryDrag : 0) * dt;
+    const ruinWealth = 1 + ruinThreshold;
+    const rng = mulberry32(seed);
+    const randn = normalFactory(rng);
+
+    const paths = [];
+    const terminalReturns = [];
+    const maxDrawdowns = [];
+    const pathVols = [];
+    const breachRuin = [];
+    const upsideTerminalCounts = new Array(upsideThresholds.length).fill(0);
+    const upsideAnyCounts = new Array(upsideThresholds.length).fill(0);
+    const stepValues = Array.from({ length: steps + 1 }, () => []);
+
+    for (let p = 0; p < pathCount; p += 1) {
+      const wealthPath = new Array(steps + 1);
+      wealthPath[0] = 1;
+      stepValues[0].push(1);
+      let breached = false;
+      const pathLogRets = [];
+      const crossed = new Array(upsideThresholds.length).fill(false);
+
+      for (let t = 1; t <= steps; t += 1) {
+        const z = randn();
+        const undLogRet = sdStep * z;
+        const etfLogRet = (leverage * undLogRet) - dragStep - carryStep;
+        const next = wealthPath[t - 1] * Math.exp(etfLogRet);
+        wealthPath[t] = Number.isFinite(next) ? next : wealthPath[t - 1];
+        pathLogRets.push(etfLogRet);
+        stepValues[t].push(wealthPath[t]);
+
+        if (!breached && wealthPath[t] <= ruinWealth) breached = true;
+        const simpleRet = wealthPath[t] - 1;
+        for (let k = 0; k < upsideThresholds.length; k += 1) {
+          if (!crossed[k] && simpleRet >= upsideThresholds[k]) crossed[k] = true;
+        }
+      }
+
+      paths.push(wealthPath);
+      const terminal = wealthPath[steps] - 1;
+      terminalReturns.push(terminal);
+      maxDrawdowns.push(computeMaxDrawdown(wealthPath));
+      const pv = computeRealizedVolFromReturns(pathLogRets);
+      pathVols.push(Number.isFinite(pv) ? pv : NaN);
+      breachRuin.push(breached ? 1 : 0);
+      for (let k = 0; k < upsideThresholds.length; k += 1) {
+        if (terminal >= upsideThresholds[k]) upsideTerminalCounts[k] += 1;
+        if (crossed[k]) upsideAnyCounts[k] += 1;
+      }
+    }
+
+    const sortedTerm = terminalReturns.slice().sort((a, b) => a - b);
+    const sortedDd = maxDrawdowns.slice().sort((a, b) => a - b);
+    const worstN = Math.max(1, Math.floor(0.05 * sortedTerm.length));
+    const cvar5 = sortedTerm.slice(0, worstN).reduce((a, b) => a + b, 0) / worstN;
+    const finiteVols = pathVols.filter(Number.isFinite);
+    const meanTerminal = sortedTerm.reduce((a, b) => a + b, 0) / sortedTerm.length;
+
+    const overlays = {
+      mean: [],
+      p05: [],
+      p25: [],
+      p50: [],
+      p75: [],
+      p95: [],
+    };
+    for (let t = 0; t <= steps; t += 1) {
+      const vals = stepValues[t].slice().sort((a, b) => a - b);
+      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+      overlays.mean.push(mean);
+      overlays.p05.push(percentileFromSorted(vals, 0.05));
+      overlays.p25.push(percentileFromSorted(vals, 0.25));
+      overlays.p50.push(percentileFromSorted(vals, 0.5));
+      overlays.p75.push(percentileFromSorted(vals, 0.75));
+      overlays.p95.push(percentileFromSorted(vals, 0.95));
+    }
+
+    return {
+      ok: true,
+      settings: {
+        pathCount,
+        sigmaAnnual,
+        leverage,
+        horizonYears,
+        annualCarryDrag,
+        seed,
+        steps,
+        upsideThresholds,
+        ruinThreshold,
+      },
+      paths,
+      overlays,
+      summary: {
+        meanTerminal,
+        medianTerminal: percentileFromSorted(sortedTerm, 0.5),
+        stdTerminal: Math.sqrt(
+          sortedTerm.reduce((acc, x) => {
+            return acc + ((x - meanTerminal) ** 2);
+          }, 0) / Math.max(1, sortedTerm.length - 1),
+        ),
+        minTerminal: sortedTerm[0],
+        maxTerminal: sortedTerm[sortedTerm.length - 1],
+        p05: percentileFromSorted(sortedTerm, 0.05),
+        p25: percentileFromSorted(sortedTerm, 0.25),
+        p50: percentileFromSorted(sortedTerm, 0.5),
+        p75: percentileFromSorted(sortedTerm, 0.75),
+        p95: percentileFromSorted(sortedTerm, 0.95),
+        cvar5,
+        probLoss: terminalReturns.filter((x) => x < 0).length / terminalReturns.length,
+        probRuin: breachRuin.reduce((a, b) => a + b, 0) / breachRuin.length,
+        ddMean: maxDrawdowns.reduce((a, b) => a + b, 0) / maxDrawdowns.length,
+        ddP50: percentileFromSorted(sortedDd, 0.5),
+        ddP95: percentileFromSorted(sortedDd, 0.95),
+        avgPathAnnVol: finiteVols.length ? finiteVols.reduce((a, b) => a + b, 0) / finiteVols.length : NaN,
+        upsideTerminalCounts: upsideThresholds.map((thr, i) => ({
+          threshold: thr,
+          count: upsideTerminalCounts[i],
+          pct: upsideTerminalCounts[i] / pathCount,
+        })),
+        upsideAnyCounts: upsideThresholds.map((thr, i) => ({
+          threshold: thr,
+          count: upsideAnyCounts[i],
+          pct: upsideAnyCounts[i] / pathCount,
+        })),
+      },
+    };
+  }
+
   const exported = {
     horizonToYears,
     computeRealizedVolFromReturns,
@@ -169,6 +389,8 @@
     buildShockRows,
     estimateEtfReturn,
     buildScenarioGrid,
+    simulateMonteCarloPaths,
+    parseThresholdList,
   };
 
   if (typeof module !== "undefined" && module.exports) {

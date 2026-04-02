@@ -508,6 +508,76 @@
     color: var(--warning);
     font-family: 'JetBrains Mono', monospace;
   }
+  .mc-card {
+    margin-top: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    padding: 10px;
+  }
+  .mc-controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .mc-field label {
+    display: block;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    margin-bottom: 4px;
+    letter-spacing: 0.4px;
+  }
+  .mc-field input, .mc-field select {
+    width: 100%;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    padding: 6px 8px;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .mc-plot {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #0b1322;
+    height: 260px;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .mc-plot svg { width: 100%; height: 100%; display: block; }
+  .mc-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 6px;
+  }
+  .mc-stat {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-card);
+    padding: 7px 8px;
+  }
+  .mc-stat .k {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .mc-stat .v {
+    margin-top: 2px;
+    font-size: 13px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .mc-list {
+    margin-top: 8px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-secondary);
+  }
+  .mc-list div { margin-top: 2px; }
 
   .tf-group {
     display: flex; gap: 3px; margin-left: auto;
@@ -600,6 +670,8 @@ const SCENARIO_HORIZONS = [
   { key: '6M', label: '6M' },
   { key: '1Y', label: '1Y' },
 ];
+const MC_PATH_OPTIONS = [100, 250, 500, 1000];
+const MC_DEFAULT_UPSIDE_THRESHOLDS = '25,50,100';
 
 const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const scenarioCellBg = val => {
@@ -619,6 +691,72 @@ const fmtSigmaMultiple = (m) => {
   if (Math.abs(Math.abs(v) - (1 / 3)) < 1e-9) return `${v < 0 ? '-' : '+'}1/3σ`;
   return `${sign}${v.toFixed(2)}σ`;
 };
+const parseThresholdInput = (raw) => {
+  const txt = String(raw ?? '').trim();
+  if (!txt) return [];
+  return txt
+    .split(',')
+    .map(s => Number(s.trim()))
+    .filter(v => Number.isFinite(v))
+    .map(v => v / 100)
+    .filter(v => v >= 0);
+};
+const quantileSorted = (arr, q) => {
+  if (!arr?.length) return null;
+  const qq = clampNum(Number(q) || 0, 0, 1);
+  const idx = (arr.length - 1) * qq;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return arr[lo];
+  const w = idx - lo;
+  return arr[lo] * (1 - w) + arr[hi] * w;
+};
+function MonteCarloPlot({ result }) {
+  if (!result?.ok) return null;
+  const maxPoints = 180;
+  const totalPts = result.settings.steps + 1;
+  const stride = Math.max(1, Math.ceil(totalPts / maxPoints));
+  const pickIdx = [];
+  for (let i = 0; i < totalPts; i += stride) pickIdx.push(i);
+  if (pickIdx[pickIdx.length - 1] !== totalPts - 1) pickIdx.push(totalPts - 1);
+
+  const toRet = (w) => (Number.isFinite(w) ? w - 1 : 0);
+  const series = result.paths.map(p => pickIdx.map(i => toRet(p[i])));
+  const mean = pickIdx.map(i => toRet(result.overlays.mean[i]));
+  const median = pickIdx.map(i => toRet(result.overlays.p50[i]));
+  const p05 = pickIdx.map(i => toRet(result.overlays.p05[i]));
+  const p95 = pickIdx.map(i => toRet(result.overlays.p95[i]));
+
+  let yMin = Math.min(...p05, ...series.map(s => Math.min(...s)));
+  let yMax = Math.max(...p95, ...series.map(s => Math.max(...s)));
+  if (!Number.isFinite(yMin) || !Number.isFinite(yMax) || yMin === yMax) {
+    yMin = -1;
+    yMax = 1;
+  }
+  const pad = 0.05 * (yMax - yMin);
+  yMin -= pad;
+  yMax += pad;
+
+  const W = 900;
+  const H = 260;
+  const x = (i) => (i / (pickIdx.length - 1)) * W;
+  const y = (v) => H - ((v - yMin) / (yMax - yMin)) * H;
+  const linePath = (vals) => vals.map((v, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}`).join(' ');
+  const bandPath = `M ${x(0)} ${y(p95[0])} ${p95.map((v, i) => `L ${x(i)} ${y(v)}`).join(' ')} ${[...p05].reverse().map((v, i) => `L ${x(p05.length - 1 - i)} ${y(v)}`).join(' ')} Z`;
+
+  return (
+    <div className="mc-plot">
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+        <path d={bandPath} fill="rgba(59,130,246,0.14)" stroke="none" />
+        {series.map((s, i) => (
+          <path key={i} d={linePath(s)} fill="none" stroke="rgba(148,163,184,0.12)" strokeWidth="1" />
+        ))}
+        <path d={linePath(median)} fill="none" stroke="rgba(139,92,246,0.95)" strokeWidth="2.2" />
+        <path d={linePath(mean)} fill="none" stroke="rgba(6,182,212,0.95)" strokeWidth="2.2" />
+      </svg>
+    </div>
+  );
+}
 
 // ── Columns ─────────────────────────────────
 const COLS = [
@@ -844,6 +982,10 @@ function ChartPage({ record, onBack }) {
   const [activeTf, setActiveTf] = useState(TIMEFRAMES[2]); // 6M
   const [activePanel, setActivePanel] = useState('chart');
   const [scenarioHorizon, setScenarioHorizon] = useState('1Y');
+  const [mcPathCount, setMcPathCount] = useState(500);
+  const [mcSeed, setMcSeed] = useState(42);
+  const [mcRuinThresholdPct, setMcRuinThresholdPct] = useState(-80);
+  const [mcUpsideThresholdsText, setMcUpsideThresholdsText] = useState(MC_DEFAULT_UPSIDE_THRESHOLDS);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -882,6 +1024,8 @@ function ChartPage({ record, onBack }) {
   const annualCarryDrag = Number.isFinite(Number(getBorrowRate(r))) ? Math.max(0, Number(getBorrowRate(r))) : 0;
   const minObsForScenario = 10;
   const undObs = Number(volPoint?.n_returns_underlying) || 0;
+  const scenarioSigmaBest = Number(ewmaUnd);
+  const scenarioSigmaRef = Number(realizedUnd);
 
   const scenarioGrid = useMemo(() => {
     if (typeof scenarioFns.buildScenarioGrid !== 'function') {
@@ -907,6 +1051,47 @@ function ChartPage({ record, onBack }) {
       maxReturn: 8.0,
     });
   }, [scenarioFns, ewmaUnd, horizonYears, undObs, scenarioLeverage, annualCarryDrag]);
+
+  const mcUpsideThresholds = useMemo(
+    () => parseThresholdInput(mcUpsideThresholdsText),
+    [mcUpsideThresholdsText],
+  );
+  const monteCarloResult = useMemo(() => {
+    if (typeof scenarioFns.simulateMonteCarloPaths !== 'function') {
+      return { ok: false, error: 'Monte Carlo utility unavailable.' };
+    }
+    if (!Number.isFinite(scenarioSigmaBest) || scenarioSigmaBest <= 0) {
+      return { ok: false, error: 'Missing valid EWMA sigma for Monte Carlo.' };
+    }
+    if (!Number.isFinite(horizonYears) || horizonYears <= 0) {
+      return { ok: false, error: 'Invalid Monte Carlo horizon.' };
+    }
+    if (undObs < minObsForScenario) {
+      return { ok: false, error: `Insufficient lookback observations (${undObs}).` };
+    }
+    return scenarioFns.simulateMonteCarloPaths({
+      pathCount: Number(mcPathCount),
+      sigmaAnnual: scenarioSigmaBest,
+      leverage: scenarioLeverage,
+      horizonYears,
+      annualCarryDrag,
+      seed: Number(mcSeed),
+      ruinThreshold: Number(mcRuinThresholdPct) / 100,
+      upsideThresholds: mcUpsideThresholds.length ? mcUpsideThresholds : [0.25, 0.5, 1.0],
+    });
+  }, [
+    scenarioFns,
+    scenarioSigmaBest,
+    horizonYears,
+    undObs,
+    minObsForScenario,
+    mcPathCount,
+    scenarioLeverage,
+    annualCarryDrag,
+    mcSeed,
+    mcRuinThresholdPct,
+    mcUpsideThresholds,
+  ]);
 
   return (
     <div className="chart-page">
@@ -1096,6 +1281,64 @@ function ChartPage({ record, onBack }) {
             <div className="scenario-formula">
           Then ETF return = exp(log(1 + ETF return)) - 1. Shock mapping: R_underlying = exp(k * sigma * sqrt(T)) - 1.
             </div>
+          </div>
+
+          <div className="mc-card">
+            <div className="scenario-title" style={{ marginBottom: 6 }}>Monte Carlo Path Simulator</div>
+            <div className="scenario-sub" style={{ marginBottom: 8 }}>
+              Uses lookback {activeTf.label}, horizon {scenarioHorizon}, sigma (EWMA) {fmt(scenarioSigmaBest)} and reference realized {fmt(scenarioSigmaRef)}.
+            </div>
+
+            <div className="mc-controls">
+              <div className="mc-field">
+                <label>Path Count</label>
+                <select value={mcPathCount} onChange={(e) => setMcPathCount(Number(e.target.value))}>
+                  {MC_PATH_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+              <div className="mc-field">
+                <label>Seed</label>
+                <input type="number" value={mcSeed} onChange={(e) => setMcSeed(Number(e.target.value || 0))} />
+              </div>
+              <div className="mc-field">
+                <label>Ruin Threshold (%)</label>
+                <input type="number" value={mcRuinThresholdPct} onChange={(e) => setMcRuinThresholdPct(Number(e.target.value || -80))} />
+              </div>
+              <div className="mc-field">
+                <label>Upside Thresholds (%)</label>
+                <input value={mcUpsideThresholdsText} onChange={(e) => setMcUpsideThresholdsText(e.target.value)} placeholder="25,50,100" />
+              </div>
+            </div>
+
+            {!monteCarloResult.ok ? (
+              <div className="scenario-warning">{monteCarloResult.error || 'Monte Carlo unavailable.'}</div>
+            ) : (
+              <>
+                <MonteCarloPlot result={monteCarloResult} />
+                <div className="mc-stats-grid">
+                  <div className="mc-stat"><div className="k">Mean Terminal Return</div><div className="v">{fmt(monteCarloResult.summary.meanTerminal)}</div></div>
+                  <div className="mc-stat"><div className="k">Median Terminal Return</div><div className="v">{fmt(monteCarloResult.summary.medianTerminal)}</div></div>
+                  <div className="mc-stat"><div className="k">Std Dev Terminal Return</div><div className="v">{fmt(monteCarloResult.summary.stdTerminal)}</div></div>
+                  <div className="mc-stat"><div className="k">Avg Path Annualized Vol</div><div className="v">{fmt(monteCarloResult.summary.avgPathAnnVol)}</div></div>
+                  <div className="mc-stat"><div className="k">Terminal Min / Max</div><div className="v">{fmt(monteCarloResult.summary.minTerminal)} / {fmt(monteCarloResult.summary.maxTerminal)}</div></div>
+                  <div className="mc-stat"><div className="k">Terminal p5 / p25 / p50 / p75 / p95</div><div className="v">{fmt(monteCarloResult.summary.p05)} / {fmt(monteCarloResult.summary.p25)} / {fmt(monteCarloResult.summary.p50)} / {fmt(monteCarloResult.summary.p75)} / {fmt(monteCarloResult.summary.p95)}</div></div>
+                  <div className="mc-stat"><div className="k">Probability of Loss</div><div className="v">{fmt(monteCarloResult.summary.probLoss)}</div></div>
+                  <div className="mc-stat"><div className="k">Probability of Ruin</div><div className="v">{fmt(monteCarloResult.summary.probRuin)}</div></div>
+                  <div className="mc-stat"><div className="k">Max Drawdown Mean / p50 / p95</div><div className="v">{fmt(monteCarloResult.summary.ddMean)} / {fmt(monteCarloResult.summary.ddP50)} / {fmt(monteCarloResult.summary.ddP95)}</div></div>
+                  <div className="mc-stat"><div className="k">CVaR 5% (Terminal)</div><div className="v">{fmt(monteCarloResult.summary.cvar5)}</div></div>
+                </div>
+                <div className="mc-list">
+                  <div><strong>Shorting Risk (Terminal Breach):</strong></div>
+                  {monteCarloResult.summary.upsideTerminalCounts.map((u, i) => (
+                    <div key={`t-${i}`}>{`> ${fmt(u.threshold)}: ${u.count}/${monteCarloResult.settings.pathCount} (${fmt(u.pct)})`}</div>
+                  ))}
+                  <div style={{ marginTop: 6 }}><strong>Shorting Risk (Any Time Breach):</strong></div>
+                  {monteCarloResult.summary.upsideAnyCounts.map((u, i) => (
+                    <div key={`a-${i}`}>{`> ${fmt(u.threshold)}: ${u.count}/${monteCarloResult.settings.pathCount} (${fmt(u.pct)})`}</div>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
 
           <div className="chart-note">

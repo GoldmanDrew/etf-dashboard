@@ -8,6 +8,7 @@ const {
   estimateEtfReturn,
   buildScenarioGrid,
   buildShockRows,
+  simulateMonteCarloPaths,
 } = require("../assets/scenario_returns.js");
 
 test("horizon conversion", () => {
@@ -75,4 +76,53 @@ test("shock mapping uses thirds and stays above -100%", () => {
   }
   const mids = shocks.map((r) => r.sigmaMultiple);
   assert.deepEqual(mids, [-1, -2 / 3, -1 / 3, 0, 1 / 3, 2 / 3, 1]);
+});
+
+test("monte carlo deterministic for same seed", () => {
+  const a = simulateMonteCarloPaths({
+    pathCount: 100,
+    sigmaAnnual: 0.8,
+    leverage: -2,
+    horizonYears: 0.5,
+    annualCarryDrag: 0.04,
+    seed: 123,
+    ruinThreshold: -0.8,
+    upsideThresholds: [0.25, 0.5, 1.0],
+  });
+  const b = simulateMonteCarloPaths({
+    pathCount: 100,
+    sigmaAnnual: 0.8,
+    leverage: -2,
+    horizonYears: 0.5,
+    annualCarryDrag: 0.04,
+    seed: 123,
+    ruinThreshold: -0.8,
+    upsideThresholds: [0.25, 0.5, 1.0],
+  });
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  assert.equal(a.summary.meanTerminal, b.summary.meanTerminal);
+  assert.equal(a.summary.p95, b.summary.p95);
+});
+
+test("monte carlo path/step sizing and risk stats", () => {
+  const out = simulateMonteCarloPaths({
+    pathCount: 250,
+    sigmaAnnual: 1.0,
+    leverage: -2,
+    horizonYears: 1,
+    annualCarryDrag: 0.05,
+    seed: 42,
+    ruinThreshold: -0.8,
+    upsideThresholds: [0.25, 0.5, 1.0],
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.paths.length, 250);
+  assert.equal(out.paths[0].length, out.settings.steps + 1);
+  assert.ok(Number.isFinite(out.summary.ddMean));
+  assert.ok(Number.isFinite(out.summary.cvar5));
+  assert.ok(out.summary.probLoss >= 0 && out.summary.probLoss <= 1);
+  assert.ok(out.summary.probRuin >= 0 && out.summary.probRuin <= 1);
+  assert.equal(out.summary.upsideTerminalCounts.length, 3);
+  assert.equal(out.summary.upsideAnyCounts.length, 3);
 });
