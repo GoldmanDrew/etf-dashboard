@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import io
 import json
 import os
 import sys
@@ -36,9 +37,12 @@ REALIZED_VOL_TIMEOUT_SEC = int(os.environ.get("REALIZED_VOL_TIMEOUT_SEC", "20"))
 REALIZED_VOL_RETRIES = int(os.environ.get("REALIZED_VOL_RETRIES", "2"))
 REALIZED_VOL_RANGE = os.environ.get("REALIZED_VOL_RANGE", "2y")
 REALIZED_VOL_EWMA_LAMBDA = float(os.environ.get("REALIZED_VOL_EWMA_LAMBDA", "0.94"))
+BORROW_HISTORY_MAX_COMMITS = int(os.environ.get("BORROW_HISTORY_MAX_COMMITS", "400"))
+BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE_SIZE", "100"))
 
 OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
+BORROW_HISTORY_FILE = OUTPUT_DIR / "borrow_history.json"
 
 # Curated inverse ETF list (Bucket 3 source of truth)
 INVERSE_ETFS = {
@@ -113,6 +117,145 @@ def fetch_last_commit_info() -> dict | None:
     except Exception as e:
         print(f"  Warning: could not fetch commit info: {e}")
     return None
+
+
+def _github_headers() -> dict:
+    headers = {"User-Agent": "etf-dashboard-builder/1.0"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+    return headers
+
+
+def fetch_universe_commits(max_commits: int = BORROW_HISTORY_MAX_COMMITS) -> list[dict]:
+    """Fetch commit metadata for all commits touching etf_screened_today.csv."""
+    url = f"https://api.github.com/repos/{UNIVERSE_REPO}/commits"
+    commits: list[dict] = []
+    page = 1
+    per_page = min(max(1, BORROW_HISTORY_COMMIT_PAGE_SIZE), 100)
+
+    while len(commits) < max_commits:
+        params = {"path": UNIVERSE_PATH, "per_page": per_page, "page": page}
+        resp = requests.get(url, headers=_github_headers(), params=params, timeout=25)
+        if not resp.ok:
+            raise RuntimeError(f"GitHub commits API failed: HTTP {resp.status_code} on page={page}")
+        rows = resp.json() or []
+        if not rows:
+            break
+        for c in rows:
+            commits.append(
+                {
+                    "sha": c.get("sha", ""),
+                    "date": (c.get("commit", {}).get("committer", {}) or {}).get("date"),
+                }
+            )
+            if len(commits) >= max_commits:
+                break
+        page += 1
+
+    return [c for c in commits if c.get("sha") and c.get("date")]
+
+
+def _fetch_csv_at_sha(sha: str) -> pd.DataFrame | None:
+    raw_url = f"https://raw.githubusercontent.com/{UNIVERSE_REPO}/{sha}/{UNIVERSE_PATH}"
+    resp = requests.get(raw_url, headers=_github_headers(), timeout=25)
+    if not resp.ok:
+        return None
+    try:
+        return pd.read_csv(io.StringIO(resp.text))
+    except Exception:
+        return None
+
+
+def _pick_borrow_fee_only(row) -> float | None:
+    # Explicitly prefer fee-only borrow (not net of rebate).
+    for key in ("borrow_current", "borrow_fee_annual", "borrow_net_annual"):
+        v = row.get(key)
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            continue
+        try:
+            return round(float(v), 6)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def build_borrow_history_from_commits(universe_symbols: set[str]) -> dict:
+    """
+    Build cleaned borrow/shares time series for each ETF symbol using all available
+    historical etf_screened_today.csv snapshots from GitHub commit history.
+    """
+    print("Building historical borrow/shares database from screener history ...")
+    symbols = {norm_sym(s) for s in universe_symbols if str(s).strip()}
+    by_symbol_day: dict[str, dict[str, dict]] = {s: {} for s in symbols}
+
+    try:
+        commits = fetch_universe_commits()
+    except Exception as e:
+        print(f"  Warning: could not fetch commit history for borrow DB: {e}")
+        return {"symbols": {}, "meta": {"error": str(e)}}
+
+    print(f"  Commit snapshots discovered: {len(commits)}")
+    processed = 0
+    for idx, c in enumerate(commits, start=1):
+        sha = c["sha"]
+        commit_date = c["date"]
+        day = str(commit_date)[:10]
+        snap = _fetch_csv_at_sha(sha)
+        if snap is None or snap.empty or "ETF" not in snap.columns:
+            continue
+
+        snap["symbol"] = snap["ETF"].apply(norm_sym)
+        filtered = snap[snap["symbol"].isin(symbols)]
+        if filtered.empty:
+            continue
+
+        for _, row in filtered.iterrows():
+            sym = row["symbol"]
+            borrow = _pick_borrow_fee_only(row)
+            shares = None
+            if pd.notna(row.get("shares_available")):
+                try:
+                    shares = int(row.get("shares_available"))
+                except (TypeError, ValueError):
+                    shares = None
+            if borrow is None and shares is None:
+                continue
+
+            cur = by_symbol_day[sym].get(day)
+            # Keep the latest snapshot in a day.
+            if cur is None or str(commit_date) > str(cur.get("_commit_ts", "")):
+                by_symbol_day[sym][day] = {
+                    "date": day,
+                    "borrow_current": borrow,
+                    "shares_available": shares,
+                    "_commit_ts": commit_date,
+                    "_sha": sha[:12],
+                }
+
+        processed += 1
+        if idx % 25 == 0 or idx == len(commits):
+            print(f"  Borrow history progress: {idx}/{len(commits)} commits (processed={processed})")
+
+    cleaned_symbols: dict[str, list[dict]] = {}
+    for sym, by_day in by_symbol_day.items():
+        rows = sorted(by_day.values(), key=lambda x: x["date"])
+        cleaned_symbols[sym] = [
+            {
+                "date": r["date"],
+                "borrow_current": r.get("borrow_current"),
+                "shares_available": r.get("shares_available"),
+            }
+            for r in rows
+        ]
+
+    meta = {
+        "source_repo": UNIVERSE_REPO,
+        "source_path": UNIVERSE_PATH,
+        "snapshot_commits_used": processed,
+        "symbols_with_history": sum(1 for v in cleaned_symbols.values() if v),
+        "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+    }
+    return {"symbols": cleaned_symbols, "meta": meta}
 
 
 def try_fetch_ibkr_ftp() -> dict:
@@ -484,6 +627,10 @@ def build():
     vol_symbols = set(df["symbol"].dropna().tolist()) | set(df["underlying_sym"].dropna().tolist())
     realized_vol_map = compute_realized_vol_map(vol_symbols)
 
+    # 4b. Build historical borrow/shares database (fee-only borrow, no rebate).
+    borrow_history = build_borrow_history_from_commits(set(df["symbol"].dropna().tolist()))
+    borrow_history_symbols = borrow_history.get("symbols", {})
+
     # 5. Build records
     records = []
     decay_count = 0
@@ -546,6 +693,10 @@ def build():
         if vol_etf is None:
             vol_etf = vol_etf_csv
 
+        hist_rows = borrow_history_symbols.get(sym, [])
+        hist_borrows = [float(x["borrow_current"]) for x in hist_rows if x.get("borrow_current") is not None]
+        borrow_avg_annual = round(float(np.mean(hist_borrows)), 6) if hist_borrows else None
+
         if gross_decay is not None:
             decay_count += 1
 
@@ -558,6 +709,7 @@ def build():
             "borrow_fee_annual": round(borrow_fee, 6) if borrow_fee is not None else None,
             "borrow_rebate_annual": round(borrow_rebate, 6) if borrow_rebate is not None else None,
             "borrow_current": round(borrow_current, 6) if borrow_current is not None else None,
+            "borrow_avg_annual": borrow_avg_annual,
             "borrow_net_annual": round(borrow_current, 6) if borrow_current is not None else None,
             "shares_available": shares_avail,
             "borrow_spiking": bool(row.get("borrow_spiking", False)),
@@ -588,6 +740,7 @@ def build():
         "ibkr_symbols_fetched": len(ibkr["borrow_map"]) if ibkr["success"] else 0,
         "refresh_type": "full",
         "decay_method": "linear_daily_pnl_1_over_beta_hedge",
+        "borrow_history_file": "data/borrow_history.json",
         "summary": summary,
         "records": records,
     }
@@ -596,9 +749,13 @@ def build():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w") as f:
         json.dump(output, f, indent=None, separators=(",", ":"))
+    with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(borrow_history, f, indent=None, separators=(",", ":"))
 
     file_size = OUTPUT_FILE.stat().st_size
     print(f"\n[OK] Wrote {OUTPUT_FILE} ({file_size:,} bytes)")
+    if BORROW_HISTORY_FILE.exists():
+        print(f"  [OK] Wrote {BORROW_HISTORY_FILE} ({BORROW_HISTORY_FILE.stat().st_size:,} bytes)")
     print(f"  {len(records)} records | B1={summary['bucket_1_count']} B2={summary['bucket_2_count']} B3={summary['bucket_3_count']}")
     print(f"  Decay: {decay_count}/{len(records)} ({100*decay_count/len(records):.0f}%)")
     print(f"  IBKR FTP: {'OK' if ibkr['success'] else 'FAIL'}")

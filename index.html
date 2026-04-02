@@ -550,7 +550,7 @@
   .mc-plot svg { width: 100%; height: 100%; display: block; }
   .mc-stats-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
     gap: 6px;
   }
   .mc-stat {
@@ -578,6 +578,23 @@
     color: var(--text-secondary);
   }
   .mc-list div { margin-top: 2px; }
+  .borrow-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .borrow-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    padding: 10px;
+  }
+  .borrow-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+    margin-bottom: 6px;
+  }
 
   .tf-group {
     display: flex; gap: 3px; margin-left: auto;
@@ -620,6 +637,8 @@
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 const DATA_URL = "data/dashboard_data.json";
+const BORROW_HISTORY_URL = "data/borrow_history.json";
+let BORROW_HISTORY_CACHE = null;
 
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
@@ -777,6 +796,56 @@ function MonteCarloPlot({ result, mode = 'short' }) {
         ))}
         <path d={linePath(median)} fill="none" stroke="rgba(139,92,246,0.95)" strokeWidth="2.2" />
         <path d={linePath(mean)} fill="none" stroke="rgba(6,182,212,0.95)" strokeWidth="2.2" />
+      </svg>
+    </div>
+  );
+}
+
+function SimpleSeriesPlot({ series, valueKey, color, label, formatValue }) {
+  if (!Array.isArray(series) || !series.length) {
+    return <div className="scenario-warning">No data available.</div>;
+  }
+  const vals = series.map(p => Number(p?.[valueKey])).filter(Number.isFinite);
+  if (!vals.length) return <div className="scenario-warning">No finite values available.</div>;
+
+  const W = 900;
+  const H = 220;
+  const L = 60;
+  const R = 8;
+  const T = 10;
+  const B = 22;
+  const PW = W - L - R;
+  const PH = H - T - B;
+
+  const yMinRaw = Math.min(...vals);
+  const yMaxRaw = Math.max(...vals);
+  const pad = (yMaxRaw - yMinRaw || Math.max(1, Math.abs(yMaxRaw) * 0.1)) * 0.08;
+  const yMin = yMinRaw - pad;
+  const yMax = yMaxRaw + pad;
+  const x = (i) => L + (i / Math.max(1, series.length - 1)) * PW;
+  const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, yMax - yMin))) * PH;
+
+  const lineVals = series.map(p => Number(p?.[valueKey]));
+  const linePath = lineVals
+    .map((v, i) => (Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : ''))
+    .filter(Boolean)
+    .join(' ');
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map(q => yMin + (yMax - yMin) * q).reverse();
+
+  return (
+    <div className="mc-plot" style={{ height: 220 }}>
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+        <rect x={L} y={T} width={PW} height={PH} fill="rgba(11,19,34,0.2)" stroke="rgba(56,72,96,0.5)" />
+        {ticks.map((tick, i) => (
+          <g key={i}>
+            <line x1={L} y1={y(tick)} x2={W - R} y2={y(tick)} stroke="rgba(56,72,96,0.35)" strokeWidth="1" />
+            <text x={L - 6} y={y(tick) + 3} textAnchor="end" fontSize="10" fill="#7f8ea8" fontFamily="JetBrains Mono">
+              {formatValue ? formatValue(tick) : String(tick)}
+            </text>
+          </g>
+        ))}
+        <path d={linePath} fill="none" stroke={color || "rgba(6,182,212,0.95)"} strokeWidth="2" />
+        <text x="12" y={T + 10} fontSize="10" fill="#7f8ea8" fontFamily="JetBrains Mono">{label}</text>
       </svg>
     </div>
   );
@@ -1010,6 +1079,9 @@ function ChartPage({ record, onBack }) {
   const [mcSeed, setMcSeed] = useState(42);
   const [mcRuinThresholdPct, setMcRuinThresholdPct] = useState(-80);
   const [mcUpsideThresholdsText, setMcUpsideThresholdsText] = useState(MC_DEFAULT_UPSIDE_THRESHOLDS);
+  const [borrowHistoryMap, setBorrowHistoryMap] = useState({});
+  const [borrowHistoryLoading, setBorrowHistoryLoading] = useState(false);
+  const [borrowHistoryError, setBorrowHistoryError] = useState(null);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -1031,6 +1103,33 @@ function ChartPage({ record, onBack }) {
 
   // Reset loaded state when widget changes
   useEffect(() => { setIframeLoaded(false); }, [widgetHtml]);
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (BORROW_HISTORY_CACHE) {
+        setBorrowHistoryMap(BORROW_HISTORY_CACHE);
+        return;
+      }
+      setBorrowHistoryLoading(true);
+      setBorrowHistoryError(null);
+      try {
+        const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+        const res = await fetch(`${BORROW_HISTORY_URL}${cacheBust}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`borrow history HTTP ${res.status}`);
+        const payload = await res.json();
+        const symbols = payload?.symbols && typeof payload.symbols === 'object' ? payload.symbols : {};
+        BORROW_HISTORY_CACHE = symbols;
+        if (!cancelled) setBorrowHistoryMap(symbols);
+      } catch (e) {
+        if (!cancelled) setBorrowHistoryError(e?.message || 'borrow history unavailable');
+      } finally {
+        if (!cancelled) setBorrowHistoryLoading(false);
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, []);
+
   const volWindowKey = VOL_TF_KEY_BY_RANGE[activeTf.range] || '6M';
   const volPoint = r?.realized_vol?.[volWindowKey] || null;
   const realizedUnd = volPoint?.underlying ?? r.vol_underlying_annual ?? null;
@@ -1045,7 +1144,16 @@ function ChartPage({ record, onBack }) {
     ? scenarioFns.horizonToYears(scenarioHorizon)
     : NaN;
   const scenarioLeverage = Number.isFinite(Number(r.beta)) ? Number(r.beta) : 1;
-  const annualCarryDrag = Number.isFinite(Number(getBorrowRate(r))) ? Math.max(0, Number(getBorrowRate(r))) : 0;
+  const etfBorrowSeries = Array.isArray(borrowHistoryMap?.[etfSym]) ? borrowHistoryMap[etfSym] : [];
+  const avgBorrowFromHistory = (() => {
+    const vals = etfBorrowSeries.map(x => Number(x?.borrow_current)).filter(Number.isFinite);
+    if (!vals.length) return null;
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
+  })();
+  const annualCarryDragRaw = Number.isFinite(avgBorrowFromHistory)
+    ? avgBorrowFromHistory
+    : (Number.isFinite(Number(r.borrow_avg_annual)) ? Number(r.borrow_avg_annual) : Number(getBorrowRate(r)));
+  const annualCarryDrag = Number.isFinite(annualCarryDragRaw) ? Math.max(0, annualCarryDragRaw) : 0;
   const minObsForScenario = 10;
   const undObs = Number(volPoint?.n_returns_underlying) || 0;
   const scenarioSigmaBest = Number(ewmaUnd);
@@ -1137,6 +1245,7 @@ function ChartPage({ record, onBack }) {
           <button className={cls('chart-view-btn', activePanel === 'chart' && 'active')} onClick={() => setActivePanel('chart')}>Chart</button>
           <button className={cls('chart-view-btn', activePanel === 'stats' && 'active')} onClick={() => setActivePanel('stats')}>Stats</button>
           <button className={cls('chart-view-btn', activePanel === 'scenarios' && 'active')} onClick={() => setActivePanel('scenarios')}>Scenarios</button>
+          <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => setActivePanel('borrow')}>Borrow</button>
         </div>
 
         {/* Timeframe buttons */}
@@ -1371,6 +1480,56 @@ function ChartPage({ record, onBack }) {
 
           <div className="chart-note">
             Scenario grid uses smaller ±1σ ladder with thirds and log-space shocks so underlying return is always greater than -100%.
+          </div>
+        </div>
+      )}
+
+      {activePanel === 'borrow' && (
+        <div className="chart-section">
+          <div className="borrow-grid">
+            <div className="borrow-card">
+              <div className="scenario-title">Borrow Rate History (Fee-Only)</div>
+              <div className="borrow-meta">
+                Symbol: {etfSym} | points: {fmtNum(etfBorrowSeries.length)} | average borrow: {fmt(avgBorrowFromHistory)}
+              </div>
+              {borrowHistoryLoading ? (
+                <div className="scenario-warning">Loading borrow history…</div>
+              ) : borrowHistoryError ? (
+                <div className="scenario-warning">{borrowHistoryError}</div>
+              ) : (
+                <SimpleSeriesPlot
+                  series={etfBorrowSeries}
+                  valueKey="borrow_current"
+                  color="rgba(245,158,11,0.95)"
+                  label="Borrow rate (annual, fee-only)"
+                  formatValue={(v) => fmt(v)}
+                />
+              )}
+            </div>
+
+            <div className="borrow-card">
+              <div className="scenario-title">Shares Available History</div>
+              <div className="borrow-meta">
+                Source: historical `etf_screened_today.csv` snapshots across available commit history.
+              </div>
+              {borrowHistoryLoading ? (
+                <div className="scenario-warning">Loading borrow history…</div>
+              ) : borrowHistoryError ? (
+                <div className="scenario-warning">{borrowHistoryError}</div>
+              ) : (
+                <SimpleSeriesPlot
+                  series={etfBorrowSeries}
+                  valueKey="shares_available"
+                  color="rgba(6,182,212,0.95)"
+                  label="Shares available"
+                  formatValue={(v) => fmtNum(Math.round(v))}
+                />
+              )}
+            </div>
+          </div>
+
+          <div className="chart-note">
+            Monte Carlo carry drag uses average historical fee-only borrow when available, otherwise falls back to current borrow.
           </div>
         </div>
       )}
