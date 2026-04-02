@@ -1091,10 +1091,10 @@ function ChartPage({ record, onBack }) {
               </div>
             )}
             <div className="scenario-formula">
-              ETF return approx = L * R_underlying - 0.5 * L * (L - 1) * sigma^2 * T - carry * T
+          log(1 + ETF return) approx = L * log(1 + R_underlying) - 0.5 * L * (L - 1) * sigma^2 * T - carry * T
             </div>
             <div className="scenario-formula">
-              Shock mapping: R_underlying = exp(k * sigma * sqrt(T)) - 1, where k is shown in σ units.
+          Then ETF return = exp(log(1 + ETF return)) - 1. Shock mapping: R_underlying = exp(k * sigma * sqrt(T)) - 1.
             </div>
           </div>
 

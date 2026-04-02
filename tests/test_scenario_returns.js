@@ -46,7 +46,7 @@ test("etf return model includes drag and carry", () => {
     annualCarryDrag: 0.05,
   });
   assert.equal(out.ok, true);
-  const expected = (-2 * -0.1) - (0.5 * -2 * -3 * (0.8 ** 2) * 1) - 0.05;
+  const expected = Math.exp(((-2) * Math.log(1 - 0.1)) - (0.5 * -2 * -3 * (0.8 ** 2) * 1) - 0.05) - 1;
   assert.ok(Math.abs(out.raw - expected) < 1e-12);
 });
 
@@ -64,7 +64,7 @@ test("scenario grid deterministic shape and center shock", () => {
   assert.equal(grid.rows.length, 1);
   const cell = grid.rows[0].cells[0];
   assert.equal(cell.ok, true);
-  assert.ok(Math.abs(cell.raw - (-3.0)) < 1e-12); // only volatility drag term remains
+  assert.ok(Math.abs(cell.raw - (Math.exp(-3.0) - 1)) < 1e-12); // only drag remains in log space
 });
 
 test("shock mapping uses thirds and stays above -100%", () => {

@@ -97,8 +97,14 @@
     }
 
     const carry = Number.isFinite(annualCarryDrag) ? annualCarryDrag : 0;
-    const drag = 0.5 * leverage * (leverage - 1) * (sigmaAnnual ** 2) * horizonYears;
-    const raw = leverage * underlyingReturn - drag - (carry * horizonYears);
+    const dragLog = 0.5 * leverage * (leverage - 1) * (sigmaAnnual ** 2) * horizonYears;
+    const onePlusUnderlying = 1 + underlyingReturn;
+    if (!Number.isFinite(onePlusUnderlying) || onePlusUnderlying <= 0) {
+      return { ok: false, error: "Invalid underlying return for log compounding." };
+    }
+    const underlyingLog = Math.log(onePlusUnderlying);
+    const etfLog = (leverage * underlyingLog) - dragLog - (carry * horizonYears);
+    const raw = Math.exp(etfLog) - 1;
     if (!Number.isFinite(raw)) return { ok: false, error: "Non-finite model output." };
 
     const lo = Number.isFinite(minReturn) ? minReturn : -0.99;
@@ -109,7 +115,8 @@
       raw,
       value,
       clamped: value !== raw,
-      drag,
+      drag: dragLog,
+      etfLog,
     };
   }
 
