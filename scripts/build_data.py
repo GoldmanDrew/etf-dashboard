@@ -34,6 +34,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 HIGH_BETA_THRESHOLD = float(os.environ.get("HIGH_BETA_THRESHOLD", "1.5"))
 REALIZED_VOL_TIMEOUT_SEC = int(os.environ.get("REALIZED_VOL_TIMEOUT_SEC", "20"))
 REALIZED_VOL_RETRIES = int(os.environ.get("REALIZED_VOL_RETRIES", "2"))
+REALIZED_VOL_RANGE = os.environ.get("REALIZED_VOL_RANGE", "2y")
 
 OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
@@ -232,10 +233,15 @@ def _build_realized_vol_windows(points: list[tuple[dt.date, float]]) -> dict:
     return results
 
 
-def _fetch_yahoo_adjclose_points(session: requests.Session, symbol: str) -> list[tuple[dt.date, float]]:
-    """Fetch max daily adjusted-close history from Yahoo chart API."""
+def _fetch_yahoo_adjclose_points(
+    session: requests.Session,
+    symbol: str,
+    *,
+    range_value: str,
+) -> list[tuple[dt.date, float]]:
+    """Fetch adjusted-close history from Yahoo chart API for a fixed range."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {"range": "max", "interval": "1d", "events": "div,splits"}
+    params = {"range": range_value, "interval": "1d", "events": "div,splits"}
 
     last_err = None
     for attempt in range(REALIZED_VOL_RETRIES + 1):
@@ -287,13 +293,16 @@ def compute_realized_vol_map(symbols: set[str]) -> dict[str, dict]:
     if not clean_symbols:
         return out
 
-    print(f"Fetching Yahoo daily history for realized vol ({len(clean_symbols)} symbols) ...")
+    print(
+        f"Fetching Yahoo daily history for realized vol ({len(clean_symbols)} symbols, "
+        f"range={REALIZED_VOL_RANGE}) ..."
+    )
     session = requests.Session()
     session.headers.update({"User-Agent": "etf-dashboard-builder/1.0"})
 
     ok = 0
     for i, sym in enumerate(clean_symbols, start=1):
-        points = _fetch_yahoo_adjclose_points(session, sym)
+        points = _fetch_yahoo_adjclose_points(session, sym, range_value=REALIZED_VOL_RANGE)
         windows = _build_realized_vol_windows(points) if points else {}
         if windows:
             out[sym] = windows
