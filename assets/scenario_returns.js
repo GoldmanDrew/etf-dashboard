@@ -2,7 +2,7 @@
 (function initScenarioReturns(globalObj) {
   const TRADING_DAYS = 252;
   const DEFAULT_VOL_MULTIPLIERS = [0.6, 0.8, 1.0, 1.2, 1.4];
-  const DEFAULT_SHOCK_MULTIPLIERS = [-3, -2, -1, 0, 1, 2, 3];
+  const DEFAULT_SHOCK_MULTIPLIERS = [-1, -2 / 3, -1 / 3, 0, 1 / 3, 2 / 3, 1];
 
   function toFiniteNumber(value) {
     if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
@@ -73,7 +73,8 @@
       .filter(Number.isFinite)
       .map((m) => ({
         sigmaMultiple: m,
-        underlyingReturn: m * horizonSigma,
+        // Map shocks in log-return space so simple return is always > -100%.
+        underlyingReturn: Math.exp(m * horizonSigma) - 1,
       }));
   }
 

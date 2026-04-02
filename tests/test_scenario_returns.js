@@ -7,6 +7,7 @@ const {
   computeEwmaVolFromReturns,
   estimateEtfReturn,
   buildScenarioGrid,
+  buildShockRows,
 } = require("../assets/scenario_returns.js");
 
 test("horizon conversion", () => {
@@ -64,4 +65,14 @@ test("scenario grid deterministic shape and center shock", () => {
   const cell = grid.rows[0].cells[0];
   assert.equal(cell.ok, true);
   assert.ok(Math.abs(cell.raw - (-3.0)) < 1e-12); // only volatility drag term remains
+});
+
+test("shock mapping uses thirds and stays above -100%", () => {
+  const shocks = buildShockRows(1.2, 1, [-1, -2 / 3, -1 / 3, 0, 1 / 3, 2 / 3, 1]);
+  assert.equal(shocks.length, 7);
+  for (const row of shocks) {
+    assert.ok(row.underlyingReturn > -1, `invalid underlying return ${row.underlyingReturn}`);
+  }
+  const mids = shocks.map((r) => r.sigmaMultiple);
+  assert.deepEqual(mids, [-1, -2 / 3, -1 / 3, 0, 1 / 3, 2 / 3, 1]);
 });
