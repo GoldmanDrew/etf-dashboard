@@ -485,72 +485,14 @@ const borrowBadge = v => {
   return null;
 };
 
-const YAHOO_RANGE_BY_TF = {
-  '1M': '1mo',
-  '3M': '3mo',
-  '6M': '6mo',
-  'YTD': 'ytd',
-  '12M': '1y',
-  'ALL': 'max',
+const VOL_TF_KEY_BY_RANGE = {
+  '1M': '1M',
+  '3M': '3M',
+  '6M': '6M',
+  'YTD': 'YTD',
+  '12M': '12M',
+  'ALL': 'ALL',
 };
-
-const LOOKBACK_DAYS_BY_TF = {
-  '1M': 21,
-  '3M': 63,
-  '6M': 126,
-  '12M': 252,
-};
-
-function sampleStd(values) {
-  if (!Array.isArray(values) || values.length < 2) return null;
-  const mean = values.reduce((a, b) => a + b, 0) / values.length;
-  const variance = values.reduce((a, b) => a + ((b - mean) ** 2), 0) / (values.length - 1);
-  return Math.sqrt(variance);
-}
-
-function computeAnnualizedRealizedVolFromSeries(series, { lookbackDays = null, startTs = null, endTs = null } = {}) {
-  if (!series || !Array.isArray(series.timestamps) || !Array.isArray(series.closes)) return null;
-
-  const points = [];
-  const n = Math.min(series.timestamps.length, series.closes.length);
-  for (let i = 0; i < n; i++) {
-    const ts = Number(series.timestamps[i]);
-    const close = Number(series.closes[i]);
-    if (!Number.isFinite(ts) || !Number.isFinite(close) || close <= 0) continue;
-    points.push({ ts, close });
-  }
-  if (points.length < 3) return null;
-
-  let scoped = points;
-  if (Number.isFinite(startTs)) scoped = scoped.filter(p => p.ts >= startTs);
-  if (Number.isFinite(endTs)) scoped = scoped.filter(p => p.ts <= endTs);
-  if (Number.isFinite(lookbackDays) && lookbackDays > 0) {
-    scoped = scoped.slice(-(lookbackDays + 1));
-  }
-  if (scoped.length < 3) return null;
-
-  const rets = [];
-  for (let i = 1; i < scoped.length; i++) {
-    rets.push(Math.log(scoped[i].close / scoped[i - 1].close));
-  }
-  const stdev = sampleStd(rets);
-  return stdev == null ? null : stdev * Math.sqrt(252);
-}
-
-async function fetchYahooSeries(symbol, range) {
-  const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
-  url.searchParams.set('range', range);
-  url.searchParams.set('interval', '1d');
-  url.searchParams.set('events', 'div,splits');
-  const res = await fetch(url.toString(), { cache: 'no-store' });
-  if (!res.ok) throw new Error(`${symbol} HTTP ${res.status}`);
-  const j = await res.json();
-  const result = j?.chart?.result?.[0];
-  if (!result) throw new Error(`${symbol} no chart result`);
-  const closes = result?.indicators?.adjclose?.[0]?.adjclose || result?.indicators?.quote?.[0]?.close || [];
-  const timestamps = result?.timestamp || [];
-  return { timestamps, closes };
-}
 
 // ── Columns ─────────────────────────────────
 const COLS = [
@@ -775,9 +717,6 @@ function buildWidgetHtml(symbol, compareSymbol, range, interval) {
 function ChartPage({ record, onBack }) {
   const [activeTf, setActiveTf] = useState(TIMEFRAMES[2]); // 6M
   const [iframeLoaded, setIframeLoaded] = useState(false);
-  const [realizedVol, setRealizedVol] = useState({ loading: false, und: null, etf: null, error: null, label: '' });
-  const [volMode, setVolMode] = useState('chart');
-  const [customDays, setCustomDays] = useState(126);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
 
@@ -798,66 +737,13 @@ function ChartPage({ record, onBack }) {
 
   // Reset loaded state when widget changes
   useEffect(() => { setIframeLoaded(false); }, [widgetHtml]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
-      setRealizedVol({ loading: true, und: null, etf: null, error: null, label: '' });
-      try {
-        const days = Math.max(10, parseInt(customDays, 10) || 126);
-        const chartRange = YAHOO_RANGE_BY_TF[activeTf.range] || '6mo';
-        const customRange = days <= 252 ? '2y' : days <= 756 ? '5y' : '10y';
-        const yahooRange = volMode === 'custom' ? customRange : chartRange;
-
-        const [etfSeries, undSeries] = await Promise.all([
-          fetchYahooSeries(etfSym, yahooRange),
-          undSym ? fetchYahooSeries(undSym, yahooRange) : Promise.resolve(null),
-        ]);
-
-        const etfLastTs = Array.isArray(etfSeries?.timestamps) && etfSeries.timestamps.length
-          ? Number(etfSeries.timestamps[etfSeries.timestamps.length - 1])
-          : null;
-        const undLastTs = Array.isArray(undSeries?.timestamps) && undSeries.timestamps.length
-          ? Number(undSeries.timestamps[undSeries.timestamps.length - 1])
-          : null;
-        const endTs = Number.isFinite(etfLastTs) && Number.isFinite(undLastTs)
-          ? Math.min(etfLastTs, undLastTs)
-          : (Number.isFinite(etfLastTs) ? etfLastTs : undLastTs);
-
-        let volArgs = { endTs };
-        if (volMode === 'custom') {
-          volArgs = { ...volArgs, lookbackDays: days };
-        } else if (activeTf.range === 'YTD') {
-          const startOfYearUtc = Date.UTC(new Date().getUTCFullYear(), 0, 1) / 1000;
-          volArgs = { ...volArgs, startTs: startOfYearUtc };
-        } else if (Number.isFinite(LOOKBACK_DAYS_BY_TF[activeTf.range])) {
-          volArgs = { ...volArgs, lookbackDays: LOOKBACK_DAYS_BY_TF[activeTf.range] };
-        }
-
-        const etfVol = computeAnnualizedRealizedVolFromSeries(etfSeries, volArgs);
-        const undVol = undSeries ? computeAnnualizedRealizedVolFromSeries(undSeries, volArgs) : null;
-        const label = volMode === 'custom' ? `${days}d lookback` : `${activeTf.label} lookback`;
-
-        if (!cancelled) {
-          setRealizedVol({ loading: false, und: undVol, etf: etfVol, error: null, label });
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setRealizedVol({
-            loading: false,
-            und: null,
-            etf: null,
-            error: e?.message || 'volatility fetch failed',
-            label: volMode === 'custom'
-              ? `${Math.max(10, parseInt(customDays, 10) || 126)}d lookback`
-              : `${activeTf.label} lookback`,
-          });
-        }
-      }
-    };
-    run();
-    return () => { cancelled = true; };
-  }, [etfSym, undSym, activeTf, volMode, customDays]);
+  const volWindowKey = VOL_TF_KEY_BY_RANGE[activeTf.range] || '6M';
+  const volPoint = r?.realized_vol?.[volWindowKey] || null;
+  const realizedUnd = volPoint?.underlying ?? r.vol_underlying_annual ?? null;
+  const realizedEtf = volPoint?.etf ?? r.vol_etf_annual ?? null;
+  const realizedLabel = volPoint ? `${activeTf.label} lookback` : 'screener snapshot';
+  const realizedUndSub = volPoint?.n_returns_underlying ? `${realizedLabel} • ${fmtNum(volPoint.n_returns_underlying)} rets` : realizedLabel;
+  const realizedEtfSub = volPoint?.n_returns_etf ? `${realizedLabel} • ${fmtNum(volPoint.n_returns_etf)} rets` : realizedLabel;
 
   return (
     <div className="chart-page">
@@ -885,25 +771,6 @@ function ChartPage({ record, onBack }) {
               {tf.label}
             </button>
           ))}
-        </div>
-        <div className="tf-group" style={{ marginLeft: 8, gap: 6 }}>
-          <select className="tf-btn" value={volMode} onChange={e => setVolMode(e.target.value)}>
-            <option value="chart">Vol: chart window</option>
-            <option value="custom">Vol: custom days</option>
-          </select>
-          {volMode === 'custom' && (
-            <input
-              className="tf-btn"
-              type="number"
-              min="10"
-              max="2520"
-              step="1"
-              value={customDays}
-              onChange={e => setCustomDays(e.target.value)}
-              style={{ width: 110 }}
-              title="Custom lookback in trading days"
-            />
-          )}
         </div>
       </div>
 
@@ -956,9 +823,9 @@ function ChartPage({ record, onBack }) {
         <div className="chart-stat">
           <div className="cs-label">Realized Vol Underlying</div>
           <div className="cs-value">
-            {realizedVol.loading ? '…' : (realizedVol.und == null ? '—' : fmt(realizedVol.und))}
+            {realizedUnd == null ? '—' : fmt(realizedUnd)}
           </div>
-          <div className="cs-sub">{realizedVol.label || (undSym || '—')}</div>
+          <div className="cs-sub">{realizedUndSub}</div>
         </div>
         <div className="chart-stat">
           <div className="cs-label">Vol ETF</div>
@@ -968,9 +835,9 @@ function ChartPage({ record, onBack }) {
         <div className="chart-stat">
           <div className="cs-label">Realized Vol ETF</div>
           <div className="cs-value">
-            {realizedVol.loading ? '…' : (realizedVol.etf == null ? '—' : fmt(realizedVol.etf))}
+            {realizedEtf == null ? '—' : fmt(realizedEtf)}
           </div>
-          <div className="cs-sub">{realizedVol.label || etfSym}</div>
+          <div className="cs-sub">{realizedEtfSub}</div>
         </div>
         <div className="chart-stat">
           <div className="cs-label">Shares Available</div>
@@ -988,7 +855,6 @@ function ChartPage({ record, onBack }) {
         Chart shows % change comparison with {etfSym} (blue) vs {undSym || 'underlying'} (orange).
         Use the timeframe buttons above or the widget's built-in controls to change the date range.
         Both series are plotted on the same scale for direct visual comparison of decay.
-        {realizedVol.error ? ` Realized-vol fetch warning: ${realizedVol.error}.` : ''}
       </div>
     </div>
   );

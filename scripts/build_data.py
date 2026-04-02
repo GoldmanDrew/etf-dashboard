@@ -32,6 +32,8 @@ UNIVERSE_PATH = os.environ.get("UNIVERSE_PATH", "data/etf_screened_today.csv")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 HIGH_BETA_THRESHOLD = float(os.environ.get("HIGH_BETA_THRESHOLD", "1.5"))
+REALIZED_VOL_TIMEOUT_SEC = int(os.environ.get("REALIZED_VOL_TIMEOUT_SEC", "20"))
+REALIZED_VOL_RETRIES = int(os.environ.get("REALIZED_VOL_RETRIES", "2"))
 
 OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
@@ -43,6 +45,9 @@ INVERSE_ETFS = {
     "TSXD", "DUST", "ZSL", "SCO", "DUG", "DRIP", "TSLQ", "MSTZ", "NVDQ",
     "NVDS", "TMV", "TBT", "BTCZ", "ETHD",
 }
+
+VOL_WINDOWS = ("1M", "3M", "6M", "YTD", "12M", "ALL")
+VOL_WINDOW_LOOKBACK_DAYS = {"1M": 21, "3M": 63, "6M": 126, "12M": 252}
 
 
 # ──────────────────────────────────────────────
@@ -178,6 +183,128 @@ def try_fetch_ibkr_ftp() -> dict:
 
 
 # ──────────────────────────────────────────────
+# Realized volatility (server-side canonical)
+# ──────────────────────────────────────────────
+def _compute_annualized_realized_vol_from_closes(closes: list[float]) -> tuple[float | None, int]:
+    """Sample stdev of log returns annualized by sqrt(252)."""
+    if len(closes) < 3:
+        return None, 0
+    arr = np.asarray(closes, dtype=float)
+    if not np.all(np.isfinite(arr)) or np.any(arr <= 0):
+        return None, 0
+    rets = np.diff(np.log(arr))
+    if rets.size < 2:
+        return None, int(rets.size)
+    vol = float(np.std(rets, ddof=1) * np.sqrt(252))
+    return round(vol, 6), int(rets.size)
+
+
+def _build_realized_vol_windows(points: list[tuple[dt.date, float]]) -> dict:
+    """
+    Build per-window realized vol stats from (date, adj_close) points.
+    Returns window -> {vol_annual, n_returns, asof}.
+    """
+    if len(points) < 3:
+        return {}
+
+    points = sorted(points, key=lambda x: x[0])
+    asof = points[-1][0].isoformat()
+    results = {}
+
+    for window in VOL_WINDOWS:
+        if window == "ALL":
+            scoped = points
+        elif window == "YTD":
+            start = dt.date(points[-1][0].year, 1, 1)
+            scoped = [p for p in points if p[0] >= start]
+        else:
+            lookback = VOL_WINDOW_LOOKBACK_DAYS.get(window)
+            scoped = points[-(lookback + 1):] if lookback else points
+
+        closes = [c for _, c in scoped]
+        vol, n_returns = _compute_annualized_realized_vol_from_closes(closes)
+        results[window] = {
+            "vol_annual": vol,
+            "n_returns": n_returns if n_returns > 0 else None,
+            "asof": asof,
+        }
+
+    return results
+
+
+def _fetch_yahoo_adjclose_points(session: requests.Session, symbol: str) -> list[tuple[dt.date, float]]:
+    """Fetch max daily adjusted-close history from Yahoo chart API."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {"range": "max", "interval": "1d", "events": "div,splits"}
+
+    last_err = None
+    for attempt in range(REALIZED_VOL_RETRIES + 1):
+        try:
+            resp = session.get(url, params=params, timeout=REALIZED_VOL_TIMEOUT_SEC)
+            resp.raise_for_status()
+            payload = resp.json()
+            result = payload.get("chart", {}).get("result", [None])[0]
+            if not result:
+                return []
+
+            timestamps = result.get("timestamp") or []
+            closes = (
+                (result.get("indicators", {}).get("adjclose", [{}])[0].get("adjclose"))
+                or (result.get("indicators", {}).get("quote", [{}])[0].get("close"))
+                or []
+            )
+            n = min(len(timestamps), len(closes))
+            points = []
+            for i in range(n):
+                ts = timestamps[i]
+                close = closes[i]
+                if ts is None or close is None:
+                    continue
+                try:
+                    px = float(close)
+                    if not np.isfinite(px) or px <= 0:
+                        continue
+                    d = dt.datetime.fromtimestamp(int(ts), dt.UTC).date()
+                    points.append((d, px))
+                except (ValueError, TypeError, OSError):
+                    continue
+            return points
+        except Exception as e:
+            last_err = e
+            if attempt < REALIZED_VOL_RETRIES:
+                continue
+    print(f"  Warning: Yahoo history fetch failed for {symbol}: {last_err}")
+    return []
+
+
+def compute_realized_vol_map(symbols: set[str]) -> dict[str, dict]:
+    """
+    Returns symbol -> realized-vol windows.
+    Each window has {vol_annual, n_returns, asof}.
+    """
+    out: dict[str, dict] = {}
+    clean_symbols = sorted({norm_sym(s) for s in symbols if str(s).strip()})
+    if not clean_symbols:
+        return out
+
+    print(f"Fetching Yahoo daily history for realized vol ({len(clean_symbols)} symbols) ...")
+    session = requests.Session()
+    session.headers.update({"User-Agent": "etf-dashboard-builder/1.0"})
+
+    ok = 0
+    for i, sym in enumerate(clean_symbols, start=1):
+        points = _fetch_yahoo_adjclose_points(session, sym)
+        windows = _build_realized_vol_windows(points) if points else {}
+        if windows:
+            out[sym] = windows
+            ok += 1
+        if i % 50 == 0 or i == len(clean_symbols):
+            print(f"  Realized vol progress: {i}/{len(clean_symbols)} (ok={ok})")
+
+    return out
+
+
+# ──────────────────────────────────────────────
 # Bucketing
 # ──────────────────────────────────────────────
 def assign_bucket(sym: str, beta: float) -> str:
@@ -287,7 +414,7 @@ def refresh_borrow_only() -> None:
         _normalize_borrow_fields(rec)
 
     output["summary"] = _calc_summary(records)
-    output["build_time"] = dt.datetime.utcnow().isoformat() + "Z"
+    output["build_time"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
     output["ibkr_ftp_success"] = ibkr["success"]
     output["ibkr_symbols_fetched"] = len(ibkr["borrow_map"]) if ibkr["success"] else 0
     output["refresh_type"] = "borrow_only"
@@ -329,7 +456,11 @@ def build():
     # 3. Try IBKR FTP for live borrow data
     ibkr = try_fetch_ibkr_ftp()
 
-    # 4. Build records
+    # 4. Build canonical realized-vol map (server-side, not browser-side)
+    vol_symbols = set(df["symbol"].dropna().tolist()) | set(df["underlying_sym"].dropna().tolist())
+    realized_vol_map = compute_realized_vol_map(vol_symbols)
+
+    # 5. Build records
     records = []
     decay_count = 0
 
@@ -362,8 +493,32 @@ def build():
         net_decay = _safe_float(row, "net_decay_annual")
         if gross_decay is not None and borrow_current is not None:
             net_decay = round(gross_decay - borrow_current, 6)
-        vol_und = _safe_float(row, "vol_underlying_annual")
-        vol_etf = _safe_float(row, "vol_etf_annual")
+        etf_realized = realized_vol_map.get(sym, {})
+        und_realized = realized_vol_map.get(row["underlying_sym"], {})
+        realized_vol = {}
+        for window in VOL_WINDOWS:
+            etf_w = etf_realized.get(window, {})
+            und_w = und_realized.get(window, {})
+            if not etf_w and not und_w:
+                continue
+            realized_vol[window] = {
+                "etf": etf_w.get("vol_annual"),
+                "underlying": und_w.get("vol_annual"),
+                "n_returns_etf": etf_w.get("n_returns"),
+                "n_returns_underlying": und_w.get("n_returns"),
+                "asof_etf": etf_w.get("asof"),
+                "asof_underlying": und_w.get("asof"),
+            }
+
+        # Keep legacy top-level fields as 6M default fallback.
+        vol_und_csv = _safe_float(row, "vol_underlying_annual")
+        vol_etf_csv = _safe_float(row, "vol_etf_annual")
+        vol_und = realized_vol.get("6M", {}).get("underlying")
+        vol_etf = realized_vol.get("6M", {}).get("etf")
+        if vol_und is None:
+            vol_und = vol_und_csv
+        if vol_etf is None:
+            vol_etf = vol_etf_csv
 
         if gross_decay is not None:
             decay_count += 1
@@ -385,6 +540,7 @@ def build():
             "net_decay": net_decay,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
+            "realized_vol": realized_vol,
             "include_for_algo": bool(row.get("include_for_algo", False)),
             "protected": bool(row.get("protected", False)),
             "cagr_positive": bool(row.get("cagr_positive")) if pd.notna(row.get("cagr_positive")) else None,
@@ -392,10 +548,10 @@ def build():
         }
         records.append(rec)
 
-    # 5. Compute summary
+    # 6. Compute summary
     summary = _calc_summary(records)
 
-    build_time = dt.datetime.utcnow().isoformat() + "Z"
+    build_time = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
 
     output = {
         "build_time": build_time,
@@ -410,7 +566,7 @@ def build():
         "records": records,
     }
 
-    # 6. Write JSON
+    # 7. Write JSON
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w") as f:
         json.dump(output, f, indent=None, separators=(",", ":"))
