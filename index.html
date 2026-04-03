@@ -696,8 +696,8 @@ const SCENARIO_HORIZONS = [
   { key: '6M', label: '6M' },
   { key: '1Y', label: '1Y' },
 ];
-const MC_PATH_OPTIONS = [100, 250, 500, 1000];
-const MC_DEFAULT_UPSIDE_THRESHOLDS = '25,50,100';
+const MC_PATH_OPTIONS = [100, 500, 1000, 5000];
+const MC_DEFAULT_UPSIDE_THRESHOLDS = '50,100,500';
 
 const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const scenarioCellBg = val => {
@@ -1547,7 +1547,7 @@ function ChartPage({ record, onBack }) {
               </div>
               <div className="mc-field">
                 <label>ETF Upside Loss Levels (%)</label>
-                <input value={mcUpsideThresholdsText} onChange={(e) => setMcUpsideThresholdsText(e.target.value)} placeholder="25,50,100" />
+                <input value={mcUpsideThresholdsText} onChange={(e) => setMcUpsideThresholdsText(e.target.value)} placeholder="50,100,500" />
               </div>
             </div>
 
