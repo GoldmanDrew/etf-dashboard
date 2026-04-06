@@ -67,6 +67,15 @@
   .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
   .dot-green { background: var(--accent-green); }
   .dot-amber { background: var(--accent-amber); }
+  .fresh-badge {
+    display: inline-flex; align-items: center;
+    padding: 1px 7px; border-radius: 999px;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.3px;
+    border: 1px solid transparent;
+  }
+  .fresh-good { color: var(--positive); background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.35); }
+  .fresh-warn { color: var(--warning); background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.35); }
+  .fresh-bad { color: var(--negative); background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.35); }
   .topbar-right { display: flex; align-items: center; gap: 10px; }
   .topbar-btn {
     padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600;
@@ -657,6 +666,22 @@ const fmtTime = iso => {
 };
 const cls = (...c) => c.filter(Boolean).join(' ');
 const getBorrowRate = r => (r?.borrow_current ?? r?.borrow_net_annual ?? null);
+const getFreshness = (data) => {
+  const built = data?.build_time ? new Date(data.build_time) : null;
+  if (!built || Number.isNaN(built.getTime())) {
+    return { label: 'Freshness: Unknown', className: 'fresh-warn' };
+  }
+  const ageMin = Math.max(0, Math.round((Date.now() - built.getTime()) / 60000));
+  const target = Number(data?.borrow_refresh_interval_minutes) > 0
+    ? Number(data.borrow_refresh_interval_minutes)
+    : 30;
+  const warnAt = Math.max(target + 10, 45);
+  const staleAt = Math.max(target * 2 + 10, 90);
+  const ftpOk = Boolean(data?.ibkr_ftp_success);
+  if (ageMin >= staleAt) return { label: `Stale (${ageMin}m old)`, className: 'fresh-bad' };
+  if (!ftpOk || ageMin >= warnAt) return { label: `Degraded (${ageMin}m old)`, className: 'fresh-warn' };
+  return { label: `Fresh (${ageMin}m old)`, className: 'fresh-good' };
+};
 
 const HIGH_BETA_THRESHOLD = 1.5;
 
@@ -1740,6 +1765,7 @@ function App() {
 
   const records = data?.records || [];
   const summary = data?.summary || {};
+  const freshness = useMemo(() => getFreshness(data), [data]);
 
   const bucketMap = {
     all: null,
@@ -1794,6 +1820,7 @@ function App() {
           <div className="topbar-meta">
             <span className={cls('dot', data.ibkr_ftp_success ? 'dot-green' : 'dot-amber')} />
             {data.ibkr_ftp_success ? 'IBKR Live' : 'CSV Data'}
+            <span className={cls('fresh-badge', freshness.className)}>{freshness.label}</span>
             <span style={{ margin: '0 4px' }}>·</span>
             Built {fmtTime(data.build_time)}
             {data.last_commit && <>

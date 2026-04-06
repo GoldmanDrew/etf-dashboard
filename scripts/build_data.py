@@ -18,6 +18,7 @@ import io
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -324,62 +325,103 @@ def try_fetch_ibkr_ftp() -> dict:
 
     result = {"borrow_map": {}, "fee_map": {}, "rebate_map": {}, "available_map": {}, "success": False}
 
-    try:
-        print("Fetching IBKR short stock file from FTP ...")
-        ftp = ftplib.FTP("ftp2.interactivebrokers.com", timeout=30)
-        ftp.login(user="shortstock", passwd="")
+    max_retries = 3
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"Fetching IBKR short stock file from FTP ... (attempt {attempt}/{max_retries})")
+            ftp = ftplib.FTP("ftp2.interactivebrokers.com", timeout=30)
+            ftp.login(user="shortstock", passwd="")
 
-        buf = io.BytesIO()
-        ftp.retrbinary("RETR usa.txt", buf.write)
-        ftp.quit()
+            buf = io.BytesIO()
+            ftp.retrbinary("RETR usa.txt", buf.write)
+            ftp.quit()
 
-        buf.seek(0)
-        text = buf.getvalue().decode("utf-8", errors="ignore")
-        lines = [ln for ln in text.splitlines() if ln.strip()]
+            buf.seek(0)
+            text = buf.getvalue().decode("utf-8", errors="ignore")
+            lines = [ln for ln in text.splitlines() if ln.strip()]
 
-        header_idx = None
-        for i, ln in enumerate(lines):
-            if ln.startswith("#SYM|"):
-                header_idx = i
-                break
-        if header_idx is None:
-            raise ValueError("No #SYM| header found")
+            header_idx = None
+            for i, ln in enumerate(lines):
+                if ln.startswith("#SYM|"):
+                    header_idx = i
+                    break
+            if header_idx is None:
+                raise ValueError("No #SYM| header found")
 
-        header_cols = [c.strip().lstrip("#").lower() for c in lines[header_idx].split("|")]
-        data_lines = lines[header_idx + 1:]
-        data_str = "\n".join(data_lines)
+            header_cols = [c.strip().lstrip("#").lower() for c in lines[header_idx].split("|")]
+            data_lines = lines[header_idx + 1:]
+            data_str = "\n".join(data_lines)
 
-        df = pd.read_csv(io.StringIO(data_str), sep="|", header=None, engine="python")
-        n_cols = min(len(header_cols), df.shape[1])
-        df = df.iloc[:, :n_cols]
-        df.columns = header_cols[:n_cols]
+            df = pd.read_csv(io.StringIO(data_str), sep="|", header=None, engine="python")
+            n_cols = min(len(header_cols), df.shape[1])
+            df = df.iloc[:, :n_cols]
+            df.columns = header_cols[:n_cols]
 
-        df["sym"] = df["sym"].astype(str).str.upper().str.strip()
-        df["rebate_annual"] = pd.to_numeric(df.get("rebaterate", pd.Series(dtype=float)), errors="coerce") / 100.0
-        df["fee_annual"] = pd.to_numeric(df.get("feerate", pd.Series(dtype=float)), errors="coerce") / 100.0
-        df["available_int"] = pd.to_numeric(df.get("available", pd.Series(dtype=float)), errors="coerce")
-        # Dashboard borrow should reflect fee only (not fee - rebate).
-        df["borrow_current"] = df["fee_annual"]
+            df["sym"] = df["sym"].astype(str).str.upper().str.strip()
+            df["rebate_annual"] = pd.to_numeric(df.get("rebaterate", pd.Series(dtype=float)), errors="coerce") / 100.0
+            df["fee_annual"] = pd.to_numeric(df.get("feerate", pd.Series(dtype=float)), errors="coerce") / 100.0
+            df["available_int"] = pd.to_numeric(df.get("available", pd.Series(dtype=float)), errors="coerce")
+            # Dashboard borrow should reflect fee only (not fee - rebate).
+            df["borrow_current"] = df["fee_annual"]
 
-        for _, row in df.iterrows():
-            sym = norm_sym(row["sym"])
-            if pd.notna(row["borrow_current"]):
-                result["borrow_map"][sym] = round(float(row["borrow_current"]), 6)
-            if pd.notna(row["fee_annual"]):
-                result["fee_map"][sym] = round(float(row["fee_annual"]), 6)
-            if pd.notna(row["rebate_annual"]):
-                result["rebate_map"][sym] = round(float(row["rebate_annual"]), 6)
-            if pd.notna(row["available_int"]):
-                result["available_map"][sym] = int(row["available_int"])
+            for _, row in df.iterrows():
+                sym = norm_sym(row["sym"])
+                if pd.notna(row["borrow_current"]):
+                    result["borrow_map"][sym] = round(float(row["borrow_current"]), 6)
+                if pd.notna(row["fee_annual"]):
+                    result["fee_map"][sym] = round(float(row["fee_annual"]), 6)
+                if pd.notna(row["rebate_annual"]):
+                    result["rebate_map"][sym] = round(float(row["rebate_annual"]), 6)
+                if pd.notna(row["available_int"]):
+                    result["available_map"][sym] = int(row["available_int"])
 
-        result["success"] = True
-        print(f"  -> IBKR FTP: {len(result['borrow_map'])} symbols fetched")
-
-    except Exception as e:
-        print(f"  -> IBKR FTP failed: {e}. Using CSV borrow values.")
-        result["success"] = False
+            result["success"] = True
+            print(f"  -> IBKR FTP: {len(result['borrow_map'])} symbols fetched")
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries:
+                wait_s = 2 ** (attempt - 1)
+                print(f"  -> FTP attempt failed: {e}; retrying in {wait_s}s")
+                time.sleep(wait_s)
+            else:
+                print(f"  -> IBKR FTP failed after {max_retries} attempts: {e}. Using CSV borrow values.")
+                result["success"] = False
 
     return result
+
+
+def _maps_from_universe_csv(df: pd.DataFrame) -> dict:
+    out = {"borrow_map": {}, "fee_map": {}, "rebate_map": {}, "available_map": {}}
+    if df is None or df.empty or "ETF" not in df.columns:
+        return out
+
+    snap = df.copy()
+    snap["symbol"] = snap["ETF"].apply(norm_sym)
+    for _, row in snap.iterrows():
+        sym = row["symbol"]
+        borrow_current = _safe_float(row, "borrow_current")
+        if borrow_current is None:
+            borrow_current = _safe_float(row, "borrow_fee_annual")
+        fee = _safe_float(row, "borrow_fee_annual")
+        rebate = _safe_float(row, "borrow_rebate_annual")
+        shares = None
+        if pd.notna(row.get("shares_available")):
+            try:
+                shares = int(row.get("shares_available"))
+            except (TypeError, ValueError):
+                shares = None
+
+        if borrow_current is not None:
+            out["borrow_map"][sym] = borrow_current
+        if fee is not None:
+            out["fee_map"][sym] = fee
+        if rebate is not None:
+            out["rebate_map"][sym] = rebate
+        if shares is not None:
+            out["available_map"][sym] = shares
+    return out
 
 
 # ──────────────────────────────────────────────
@@ -612,7 +654,15 @@ def refresh_borrow_only() -> None:
         raise ValueError("dashboard_data.json is malformed: missing records list")
 
     ibkr = try_fetch_ibkr_ftp()
+    csv_maps = {"borrow_map": {}, "fee_map": {}, "rebate_map": {}, "available_map": {}}
+    try:
+        csv_df = fetch_csv_from_github()
+        csv_maps = _maps_from_universe_csv(csv_df)
+    except Exception as e:
+        print(f"  Warning: could not fetch latest CSV fallback during borrow refresh: {e}")
+
     updated = 0
+    updated_csv = 0
 
     for rec in records:
         sym = norm_sym(rec.get("symbol", ""))
@@ -628,6 +678,15 @@ def refresh_borrow_only() -> None:
             rec["borrow_source"] = "ibkr_ftp"
             rec["borrow_missing"] = False
             updated += 1
+        elif sym in csv_maps["borrow_map"] or sym in csv_maps["available_map"]:
+            borrow_current = csv_maps["borrow_map"].get(sym)
+            rec["borrow_fee_annual"] = csv_maps["fee_map"].get(sym)
+            rec["borrow_rebate_annual"] = csv_maps["rebate_map"].get(sym)
+            rec["shares_available"] = csv_maps["available_map"].get(sym)
+            rec["borrow_current"] = round(float(borrow_current), 6) if borrow_current is not None else rec.get("borrow_current")
+            rec["borrow_source"] = "csv"
+            rec["borrow_missing"] = borrow_current is None
+            updated_csv += 1
         else:
             # Keep existing record values, but normalize borrowed field aliases.
             rec["borrow_source"] = rec.get("borrow_source", "csv")
@@ -641,6 +700,11 @@ def refresh_borrow_only() -> None:
     output["ibkr_symbols_fetched"] = len(ibkr["borrow_map"]) if ibkr["success"] else 0
     output["refresh_type"] = "borrow_only"
     output["borrow_refresh_interval_minutes"] = 30
+    output["freshness"] = {
+        "updated_from_ibkr": int(updated),
+        "updated_from_csv": int(updated_csv),
+        "ibkr_attempt_success": bool(ibkr["success"]),
+    }
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
@@ -648,6 +712,7 @@ def refresh_borrow_only() -> None:
 
     print(f"[OK] Borrow-only refresh wrote {OUTPUT_FILE}")
     print(f"  Updated from IBKR FTP: {updated}/{len(records)} symbols")
+    print(f"  Updated from latest CSV fallback: {updated_csv}/{len(records)} symbols")
 
 
 # ──────────────────────────────────────────────
