@@ -1464,6 +1464,10 @@ function ChartPage({ record, onBack }) {
 
   const cachedSpotUnd = Number(optionsCache?.symbols?.[undSym]?.spot);
   const cachedSpotEtf = Number(optionsCache?.symbols?.[etfSym]?.spot);
+  const undOptionsRows = Array.isArray(optionsCache?.symbols?.[undSym]?.options) ? optionsCache.symbols[undSym].options : [];
+  const etfOptionsRows = Array.isArray(optionsCache?.symbols?.[etfSym]?.options) ? optionsCache.symbols[etfSym].options : [];
+  const optionsErrUnd = optionsCache?.errors_by_symbol?.[undSym];
+  const optionsErrEtf = optionsCache?.errors_by_symbol?.[etfSym];
   const hasCachedSpotUnd = Number.isFinite(cachedSpotUnd);
   const hasCachedSpotEtf = Number.isFinite(cachedSpotEtf);
   const tradeSpotUnderlying = Number.isFinite(cachedSpotUnd) ? cachedSpotUnd : 100;
@@ -1973,6 +1977,11 @@ function ChartPage({ record, onBack }) {
                 {(!hasCachedSpotUnd || !hasCachedSpotEtf) && (
                   <div className="trade-warning">
                     Live spot missing for {(!hasCachedSpotUnd && !hasCachedSpotEtf) ? `${undSym}/${etfSym}` : (!hasCachedSpotUnd ? undSym : etfSym)} in options cache; using fallback spot=100 for calculations until cache refresh succeeds.
+                  </div>
+                )}
+                {((!undOptionsRows.length && optionsErrUnd) || (!etfOptionsRows.length && optionsErrEtf)) && (
+                  <div className="trade-warning">
+                    Polygon diagnostics: {!undOptionsRows.length && optionsErrUnd ? `${undSym}: ${optionsErrUnd}. ` : ''}{!etfOptionsRows.length && optionsErrEtf ? `${etfSym}: ${optionsErrEtf}.` : ''}
                   </div>
                 )}
                 {!!(optionsCache?.polygon_api_configured && !Object.keys(optionsCache?.symbols || {}).length) && (
