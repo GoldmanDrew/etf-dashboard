@@ -100,6 +100,10 @@
     const ttxDays = Number.isFinite(toNum(params && params.ttxDays)) ? toNum(params.ttxDays) : 0;
     const volMap = (params && params.volMap) || {};
     const rate = Number.isFinite(toNum(params && params.rate)) ? toNum(params.rate) : 0;
+    const elapsedYears = Number.isFinite(toNum(params && params.elapsedYears)) ? Math.max(0, toNum(params.elapsedYears)) : 0;
+    const annualBorrowBySymbol = (params && params.annualBorrowBySymbol) || {};
+    const defaultBorrowAnnual = Number.isFinite(toNum(params && params.defaultBorrowAnnual)) ? Math.max(0, toNum(params.defaultBorrowAnnual)) : 0;
+    const shortProceedsRateAnnual = Number.isFinite(toNum(params && params.shortProceedsRateAnnual)) ? toNum(params.shortProceedsRateAnnual) : 0;
 
     let total = 0;
     const legRows = [];
@@ -110,8 +114,16 @@
       const entry = Number.isFinite(toNum(leg && leg.entry)) ? toNum(leg.entry) : toNum(priceNow[sym]);
       const finalSpot = toNum(priceFinal[sym]);
       const pnl = equityLegPnl(leg, entry, finalSpot);
+      let financingPnl = 0;
+      if (String((leg && leg.side) || "").toLowerCase() === "short" && Number.isFinite(entry)) {
+        const qAbs = Math.abs(toNum(leg && leg.quantity));
+        const shortNotional = qAbs * entry;
+        const b = Number.isFinite(toNum(annualBorrowBySymbol[sym])) ? Math.max(0, toNum(annualBorrowBySymbol[sym])) : defaultBorrowAnnual;
+        financingPnl = shortNotional * (shortProceedsRateAnnual - b) * elapsedYears;
+      }
       total += pnl;
-      legRows.push({ kind: "equity", symbol: sym, pnl });
+      total += financingPnl;
+      legRows.push({ kind: "equity", symbol: sym, pnl, financingPnl });
     }
 
     for (const leg of optionLegs) {
@@ -173,6 +185,10 @@
           priceNow: { [underlyingSymbol]: spotUnderlying, [etfSymbol]: spotEtf },
           priceFinal: { [underlyingSymbol]: undFinal, [etfSymbol]: etfFinal },
           ttxDays,
+          elapsedYears: horizonYears,
+          annualBorrowBySymbol: (params && params.annualBorrowBySymbol) || {},
+          defaultBorrowAnnual: (params && params.defaultBorrowAnnual) ?? 0,
+          shortProceedsRateAnnual: (params && params.shortProceedsRateAnnual) ?? 0,
           volMap: { [underlyingSymbol]: baseVol, [etfSymbol]: sigmaAnnual * Math.max(0.2, Math.abs(leverage)) },
           rate,
         });
@@ -219,6 +235,9 @@
     const horizonYears = Math.max(1e-8, toNum(params && params.horizonYears));
     const volAnnual = Math.max(0.01, toNum(params && params.volAnnual));
     const rate = Number.isFinite(toNum(params && params.rate)) ? toNum(params.rate) : 0;
+    const annualBorrowBySymbol = (params && params.annualBorrowBySymbol) || {};
+    const defaultBorrowAnnual = Number.isFinite(toNum(params && params.defaultBorrowAnnual)) ? Math.max(0, toNum(params.defaultBorrowAnnual)) : 0;
+    const shortProceedsRateAnnual = Number.isFinite(toNum(params && params.shortProceedsRateAnnual)) ? toNum(params.shortProceedsRateAnnual) : 0;
 
     if (!etfPaths.length || !underlyingPaths.length) return { ok: false, error: "Monte Carlo paths missing." };
     const n = Math.min(etfPaths.length, underlyingPaths.length);
@@ -241,6 +260,10 @@
           priceNow: { [underlyingSymbol]: spotUnderlying, [etfSymbol]: spotEtf },
           priceFinal: { [underlyingSymbol]: undNow, [etfSymbol]: etfNow },
           ttxDays: ttxRemain,
+          elapsedYears: (t / steps) * horizonYears,
+          annualBorrowBySymbol,
+          defaultBorrowAnnual,
+          shortProceedsRateAnnual,
           volMap: { [underlyingSymbol]: volAnnual, [etfSymbol]: volAnnual },
           rate,
         });

@@ -40,6 +40,20 @@ test("structure pnl aggregates base and option legs", () => {
   assert.ok(out.totalPnl > 0);
 });
 
+test("short financing applies borrow less proceeds", () => {
+  const out = evaluateStructurePnl({
+    baseLegs: [{ symbol: "ETF", side: "short", quantity: 100, entry: 100 }],
+    optionLegs: [],
+    priceNow: { ETF: 100 },
+    priceFinal: { ETF: 100 },
+    elapsedYears: 1,
+    annualBorrowBySymbol: { ETF: 0.3 },
+    shortProceedsRateAnnual: 0.05,
+  });
+  // No spot move; financing should be negative by (5%-30%) * 10,000 = -2,500.
+  assert.equal(Math.round(out.totalPnl), -2500);
+});
+
 test("trade scenario grid deterministic shape", () => {
   const grid = buildTradeScenarioGrid({
     baseLegs: [{ symbol: "UND", side: "short", quantity: 100, entry: 100 }, { symbol: "ETF", side: "long", quantity: 100, entry: 100 }],
@@ -79,6 +93,42 @@ test("trade monte carlo deterministic for fixed paths", () => {
   assert.equal(out.ok, true);
   assert.equal(out.terminal.length, 2);
   assert.equal(out.terminal[0], out.terminal[1]);
+});
+
+test("trade monte carlo financing reduces short pnl when borrow exceeds proceeds", () => {
+  const path = new Array(6).fill(1);
+  const outNoFin = evaluateTradeMonteCarlo({
+    baseLegs: [{ symbol: "ETF", side: "short", quantity: 100, entry: 100 }],
+    optionLegs: [],
+    underlyingSymbol: "UND",
+    etfSymbol: "ETF",
+    spotUnderlying: 100,
+    spotEtf: 100,
+    ttxDaysStart: 30,
+    horizonYears: 1,
+    volAnnual: 0.6,
+    etfPaths: [path],
+    underlyingPaths: [path],
+    annualBorrowBySymbol: { ETF: 0.0 },
+    shortProceedsRateAnnual: 0.0,
+  });
+  const outFin = evaluateTradeMonteCarlo({
+    baseLegs: [{ symbol: "ETF", side: "short", quantity: 100, entry: 100 }],
+    optionLegs: [],
+    underlyingSymbol: "UND",
+    etfSymbol: "ETF",
+    spotUnderlying: 100,
+    spotEtf: 100,
+    ttxDaysStart: 30,
+    horizonYears: 1,
+    volAnnual: 0.6,
+    etfPaths: [path],
+    underlyingPaths: [path],
+    annualBorrowBySymbol: { ETF: 0.2 },
+    shortProceedsRateAnnual: 0.05,
+  });
+  assert.ok(outNoFin.ok && outFin.ok);
+  assert.ok(outFin.summary.meanTerminal < outNoFin.summary.meanTerminal);
 });
 
 test("ttx sensitivity returns requested tenors", () => {

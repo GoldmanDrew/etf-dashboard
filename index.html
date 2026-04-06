@@ -1300,6 +1300,7 @@ function ChartPage({ record, onBack }) {
   const [tradeOptionLegs, setTradeOptionLegs] = useState([]);
   const [tradeTtxDays, setTradeTtxDays] = useState(30);
   const [tradeRatePct, setTradeRatePct] = useState(4.0);
+  const [tradeShortProceedsPct, setTradeShortProceedsPct] = useState(1.0);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -1390,6 +1391,7 @@ function ChartPage({ record, onBack }) {
     ? avgBorrowFromHistory
     : (Number.isFinite(Number(r.borrow_avg_annual)) ? Number(r.borrow_avg_annual) : Number(getBorrowRate(r)));
   const annualCarryDrag = Number.isFinite(annualCarryDragRaw) ? Math.max(0, annualCarryDragRaw) : 0;
+  const tradeBorrowBySymbol = useMemo(() => ({ [etfSym]: annualCarryDrag }), [etfSym, annualCarryDrag]);
   const minObsForScenario = 10;
   const undObs = Number(volPoint?.n_returns_underlying) || 0;
   const scenarioSigmaBest = Number(ewmaUnd);
@@ -1520,8 +1522,11 @@ function ChartPage({ record, onBack }) {
       volColumns: scenarioGrid.volColumns.map((x) => ({ sigmaAnnual: x.sigmaAnnual })),
       ttxDays: tradeTtxDays,
       rate: Number(tradeRatePct) / 100,
+      annualBorrowBySymbol: tradeBorrowBySymbol,
+      defaultBorrowAnnual: annualCarryDrag,
+      shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
     });
-  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta]);
+  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   const tradeMonteCarlo = useMemo(() => {
     if (typeof tradeFns.evaluateTradeMonteCarlo !== 'function') return { ok: false, error: 'Trade Lab utility unavailable.' };
@@ -1559,10 +1564,13 @@ function ChartPage({ record, onBack }) {
       horizonYears: tradeHYears,
       volAnnual: tradeSigmaAnnual,
       rate: Number(tradeRatePct) / 100,
+      annualBorrowBySymbol: tradeBorrowBySymbol,
+      defaultBorrowAnnual: annualCarryDrag,
+      shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
       etfPaths: monteCarloResult.paths,
       underlyingPaths: underlyingMc.paths,
     });
-  }, [tradeFns, monteCarloResult, scenarioFns, mcPathCount, scenarioSigmaBest, horizonYears, mcSeed, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd]);
+  }, [tradeFns, monteCarloResult, scenarioFns, mcPathCount, scenarioSigmaBest, horizonYears, mcSeed, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   const tradeTtxSeries = useMemo(() => {
     if (typeof tradeFns.buildTtxSensitivity !== 'function') return [];
@@ -1592,8 +1600,11 @@ function ChartPage({ record, onBack }) {
       volColumns: scenarioGrid.volColumns.map((x) => ({ sigmaAnnual: x.sigmaAnnual })),
       ttxList: [1, 7, 14, 30, 60, 90],
       rate: Number(tradeRatePct) / 100,
+      annualBorrowBySymbol: tradeBorrowBySymbol,
+      defaultBorrowAnnual: annualCarryDrag,
+      shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
     });
-  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta]);
+  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   return (
     <div className="chart-page">
@@ -1965,6 +1976,8 @@ function ChartPage({ record, onBack }) {
                     <input type="number" value={tradeTtxDays} onChange={(e) => setTradeTtxDays(Number(e.target.value || 0))} style={{ width: 92 }} />
                     <label className="scenario-sub">Rate %</label>
                     <input type="number" value={tradeRatePct} onChange={(e) => setTradeRatePct(Number(e.target.value || 0))} style={{ width: 84 }} />
+                    <label className="scenario-sub">Short Proceeds %</label>
+                    <input type="number" value={tradeShortProceedsPct} onChange={(e) => setTradeShortProceedsPct(Number(e.target.value || 0))} style={{ width: 96 }} />
                   </div>
                 </div>
                 {!tradeScenarioGrid.ok ? (
@@ -2033,6 +2046,9 @@ function ChartPage({ record, onBack }) {
 
             <div className="trade-note">
               Formula notes: options are marked with Black-Scholes for TTX &gt; 0 and intrinsic at expiry; scenario and Monte Carlo assumptions reuse active Scenarios controls (lookback EWMA sigma, horizon, leverage mapping).
+            </div>
+            <div className="trade-note">
+              Financing notes: short equity legs include financing PnL = short_notional * (short_proceeds_rate - borrow_rate) * elapsed_years. ETF short borrow defaults to current/avg borrow estimate from the Borrow tab data.
             </div>
           </div>
         </div>

@@ -32,7 +32,10 @@ UNIVERSE_REPO = os.environ.get("UNIVERSE_REPO", "GoldmanDrew/ls-algo")
 UNIVERSE_BRANCH = os.environ.get("UNIVERSE_BRANCH", "main")
 UNIVERSE_PATH = os.environ.get("UNIVERSE_PATH", "data/etf_screened_today.csv")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY", "").strip()
+POLYGON_API_KEY = (
+    os.environ.get("POLYGON_API_KEY", "")
+    or os.environ.get("POLYGON_IO_API_KEY", "")
+).strip()
 
 HIGH_BETA_THRESHOLD = float(os.environ.get("HIGH_BETA_THRESHOLD", "1.5"))
 REALIZED_VOL_TIMEOUT_SEC = int(os.environ.get("REALIZED_VOL_TIMEOUT_SEC", "20"))

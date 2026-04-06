@@ -25,6 +25,8 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    env:
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
 
     steps:
       - name: Checkout
@@ -38,10 +40,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Validate Polygon key
+        run: |
+          if [ -z "${POLYGON_API_KEY}" ]; then
+            echo "POLYGON_API_KEY (or POLYGON_IO_API_KEY) is missing in repo secrets."
+            exit 1
+          fi
+
       - name: Build dashboard data
         env:
           GITHUB_TOKEN: ${{ secrets.LS_ALGO_TOKEN }}
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
         run: python scripts/build_data.py
 
       - name: Commit data if changed
