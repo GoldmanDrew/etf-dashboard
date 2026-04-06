@@ -1957,11 +1957,17 @@ function ChartPage({ record, onBack }) {
                   })}
                 </div>
                 <div className="trade-note">
-                  Options source: {optionsCache?.source || 'cache unavailable'}.
+                  Options source: {optionsCache?.source || 'cache unavailable'} | symbols: {fmtNum(Object.keys(optionsCache?.symbols || {}).length)}.
                 </div>
                 {(optionsCacheError || (!optionsCache?.polygon_api_configured && !Object.keys(optionsCache?.symbols || {}).length)) && (
                   <div className="trade-warning">
                     {optionsCacheError ? `Options cache error: ${optionsCacheError}. ` : ''}POLYGON_API_KEY not configured (or cache missing): options controls may be limited.
+                  </div>
+                )}
+                {!!(optionsCache?.polygon_api_configured && !Object.keys(optionsCache?.symbols || {}).length) && (
+                  <div className="trade-warning">
+                    Polygon key is configured but no option rows were returned. Check API plan/permissions for options endpoints.
+                    {(optionsCache?.errors && optionsCache.errors.length) ? ` Example: ${String(optionsCache.errors[0])}` : ''}
                   </div>
                 )}
               </div>

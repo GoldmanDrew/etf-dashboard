@@ -447,6 +447,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "source": "polygon_snapshot",
         "polygon_api_configured": bool(POLYGON_API_KEY),
         "symbols": {},
+        "errors": [],
     }
     if not POLYGON_API_KEY:
         prior_symbols = prior_cache.get("symbols") if isinstance(prior_cache, dict) else {}
@@ -462,31 +463,68 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     headers = {"User-Agent": "etf-dashboard-builder/1.0"}
     unique_symbols = sorted({norm_sym(s) for s in symbols if str(s).strip()})
 
+    def _append_api_key(next_url: str) -> str:
+        parsed = urlparse(next_url)
+        qs = parse_qs(parsed.query)
+        if "apiKey" in qs:
+            return next_url
+        sep = "&" if parsed.query else ""
+        return f"{next_url}{sep}apiKey={POLYGON_API_KEY}"
+
+    def _fetch_json_pages(start_url: str, max_pages: int = 6) -> list[dict]:
+        rows = []
+        next_url = start_url
+        pages = 0
+        while next_url and pages < max_pages:
+            pages += 1
+            resp = session.get(next_url, headers=headers, timeout=25)
+            if not resp.ok:
+                return []
+            payload = resp.json() or {}
+            batch = payload.get("results") or []
+            if isinstance(batch, list):
+                rows.extend(batch)
+            nurl = payload.get("next_url")
+            next_url = _append_api_key(nurl) if nurl else None
+        return rows
+
     for sym in unique_symbols:
         try:
-            rows = []
             under_px = None
-            next_url = f"https://api.polygon.io/v3/snapshot/options/{sym}?{urlencode({'limit': 250, 'apiKey': POLYGON_API_KEY})}"
-            pages = 0
-            while next_url and pages < 6:
-                pages += 1
-                resp = session.get(next_url, headers=headers, timeout=25)
-                if not resp.ok:
-                    break
-                payload = resp.json() or {}
+            snap_start = f"https://api.polygon.io/v3/snapshot/options/{sym}?{urlencode({'limit': 250, 'apiKey': POLYGON_API_KEY})}"
+            resp = session.get(snap_start, headers=headers, timeout=25)
+            payload = resp.json() if resp.ok else {}
+            rows = []
+            if resp.ok:
                 batch = payload.get("results") or []
                 if isinstance(batch, list):
                     rows.extend(batch)
-                if under_px is None:
-                    under_px = (payload.get("underlying_asset") or {}).get("price")
+                under_px = (payload.get("underlying_asset") or {}).get("price")
                 nurl = payload.get("next_url")
                 if nurl:
-                    parsed = urlparse(nurl)
-                    qs = parse_qs(parsed.query)
-                    if "apiKey" not in qs:
-                        sep = "&" if parsed.query else ""
-                        nurl = f"{nurl}{sep}apiKey={POLYGON_API_KEY}"
-                next_url = nurl
+                    rows.extend(_fetch_json_pages(_append_api_key(nurl), max_pages=6))
+            else:
+                out["errors"].append(f"{sym}: snapshot HTTP {resp.status_code}")
+
+            # Fallback: contracts reference endpoint to at least populate expiries/strikes.
+            if not rows:
+                ref_start = (
+                    "https://api.polygon.io/v3/reference/options/contracts?"
+                    + urlencode({
+                        "underlying_ticker": sym,
+                        "expired": "false",
+                        "limit": 1000,
+                        "order": "asc",
+                        "sort": "expiration_date",
+                        "apiKey": POLYGON_API_KEY,
+                    })
+                )
+                ref_rows = _fetch_json_pages(ref_start, max_pages=10)
+                if ref_rows:
+                    rows = ref_rows
+                else:
+                    msg = payload.get("error") or payload.get("message") or "no rows from snapshot/contracts"
+                    out["errors"].append(f"{sym}: {msg}")
             if not rows:
                 prior_sym = prior_cache.get("symbols", {}).get(sym) if isinstance(prior_cache, dict) else None
                 if prior_sym:
@@ -514,12 +552,22 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
                 if under_px is None:
                     under_px = r.get("underlying_asset", {}).get("price")
-                exp = details.get("expiration_date") or r.get("expiration_date")
+                exp = (
+                    details.get("expiration_date")
+                    or r.get("expiration_date")
+                    or r.get("expiration_date_from")
+                )
                 strike = details.get("strike_price") if details.get("strike_price") is not None else r.get("strike_price")
                 ctype = details.get("contract_type") or r.get("contract_type")
+                if not ctype:
+                    opt_ticker = details.get("ticker") or r.get("ticker") or ""
+                    if "P" in str(opt_ticker):
+                        ctype = "put"
+                    elif "C" in str(opt_ticker):
+                        ctype = "call"
                 parsed.append(
                     {
-                        "ticker": details.get("ticker"),
+                        "ticker": details.get("ticker") or r.get("ticker"),
                         "expiration_date": exp,
                         "strike_price": strike,
                         "contract_type": ctype,
@@ -547,6 +595,10 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             continue
 
     out["symbols_count"] = len(out["symbols"])
+    if out["errors"]:
+        out["errors"] = sorted(set(out["errors"]))[:50]
+    else:
+        out.pop("errors", None)
     if out["symbols_count"] == 0 and isinstance(prior_cache, dict):
         prior_symbols = prior_cache.get("symbols")
         if isinstance(prior_symbols, dict) and prior_symbols:

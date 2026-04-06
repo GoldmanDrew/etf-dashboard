@@ -18,10 +18,14 @@ jobs:
   refresh-borrow:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -32,6 +36,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Refresh borrow + shares
+        env:
+          POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
         run: python scripts/build_data.py --borrow-only
 
       - name: Commit data if changed
@@ -43,7 +49,15 @@ jobs:
             echo "No borrow changes to commit"
           else
             git commit -m "chore: refresh borrow data [$(date -u '+%Y-%m-%d %H:%M UTC')]"
-            git push
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push && break
+              if [ "$i" -eq 3 ]; then
+                echo "Push failed after retries"
+                exit 1
+              fi
+              git rebase --abort || true
+              sleep $((i * 5))
+            done
           fi
 
       - name: Setup Pages
