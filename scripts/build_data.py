@@ -45,6 +45,8 @@ REALIZED_VOL_RANGE = os.environ.get("REALIZED_VOL_RANGE", "2y")
 REALIZED_VOL_EWMA_LAMBDA = float(os.environ.get("REALIZED_VOL_EWMA_LAMBDA", "0.94"))
 BORROW_HISTORY_MAX_COMMITS = int(os.environ.get("BORROW_HISTORY_MAX_COMMITS", "400"))
 BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE_SIZE", "100"))
+POLYGON_OPTIONS_MAX_SYMBOLS = int(os.environ.get("POLYGON_OPTIONS_MAX_SYMBOLS", "240"))
+POLYGON_FORCE_SYMBOLS_RAW = [s.strip() for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "").split(",") if s.strip()]
 
 OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
@@ -446,6 +448,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         "source": "polygon_snapshot",
         "polygon_api_configured": bool(POLYGON_API_KEY),
+        "requested_symbols": int(len(symbols)),
         "symbols": {},
         "errors": [],
     }
@@ -488,6 +491,18 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             next_url = _append_api_key(nurl) if nurl else None
         return rows
 
+    def _fetch_last_spot(sym: str):
+        try:
+            url = f"https://api.polygon.io/v2/last/trade/{sym}?{urlencode({'apiKey': POLYGON_API_KEY})}"
+            resp = session.get(url, headers=headers, timeout=15)
+            if not resp.ok:
+                return None
+            payload = resp.json() or {}
+            p = (payload.get("results") or {}).get("p")
+            return float(p) if p is not None else None
+        except Exception:
+            return None
+
     for sym in unique_symbols:
         try:
             under_px = None
@@ -526,6 +541,10 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                     msg = payload.get("error") or payload.get("message") or "no rows from snapshot/contracts"
                     out["errors"].append(f"{sym}: {msg}")
             if not rows:
+                spot_only = _fetch_last_spot(sym)
+                if spot_only is not None:
+                    out["symbols"][sym] = {"spot": float(spot_only), "options": []}
+                    continue
                 prior_sym = prior_cache.get("symbols", {}).get(sym) if isinstance(prior_cache, dict) else None
                 if prior_sym:
                     out["symbols"][sym] = prior_sym
@@ -579,11 +598,17 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
             parsed = [x for x in parsed if x.get("expiration_date") and x.get("strike_price") is not None]
             if not parsed:
+                spot_only = under_px if under_px is not None else _fetch_last_spot(sym)
+                if spot_only is not None:
+                    out["symbols"][sym] = {"spot": float(spot_only), "options": []}
+                    continue
                 prior_sym = prior_cache.get("symbols", {}).get(sym) if isinstance(prior_cache, dict) else None
                 if prior_sym:
                     out["symbols"][sym] = prior_sym
                 continue
             parsed.sort(key=lambda x: (x["expiration_date"], abs(float(x["strike_price"])) if x["strike_price"] is not None else 9e9))
+            if under_px is None:
+                under_px = _fetch_last_spot(sym)
             out["symbols"][sym] = {
                 "spot": float(under_px) if under_px is not None else None,
                 "options": parsed[:300],
@@ -606,6 +631,35 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             out["symbols_count"] = len(prior_symbols)
             out["warning"] = "Polygon fetch returned no symbols; using previous cached options data."
     return out
+
+
+def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
+    """
+    Keep Polygon requests bounded to avoid rate-limit starvation.
+    Priority:
+      1) forced symbols from env
+      2) symbol + underlying pairs in record order
+    """
+    seen = set()
+    ordered: list[str] = []
+
+    def add(sym):
+        s = norm_sym(sym)
+        if not s or s in seen:
+            return
+        seen.add(s)
+        ordered.append(s)
+
+    for s in POLYGON_FORCE_SYMBOLS_RAW:
+        add(s)
+
+    for rec in records:
+        add(rec.get("symbol"))
+        add(rec.get("underlying"))
+        if len(ordered) >= max(1, POLYGON_OPTIONS_MAX_SYMBOLS):
+            break
+
+    return ordered
 
 
 # ──────────────────────────────────────────────
@@ -1071,7 +1125,7 @@ def build():
         json.dump(output, f, indent=None, separators=(",", ":"))
     with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(borrow_history, f, indent=None, separators=(",", ":"))
-    symbols_for_options = sorted({rec["symbol"] for rec in records} | {rec["underlying"] for rec in records})
+    symbols_for_options = select_symbols_for_polygon_cache(records)
     options_cache = build_polygon_options_cache(symbols_for_options)
     with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(options_cache, f, indent=None, separators=(",", ":"))
