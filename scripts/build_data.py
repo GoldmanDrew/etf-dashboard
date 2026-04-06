@@ -20,6 +20,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlencode, urlparse, parse_qs
 
 import numpy as np
 import pandas as pd
@@ -434,6 +435,13 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     Build delayed options snapshot cache from Polygon for UI consumption.
     Returns a JSON-serializable dict with per-symbol spot + option rows.
     """
+    prior_cache = {}
+    if OPTIONS_CACHE_FILE.exists():
+        try:
+            prior_cache = json.loads(OPTIONS_CACHE_FILE.read_text(encoding="utf-8")) or {}
+        except Exception:
+            prior_cache = {}
+
     out = {
         "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         "source": "polygon_snapshot",
@@ -441,6 +449,12 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "symbols": {},
     }
     if not POLYGON_API_KEY:
+        prior_symbols = prior_cache.get("symbols") if isinstance(prior_cache, dict) else {}
+        if isinstance(prior_symbols, dict) and prior_symbols:
+            out["symbols"] = prior_symbols
+            out["symbols_count"] = len(prior_symbols)
+            out["warning"] = "POLYGON_API_KEY missing; using previous cached options data."
+            return out
         out["error"] = "POLYGON_API_KEY missing"
         return out
 
@@ -450,18 +464,36 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
     for sym in unique_symbols:
         try:
-            url = f"https://api.polygon.io/v3/snapshot/options/{sym}"
-            params = {"limit": 250, "apiKey": POLYGON_API_KEY}
-            resp = session.get(url, params=params, headers=headers, timeout=25)
-            if not resp.ok:
-                continue
-            payload = resp.json() or {}
-            rows = payload.get("results") or []
+            rows = []
+            under_px = None
+            next_url = f"https://api.polygon.io/v3/snapshot/options/{sym}?{urlencode({'limit': 250, 'apiKey': POLYGON_API_KEY})}"
+            pages = 0
+            while next_url and pages < 6:
+                pages += 1
+                resp = session.get(next_url, headers=headers, timeout=25)
+                if not resp.ok:
+                    break
+                payload = resp.json() or {}
+                batch = payload.get("results") or []
+                if isinstance(batch, list):
+                    rows.extend(batch)
+                if under_px is None:
+                    under_px = (payload.get("underlying_asset") or {}).get("price")
+                nurl = payload.get("next_url")
+                if nurl:
+                    parsed = urlparse(nurl)
+                    qs = parse_qs(parsed.query)
+                    if "apiKey" not in qs:
+                        sep = "&" if parsed.query else ""
+                        nurl = f"{nurl}{sep}apiKey={POLYGON_API_KEY}"
+                next_url = nurl
             if not rows:
+                prior_sym = prior_cache.get("symbols", {}).get(sym) if isinstance(prior_cache, dict) else None
+                if prior_sym:
+                    out["symbols"][sym] = prior_sym
                 continue
 
             parsed = []
-            under_px = None
             for r in rows:
                 details = r.get("details") or {}
                 quote = r.get("last_quote") or {}
@@ -480,13 +512,17 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                     p = last_trade.get("price")
                     mid = float(p) if p is not None else None
 
-                under_px = under_px if under_px is not None else r.get("underlying_asset", {}).get("price")
+                if under_px is None:
+                    under_px = r.get("underlying_asset", {}).get("price")
+                exp = details.get("expiration_date") or r.get("expiration_date")
+                strike = details.get("strike_price") if details.get("strike_price") is not None else r.get("strike_price")
+                ctype = details.get("contract_type") or r.get("contract_type")
                 parsed.append(
                     {
                         "ticker": details.get("ticker"),
-                        "expiration_date": details.get("expiration_date"),
-                        "strike_price": details.get("strike_price"),
-                        "contract_type": details.get("contract_type"),
+                        "expiration_date": exp,
+                        "strike_price": strike,
+                        "contract_type": ctype,
                         "mid": mid,
                         "iv": iv,
                         "delta": greeks.get("delta"),
@@ -494,15 +530,29 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 )
 
             parsed = [x for x in parsed if x.get("expiration_date") and x.get("strike_price") is not None]
+            if not parsed:
+                prior_sym = prior_cache.get("symbols", {}).get(sym) if isinstance(prior_cache, dict) else None
+                if prior_sym:
+                    out["symbols"][sym] = prior_sym
+                continue
             parsed.sort(key=lambda x: (x["expiration_date"], abs(float(x["strike_price"])) if x["strike_price"] is not None else 9e9))
             out["symbols"][sym] = {
                 "spot": float(under_px) if under_px is not None else None,
                 "options": parsed[:300],
             }
         except Exception:
+            prior_sym = prior_cache.get("symbols", {}).get(sym) if isinstance(prior_cache, dict) else None
+            if prior_sym:
+                out["symbols"][sym] = prior_sym
             continue
 
     out["symbols_count"] = len(out["symbols"])
+    if out["symbols_count"] == 0 and isinstance(prior_cache, dict):
+        prior_symbols = prior_cache.get("symbols")
+        if isinstance(prior_symbols, dict) and prior_symbols:
+            out["symbols"] = prior_symbols
+            out["symbols_count"] = len(prior_symbols)
+            out["warning"] = "Polygon fetch returned no symbols; using previous cached options data."
     return out
 
 

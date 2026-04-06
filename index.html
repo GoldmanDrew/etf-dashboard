@@ -1959,7 +1959,7 @@ function ChartPage({ record, onBack }) {
                 <div className="trade-note">
                   Options source: {optionsCache?.source || 'cache unavailable'}.
                 </div>
-                {(optionsCacheError || !optionsCache?.polygon_api_configured) && (
+                {(optionsCacheError || (!optionsCache?.polygon_api_configured && !Object.keys(optionsCache?.symbols || {}).length)) && (
                   <div className="trade-warning">
                     {optionsCacheError ? `Options cache error: ${optionsCacheError}. ` : ''}POLYGON_API_KEY not configured (or cache missing): options controls may be limited.
                   </div>
