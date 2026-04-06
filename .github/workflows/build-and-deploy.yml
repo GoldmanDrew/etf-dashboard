@@ -53,6 +53,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.LS_ALGO_TOKEN }}
           POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
+          POLYGON_OPTIONS_MAX_SYMBOLS: "1200"
+          POLYGON_FORCE_SYMBOLS: "APLD,APLZ"
         run: python scripts/build_data.py
 
       - name: Commit data if changed

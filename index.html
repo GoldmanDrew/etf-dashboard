@@ -1464,6 +1464,8 @@ function ChartPage({ record, onBack }) {
 
   const cachedSpotUnd = Number(optionsCache?.symbols?.[undSym]?.spot);
   const cachedSpotEtf = Number(optionsCache?.symbols?.[etfSym]?.spot);
+  const hasCachedSpotUnd = Number.isFinite(cachedSpotUnd);
+  const hasCachedSpotEtf = Number.isFinite(cachedSpotEtf);
   const tradeSpotUnderlying = Number.isFinite(cachedSpotUnd) ? cachedSpotUnd : 100;
   const tradeSpotEtf = Number.isFinite(cachedSpotEtf) ? cachedSpotEtf : 100;
 
@@ -1908,7 +1910,11 @@ function ChartPage({ record, onBack }) {
                       </select>
                       <input type="number" value={leg.quantity} onChange={(e) => setTradeBaseLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, quantity: Number(e.target.value || 0) } : x))} placeholder="Qty" />
                       <input type="number" value={leg.entry} onChange={(e) => setTradeBaseLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, entry: Number(e.target.value || 0) } : x))} placeholder="Entry" />
-                      <div className="scenario-sub">{leg.symbol === undSym ? `spot ${tradeSpotUnderlying.toFixed(2)}` : `spot ${tradeSpotEtf.toFixed(2)}`}</div>
+                      <div className="scenario-sub">
+                        {leg.symbol === undSym
+                          ? (hasCachedSpotUnd ? `spot ${tradeSpotUnderlying.toFixed(2)}` : 'spot n/a (fallback 100)')
+                          : (hasCachedSpotEtf ? `spot ${tradeSpotEtf.toFixed(2)}` : 'spot n/a (fallback 100)')}
+                      </div>
                       <button onClick={() => setTradeBaseLegs((arr) => arr.filter((x) => x.id !== leg.id))}>×</button>
                     </div>
                   ))}
@@ -1962,6 +1968,11 @@ function ChartPage({ record, onBack }) {
                 {(optionsCacheError || (!optionsCache?.polygon_api_configured && !Object.keys(optionsCache?.symbols || {}).length)) && (
                   <div className="trade-warning">
                     {optionsCacheError ? `Options cache error: ${optionsCacheError}. ` : ''}POLYGON_API_KEY not configured (or cache missing): options controls may be limited.
+                  </div>
+                )}
+                {(!hasCachedSpotUnd || !hasCachedSpotEtf) && (
+                  <div className="trade-warning">
+                    Live spot missing for {(!hasCachedSpotUnd && !hasCachedSpotEtf) ? `${undSym}/${etfSym}` : (!hasCachedSpotUnd ? undSym : etfSym)} in options cache; using fallback spot=100 for calculations until cache refresh succeeds.
                   </div>
                 )}
                 {!!(optionsCache?.polygon_api_configured && !Object.keys(optionsCache?.symbols || {}).length) && (

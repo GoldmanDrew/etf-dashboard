@@ -45,8 +45,12 @@ REALIZED_VOL_RANGE = os.environ.get("REALIZED_VOL_RANGE", "2y")
 REALIZED_VOL_EWMA_LAMBDA = float(os.environ.get("REALIZED_VOL_EWMA_LAMBDA", "0.94"))
 BORROW_HISTORY_MAX_COMMITS = int(os.environ.get("BORROW_HISTORY_MAX_COMMITS", "400"))
 BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE_SIZE", "100"))
-POLYGON_OPTIONS_MAX_SYMBOLS = int(os.environ.get("POLYGON_OPTIONS_MAX_SYMBOLS", "240"))
-POLYGON_FORCE_SYMBOLS_RAW = [s.strip() for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "").split(",") if s.strip()]
+POLYGON_OPTIONS_MAX_SYMBOLS = int(os.environ.get("POLYGON_OPTIONS_MAX_SYMBOLS", "1200"))
+POLYGON_FORCE_SYMBOLS_RAW = [
+    s.strip()
+    for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "APLD,APLZ").split(",")
+    if s.strip()
+]
 
 OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
@@ -449,6 +453,8 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "source": "polygon_snapshot",
         "polygon_api_configured": bool(POLYGON_API_KEY),
         "requested_symbols": int(len(symbols)),
+        "max_symbols": int(POLYGON_OPTIONS_MAX_SYMBOLS),
+        "forced_symbols": [norm_sym(s) for s in POLYGON_FORCE_SYMBOLS_RAW],
         "symbols": {},
         "errors": [],
     }
@@ -653,9 +659,14 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
     for s in POLYGON_FORCE_SYMBOLS_RAW:
         add(s)
 
+    # Prefer broad, deterministic coverage: all ETF + underlying symbols sorted.
+    base_set = set()
     for rec in records:
-        add(rec.get("symbol"))
-        add(rec.get("underlying"))
+        base_set.add(norm_sym(rec.get("symbol")))
+        base_set.add(norm_sym(rec.get("underlying")))
+    base_symbols = sorted(s for s in base_set if s)
+    for s in base_symbols:
+        add(s)
         if len(ordered) >= max(1, POLYGON_OPTIONS_MAX_SYMBOLS):
             break
 
@@ -955,6 +966,32 @@ def refresh_borrow_only() -> None:
     print(f"  Updated from latest CSV fallback: {updated_csv}/{len(records)} symbols")
 
 
+def refresh_options_only() -> None:
+    """Refresh options/spot cache used by Trade Lab."""
+    if not OUTPUT_FILE.exists():
+        raise FileNotFoundError(
+            f"Cannot run --options-only because {OUTPUT_FILE} does not exist. Run full build first."
+        )
+
+    with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+        output = json.load(f)
+    records = output.get("records", [])
+    if not isinstance(records, list) or not records:
+        raise ValueError("dashboard_data.json is malformed: missing records list")
+
+    symbols_for_options = select_symbols_for_polygon_cache(records)
+    options_cache = build_polygon_options_cache(symbols_for_options)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(options_cache, f, indent=None, separators=(",", ":"))
+
+    print(f"[OK] Options-only refresh wrote {OPTIONS_CACHE_FILE}")
+    print(f"  requested symbols: {options_cache.get('requested_symbols')}")
+    print(f"  cached symbols: {options_cache.get('symbols_count')}")
+    if options_cache.get("errors"):
+        print(f"  sample error: {options_cache['errors'][0]}")
+
+
 # ──────────────────────────────────────────────
 # Main build
 # ──────────────────────────────────────────────
@@ -1150,9 +1187,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Only refresh borrow rate + shares available in existing dashboard_data.json",
     )
+    parser.add_argument(
+        "--options-only",
+        action="store_true",
+        help="Only refresh options/spot cache in data/options_cache.json",
+    )
     args = parser.parse_args()
 
+    if args.borrow_only and args.options_only:
+        raise SystemExit("Use either --borrow-only or --options-only, not both.")
     if args.borrow_only:
         refresh_borrow_only()
+    elif args.options_only:
+        refresh_options_only()
     else:
         build()
