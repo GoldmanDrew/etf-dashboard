@@ -611,6 +611,81 @@
     margin: 4px 0 10px;
     line-height: 1.45;
   }
+  .trade-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .trade-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    padding: 10px;
+  }
+  .trade-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .trade-rows { display: grid; gap: 6px; }
+  .trade-row {
+    display: grid;
+    grid-template-columns: 1.1fr 0.8fr 0.8fr 0.8fr 0.8fr auto;
+    gap: 6px;
+    align-items: center;
+  }
+  .trade-row.option { grid-template-columns: 1fr 0.8fr 0.8fr 1fr 0.9fr 0.9fr 0.9fr auto; }
+  .trade-row input, .trade-row select, .trade-actions button, .trade-card button {
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .trade-actions { display: flex; gap: 6px; }
+  .trade-note {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+    margin-top: 6px;
+  }
+  .trade-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .trade-metric {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px;
+    background: var(--bg-card);
+  }
+  .trade-metric .k { color: var(--text-muted); font-size: 10px; text-transform: uppercase; }
+  .trade-metric .v { color: var(--text-primary); font-size: 14px; font-weight: 700; margin-top: 2px; }
+  .trade-warning {
+    color: var(--warning);
+    font-size: 11px;
+    margin-top: 6px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .ttx-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+  }
+  .ttx-table th, .ttx-table td {
+    border-bottom: 1px solid var(--border);
+    padding: 6px 8px;
+    text-align: right;
+  }
+  .ttx-table th:first-child, .ttx-table td:first-child { text-align: left; }
 
   .tf-group {
     display: flex; gap: 3px; margin-left: auto;
@@ -637,6 +712,8 @@
     .chart-header { gap: 10px; }
     .tf-group { margin-left: 0; width: 100%; justify-content: center; }
     .tf-btn { padding: 5px 8px; font-size: 10px; }
+    .trade-grid { grid-template-columns: 1fr; }
+    .trade-row, .trade-row.option { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -647,6 +724,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
+<script src="assets/trade_lab.js?v=tl-v1"></script>
+<script src="assets/options_data.js?v=tl-v1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
 <script type="text/babel">
@@ -654,6 +733,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 const DATA_URL = "data/dashboard_data.json";
 const BORROW_HISTORY_URL = "data/borrow_history.json";
+const OPTIONS_CACHE_URL = "data/options_cache.json";
 let BORROW_HISTORY_CACHE = null;
 
 // ── Formatters ──────────────────────────────
@@ -1213,6 +1293,13 @@ function ChartPage({ record, onBack }) {
   const [borrowHistoryMap, setBorrowHistoryMap] = useState({});
   const [borrowHistoryLoading, setBorrowHistoryLoading] = useState(false);
   const [borrowHistoryError, setBorrowHistoryError] = useState(null);
+  const [optionsCache, setOptionsCache] = useState(null);
+  const [optionsCacheError, setOptionsCacheError] = useState(null);
+  const [tradeUseScenarioAssumptions, setTradeUseScenarioAssumptions] = useState(true);
+  const [tradeBaseLegs, setTradeBaseLegs] = useState([]);
+  const [tradeOptionLegs, setTradeOptionLegs] = useState([]);
+  const [tradeTtxDays, setTradeTtxDays] = useState(30);
+  const [tradeRatePct, setTradeRatePct] = useState(4.0);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -1220,6 +1307,7 @@ function ChartPage({ record, onBack }) {
   const r = record;
   const etfSym = r.symbol;
   const undSym = r.underlying;
+  const tradeFns = window.TradeLab || {};
 
   const bucketLabel = r.bucket === 'bucket_1_high_beta' ? 'Bucket 1 — High β'
     : r.bucket === 'bucket_2_low_beta' ? 'Bucket 2 — Low β'
@@ -1255,6 +1343,23 @@ function ChartPage({ record, onBack }) {
         if (!cancelled) setBorrowHistoryError(e?.message || 'borrow history unavailable');
       } finally {
         if (!cancelled) setBorrowHistoryLoading(false);
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setOptionsCacheError(null);
+      try {
+        const cacheBust = `?t=${Math.floor(Date.now() / 1800)}`;
+        const res = await fetch(`${OPTIONS_CACHE_URL}${cacheBust}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`options cache HTTP ${res.status}`);
+        const payload = await res.json();
+        if (!cancelled) setOptionsCache(payload);
+      } catch (e) {
+        if (!cancelled) setOptionsCacheError(e?.message || 'options cache unavailable');
       }
     };
     run();
@@ -1355,6 +1460,141 @@ function ChartPage({ record, onBack }) {
     mcUpsideThresholds,
   ]);
 
+  const cachedSpotUnd = Number(optionsCache?.symbols?.[undSym]?.spot);
+  const cachedSpotEtf = Number(optionsCache?.symbols?.[etfSym]?.spot);
+  const tradeSpotUnderlying = Number.isFinite(cachedSpotUnd) ? cachedSpotUnd : 100;
+  const tradeSpotEtf = Number.isFinite(cachedSpotEtf) ? cachedSpotEtf : 100;
+
+  useEffect(() => {
+    setTradeBaseLegs([
+      { id: 1, symbol: undSym, side: 'short', quantity: 100, entry: tradeSpotUnderlying },
+      { id: 2, symbol: etfSym, side: 'long', quantity: 100, entry: tradeSpotEtf },
+    ]);
+    setTradeOptionLegs([]);
+  }, [undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf]);
+
+  const symbolChoices = useMemo(() => Array.from(new Set([undSym, etfSym])), [undSym, etfSym]);
+  const optionsForSymbol = useCallback((sym) => {
+    const rows = optionsCache?.symbols?.[sym]?.options;
+    return Array.isArray(rows) ? rows : [];
+  }, [optionsCache]);
+  const expiriesForSymbol = useCallback((sym) => {
+    const rows = optionsForSymbol(sym);
+    return Array.from(new Set(rows.map((x) => x.expiration_date).filter(Boolean))).sort();
+  }, [optionsForSymbol]);
+  const strikesForSymbolExpiryType = useCallback((sym, exp, type) => {
+    const rows = optionsForSymbol(sym).filter((x) => x.expiration_date === exp && String(x.contract_type || '').toLowerCase() === String(type || '').toLowerCase());
+    return Array.from(new Set(rows.map((x) => Number(x.strike_price)).filter(Number.isFinite))).sort((a, b) => a - b);
+  }, [optionsForSymbol]);
+  const findContract = useCallback((sym, exp, type, strike) => {
+    return optionsForSymbol(sym).find((x) => x.expiration_date === exp
+      && String(x.contract_type || '').toLowerCase() === String(type || '').toLowerCase()
+      && Math.abs(Number(x.strike_price) - Number(strike)) < 1e-9) || null;
+  }, [optionsForSymbol]);
+
+  const tradeScenarioGrid = useMemo(() => {
+    if (typeof tradeFns.buildTradeScenarioGrid !== 'function') return { ok: false, error: 'Trade Lab utility unavailable.' };
+    if (!scenarioGrid?.ok) return { ok: false, error: 'Scenario inputs unavailable.' };
+    const optionLegs = tradeOptionLegs.map((leg) => {
+      const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
+      return {
+        ...leg,
+        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : Number(c?.mid),
+        iv: Number.isFinite(Number(leg.iv)) ? Number(leg.iv) : Number(c?.iv),
+      };
+    });
+    const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
+    const tradeHYears = tradeUseScenarioAssumptions ? horizonYears : 1;
+    const tradeLev = tradeUseScenarioAssumptions ? scenarioLeverage : (Number.isFinite(Number(r.beta)) ? Number(r.beta) : scenarioLeverage);
+    return tradeFns.buildTradeScenarioGrid({
+      baseLegs: tradeBaseLegs,
+      optionLegs,
+      underlyingSymbol: undSym,
+      etfSymbol: etfSym,
+      spotUnderlying: tradeSpotUnderlying,
+      spotEtf: tradeSpotEtf,
+      leverage: tradeLev,
+      horizonYears: tradeHYears,
+      baseVolAnnual: tradeSigmaAnnual,
+      shockRows: scenarioGrid.rows.map((x) => ({ sigmaMultiple: x.sigmaMultiple, underlyingReturn: x.underlyingReturn })),
+      volColumns: scenarioGrid.volColumns.map((x) => ({ sigmaAnnual: x.sigmaAnnual })),
+      ttxDays: tradeTtxDays,
+      rate: Number(tradeRatePct) / 100,
+    });
+  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta]);
+
+  const tradeMonteCarlo = useMemo(() => {
+    if (typeof tradeFns.evaluateTradeMonteCarlo !== 'function') return { ok: false, error: 'Trade Lab utility unavailable.' };
+    if (!monteCarloResult?.ok) return { ok: false, error: 'Monte Carlo unavailable.' };
+    if (typeof scenarioFns.simulateMonteCarloPaths !== 'function') return { ok: false, error: 'Monte Carlo engine unavailable.' };
+    const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
+    const tradeHYears = tradeUseScenarioAssumptions ? horizonYears : 1;
+    const underlyingMc = scenarioFns.simulateMonteCarloPaths({
+      pathCount: Number(mcPathCount),
+      sigmaAnnual: tradeSigmaAnnual,
+      leverage: 1,
+      horizonYears: tradeHYears,
+      annualCarryDrag: 0,
+      seed: Number(mcSeed),
+      ruinThreshold: -0.99,
+      upsideThresholds: [0.25],
+    });
+    if (!underlyingMc.ok) return { ok: false, error: underlyingMc.error || 'Underlying MC unavailable.' };
+    const optionLegs = tradeOptionLegs.map((leg) => {
+      const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
+      return {
+        ...leg,
+        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : Number(c?.mid),
+        iv: Number.isFinite(Number(leg.iv)) ? Number(leg.iv) : Number(c?.iv),
+      };
+    });
+    return tradeFns.evaluateTradeMonteCarlo({
+      baseLegs: tradeBaseLegs,
+      optionLegs,
+      underlyingSymbol: undSym,
+      etfSymbol: etfSym,
+      spotUnderlying: tradeSpotUnderlying,
+      spotEtf: tradeSpotEtf,
+      ttxDaysStart: tradeTtxDays,
+      horizonYears: tradeHYears,
+      volAnnual: tradeSigmaAnnual,
+      rate: Number(tradeRatePct) / 100,
+      etfPaths: monteCarloResult.paths,
+      underlyingPaths: underlyingMc.paths,
+    });
+  }, [tradeFns, monteCarloResult, scenarioFns, mcPathCount, scenarioSigmaBest, horizonYears, mcSeed, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd]);
+
+  const tradeTtxSeries = useMemo(() => {
+    if (typeof tradeFns.buildTtxSensitivity !== 'function') return [];
+    if (!scenarioGrid?.ok) return [];
+    const optionLegs = tradeOptionLegs.map((leg) => {
+      const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
+      return {
+        ...leg,
+        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : Number(c?.mid),
+        iv: Number.isFinite(Number(leg.iv)) ? Number(leg.iv) : Number(c?.iv),
+      };
+    });
+    const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
+    const tradeHYears = tradeUseScenarioAssumptions ? horizonYears : 1;
+    const tradeLev = tradeUseScenarioAssumptions ? scenarioLeverage : (Number.isFinite(Number(r.beta)) ? Number(r.beta) : scenarioLeverage);
+    return tradeFns.buildTtxSensitivity({
+      baseLegs: tradeBaseLegs,
+      optionLegs,
+      underlyingSymbol: undSym,
+      etfSymbol: etfSym,
+      spotUnderlying: tradeSpotUnderlying,
+      spotEtf: tradeSpotEtf,
+      leverage: tradeLev,
+      horizonYears: tradeHYears,
+      baseVolAnnual: tradeSigmaAnnual,
+      shockRows: scenarioGrid.rows.map((x) => ({ sigmaMultiple: x.sigmaMultiple, underlyingReturn: x.underlyingReturn })),
+      volColumns: scenarioGrid.volColumns.map((x) => ({ sigmaAnnual: x.sigmaAnnual })),
+      ttxList: [1, 7, 14, 30, 60, 90],
+      rate: Number(tradeRatePct) / 100,
+    });
+  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta]);
+
   return (
     <div className="chart-page">
       {/* Header */}
@@ -1375,6 +1615,7 @@ function ChartPage({ record, onBack }) {
           <button className={cls('chart-view-btn', activePanel === 'chart' && 'active')} onClick={() => setActivePanel('chart')}>Chart</button>
           <button className={cls('chart-view-btn', activePanel === 'stats' && 'active')} onClick={() => setActivePanel('stats')}>Stats</button>
           <button className={cls('chart-view-btn', activePanel === 'scenarios' && 'active')} onClick={() => setActivePanel('scenarios')}>Scenarios</button>
+          <button className={cls('chart-view-btn', activePanel === 'trade' && 'active')} onClick={() => setActivePanel('trade')}>Trade Lab</button>
           <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => setActivePanel('borrow')}>Borrow</button>
         </div>
 
@@ -1613,6 +1854,186 @@ function ChartPage({ record, onBack }) {
 
           <div className="chart-note">
             Scenario grid uses shocks {`±1/3σ, ±1σ, ±3σ`} and log-space mapping so underlying return is always greater than -100%.
+          </div>
+        </div>
+      )}
+
+      {activePanel === 'trade' && (
+        <div className="chart-section">
+          <div className="scenario-card" style={{ marginTop: 0 }}>
+            <div className="scenario-head">
+              <div>
+                <div className="scenario-title">Trade Lab</div>
+                <div className="scenario-sub">
+                  Build equity + options structures (e.g. short {undSym} / long {etfSym}) and evaluate across scenarios + Monte Carlo.
+                </div>
+              </div>
+              <div className="trade-actions">
+                <label className="toggle-label">
+                  <input type="checkbox" checked={tradeUseScenarioAssumptions} onChange={(e) => setTradeUseScenarioAssumptions(e.target.checked)} />
+                  Use current Scenarios assumptions
+                </label>
+              </div>
+            </div>
+
+            <div className="trade-grid">
+              <div className="trade-card">
+                <div className="trade-head">
+                  <div className="scenario-title">Base Legs</div>
+                  <button onClick={() => {
+                    if (tradeBaseLegs.length >= 4) return;
+                    setTradeBaseLegs((arr) => [...arr, { id: Date.now(), symbol: undSym, side: 'long', quantity: 10, entry: tradeSpotUnderlying }]);
+                  }}>+ Leg</button>
+                </div>
+                <div className="trade-rows">
+                  {tradeBaseLegs.map((leg) => (
+                    <div className="trade-row" key={`b-${leg.id}`}>
+                      <select value={leg.symbol} onChange={(e) => setTradeBaseLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, symbol: e.target.value } : x))}>
+                        {symbolChoices.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                      <select value={leg.side} onChange={(e) => setTradeBaseLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, side: e.target.value } : x))}>
+                        <option value="long">Long</option>
+                        <option value="short">Short</option>
+                      </select>
+                      <input type="number" value={leg.quantity} onChange={(e) => setTradeBaseLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, quantity: Number(e.target.value || 0) } : x))} placeholder="Qty" />
+                      <input type="number" value={leg.entry} onChange={(e) => setTradeBaseLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, entry: Number(e.target.value || 0) } : x))} placeholder="Entry" />
+                      <div className="scenario-sub">{leg.symbol === undSym ? `spot ${tradeSpotUnderlying.toFixed(2)}` : `spot ${tradeSpotEtf.toFixed(2)}`}</div>
+                      <button onClick={() => setTradeBaseLegs((arr) => arr.filter((x) => x.id !== leg.id))}>×</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="trade-card">
+                <div className="trade-head">
+                  <div className="scenario-title">Options Hedge Legs</div>
+                  <button onClick={() => setTradeOptionLegs((arr) => [...arr, { id: Date.now(), symbol: undSym, type: 'put', side: 'buy', expiry: (expiriesForSymbol(undSym)[0] || ''), strike: Number(strikesForSymbolExpiryType(undSym, expiriesForSymbol(undSym)[0], 'put')[0] || tradeSpotUnderlying), contracts: 1, premium: 0, iv: Number(scenarioSigmaBest) || 0.8 }])}>+ Option</button>
+                </div>
+                <div className="trade-rows">
+                  {tradeOptionLegs.map((leg) => {
+                    const expiries = expiriesForSymbol(leg.symbol);
+                    const strikes = strikesForSymbolExpiryType(leg.symbol, leg.expiry, leg.type);
+                    const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
+                    return (
+                      <div className="trade-row option" key={`o-${leg.id}`}>
+                        <select value={leg.symbol} onChange={(e) => {
+                          const sym = e.target.value;
+                          const exp = expiriesForSymbol(sym)[0] || '';
+                          const strike = Number(strikesForSymbolExpiryType(sym, exp, leg.type)[0] || 0);
+                          setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, symbol: sym, expiry: exp, strike } : x));
+                        }}>
+                          {symbolChoices.map((s) => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                        <select value={leg.type} onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, type: e.target.value } : x))}>
+                          <option value="call">Call</option>
+                          <option value="put">Put</option>
+                        </select>
+                        <select value={leg.side} onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, side: e.target.value } : x))}>
+                          <option value="buy">Buy</option>
+                          <option value="sell">Sell</option>
+                        </select>
+                        <select value={leg.expiry} onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, expiry: e.target.value } : x))}>
+                          {expiries.length ? expiries.map((d) => <option key={d} value={d}>{d}</option>) : <option value="">No expiry data</option>}
+                        </select>
+                        <select value={leg.strike} onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, strike: Number(e.target.value || 0) } : x))}>
+                          {strikes.length ? strikes.map((k) => <option key={k} value={k}>{k}</option>) : <option value={leg.strike}>{leg.strike || 0}</option>}
+                        </select>
+                        <input type="number" value={leg.contracts} onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, contracts: Number(e.target.value || 0) } : x))} placeholder="Contracts" />
+                        <div className="scenario-sub">mid {Number.isFinite(Number(c?.mid)) ? Number(c.mid).toFixed(2) : '—'} | iv {Number.isFinite(Number(c?.iv)) ? fmt(Number(c.iv)) : '—'}</div>
+                        <button onClick={() => setTradeOptionLegs((arr) => arr.filter((x) => x.id !== leg.id))}>×</button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="trade-note">
+                  Options source: {optionsCache?.source || 'cache unavailable'}.
+                </div>
+                {(optionsCacheError || !optionsCache?.polygon_api_configured) && (
+                  <div className="trade-warning">
+                    {optionsCacheError ? `Options cache error: ${optionsCacheError}. ` : ''}POLYGON_API_KEY not configured (or cache missing): options controls may be limited.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="trade-grid" style={{ marginTop: 10 }}>
+              <div className="trade-card">
+                <div className="trade-head">
+                  <div className="scenario-title">Scenario Payout</div>
+                  <div className="trade-actions">
+                    <label className="scenario-sub">TTX days</label>
+                    <input type="number" value={tradeTtxDays} onChange={(e) => setTradeTtxDays(Number(e.target.value || 0))} style={{ width: 92 }} />
+                    <label className="scenario-sub">Rate %</label>
+                    <input type="number" value={tradeRatePct} onChange={(e) => setTradeRatePct(Number(e.target.value || 0))} style={{ width: 84 }} />
+                  </div>
+                </div>
+                {!tradeScenarioGrid.ok ? (
+                  <div className="scenario-warning">{tradeScenarioGrid.error || 'Trade scenario unavailable.'}</div>
+                ) : (
+                  <div className="scenario-table-wrap">
+                    <table className="scenario-table">
+                      <thead>
+                        <tr>
+                          <th>Underlying Shock</th>
+                          {scenarioGrid.volColumns.map((col, idx) => (
+                            <th key={`tl-v-${idx}`}>{fmt(col.sigmaAnnual)}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {tradeScenarioGrid.rows.map((row, ridx) => (
+                          <tr key={`tl-r-${ridx}`}>
+                            <td>{fmtSigmaMultiple(row.sigmaMultiple)} ({fmt(row.underlyingReturn)})</td>
+                            {row.cells.map((cell, cidx) => (
+                              <td key={`tl-c-${ridx}-${cidx}`} style={{ background: scenarioCellBg(Number(cell.pnl) / Math.max(1, Math.abs((tradeSpotUnderlying * 100)))), color: 'var(--text-primary)' }}>
+                                {fmtNum(Math.round(cell.pnl))}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div className="trade-card">
+                <div className="trade-head">
+                  <div className="scenario-title">Monte Carlo Payout</div>
+                </div>
+                {!tradeMonteCarlo.ok ? (
+                  <div className="scenario-warning">{tradeMonteCarlo.error || 'Trade Monte Carlo unavailable.'}</div>
+                ) : (
+                  <div className="trade-metrics">
+                    <div className="trade-metric"><div className="k">Mean Terminal PnL</div><div className="v">{fmtNum(Math.round(tradeMonteCarlo.summary.meanTerminal))}</div></div>
+                    <div className="trade-metric"><div className="k">Median Terminal PnL</div><div className="v">{fmtNum(Math.round(tradeMonteCarlo.summary.medianTerminal))}</div></div>
+                    <div className="trade-metric"><div className="k">p05 / p95</div><div className="v">{fmtNum(Math.round(tradeMonteCarlo.summary.p05))} / {fmtNum(Math.round(tradeMonteCarlo.summary.p95))}</div></div>
+                    <div className="trade-metric"><div className="k">CVaR 5%</div><div className="v">{fmtNum(Math.round(tradeMonteCarlo.summary.cvar5))}</div></div>
+                    <div className="trade-metric"><div className="k">Prob Loss</div><div className="v">{fmt(tradeMonteCarlo.summary.probLoss)}</div></div>
+                    <div className="trade-metric"><div className="k">MaxDD Mean / p95</div><div className="v">{fmt(tradeMonteCarlo.summary.ddMean)} / {fmt(tradeMonteCarlo.summary.ddP95)}</div></div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="trade-card" style={{ marginTop: 10 }}>
+              <div className="trade-head">
+                <div className="scenario-title">TTX Sensitivity</div>
+                <div className="scenario-sub">Center-cell scenario PnL across days-to-expiry.</div>
+              </div>
+              <table className="ttx-table">
+                <thead><tr><th>TTX (days)</th><th>PnL</th></tr></thead>
+                <tbody>
+                  {tradeTtxSeries.map((x) => (
+                    <tr key={`ttx-${x.ttxDays}`}><td>{x.ttxDays}</td><td>{fmtNum(Math.round(x.pnl))}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="trade-note">
+              Formula notes: options are marked with Black-Scholes for TTX &gt; 0 and intrinsic at expiry; scenario and Monte Carlo assumptions reuse active Scenarios controls (lookback EWMA sigma, horizon, leverage mapping).
+            </div>
           </div>
         </div>
       )}

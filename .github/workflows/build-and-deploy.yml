@@ -41,13 +41,14 @@ jobs:
       - name: Build dashboard data
         env:
           GITHUB_TOKEN: ${{ secrets.LS_ALGO_TOKEN }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: python scripts/build_data.py
 
       - name: Commit data if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/dashboard_data.json data/etf_screened_today.csv
+          git add data/dashboard_data.json data/etf_screened_today.csv data/options_cache.json
           if git diff --staged --quiet; then
             echo "No data changes to commit"
           else

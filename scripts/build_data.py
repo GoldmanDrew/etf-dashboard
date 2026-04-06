@@ -32,6 +32,7 @@ UNIVERSE_REPO = os.environ.get("UNIVERSE_REPO", "GoldmanDrew/ls-algo")
 UNIVERSE_BRANCH = os.environ.get("UNIVERSE_BRANCH", "main")
 UNIVERSE_PATH = os.environ.get("UNIVERSE_PATH", "data/etf_screened_today.csv")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY", "").strip()
 
 HIGH_BETA_THRESHOLD = float(os.environ.get("HIGH_BETA_THRESHOLD", "1.5"))
 REALIZED_VOL_TIMEOUT_SEC = int(os.environ.get("REALIZED_VOL_TIMEOUT_SEC", "20"))
@@ -44,6 +45,7 @@ BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE
 OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
 BORROW_HISTORY_FILE = OUTPUT_DIR / "borrow_history.json"
+OPTIONS_CACHE_FILE = OUTPUT_DIR / "options_cache.json"
 LS_ALGO_DATA_PATH = Path(
     os.environ.get(
         "LS_ALGO_DATA_PATH",
@@ -424,6 +426,83 @@ def _maps_from_universe_csv(df: pd.DataFrame) -> dict:
     return out
 
 
+def build_polygon_options_cache(symbols: list[str]) -> dict:
+    """
+    Build delayed options snapshot cache from Polygon for UI consumption.
+    Returns a JSON-serializable dict with per-symbol spot + option rows.
+    """
+    out = {
+        "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+        "source": "polygon_snapshot",
+        "polygon_api_configured": bool(POLYGON_API_KEY),
+        "symbols": {},
+    }
+    if not POLYGON_API_KEY:
+        out["error"] = "POLYGON_API_KEY missing"
+        return out
+
+    session = requests.Session()
+    headers = {"User-Agent": "etf-dashboard-builder/1.0"}
+    unique_symbols = sorted({norm_sym(s) for s in symbols if str(s).strip()})
+
+    for sym in unique_symbols:
+        try:
+            url = f"https://api.polygon.io/v3/snapshot/options/{sym}"
+            params = {"limit": 250, "apiKey": POLYGON_API_KEY}
+            resp = session.get(url, params=params, headers=headers, timeout=25)
+            if not resp.ok:
+                continue
+            payload = resp.json() or {}
+            rows = payload.get("results") or []
+            if not rows:
+                continue
+
+            parsed = []
+            under_px = None
+            for r in rows:
+                details = r.get("details") or {}
+                quote = r.get("last_quote") or {}
+                greeks = r.get("greeks") or {}
+                iv = r.get("implied_volatility")
+                bid = quote.get("bid")
+                ask = quote.get("ask")
+                mid = None
+                if bid is not None and ask is not None:
+                    try:
+                        mid = 0.5 * (float(bid) + float(ask))
+                    except Exception:
+                        mid = None
+                if mid is None:
+                    last_trade = r.get("last_trade") or {}
+                    p = last_trade.get("price")
+                    mid = float(p) if p is not None else None
+
+                under_px = under_px if under_px is not None else r.get("underlying_asset", {}).get("price")
+                parsed.append(
+                    {
+                        "ticker": details.get("ticker"),
+                        "expiration_date": details.get("expiration_date"),
+                        "strike_price": details.get("strike_price"),
+                        "contract_type": details.get("contract_type"),
+                        "mid": mid,
+                        "iv": iv,
+                        "delta": greeks.get("delta"),
+                    }
+                )
+
+            parsed = [x for x in parsed if x.get("expiration_date") and x.get("strike_price") is not None]
+            parsed.sort(key=lambda x: (x["expiration_date"], abs(float(x["strike_price"])) if x["strike_price"] is not None else 9e9))
+            out["symbols"][sym] = {
+                "spot": float(under_px) if under_px is not None else None,
+                "options": parsed[:300],
+            }
+        except Exception:
+            continue
+
+    out["symbols_count"] = len(out["symbols"])
+    return out
+
+
 # ──────────────────────────────────────────────
 # Realized volatility (server-side canonical)
 # ──────────────────────────────────────────────
@@ -705,6 +784,8 @@ def refresh_borrow_only() -> None:
         "updated_from_csv": int(updated_csv),
         "ibkr_attempt_success": bool(ibkr["success"]),
     }
+    output["polygon_api_configured"] = bool(POLYGON_API_KEY)
+    output["options_cache_file"] = "data/options_cache.json"
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
@@ -873,6 +954,8 @@ def build():
         "refresh_type": "full",
         "decay_method": "linear_daily_pnl_1_over_beta_hedge",
         "borrow_history_file": "data/borrow_history.json",
+        "polygon_api_configured": bool(POLYGON_API_KEY),
+        "options_cache_file": "data/options_cache.json",
         "summary": summary,
         "records": records,
     }
@@ -883,11 +966,17 @@ def build():
         json.dump(output, f, indent=None, separators=(",", ":"))
     with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(borrow_history, f, indent=None, separators=(",", ":"))
+    symbols_for_options = sorted({rec["symbol"] for rec in records} | {rec["underlying"] for rec in records})
+    options_cache = build_polygon_options_cache(symbols_for_options)
+    with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(options_cache, f, indent=None, separators=(",", ":"))
 
     file_size = OUTPUT_FILE.stat().st_size
     print(f"\n[OK] Wrote {OUTPUT_FILE} ({file_size:,} bytes)")
     if BORROW_HISTORY_FILE.exists():
         print(f"  [OK] Wrote {BORROW_HISTORY_FILE} ({BORROW_HISTORY_FILE.stat().st_size:,} bytes)")
+    if OPTIONS_CACHE_FILE.exists():
+        print(f"  [OK] Wrote {OPTIONS_CACHE_FILE} ({OPTIONS_CACHE_FILE.stat().st_size:,} bytes)")
     print(f"  {len(records)} records | B1={summary['bucket_1_count']} B2={summary['bucket_2_count']} B3={summary['bucket_3_count']}")
     print(f"  Decay: {decay_count}/{len(records)} ({100*decay_count/len(records):.0f}%)")
     print(f"  IBKR FTP: {'OK' if ibkr['success'] else 'FAIL'}")
