@@ -48,15 +48,27 @@ REALIZED_VOL_RANGE = os.environ.get("REALIZED_VOL_RANGE", "2y")
 REALIZED_VOL_EWMA_LAMBDA = float(os.environ.get("REALIZED_VOL_EWMA_LAMBDA", "0.94"))
 BORROW_HISTORY_MAX_COMMITS = int(os.environ.get("BORROW_HISTORY_MAX_COMMITS", "400"))
 BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE_SIZE", "100"))
-POLYGON_OPTIONS_MAX_SYMBOLS = int(os.environ.get("POLYGON_OPTIONS_MAX_SYMBOLS", "250"))
+POLYGON_OPTIONS_MAX_SYMBOLS = int(os.environ.get("POLYGON_OPTIONS_MAX_SYMBOLS", "100"))
 TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH = int(os.environ.get("TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH", "200"))
 TRADIER_SPOT_MAX_REQUESTS = int(os.environ.get("TRADIER_SPOT_MAX_REQUESTS", "30"))
 OPTIONS_REFRESH_SLEEP_MS = int(os.environ.get("OPTIONS_REFRESH_SLEEP_MS", "0"))
-POLYGON_MAX_REQUESTS_PER_MINUTE = int(os.environ.get("POLYGON_MAX_REQUESTS_PER_MINUTE", "90"))
-POLYGON_MAX_TOTAL_REQUESTS = int(os.environ.get("POLYGON_MAX_TOTAL_REQUESTS", "700"))
-POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL", "2"))
-POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL", "2"))
-POLYGON_RETRY_MAX_429 = int(os.environ.get("POLYGON_RETRY_MAX_429", "2"))
+POLYGON_MAX_REQUESTS_PER_MINUTE = int(os.environ.get("POLYGON_MAX_REQUESTS_PER_MINUTE", "25"))
+POLYGON_MAX_TOTAL_REQUESTS = int(os.environ.get("POLYGON_MAX_TOTAL_REQUESTS", "90"))
+POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL", "1"))
+POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL", "0"))
+POLYGON_RETRY_MAX_429 = int(os.environ.get("POLYGON_RETRY_MAX_429", "1"))
+TRADIER_CHAIN_SYMBOLS_RAW = [
+    s.strip()
+    for s in os.environ.get("TRADIER_CHAIN_SYMBOLS", "APLD,APLZ").split(",")
+    if s.strip()
+]
+TRADIER_MAX_REQUESTS_PER_MINUTE = int(os.environ.get("TRADIER_MAX_REQUESTS_PER_MINUTE", "25"))
+TRADIER_MAX_TOTAL_REQUESTS = int(os.environ.get("TRADIER_MAX_TOTAL_REQUESTS", "70"))
+TRADIER_CHAIN_MAX_EXPIRIES = int(os.environ.get("TRADIER_CHAIN_MAX_EXPIRIES", "1"))
+TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL = int(os.environ.get("TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL", "120"))
+TRADIER_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("TRADIER_CHAIN_STRIKE_BAND_PCT", "0.12"))
+OPTIONS_SYMBOLS_PER_RUN = int(os.environ.get("OPTIONS_SYMBOLS_PER_RUN", "12"))
+OPTIONS_SHARD_COUNT = int(os.environ.get("OPTIONS_SHARD_COUNT", "48"))
 POLYGON_FORCE_SYMBOLS_RAW = [
     s.strip()
     for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "APLD,APLZ").split(",")
@@ -470,6 +482,37 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         except Exception:
             prior_cache = {}
 
+    tradier_chain_symbols = {norm_sym(s) for s in TRADIER_CHAIN_SYMBOLS_RAW if str(s).strip()}
+    all_symbols = sorted({norm_sym(s) for s in symbols if str(s).strip()})
+    prior_symbols = prior_cache.get("symbols") if isinstance(prior_cache, dict) else {}
+    if not isinstance(prior_symbols, dict):
+        prior_symbols = {}
+
+    # Time-sharded refresh keeps frequent updates while controlling API pressure.
+    forced_symbols = [norm_sym(s) for s in POLYGON_FORCE_SYMBOLS_RAW if str(s).strip()]
+    forced_set = set(forced_symbols)
+    shard_count = max(1, OPTIONS_SHARD_COUNT)
+    symbols_per_run = max(1, OPTIONS_SYMBOLS_PER_RUN)
+    slot = int(time.time() // (30 * 60)) % shard_count
+    shard_candidates = [
+        s for s in all_symbols if (hash(s) % shard_count) == slot and s not in forced_set
+    ]
+    refresh_candidates = forced_symbols + shard_candidates
+    seen_refresh = set()
+    refresh_symbols: list[str] = []
+    for s in refresh_candidates:
+        if s and s not in seen_refresh:
+            seen_refresh.add(s)
+            refresh_symbols.append(s)
+        if len(refresh_symbols) >= symbols_per_run:
+            break
+    # Guarantee tradier-chain symbols are refreshed each run, then trim.
+    for s in sorted(tradier_chain_symbols):
+        if s in all_symbols and s not in seen_refresh:
+            refresh_symbols.insert(0, s)
+            seen_refresh.add(s)
+    refresh_symbols = refresh_symbols[: max(symbols_per_run, len([s for s in tradier_chain_symbols if s in all_symbols]))]
+
     out = {
         "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         "source": "polygon_snapshot",
@@ -478,20 +521,20 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "requested_symbols": int(len(symbols)),
         "max_symbols": int(POLYGON_OPTIONS_MAX_SYMBOLS),
         "forced_symbols": [norm_sym(s) for s in POLYGON_FORCE_SYMBOLS_RAW],
+        "tradier_chain_symbols": sorted(tradier_chain_symbols),
+        "refresh_symbols_count": int(len(refresh_symbols)),
         "polygon_request_limits": {
             "max_requests_per_minute": int(POLYGON_MAX_REQUESTS_PER_MINUTE),
             "max_total_requests": int(POLYGON_MAX_TOTAL_REQUESTS),
             "max_snapshot_pages_per_symbol": int(POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL),
             "max_contract_pages_per_symbol": int(POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL),
         },
-        "symbols": {},
+        "symbols": dict(prior_symbols),
         "errors": [],
         "errors_by_symbol": {},
     }
     if not POLYGON_API_KEY:
-        prior_symbols = prior_cache.get("symbols") if isinstance(prior_cache, dict) else {}
-        if isinstance(prior_symbols, dict) and prior_symbols:
-            out["symbols"] = prior_symbols
+        if prior_symbols:
             out["symbols_count"] = len(prior_symbols)
             out["warning"] = "POLYGON_API_KEY missing; using previous cached options data."
             return out
@@ -500,9 +543,11 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
     session = requests.Session()
     headers = {"User-Agent": "etf-dashboard-builder/1.0"}
-    unique_symbols = sorted({norm_sym(s) for s in symbols if str(s).strip()})
+
     request_timestamps: collections.deque[float] = collections.deque()
     total_polygon_requests = 0
+    tradier_request_timestamps: collections.deque[float] = collections.deque()
+    total_tradier_requests = 0
 
     def _safe_float(v):
         try:
@@ -619,6 +664,50 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             time.sleep(wait_s)
             retries_left -= 1
 
+    def _rate_limit_tradier() -> None:
+        if TRADIER_MAX_REQUESTS_PER_MINUTE <= 0:
+            return
+        now = time.monotonic()
+        while tradier_request_timestamps and (now - tradier_request_timestamps[0]) >= 60.0:
+            tradier_request_timestamps.popleft()
+        if len(tradier_request_timestamps) < TRADIER_MAX_REQUESTS_PER_MINUTE:
+            return
+        wait_s = max(0.01, 60.0 - (now - tradier_request_timestamps[0]))
+        time.sleep(wait_s)
+
+    def _tradier_get(path: str, params: dict[str, str]) -> tuple[requests.Response | None, str | None]:
+        nonlocal total_tradier_requests
+        if not TRADIER_TOKEN:
+            return None, "tradier token missing"
+        if TRADIER_MAX_TOTAL_REQUESTS > 0 and total_tradier_requests >= TRADIER_MAX_TOTAL_REQUESTS:
+            return None, f"tradier request budget exceeded ({TRADIER_MAX_TOTAL_REQUESTS})"
+        _rate_limit_tradier()
+        headers = {
+            "Authorization": f"Bearer {TRADIER_TOKEN}",
+            "Accept": "application/json",
+            "User-Agent": "etf-dashboard-builder/1.0",
+        }
+        try:
+            resp = requests.get(
+                f"{TRADIER_BASE_URL}{path}",
+                headers=headers,
+                params=params,
+                timeout=20,
+            )
+        except Exception:
+            return None, "tradier request exception"
+        total_tradier_requests += 1
+        tradier_request_timestamps.append(time.monotonic())
+        if not resp.ok:
+            msg = ""
+            try:
+                payload = resp.json() or {}
+                msg = payload.get("error") or payload.get("message") or ""
+            except Exception:
+                msg = ""
+            return resp, f"tradier HTTP {resp.status_code}{f' {msg}' if msg else ''}"
+        return resp, None
+
     def _append_api_key(next_url: str) -> str:
         parsed = urlparse(next_url)
         qs = parse_qs(parsed.query)
@@ -702,48 +791,143 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
         return None, "; ".join(errs[:3]) if errs else "spot unavailable"
 
-    tradier_spot_map, tradier_err = _fetch_tradier_spot_map(unique_symbols)
+    def _fetch_tradier_chain(sym: str, spot_hint: float | None) -> tuple[list[dict], float | None, str | None]:
+        # Tradier chain fetch is intentionally narrow: few expiries + near-ATM strikes.
+        exp_resp, exp_err = _tradier_get(
+            "/markets/options/expirations",
+            {"symbol": sym, "includeAllRoots": "true"},
+        )
+        if exp_err and exp_resp is None:
+            return [], spot_hint, exp_err
+
+        expirations = []
+        if exp_resp is not None and exp_resp.ok:
+            payload = exp_resp.json() or {}
+            dates = ((payload.get("expirations") or {}).get("date")) or []
+            if isinstance(dates, str):
+                expirations = [dates]
+            elif isinstance(dates, list):
+                expirations = [str(x) for x in dates if x]
+        expirations = expirations[: max(0, TRADIER_CHAIN_MAX_EXPIRIES)]
+        if not expirations:
+            return [], spot_hint, exp_err or "tradier expirations unavailable"
+
+        out_rows: list[dict] = []
+        errs: list[str] = []
+        spot_value = spot_hint
+        strike_min = None
+        strike_max = None
+        if spot_value is not None and spot_value > 0:
+            band = max(0.01, float(TRADIER_CHAIN_STRIKE_BAND_PCT))
+            strike_min = spot_value * (1.0 - band)
+            strike_max = spot_value * (1.0 + band)
+
+        for exp in expirations:
+            chain_resp, chain_err = _tradier_get(
+                "/markets/options/chains",
+                {"symbol": sym, "expiration": exp, "greeks": "true"},
+            )
+            if chain_err:
+                errs.append(chain_err)
+            if chain_resp is None or not chain_resp.ok:
+                continue
+
+            payload = chain_resp.json() or {}
+            options = ((payload.get("options") or {}).get("option")) or []
+            if isinstance(options, dict):
+                options = [options]
+
+            for opt in options:
+                strike = _safe_float(opt.get("strike"))
+                if strike is None:
+                    continue
+                if strike_min is not None and strike < strike_min:
+                    continue
+                if strike_max is not None and strike > strike_max:
+                    continue
+
+                bid = _safe_float(opt.get("bid"))
+                ask = _safe_float(opt.get("ask"))
+                mid = None
+                if bid is not None and ask is not None:
+                    mid = 0.5 * (bid + ask)
+                if mid is None:
+                    mid = _safe_float(opt.get("last"))
+
+                greeks = opt.get("greeks") or {}
+                out_rows.append(
+                    {
+                        "ticker": opt.get("symbol"),
+                        "expiration_date": opt.get("expiration_date") or exp,
+                        "strike_price": strike,
+                        "contract_type": "put" if str(opt.get("option_type", "")).lower().startswith("put") else "call",
+                        "mid": mid,
+                        "iv": _safe_float(greeks.get("mid_iv") or greeks.get("smv_vol")),
+                        "delta": _safe_float(greeks.get("delta")),
+                    }
+                )
+                if len(out_rows) >= max(1, TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL):
+                    break
+            if len(out_rows) >= max(1, TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL):
+                break
+
+        err_msg = "; ".join(errs[:3]) if errs else None
+        return out_rows, spot_value, err_msg
+
+    tradier_spot_map, tradier_err = _fetch_tradier_spot_map(all_symbols)
     if tradier_err:
         out["errors"].append(tradier_err)
 
-    for sym in unique_symbols:
+    for sym in refresh_symbols:
         try:
             under_px = None
             tradier_spot = tradier_spot_map.get(sym)
             sym_errors = []
             snapshot_rate_limited = False
-            snap_start = f"https://api.polygon.io/v3/snapshot/options/{sym}?{urlencode({'limit': 250, 'apiKey': POLYGON_API_KEY})}"
-            resp, req_err = _polygon_get(snap_start, timeout=25)
-            if req_err and resp is None:
-                sym_errors.append(f"snapshot: {req_err}")
-                payload = {}
-            else:
-                payload = resp.json() if (resp is not None and resp.ok) else {}
             rows = []
-            if resp is not None and resp.ok:
-                batch = payload.get("results") or []
-                if isinstance(batch, list):
-                    rows.extend(batch)
-                under_px = (payload.get("underlying_asset") or {}).get("price")
-                nurl = payload.get("next_url")
-                if nurl:
-                    more_rows, page_err = _fetch_json_pages(
-                        _append_api_key(nurl),
-                        max_pages=max(0, POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL),
-                    )
-                    rows.extend(more_rows)
-                    if page_err:
-                        sym_errors.append(f"snapshot next_url: {page_err}")
-                        if "HTTP 429" in str(page_err):
-                            snapshot_rate_limited = True
-            elif resp is not None:
-                msg = payload.get("error") or payload.get("message") or ""
-                sym_errors.append(f"snapshot HTTP {resp.status_code}{f' {msg}' if msg else ''}")
-                if resp.status_code == 429:
-                    snapshot_rate_limited = True
+            payload = {}
+            resp = None
+
+            # For configured symbols, prefer Tradier chain directly to avoid Polygon 403/429 churn.
+            if sym in tradier_chain_symbols:
+                tradier_rows, _, tradier_chain_err = _fetch_tradier_chain(sym, tradier_spot)
+                if tradier_rows:
+                    rows = tradier_rows
+                elif tradier_chain_err:
+                    sym_errors.append(f"tradier_chain: {tradier_chain_err}")
+
+            if not rows:
+                snap_start = f"https://api.polygon.io/v3/snapshot/options/{sym}?{urlencode({'limit': 250, 'apiKey': POLYGON_API_KEY})}"
+                resp, req_err = _polygon_get(snap_start, timeout=25)
+                if req_err and resp is None:
+                    sym_errors.append(f"snapshot: {req_err}")
+                    payload = {}
+                else:
+                    payload = resp.json() if (resp is not None and resp.ok) else {}
+                if resp is not None and resp.ok:
+                    batch = payload.get("results") or []
+                    if isinstance(batch, list):
+                        rows.extend(batch)
+                    under_px = (payload.get("underlying_asset") or {}).get("price")
+                    nurl = payload.get("next_url")
+                    if nurl:
+                        more_rows, page_err = _fetch_json_pages(
+                            _append_api_key(nurl),
+                            max_pages=max(0, POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL),
+                        )
+                        rows.extend(more_rows)
+                        if page_err:
+                            sym_errors.append(f"snapshot next_url: {page_err}")
+                            if "HTTP 429" in str(page_err):
+                                snapshot_rate_limited = True
+                elif resp is not None:
+                    msg = payload.get("error") or payload.get("message") or ""
+                    sym_errors.append(f"snapshot HTTP {resp.status_code}{f' {msg}' if msg else ''}")
+                    if resp.status_code == 429:
+                        snapshot_rate_limited = True
 
             # Fallback: contracts reference endpoint to at least populate expiries/strikes.
-            if not rows and not snapshot_rate_limited:
+            if not rows and not snapshot_rate_limited and sym not in tradier_chain_symbols:
                 ref_start = (
                     "https://api.polygon.io/v3/reference/options/contracts?"
                     + urlencode({
@@ -763,8 +947,16 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                     rows = ref_rows
                 if ref_err:
                     sym_errors.append(f"contracts: {ref_err}")
-            elif not rows and snapshot_rate_limited:
+            elif not rows and snapshot_rate_limited and sym not in tradier_chain_symbols:
                 sym_errors.append("contracts fallback skipped after snapshot 429")
+
+            # Secondary fallback to Tradier chains for non-primary symbols that failed Polygon.
+            if not rows and sym not in tradier_chain_symbols:
+                tradier_rows, _, tradier_chain_err = _fetch_tradier_chain(sym, tradier_spot)
+                if tradier_rows:
+                    rows = tradier_rows
+                elif tradier_chain_err:
+                    sym_errors.append(f"tradier_chain: {tradier_chain_err}")
             if not rows:
                 spot_only = tradier_spot if tradier_spot is not None else None
                 spot_err = None
@@ -875,6 +1067,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
     out["symbols_count"] = len(out["symbols"])
     out["polygon_requests_used"] = int(total_polygon_requests)
+    out["tradier_requests_used"] = int(total_tradier_requests)
     if out["errors"]:
         out["errors"] = sorted(set(out["errors"]))[:50]
     else:
