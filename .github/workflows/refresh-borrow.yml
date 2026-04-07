@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 15
     env:
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
+      TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
 
     steps:
       - name: Checkout
@@ -43,6 +44,7 @@ jobs:
       - name: Refresh options cache
         env:
           POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
+          TRADIER_TOKEN: ${{ env.TRADIER_TOKEN }}
           POLYGON_OPTIONS_MAX_SYMBOLS: "1200"
           POLYGON_FORCE_SYMBOLS: "APLD,APLZ"
         run: python scripts/build_data.py --options-only

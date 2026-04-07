@@ -94,6 +94,7 @@ etf-dashboard/
 
 - **Universe**: `GoldmanDrew/ls-algo` → `data/etf_screened_today.csv`
 - **Borrow rates**: IBKR public FTP (`ftp2.interactivebrokers.com/usa.txt`) — dashboard uses fee-only borrow (not net of rebate), with shares available
+- **Spot + options**: Tradier REST (spot primary) + Polygon REST (options snapshots/contracts, spot fallback)
 - **Decay**: Volatility drag model estimate (plug in real Stahl metrics when price data is available)
 
 ## Expected Decay Calculator
@@ -111,5 +112,20 @@ Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 |----------|---------|-------------|
 | `UNIVERSE_REPO` | `GoldmanDrew/ls-algo` | Source repo for universe CSV |
 | `UNIVERSE_BRANCH` | `main` | Branch to fetch from |
+| `UNIVERSE_PATH` | `data/etf_screened_today.csv` | Source CSV path in repo |
 | `HIGH_BETA_THRESHOLD` | `1.5` | Beta cutoff for Bucket 1 vs 2 |
 | `GITHUB_TOKEN` | (from Actions) | Auto-set in CI; needed locally for private repos |
+| `POLYGON_API_KEY` | *(none)* | Polygon key for options snapshots/contracts |
+| `TRADIER_TOKEN` | *(none)* | Tradier token for primary spot quotes |
+| `TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH` | `200` | Max symbols per Tradier quote batch |
+| `TRADIER_SPOT_MAX_REQUESTS` | `30` | Request cap per build run before fallback |
+| `POLYGON_OPTIONS_MAX_SYMBOLS` | `1200` | Max symbols to request from Polygon |
+| `POLYGON_FORCE_SYMBOLS` | `APLD,APLZ` | Symbols always included in options refresh |
+| `OPTIONS_REFRESH_SLEEP_MS` | `0` | Throttle delay between API calls in ms |
+
+### Spot fallback order
+
+For each symbol in `options_cache.json`:
+1. Tradier spot quote (if `TRADIER_TOKEN` present and quote available)
+2. Polygon-derived spot (`underlying_asset.price`, then Polygon spot endpoints)
+3. Prior cached symbol entry from previous `data/options_cache.json`

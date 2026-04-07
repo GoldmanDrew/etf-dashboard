@@ -37,6 +37,8 @@ POLYGON_API_KEY = (
     os.environ.get("POLYGON_API_KEY", "")
     or os.environ.get("POLYGON_IO_API_KEY", "")
 ).strip()
+TRADIER_TOKEN = os.environ.get("TRADIER_TOKEN", "").strip()
+TRADIER_BASE_URL = os.environ.get("TRADIER_BASE_URL", "https://api.tradier.com/v1").strip().rstrip("/")
 
 HIGH_BETA_THRESHOLD = float(os.environ.get("HIGH_BETA_THRESHOLD", "1.5"))
 REALIZED_VOL_TIMEOUT_SEC = int(os.environ.get("REALIZED_VOL_TIMEOUT_SEC", "20"))
@@ -46,6 +48,9 @@ REALIZED_VOL_EWMA_LAMBDA = float(os.environ.get("REALIZED_VOL_EWMA_LAMBDA", "0.9
 BORROW_HISTORY_MAX_COMMITS = int(os.environ.get("BORROW_HISTORY_MAX_COMMITS", "400"))
 BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE_SIZE", "100"))
 POLYGON_OPTIONS_MAX_SYMBOLS = int(os.environ.get("POLYGON_OPTIONS_MAX_SYMBOLS", "1200"))
+TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH = int(os.environ.get("TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH", "200"))
+TRADIER_SPOT_MAX_REQUESTS = int(os.environ.get("TRADIER_SPOT_MAX_REQUESTS", "30"))
+OPTIONS_REFRESH_SLEEP_MS = int(os.environ.get("OPTIONS_REFRESH_SLEEP_MS", "0"))
 POLYGON_FORCE_SYMBOLS_RAW = [
     s.strip()
     for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "APLD,APLZ").split(",")
@@ -113,6 +118,17 @@ def fetch_csv_from_github() -> pd.DataFrame:
     from io import StringIO
     df = pd.read_csv(StringIO(resp.text))
     return df
+
+
+def _validate_universe_schema(df: pd.DataFrame) -> None:
+    required = ("ETF", "Underlying", "Beta")
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(
+            "Universe CSV missing required columns: "
+            + ", ".join(missing)
+            + ". Expected at least: ETF, Underlying, Beta."
+        )
 
 
 def fetch_last_commit_info() -> dict | None:
@@ -452,6 +468,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         "source": "polygon_snapshot",
         "polygon_api_configured": bool(POLYGON_API_KEY),
+        "tradier_api_configured": bool(TRADIER_TOKEN),
         "requested_symbols": int(len(symbols)),
         "max_symbols": int(POLYGON_OPTIONS_MAX_SYMBOLS),
         "forced_symbols": [norm_sym(s) for s in POLYGON_FORCE_SYMBOLS_RAW],
@@ -472,6 +489,77 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     session = requests.Session()
     headers = {"User-Agent": "etf-dashboard-builder/1.0"}
     unique_symbols = sorted({norm_sym(s) for s in symbols if str(s).strip()})
+
+    def _safe_float(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _chunked(seq: list[str], n: int):
+        step = max(1, int(n))
+        for i in range(0, len(seq), step):
+            yield seq[i : i + step]
+
+    def _fetch_tradier_spot_map(target_symbols: list[str]) -> tuple[dict[str, float], str | None]:
+        if not TRADIER_TOKEN:
+            return {}, None
+        tradier_headers = {
+            "Authorization": f"Bearer {TRADIER_TOKEN}",
+            "Accept": "application/json",
+            "User-Agent": "etf-dashboard-builder/1.0",
+        }
+        tradier_session = requests.Session()
+        out_map: dict[str, float] = {}
+        errs: list[str] = []
+        request_count = 0
+
+        for batch in _chunked(target_symbols, TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH):
+            if request_count >= max(1, TRADIER_SPOT_MAX_REQUESTS):
+                errs.append(
+                    f"tradier capped at {TRADIER_SPOT_MAX_REQUESTS} requests; "
+                    "remaining symbols may use polygon fallback"
+                )
+                break
+            request_count += 1
+            try:
+                resp = tradier_session.post(
+                    f"{TRADIER_BASE_URL}/markets/quotes",
+                    headers=tradier_headers,
+                    data={"symbols": ",".join(batch)},
+                    timeout=20,
+                )
+                if not resp.ok:
+                    msg = ""
+                    try:
+                        payload = resp.json() or {}
+                        msg = payload.get("error") or payload.get("message") or ""
+                    except Exception:
+                        msg = ""
+                    errs.append(f"tradier HTTP {resp.status_code}{f' {msg}' if msg else ''}")
+                    continue
+                payload = resp.json() or {}
+                quotes = ((payload.get("quotes") or {}).get("quote")) or []
+                if isinstance(quotes, dict):
+                    quotes = [quotes]
+                for q in quotes:
+                    sym = norm_sym(q.get("symbol"))
+                    if not sym:
+                        continue
+                    px = (
+                        _safe_float(q.get("last"))
+                        or _safe_float(q.get("close"))
+                        or _safe_float(q.get("bid"))
+                        or _safe_float(q.get("ask"))
+                    )
+                    if px is not None:
+                        out_map[sym] = px
+            except Exception:
+                errs.append("tradier request exception")
+
+            if OPTIONS_REFRESH_SLEEP_MS > 0:
+                time.sleep(OPTIONS_REFRESH_SLEEP_MS / 1000.0)
+        return out_map, ("; ".join(errs[:4]) if errs else None)
 
     def _append_api_key(next_url: str) -> str:
         parsed = urlparse(next_url)
@@ -546,9 +634,14 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
         return None, "; ".join(errs[:3]) if errs else "spot unavailable"
 
+    tradier_spot_map, tradier_err = _fetch_tradier_spot_map(unique_symbols)
+    if tradier_err:
+        out["errors"].append(tradier_err)
+
     for sym in unique_symbols:
         try:
             under_px = None
+            tradier_spot = tradier_spot_map.get(sym)
             sym_errors = []
             snap_start = f"https://api.polygon.io/v3/snapshot/options/{sym}?{urlencode({'limit': 250, 'apiKey': POLYGON_API_KEY})}"
             resp = session.get(snap_start, headers=headers, timeout=25)
@@ -588,7 +681,10 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 if ref_err:
                     sym_errors.append(f"contracts: {ref_err}")
             if not rows:
-                spot_only, spot_err = _fetch_last_spot(sym)
+                spot_only = tradier_spot if tradier_spot is not None else None
+                spot_err = None
+                if spot_only is None:
+                    spot_only, spot_err = _fetch_last_spot(sym)
                 if spot_only is not None:
                     out["symbols"][sym] = {"spot": float(spot_only), "options": []}
                     if sym_errors:
@@ -654,7 +750,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
             parsed = [x for x in parsed if x.get("expiration_date") and x.get("strike_price") is not None]
             if not parsed:
-                spot_only = under_px
+                spot_only = tradier_spot if tradier_spot is not None else under_px
                 if spot_only is None:
                     spot_only, spot_err = _fetch_last_spot(sym)
                     if spot_err:
@@ -673,16 +769,19 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                     out["errors_by_symbol"][sym] = "; ".join(sym_errors[:4])
                 continue
             parsed.sort(key=lambda x: (x["expiration_date"], abs(float(x["strike_price"])) if x["strike_price"] is not None else 9e9))
-            if under_px is None:
-                under_px, spot_err = _fetch_last_spot(sym)
+            final_spot = tradier_spot if tradier_spot is not None else under_px
+            if final_spot is None:
+                final_spot, spot_err = _fetch_last_spot(sym)
                 if spot_err:
                     sym_errors.append(spot_err)
             out["symbols"][sym] = {
-                "spot": float(under_px) if under_px is not None else None,
+                "spot": float(final_spot) if final_spot is not None else None,
                 "options": parsed[:300],
             }
             if sym_errors:
                 out["errors_by_symbol"][sym] = "; ".join(sym_errors[:4])
+            if OPTIONS_REFRESH_SLEEP_MS > 0:
+                time.sleep(OPTIONS_REFRESH_SLEEP_MS / 1000.0)
         except Exception:
             prior_sym = prior_cache.get("symbols", {}).get(sym) if isinstance(prior_cache, dict) else None
             if prior_sym:
@@ -1021,6 +1120,7 @@ def refresh_borrow_only() -> None:
         "ibkr_attempt_success": bool(ibkr["success"]),
     }
     output["polygon_api_configured"] = bool(POLYGON_API_KEY)
+    output["tradier_api_configured"] = bool(TRADIER_TOKEN)
     output["options_cache_file"] = "data/options_cache.json"
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1068,6 +1168,7 @@ def build():
 
     # 1. Fetch universe CSV from GitHub
     df = fetch_csv_from_github()
+    _validate_universe_schema(df)
     df["symbol"] = df["ETF"].apply(norm_sym)
     df["underlying_sym"] = df["Underlying"].apply(norm_sym)
     print(f"Universe: {len(df)} ETFs loaded")
@@ -1217,6 +1318,7 @@ def build():
         "decay_method": "linear_daily_pnl_1_over_beta_hedge",
         "borrow_history_file": "data/borrow_history.json",
         "polygon_api_configured": bool(POLYGON_API_KEY),
+        "tradier_api_configured": bool(TRADIER_TOKEN),
         "options_cache_file": "data/options_cache.json",
         "summary": summary,
         "records": records,
