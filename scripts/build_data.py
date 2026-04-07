@@ -13,6 +13,7 @@ Run in CI:     github actions calls this on a schedule
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime as dt
 import io
 import json
@@ -47,10 +48,15 @@ REALIZED_VOL_RANGE = os.environ.get("REALIZED_VOL_RANGE", "2y")
 REALIZED_VOL_EWMA_LAMBDA = float(os.environ.get("REALIZED_VOL_EWMA_LAMBDA", "0.94"))
 BORROW_HISTORY_MAX_COMMITS = int(os.environ.get("BORROW_HISTORY_MAX_COMMITS", "400"))
 BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE_SIZE", "100"))
-POLYGON_OPTIONS_MAX_SYMBOLS = int(os.environ.get("POLYGON_OPTIONS_MAX_SYMBOLS", "1200"))
+POLYGON_OPTIONS_MAX_SYMBOLS = int(os.environ.get("POLYGON_OPTIONS_MAX_SYMBOLS", "250"))
 TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH = int(os.environ.get("TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH", "200"))
 TRADIER_SPOT_MAX_REQUESTS = int(os.environ.get("TRADIER_SPOT_MAX_REQUESTS", "30"))
 OPTIONS_REFRESH_SLEEP_MS = int(os.environ.get("OPTIONS_REFRESH_SLEEP_MS", "0"))
+POLYGON_MAX_REQUESTS_PER_MINUTE = int(os.environ.get("POLYGON_MAX_REQUESTS_PER_MINUTE", "90"))
+POLYGON_MAX_TOTAL_REQUESTS = int(os.environ.get("POLYGON_MAX_TOTAL_REQUESTS", "700"))
+POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL", "2"))
+POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL", "2"))
+POLYGON_RETRY_MAX_429 = int(os.environ.get("POLYGON_RETRY_MAX_429", "2"))
 POLYGON_FORCE_SYMBOLS_RAW = [
     s.strip()
     for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "APLD,APLZ").split(",")
@@ -472,6 +478,12 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "requested_symbols": int(len(symbols)),
         "max_symbols": int(POLYGON_OPTIONS_MAX_SYMBOLS),
         "forced_symbols": [norm_sym(s) for s in POLYGON_FORCE_SYMBOLS_RAW],
+        "polygon_request_limits": {
+            "max_requests_per_minute": int(POLYGON_MAX_REQUESTS_PER_MINUTE),
+            "max_total_requests": int(POLYGON_MAX_TOTAL_REQUESTS),
+            "max_snapshot_pages_per_symbol": int(POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL),
+            "max_contract_pages_per_symbol": int(POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL),
+        },
         "symbols": {},
         "errors": [],
         "errors_by_symbol": {},
@@ -489,6 +501,8 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     session = requests.Session()
     headers = {"User-Agent": "etf-dashboard-builder/1.0"}
     unique_symbols = sorted({norm_sym(s) for s in symbols if str(s).strip()})
+    request_timestamps: collections.deque[float] = collections.deque()
+    total_polygon_requests = 0
 
     def _safe_float(v):
         try:
@@ -561,6 +575,50 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 time.sleep(OPTIONS_REFRESH_SLEEP_MS / 1000.0)
         return out_map, ("; ".join(errs[:4]) if errs else None)
 
+    def _rate_limit_polygon() -> None:
+        if POLYGON_MAX_REQUESTS_PER_MINUTE <= 0:
+            return
+        now = time.monotonic()
+        while request_timestamps and (now - request_timestamps[0]) >= 60.0:
+            request_timestamps.popleft()
+        if len(request_timestamps) < POLYGON_MAX_REQUESTS_PER_MINUTE:
+            return
+        wait_s = max(0.01, 60.0 - (now - request_timestamps[0]))
+        time.sleep(wait_s)
+
+    def _polygon_get(url: str, timeout: int = 25) -> tuple[requests.Response | None, str | None]:
+        nonlocal total_polygon_requests
+        retries_left = max(0, POLYGON_RETRY_MAX_429)
+        while True:
+            if POLYGON_MAX_TOTAL_REQUESTS > 0 and total_polygon_requests >= POLYGON_MAX_TOTAL_REQUESTS:
+                return None, (
+                    f"polygon request budget exceeded ({POLYGON_MAX_TOTAL_REQUESTS}); "
+                    "using cached/stale symbols for remainder"
+                )
+            _rate_limit_polygon()
+            try:
+                resp = session.get(url, headers=headers, timeout=timeout)
+            except Exception:
+                return None, "polygon request exception"
+
+            total_polygon_requests += 1
+            request_timestamps.append(time.monotonic())
+
+            if resp.status_code != 429:
+                return resp, None
+
+            if retries_left <= 0:
+                return resp, "HTTP 429 rate limited"
+
+            retry_after = resp.headers.get("Retry-After", "").strip()
+            try:
+                wait_s = float(retry_after) if retry_after else 2.0
+            except ValueError:
+                wait_s = 2.0
+            wait_s = min(max(wait_s, 0.5), 15.0)
+            time.sleep(wait_s)
+            retries_left -= 1
+
     def _append_api_key(next_url: str) -> str:
         parsed = urlparse(next_url)
         qs = parse_qs(parsed.query)
@@ -576,7 +634,11 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         last_error = None
         while next_url and pages < max_pages:
             pages += 1
-            resp = session.get(next_url, headers=headers, timeout=25)
+            resp, req_err = _polygon_get(next_url, timeout=25)
+            if req_err and resp is None:
+                return rows, req_err
+            if resp is None:
+                return rows, "polygon request failed"
             if not resp.ok:
                 msg = None
                 try:
@@ -599,13 +661,16 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         try:
             # Stocks last trade endpoint (widely available on stock plans).
             url = f"https://api.polygon.io/v2/last/trade/{sym}?{urlencode({'apiKey': POLYGON_API_KEY})}"
-            resp = session.get(url, headers=headers, timeout=15)
-            if resp.ok:
+            resp, req_err = _polygon_get(url, timeout=15)
+            if req_err and resp is None:
+                errs.append(req_err)
+                resp = None
+            if resp is not None and resp.ok:
                 payload = resp.json() or {}
                 p = (payload.get("results") or {}).get("p")
                 if p is not None:
                     return float(p), None
-            else:
+            elif resp is not None:
                 try:
                     payload = resp.json() or {}
                     errs.append(f"last_trade HTTP {resp.status_code} {payload.get('error') or payload.get('message') or ''}".strip())
@@ -617,13 +682,16 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         try:
             # Previous daily aggregate fallback.
             url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/prev?{urlencode({'adjusted': 'true', 'apiKey': POLYGON_API_KEY})}"
-            resp = session.get(url, headers=headers, timeout=15)
-            if resp.ok:
+            resp, req_err = _polygon_get(url, timeout=15)
+            if req_err and resp is None:
+                errs.append(req_err)
+                resp = None
+            if resp is not None and resp.ok:
                 payload = resp.json() or {}
                 rows = payload.get("results") or []
                 if rows and rows[0].get("c") is not None:
                     return float(rows[0]["c"]), None
-            else:
+            elif resp is not None:
                 try:
                     payload = resp.json() or {}
                     errs.append(f"prev_agg HTTP {resp.status_code} {payload.get('error') or payload.get('message') or ''}".strip())
@@ -643,27 +711,39 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             under_px = None
             tradier_spot = tradier_spot_map.get(sym)
             sym_errors = []
+            snapshot_rate_limited = False
             snap_start = f"https://api.polygon.io/v3/snapshot/options/{sym}?{urlencode({'limit': 250, 'apiKey': POLYGON_API_KEY})}"
-            resp = session.get(snap_start, headers=headers, timeout=25)
-            payload = resp.json() if resp.ok else {}
+            resp, req_err = _polygon_get(snap_start, timeout=25)
+            if req_err and resp is None:
+                sym_errors.append(f"snapshot: {req_err}")
+                payload = {}
+            else:
+                payload = resp.json() if (resp is not None and resp.ok) else {}
             rows = []
-            if resp.ok:
+            if resp is not None and resp.ok:
                 batch = payload.get("results") or []
                 if isinstance(batch, list):
                     rows.extend(batch)
                 under_px = (payload.get("underlying_asset") or {}).get("price")
                 nurl = payload.get("next_url")
                 if nurl:
-                    more_rows, page_err = _fetch_json_pages(_append_api_key(nurl), max_pages=6)
+                    more_rows, page_err = _fetch_json_pages(
+                        _append_api_key(nurl),
+                        max_pages=max(0, POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL),
+                    )
                     rows.extend(more_rows)
                     if page_err:
                         sym_errors.append(f"snapshot next_url: {page_err}")
-            else:
+                        if "HTTP 429" in str(page_err):
+                            snapshot_rate_limited = True
+            elif resp is not None:
                 msg = payload.get("error") or payload.get("message") or ""
                 sym_errors.append(f"snapshot HTTP {resp.status_code}{f' {msg}' if msg else ''}")
+                if resp.status_code == 429:
+                    snapshot_rate_limited = True
 
             # Fallback: contracts reference endpoint to at least populate expiries/strikes.
-            if not rows:
+            if not rows and not snapshot_rate_limited:
                 ref_start = (
                     "https://api.polygon.io/v3/reference/options/contracts?"
                     + urlencode({
@@ -675,11 +755,16 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                         "apiKey": POLYGON_API_KEY,
                     })
                 )
-                ref_rows, ref_err = _fetch_json_pages(ref_start, max_pages=10)
+                ref_rows, ref_err = _fetch_json_pages(
+                    ref_start,
+                    max_pages=max(0, POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL),
+                )
                 if ref_rows:
                     rows = ref_rows
                 if ref_err:
                     sym_errors.append(f"contracts: {ref_err}")
+            elif not rows and snapshot_rate_limited:
+                sym_errors.append("contracts fallback skipped after snapshot 429")
             if not rows:
                 spot_only = tradier_spot if tradier_spot is not None else None
                 spot_err = None
@@ -789,6 +874,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             continue
 
     out["symbols_count"] = len(out["symbols"])
+    out["polygon_requests_used"] = int(total_polygon_requests)
     if out["errors"]:
         out["errors"] = sorted(set(out["errors"]))[:50]
     else:

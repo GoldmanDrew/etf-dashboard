@@ -41,12 +41,18 @@ jobs:
           POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
         run: python scripts/build_data.py --borrow-only
 
-      - name: Refresh options cache
+      - name: Refresh options cache (manual only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
           TRADIER_TOKEN: ${{ env.TRADIER_TOKEN }}
-          POLYGON_OPTIONS_MAX_SYMBOLS: "1200"
+          POLYGON_OPTIONS_MAX_SYMBOLS: "250"
           POLYGON_FORCE_SYMBOLS: "APLD,APLZ"
+          POLYGON_MAX_REQUESTS_PER_MINUTE: "80"
+          POLYGON_MAX_TOTAL_REQUESTS: "500"
+          POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL: "2"
+          POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL: "1"
+          OPTIONS_REFRESH_SLEEP_MS: "150"
         run: python scripts/build_data.py --options-only
 
       - name: Commit data if changed

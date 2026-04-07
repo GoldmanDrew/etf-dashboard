@@ -53,6 +53,7 @@ The `build-and-deploy.yml` Action will run automatically on push, build the data
 
 - `build-and-deploy.yml` runs once daily on weekdays (plus push/manual) for full rebuild.
 - `refresh-borrow.yml` runs every 30 minutes on weekdays for borrow + shares refresh.
+- Options cache refresh on `refresh-borrow.yml` is manual-only (`workflow_dispatch`) to avoid Polygon rate-limit churn.
 
 ## Running Locally
 
@@ -119,9 +120,14 @@ Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 | `TRADIER_TOKEN` | *(none)* | Tradier token for primary spot quotes |
 | `TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH` | `200` | Max symbols per Tradier quote batch |
 | `TRADIER_SPOT_MAX_REQUESTS` | `30` | Request cap per build run before fallback |
-| `POLYGON_OPTIONS_MAX_SYMBOLS` | `1200` | Max symbols to request from Polygon |
+| `POLYGON_OPTIONS_MAX_SYMBOLS` | `250` | Max symbols to request from Polygon |
 | `POLYGON_FORCE_SYMBOLS` | `APLD,APLZ` | Symbols always included in options refresh |
 | `OPTIONS_REFRESH_SLEEP_MS` | `0` | Throttle delay between API calls in ms |
+| `POLYGON_MAX_REQUESTS_PER_MINUTE` | `90` | Hard throttle per-minute Polygon requests in builder |
+| `POLYGON_MAX_TOTAL_REQUESTS` | `700` | Total Polygon request cap per run before stale fallback |
+| `POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL` | `2` | Max snapshot pagination depth per symbol |
+| `POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL` | `2` | Max contracts fallback pagination depth per symbol |
+| `POLYGON_RETRY_MAX_429` | `2` | Max retries after Polygon HTTP 429 |
 
 ### Spot fallback order
 
@@ -129,3 +135,5 @@ For each symbol in `options_cache.json`:
 1. Tradier spot quote (if `TRADIER_TOKEN` present and quote available)
 2. Polygon-derived spot (`underlying_asset.price`, then Polygon spot endpoints)
 3. Prior cached symbol entry from previous `data/options_cache.json`
+
+If Polygon returns HTTP 429 for snapshots, contracts fallback is skipped for that symbol in the same run, and stale cache is preferred to preserve request budget.
