@@ -52,8 +52,8 @@ The `build-and-deploy.yml` Action will run automatically on push, build the data
 ## Schedule
 
 - `build-and-deploy.yml` runs once daily on weekdays (plus push/manual) for full rebuild.
-- `refresh-borrow.yml` runs every 30 minutes on weekdays for borrow + shares refresh.
-- `refresh-borrow.yml` also refreshes a throttled options shard each run (aggressive cache reuse + spacing).
+- `refresh-borrow.yml` runs every 10 minutes for borrow + shares refresh only.
+- `refresh-options.yml` runs every 10 minutes for a throttled options shard (aggressive cache reuse + spacing).
 
 ## Running Locally
 

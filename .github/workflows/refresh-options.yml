@@ -1,4 +1,4 @@
-name: Refresh Borrow Every 10m
+name: Refresh Options Every 10m
 
 on:
   schedule:
@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  refresh-borrow:
+  refresh-options:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -36,20 +36,37 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Refresh borrow + shares
+      - name: Refresh options cache (ultra-safe throttled shard)
         env:
           POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
-        run: python scripts/build_data.py --borrow-only
+          TRADIER_TOKEN: ${{ env.TRADIER_TOKEN }}
+          POLYGON_OPTIONS_MAX_SYMBOLS: "100"
+          POLYGON_FORCE_SYMBOLS: "APLD,APLZ"
+          POLYGON_MAX_REQUESTS_PER_MINUTE: "25"
+          POLYGON_MAX_TOTAL_REQUESTS: "90"
+          POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL: "1"
+          POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL: "0"
+          POLYGON_RETRY_MAX_429: "1"
+          OPTIONS_REFRESH_SLEEP_MS: "400"
+          OPTIONS_SYMBOLS_PER_RUN: "12"
+          OPTIONS_SHARD_COUNT: "48"
+          TRADIER_CHAIN_SYMBOLS: "APLD,APLZ"
+          TRADIER_CHAIN_MAX_EXPIRIES: "1"
+          TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL: "120"
+          TRADIER_CHAIN_STRIKE_BAND_PCT: "0.12"
+          TRADIER_MAX_REQUESTS_PER_MINUTE: "25"
+          TRADIER_MAX_TOTAL_REQUESTS: "70"
+        run: python scripts/build_data.py --options-only
 
       - name: Commit data if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/dashboard_data.json
+          git add data/options_cache.json
           if git diff --staged --quiet; then
-            echo "No borrow changes to commit"
+            echo "No options changes to commit"
           else
-            git commit -m "chore: refresh borrow data [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+            git commit -m "chore: refresh options cache [$(date -u '+%Y-%m-%d %H:%M UTC')]"
             for i in 1 2 3; do
               git pull --rebase origin main && git push && break
               if [ "$i" -eq 3 ]; then
