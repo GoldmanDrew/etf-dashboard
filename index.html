@@ -1278,6 +1278,7 @@ function buildWidgetHtml(symbol, compareSymbol, range, interval) {
     symbol: symbol,
     interval: interval || 'D',
     range: range || '6M',
+    adjustment: 'dividends',
     timezone: 'exchange',
     theme: 'dark',
     style: '2',
@@ -1701,6 +1702,7 @@ function ChartPage({ record, onBack }) {
 
           <div className="chart-note">
             Chart shows % change comparison with {etfSym} (blue) vs {undSym || 'underlying'} (orange).
+            Prices are dividend-adjusted in TradingView.
             Use timeframe controls to align realized-vol and scenario inputs.
           </div>
         </div>
