@@ -134,9 +134,10 @@ Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 | `TRADIER_CHAIN_SYMBOLS` | `APLD,APLZ` | Symbols that use Tradier chain-first path |
 | `TRADIER_MAX_REQUESTS_PER_MINUTE` | `25` | Tradier request throttle per minute |
 | `TRADIER_MAX_TOTAL_REQUESTS` | `70` | Tradier request cap per run |
-| `TRADIER_CHAIN_MAX_EXPIRIES` | `1` | Max expiries requested per symbol from Tradier |
+| `TRADIER_CHAIN_MAX_EXPIRIES` | `16` | Max expiries requested per symbol from Tradier |
 | `TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL` | `120` | Max Tradier contracts retained per symbol |
 | `TRADIER_CHAIN_STRIKE_BAND_PCT` | `0.12` | Keep Tradier chain to +/- band around spot |
+| `TRADIER_CHAIN_MONEYNESS_MODE` | `atm_otm` | `atm_otm` keeps only ATM/OTM legs (drops ITM) |
 
 ### Spot fallback order
 

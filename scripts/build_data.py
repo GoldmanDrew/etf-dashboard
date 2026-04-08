@@ -64,9 +64,10 @@ TRADIER_CHAIN_SYMBOLS_RAW = [
 ]
 TRADIER_MAX_REQUESTS_PER_MINUTE = int(os.environ.get("TRADIER_MAX_REQUESTS_PER_MINUTE", "25"))
 TRADIER_MAX_TOTAL_REQUESTS = int(os.environ.get("TRADIER_MAX_TOTAL_REQUESTS", "70"))
-TRADIER_CHAIN_MAX_EXPIRIES = int(os.environ.get("TRADIER_CHAIN_MAX_EXPIRIES", "1"))
+TRADIER_CHAIN_MAX_EXPIRIES = int(os.environ.get("TRADIER_CHAIN_MAX_EXPIRIES", "16"))
 TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL = int(os.environ.get("TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL", "120"))
 TRADIER_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("TRADIER_CHAIN_STRIKE_BAND_PCT", "0.12"))
+TRADIER_CHAIN_MONEYNESS_MODE = os.environ.get("TRADIER_CHAIN_MONEYNESS_MODE", "atm_otm").strip().lower()
 OPTIONS_SYMBOLS_PER_RUN = int(os.environ.get("OPTIONS_SYMBOLS_PER_RUN", "12"))
 OPTIONS_SHARD_COUNT = int(os.environ.get("OPTIONS_SHARD_COUNT", "48"))
 OPTIONS_SHARD_INTERVAL_MINUTES = int(os.environ.get("OPTIONS_SHARD_INTERVAL_MINUTES", "10"))
@@ -852,6 +853,15 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 strike = _safe_float(opt.get("strike"))
                 if strike is None:
                     continue
+                option_type = str(opt.get("option_type", "")).lower()
+                if spot_value is not None and spot_value > 0 and TRADIER_CHAIN_MONEYNESS_MODE == "atm_otm":
+                    # Keep only ATM/OTM contracts:
+                    # - Calls: strike >= spot (ATM or OTM)
+                    # - Puts:  strike <= spot (ATM or OTM)
+                    if option_type.startswith("call") and strike < spot_value:
+                        continue
+                    if option_type.startswith("put") and strike > spot_value:
+                        continue
                 if strike_min is not None and strike < strike_min:
                     continue
                 if strike_max is not None and strike > strike_max:
@@ -871,7 +881,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                         "ticker": opt.get("symbol"),
                         "expiration_date": opt.get("expiration_date") or exp,
                         "strike_price": strike,
-                        "contract_type": "put" if str(opt.get("option_type", "")).lower().startswith("put") else "call",
+                        "contract_type": "put" if option_type.startswith("put") else "call",
                         "mid": mid,
                         "iv": _safe_float(greeks.get("mid_iv") or greeks.get("smv_vol")),
                         "delta": _safe_float(greeks.get("delta")),
