@@ -50,6 +50,7 @@ jobs:
             echo "No borrow changes to commit"
           else
             git commit -m "chore: refresh borrow data [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+            git stash push --include-untracked -m "ci-autostash-before-rebase" || true
             pushed=0
             for i in 1 2 3; do
               git fetch origin "${BRANCH}"

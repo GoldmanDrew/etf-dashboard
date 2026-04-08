@@ -69,6 +69,7 @@ jobs:
             echo "No options changes to commit"
           else
             git commit -m "chore: refresh options cache [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+            git stash push --include-untracked -m "ci-autostash-before-rebase" || true
             pushed=0
             for i in 1 2 3; do
               git fetch origin "${BRANCH}"
