@@ -1450,6 +1450,29 @@ function ChartPage({ record, onBack }) {
     const fallback = Number(defaultIvBySymbol[sym]);
     return Number.isFinite(fallback) && fallback > 0 ? fallback : 0.8;
   }, [defaultIvBySymbol]);
+  const resolveLegPremium = useCallback((leg, contract) => {
+    const explicit = Number(leg?.premium);
+    if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+    const marketMid = optionMidFromContract(contract);
+    if (Number.isFinite(Number(marketMid)) && Number(marketMid) > 0) return Number(marketMid);
+
+    // Fallback: theoretical premium using current spot + resolved IV.
+    const spotNow = String(leg?.symbol || '').toUpperCase() === undSym
+      ? Number(tradeSpotUnderlying)
+      : String(leg?.symbol || '').toUpperCase() === etfSym
+      ? Number(tradeSpotEtf)
+      : NaN;
+    const strike = Number(leg?.strike);
+    const iv = resolveLegIv(leg, contract);
+    const tYears = Math.max(0, Number(tradeTtxDays)) / 365;
+    const rate = Number(tradeRatePct) / 100;
+    const type = String((leg?.type) || 'call').toLowerCase();
+    if (typeof tradeFns.bsPrice === 'function' && Number.isFinite(spotNow) && Number.isFinite(strike) && Number.isFinite(iv)) {
+      const theo = Number(tradeFns.bsPrice({ spot: spotNow, strike, vol: iv, ttmYears: tYears, rate, type }));
+      if (Number.isFinite(theo) && theo > 0) return theo;
+    }
+    return 0;
+  }, [tradeFns, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeTtxDays, tradeRatePct, resolveLegIv]);
   const minObsForScenario = 10;
   const undObs = Number(volPoint?.n_returns_underlying) || 0;
   const scenarioSigmaBest = Number(ewmaUnd);
@@ -1565,7 +1588,7 @@ function ChartPage({ record, onBack }) {
       const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
       return {
         ...leg,
-        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : optionMidFromContract(c),
+        premium: resolveLegPremium(leg, c),
         iv: resolveLegIv(leg, c),
       };
     });
@@ -1590,7 +1613,7 @@ function ChartPage({ record, onBack }) {
       defaultBorrowAnnual: annualCarryDrag,
       shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
     });
-  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   const tradeMonteCarlo = useMemo(() => {
     if (typeof tradeFns.evaluateTradeMonteCarlo !== 'function') return { ok: false, error: 'Trade Lab utility unavailable.' };
@@ -1613,7 +1636,7 @@ function ChartPage({ record, onBack }) {
       const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
       return {
         ...leg,
-        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : optionMidFromContract(c),
+        premium: resolveLegPremium(leg, c),
         iv: resolveLegIv(leg, c),
       };
     });
@@ -1634,7 +1657,7 @@ function ChartPage({ record, onBack }) {
       etfPaths: monteCarloResult.paths,
       underlyingPaths: underlyingMc.paths,
     });
-  }, [tradeFns, monteCarloResult, scenarioFns, mcPathCount, scenarioSigmaBest, horizonYears, mcSeed, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, monteCarloResult, scenarioFns, mcPathCount, scenarioSigmaBest, horizonYears, mcSeed, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   const tradeTtxSeries = useMemo(() => {
     if (typeof tradeFns.buildTtxSensitivity !== 'function') return [];
@@ -1643,7 +1666,7 @@ function ChartPage({ record, onBack }) {
       const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
       return {
         ...leg,
-        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : optionMidFromContract(c),
+        premium: resolveLegPremium(leg, c),
         iv: resolveLegIv(leg, c),
       };
     });
@@ -1668,7 +1691,7 @@ function ChartPage({ record, onBack }) {
       defaultBorrowAnnual: annualCarryDrag,
       shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
     });
-  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   return (
     <div className="chart-page">
@@ -2010,7 +2033,7 @@ function ChartPage({ record, onBack }) {
               <div className="trade-card">
                 <div className="trade-head">
                   <div className="scenario-title">Options Hedge Legs</div>
-                  <button onClick={() => setTradeOptionLegs((arr) => [...arr, { id: Date.now(), symbol: undSym, type: 'put', side: 'buy', expiry: (expiriesForSymbol(undSym)[0] || ''), strike: Number(strikesForSymbolExpiryType(undSym, expiriesForSymbol(undSym)[0], 'put')[0] || tradeSpotUnderlying), contracts: 1, premium: 0, iv: Number(scenarioSigmaBest) || 0.8 }])}>+ Option</button>
+                  <button onClick={() => setTradeOptionLegs((arr) => [...arr, { id: Date.now(), symbol: undSym, type: 'put', side: 'buy', expiry: (expiriesForSymbol(undSym)[0] || ''), strike: Number(strikesForSymbolExpiryType(undSym, expiriesForSymbol(undSym)[0], 'put')[0] || tradeSpotUnderlying), contracts: 1, premium: null, iv: Number(scenarioSigmaBest) || 0.8 }])}>+ Option</button>
                 </div>
                 <div className="trade-rows">
                   {tradeOptionLegs.map((leg) => {
@@ -2041,8 +2064,21 @@ function ChartPage({ record, onBack }) {
                         <select value={leg.strike} onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, strike: Number(e.target.value || 0) } : x))}>
                           {strikes.length ? strikes.map((k) => <option key={k} value={k}>{k}</option>) : <option value={leg.strike}>{leg.strike || 0}</option>}
                         </select>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={leg.premium ?? ''}
+                          onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => {
+                            if (x.id !== leg.id) return x;
+                            const raw = e.target.value;
+                            if (raw === '') return { ...x, premium: null };
+                            const n = Number(raw);
+                            return { ...x, premium: Number.isFinite(n) ? n : null };
+                          }))}
+                          placeholder="Premium"
+                        />
                         <input type="number" value={leg.contracts} onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, contracts: Number(e.target.value || 0) } : x))} placeholder="Contracts" />
-                        <div className="scenario-sub">mid {Number.isFinite(Number(optionMidFromContract(c))) ? Number(optionMidFromContract(c)).toFixed(2) : '—'} | iv {normalizeOptionIv(c?.iv) != null ? fmt(normalizeOptionIv(c?.iv)) : '—'}</div>
+                        <div className="scenario-sub">mid {Number.isFinite(Number(optionMidFromContract(c))) ? Number(optionMidFromContract(c)).toFixed(2) : '—'} | paid {resolveLegPremium(leg, c).toFixed(2)} | iv {normalizeOptionIv(c?.iv) != null ? fmt(normalizeOptionIv(c?.iv)) : '—'}</div>
                         <button onClick={() => setTradeOptionLegs((arr) => arr.filter((x) => x.id !== leg.id))}>×</button>
                       </div>
                     );
