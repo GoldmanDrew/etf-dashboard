@@ -583,7 +583,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
     def _normalize_iv(v) -> float | None:
         iv = _safe_float(v)
-        if iv is None or iv < 0:
+        if iv is None or iv <= 0:
             return None
         # Providers can return IV in percent (e.g., 63.5) or decimal (0.635).
         if iv > 5:

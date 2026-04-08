@@ -758,7 +758,7 @@ const toFiniteNum = (v) => {
 };
 const normalizeOptionIv = (v) => {
   const n = toFiniteNum(v);
-  if (n == null || n < 0) return null;
+  if (n == null || n <= 0) return null;
   if (n > 5) return n / 100;
   return n;
 };
@@ -1437,6 +1437,19 @@ function ChartPage({ record, onBack }) {
     : (Number.isFinite(Number(r.borrow_avg_annual)) ? Number(r.borrow_avg_annual) : Number(getBorrowRate(r)));
   const annualCarryDrag = Number.isFinite(annualCarryDragRaw) ? Math.max(0, annualCarryDragRaw) : 0;
   const tradeBorrowBySymbol = useMemo(() => ({ [etfSym]: annualCarryDrag }), [etfSym, annualCarryDrag]);
+  const defaultIvBySymbol = useMemo(() => ({
+    [undSym]: Number.isFinite(Number(realizedUnd)) && Number(realizedUnd) > 0 ? Number(realizedUnd) : 0.8,
+    [etfSym]: Number.isFinite(Number(realizedEtf)) && Number(realizedEtf) > 0 ? Number(realizedEtf) : 0.8,
+  }), [undSym, etfSym, realizedUnd, realizedEtf]);
+  const resolveLegIv = useCallback((leg, contract) => {
+    const legIv = normalizeOptionIv(leg?.iv);
+    if (legIv != null) return legIv;
+    const contractIv = normalizeOptionIv(contract?.iv);
+    if (contractIv != null) return contractIv;
+    const sym = String(leg?.symbol || '').toUpperCase();
+    const fallback = Number(defaultIvBySymbol[sym]);
+    return Number.isFinite(fallback) && fallback > 0 ? fallback : 0.8;
+  }, [defaultIvBySymbol]);
   const minObsForScenario = 10;
   const undObs = Number(volPoint?.n_returns_underlying) || 0;
   const scenarioSigmaBest = Number(ewmaUnd);
@@ -1553,7 +1566,7 @@ function ChartPage({ record, onBack }) {
       return {
         ...leg,
         premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : optionMidFromContract(c),
-        iv: Number.isFinite(Number(leg.iv)) ? normalizeOptionIv(leg.iv) : normalizeOptionIv(c?.iv),
+        iv: resolveLegIv(leg, c),
       };
     });
     const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
@@ -1577,7 +1590,7 @@ function ChartPage({ record, onBack }) {
       defaultBorrowAnnual: annualCarryDrag,
       shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
     });
-  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   const tradeMonteCarlo = useMemo(() => {
     if (typeof tradeFns.evaluateTradeMonteCarlo !== 'function') return { ok: false, error: 'Trade Lab utility unavailable.' };
@@ -1601,7 +1614,7 @@ function ChartPage({ record, onBack }) {
       return {
         ...leg,
         premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : optionMidFromContract(c),
-        iv: Number.isFinite(Number(leg.iv)) ? normalizeOptionIv(leg.iv) : normalizeOptionIv(c?.iv),
+        iv: resolveLegIv(leg, c),
       };
     });
     return tradeFns.evaluateTradeMonteCarlo({
@@ -1621,7 +1634,7 @@ function ChartPage({ record, onBack }) {
       etfPaths: monteCarloResult.paths,
       underlyingPaths: underlyingMc.paths,
     });
-  }, [tradeFns, monteCarloResult, scenarioFns, mcPathCount, scenarioSigmaBest, horizonYears, mcSeed, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, monteCarloResult, scenarioFns, mcPathCount, scenarioSigmaBest, horizonYears, mcSeed, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   const tradeTtxSeries = useMemo(() => {
     if (typeof tradeFns.buildTtxSensitivity !== 'function') return [];
@@ -1631,7 +1644,7 @@ function ChartPage({ record, onBack }) {
       return {
         ...leg,
         premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : optionMidFromContract(c),
-        iv: Number.isFinite(Number(leg.iv)) ? normalizeOptionIv(leg.iv) : normalizeOptionIv(c?.iv),
+        iv: resolveLegIv(leg, c),
       };
     });
     const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
@@ -1655,7 +1668,7 @@ function ChartPage({ record, onBack }) {
       defaultBorrowAnnual: annualCarryDrag,
       shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
     });
-  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   return (
     <div className="chart-page">
