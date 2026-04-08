@@ -739,6 +739,7 @@ let BORROW_HISTORY_CACHE = null;
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
 const fmtNum = v => v == null ? '—' : Number(v).toLocaleString();
+const fmtUsd = v => (v == null || !Number.isFinite(Number(v))) ? '—' : `$${Number(v).toFixed(2)}`;
 const fmtTime = iso => {
   if (!iso) return '—';
   const d = new Date(iso);
@@ -1407,6 +1408,19 @@ function ChartPage({ record, onBack }) {
   const realizedLabel = volPoint ? `${activeTf.label} lookback` : 'screener snapshot';
   const realizedUndSub = volPoint?.n_returns_underlying ? `${realizedLabel} • ${fmtNum(volPoint.n_returns_underlying)} rets` : realizedLabel;
   const realizedEtfSub = volPoint?.n_returns_etf ? `${realizedLabel} • ${fmtNum(volPoint.n_returns_etf)} rets` : realizedLabel;
+  const divPoint = r?.dividend_adjustment?.[volWindowKey] || null;
+  const etfDivTotal = Number(divPoint?.etf_total_dividends);
+  const undDivTotal = Number(divPoint?.underlying_total_dividends);
+  const etfDivYield = Number(divPoint?.etf_dividend_yield);
+  const undDivYield = Number(divPoint?.underlying_dividend_yield);
+  const etfPriceRet = Number(divPoint?.etf_price_return);
+  const undPriceRet = Number(divPoint?.underlying_price_return);
+  const etfAdjRet = Number(divPoint?.etf_adj_return);
+  const undAdjRet = Number(divPoint?.underlying_adj_return);
+  const etfDivLift = (Number.isFinite(etfAdjRet) && Number.isFinite(etfPriceRet)) ? (etfAdjRet - etfPriceRet) : null;
+  const undDivLift = (Number.isFinite(undAdjRet) && Number.isFinite(undPriceRet)) ? (undAdjRet - undPriceRet) : null;
+  const etfWindowDates = divPoint?.etf_start_date && divPoint?.etf_end_date ? `${divPoint.etf_start_date} to ${divPoint.etf_end_date}` : 'window unavailable';
+  const undWindowDates = divPoint?.underlying_start_date && divPoint?.underlying_end_date ? `${divPoint.underlying_start_date} to ${divPoint.underlying_end_date}` : 'window unavailable';
   const scenarioFns = window.ScenarioReturns || {};
   const horizonYears = typeof scenarioFns.horizonToYears === 'function'
     ? scenarioFns.horizonToYears(scenarioHorizon)
@@ -1702,8 +1716,31 @@ function ChartPage({ record, onBack }) {
 
           <div className="chart-note">
             Chart shows % change comparison with {etfSym} (blue) vs {undSym || 'underlying'} (orange).
-            Prices are dividend-adjusted in TradingView.
-            Use timeframe controls to align realized-vol and scenario inputs.
+            TradingView may not expose formal total-return series for every symbol.
+            Use the dividend adjustment panel below for explicit period dividend impact.
+          </div>
+
+          <div className="chart-stats">
+            <div className="chart-stat">
+              <div className="cs-label">{etfSym} Dividends ({activeTf.label})</div>
+              <div className="cs-value">{Number.isFinite(etfDivTotal) ? fmtUsd(etfDivTotal) : '—'}</div>
+              <div className="cs-sub">{Number.isFinite(etfDivYield) ? `${fmt(etfDivYield)} of start px` : etfWindowDates}</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">{undSym || 'Underlying'} Dividends ({activeTf.label})</div>
+              <div className="cs-value">{Number.isFinite(undDivTotal) ? fmtUsd(undDivTotal) : '—'}</div>
+              <div className="cs-sub">{Number.isFinite(undDivYield) ? `${fmt(undDivYield)} of start px` : undWindowDates}</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">{etfSym} Price vs Adj Return</div>
+              <div className="cs-value">{Number.isFinite(etfPriceRet) ? fmt(etfPriceRet) : '—'} / {Number.isFinite(etfAdjRet) ? fmt(etfAdjRet) : '—'}</div>
+              <div className="cs-sub">Dividend lift: {etfDivLift == null ? '—' : fmt(etfDivLift)}</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">{undSym || 'Underlying'} Price vs Adj Return</div>
+              <div className="cs-value">{Number.isFinite(undPriceRet) ? fmt(undPriceRet) : '—'} / {Number.isFinite(undAdjRet) ? fmt(undAdjRet) : '—'}</div>
+              <div className="cs-sub">Dividend lift: {undDivLift == null ? '—' : fmt(undDivLift)}</div>
+            </div>
           </div>
         </div>
       )}

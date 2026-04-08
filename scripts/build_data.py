@@ -1397,47 +1397,92 @@ def _compute_vol_stats_from_closes(closes: list[float]) -> dict:
     }
 
 
-def _build_realized_vol_windows(points: list[tuple[dt.date, float]]) -> dict:
+def _scope_series_window(
+    points: list[tuple[dt.date, float, float]],
+    window: str,
+) -> list[tuple[dt.date, float, float]]:
+    if not points:
+        return []
+    if window == "ALL":
+        return points
+    if window == "YTD":
+        start = dt.date(points[-1][0].year, 1, 1)
+        return [p for p in points if p[0] >= start]
+    lookback = VOL_WINDOW_LOOKBACK_DAYS.get(window)
+    return points[-(lookback + 1):] if lookback else points
+
+
+def _build_market_windows(
+    points: list[tuple[dt.date, float, float]],
+    dividends: list[tuple[dt.date, float]],
+) -> dict:
     """
-    Build per-window realized vol stats from (date, adj_close) points.
-    Returns window -> {vol_annual, n_returns, asof}.
+    Build per-window stats from (date, close, adj_close) plus dividends.
+    Returns window -> realized vol stats + dividend/return diagnostics.
     """
-    if len(points) < 3:
+    if len(points) < 2:
         return {}
 
     points = sorted(points, key=lambda x: x[0])
-    asof = points[-1][0].isoformat()
-    results = {}
+    dividends = sorted(dividends, key=lambda x: x[0])
+    results: dict[str, dict] = {}
 
     for window in VOL_WINDOWS:
-        if window == "ALL":
-            scoped = points
-        elif window == "YTD":
-            start = dt.date(points[-1][0].year, 1, 1)
-            scoped = [p for p in points if p[0] >= start]
-        else:
-            lookback = VOL_WINDOW_LOOKBACK_DAYS.get(window)
-            scoped = points[-(lookback + 1):] if lookback else points
+        scoped = _scope_series_window(points, window)
+        if len(scoped) < 2:
+            continue
+        start_date = scoped[0][0]
+        end_date = scoped[-1][0]
+        start_close = scoped[0][1]
+        end_close = scoped[-1][1]
+        start_adj = scoped[0][2]
+        end_adj = scoped[-1][2]
 
-        closes = [c for _, c in scoped]
-        stats = _compute_vol_stats_from_closes(closes)
+        adj_closes = [adj for _, _, adj in scoped]
+        stats = _compute_vol_stats_from_closes(adj_closes)
+
+        total_dividends = 0.0
+        for d, amount in dividends:
+            if d < start_date or d > end_date:
+                continue
+            total_dividends += float(amount)
+
+        price_return = None
+        adj_return = None
+        dividend_yield = None
+        if start_close > 0:
+            price_return = (end_close / start_close) - 1.0
+            dividend_yield = total_dividends / start_close
+        if start_adj > 0:
+            adj_return = (end_adj / start_adj) - 1.0
+
         results[window] = {
             "vol_annual": stats["vol_annual"],
             "ewma_vol_annual": stats["ewma_vol_annual"],
             "n_returns": stats["n_returns"] if stats["n_returns"] > 0 else None,
-            "asof": asof,
+            "asof": end_date.isoformat(),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "start_close": round(float(start_close), 6),
+            "end_close": round(float(end_close), 6),
+            "start_adj_close": round(float(start_adj), 6),
+            "end_adj_close": round(float(end_adj), 6),
+            "total_dividends": round(float(total_dividends), 6),
+            "dividend_yield": round(float(dividend_yield), 6) if dividend_yield is not None else None,
+            "price_return": round(float(price_return), 6) if price_return is not None else None,
+            "adj_return": round(float(adj_return), 6) if adj_return is not None else None,
         }
 
     return results
 
 
-def _fetch_yahoo_adjclose_points(
+def _fetch_yahoo_symbol_series(
     session: requests.Session,
     symbol: str,
     *,
     range_value: str,
-) -> list[tuple[dt.date, float]]:
-    """Fetch adjusted-close history from Yahoo chart API for a fixed range."""
+) -> dict:
+    """Fetch close/adjclose plus dividend events from Yahoo chart API."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = {"range": range_value, "interval": "1d", "events": "div,splits"}
 
@@ -1449,42 +1494,68 @@ def _fetch_yahoo_adjclose_points(
             payload = resp.json()
             result = payload.get("chart", {}).get("result", [None])[0]
             if not result:
-                return []
+                return {"points": [], "dividends": []}
 
             timestamps = result.get("timestamp") or []
-            closes = (
+            close_values = (result.get("indicators", {}).get("quote", [{}])[0].get("close")) or []
+            adj_values = (
                 (result.get("indicators", {}).get("adjclose", [{}])[0].get("adjclose"))
-                or (result.get("indicators", {}).get("quote", [{}])[0].get("close"))
-                or []
+                or close_values
             )
-            n = min(len(timestamps), len(closes))
+            n = min(len(timestamps), len(close_values), len(adj_values))
             points = []
             for i in range(n):
                 ts = timestamps[i]
-                close = closes[i]
-                if ts is None or close is None:
+                close = close_values[i]
+                adj_close = adj_values[i]
+                if ts is None or close is None or adj_close is None:
                     continue
                 try:
-                    px = float(close)
-                    if not np.isfinite(px) or px <= 0:
+                    px_close = float(close)
+                    px_adj = float(adj_close)
+                    if (
+                        not np.isfinite(px_close)
+                        or not np.isfinite(px_adj)
+                        or px_close <= 0
+                        or px_adj <= 0
+                    ):
                         continue
                     d = dt.datetime.fromtimestamp(int(ts), dt.UTC).date()
-                    points.append((d, px))
+                    points.append((d, px_close, px_adj))
                 except (ValueError, TypeError, OSError):
                     continue
-            return points
+
+            dividends = []
+            div_map = (result.get("events") or {}).get("dividends") or {}
+            if isinstance(div_map, dict):
+                for ts_key, payload in div_map.items():
+                    amount = payload.get("amount") if isinstance(payload, dict) else None
+                    try:
+                        amt = float(amount)
+                        if not np.isfinite(amt):
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    try:
+                        ev_ts = int(payload.get("date") if isinstance(payload, dict) and payload.get("date") is not None else ts_key)
+                        ev_date = dt.datetime.fromtimestamp(ev_ts, dt.UTC).date()
+                    except (ValueError, TypeError, OSError):
+                        continue
+                    dividends.append((ev_date, float(amt)))
+
+            return {"points": points, "dividends": dividends}
         except Exception as e:
             last_err = e
             if attempt < REALIZED_VOL_RETRIES:
                 continue
     print(f"  Warning: Yahoo history fetch failed for {symbol}: {last_err}")
-    return []
+    return {"points": [], "dividends": []}
 
 
 def compute_realized_vol_map(symbols: set[str]) -> dict[str, dict]:
     """
-    Returns symbol -> realized-vol windows.
-    Each window has {vol_annual, n_returns, asof}.
+    Returns symbol -> market windows.
+    Each window has realized-vol and dividend/return diagnostics.
     """
     out: dict[str, dict] = {}
     clean_symbols = sorted({norm_sym(s) for s in symbols if str(s).strip()})
@@ -1500,8 +1571,10 @@ def compute_realized_vol_map(symbols: set[str]) -> dict[str, dict]:
 
     ok = 0
     for i, sym in enumerate(clean_symbols, start=1):
-        points = _fetch_yahoo_adjclose_points(session, sym, range_value=REALIZED_VOL_RANGE)
-        windows = _build_realized_vol_windows(points) if points else {}
+        series = _fetch_yahoo_symbol_series(session, sym, range_value=REALIZED_VOL_RANGE)
+        points = series.get("points") or []
+        dividends = series.get("dividends") or []
+        windows = _build_market_windows(points, dividends) if points else {}
         if windows:
             out[sym] = windows
             ok += 1
@@ -1762,6 +1835,7 @@ def build():
         etf_realized = realized_vol_map.get(sym, {})
         und_realized = realized_vol_map.get(row["underlying_sym"], {})
         realized_vol = {}
+        dividend_adjustment = {}
         for window in VOL_WINDOWS:
             etf_w = etf_realized.get(window, {})
             und_w = und_realized.get(window, {})
@@ -1776,6 +1850,20 @@ def build():
                 "n_returns_underlying": und_w.get("n_returns"),
                 "asof_etf": etf_w.get("asof"),
                 "asof_underlying": und_w.get("asof"),
+            }
+            dividend_adjustment[window] = {
+                "etf_total_dividends": etf_w.get("total_dividends"),
+                "underlying_total_dividends": und_w.get("total_dividends"),
+                "etf_dividend_yield": etf_w.get("dividend_yield"),
+                "underlying_dividend_yield": und_w.get("dividend_yield"),
+                "etf_price_return": etf_w.get("price_return"),
+                "underlying_price_return": und_w.get("price_return"),
+                "etf_adj_return": etf_w.get("adj_return"),
+                "underlying_adj_return": und_w.get("adj_return"),
+                "etf_start_date": etf_w.get("start_date"),
+                "etf_end_date": etf_w.get("end_date"),
+                "underlying_start_date": und_w.get("start_date"),
+                "underlying_end_date": und_w.get("end_date"),
             }
 
         # Keep legacy top-level fields as 6M default fallback.
@@ -1824,6 +1912,7 @@ def build():
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
             "realized_vol": realized_vol,
+            "dividend_adjustment": dividend_adjustment,
             "include_for_algo": bool(row.get("include_for_algo", False)),
             "protected": bool(row.get("protected", False)),
             "cagr_positive": bool(row.get("cagr_positive")) if pd.notna(row.get("cagr_positive")) else None,

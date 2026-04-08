@@ -59,6 +59,30 @@ jobs:
           TRADIER_MAX_TOTAL_REQUESTS: "70"
         run: python scripts/build_data.py --options-only
 
+      - name: Print options coverage diagnostics
+        run: |
+          python - <<'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          p = Path("data/options_cache.json")
+          if not p.exists():
+              raise SystemExit("options_cache.json missing")
+          d = json.loads(p.read_text(encoding="utf-8"))
+          cov = d.get("option_field_coverage") or {}
+          print("option_field_coverage:", cov)
+          symbols = d.get("symbols") or {}
+          source_counts = Counter()
+          for payload in symbols.values():
+              source_counts[str((payload or {}).get("source"))] += len((payload or {}).get("options") or [])
+          print("rows_by_source:", dict(source_counts))
+          errs = d.get("errors_by_symbol") or {}
+          if errs:
+              items = list(errs.items())[:8]
+              print("sample_errors_by_symbol:", items)
+          PY
+
       - name: Commit data if changed
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
