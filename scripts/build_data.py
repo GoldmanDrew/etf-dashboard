@@ -57,6 +57,10 @@ POLYGON_MAX_TOTAL_REQUESTS = int(os.environ.get("POLYGON_MAX_TOTAL_REQUESTS", "9
 POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL", "1"))
 POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL", "0"))
 POLYGON_RETRY_MAX_429 = int(os.environ.get("POLYGON_RETRY_MAX_429", "1"))
+POLYGON_CHAIN_MAX_EXPIRIES = int(os.environ.get("POLYGON_CHAIN_MAX_EXPIRIES", "16"))
+POLYGON_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("POLYGON_CHAIN_STRIKE_BAND_PCT", "0.12"))
+POLYGON_CHAIN_MONEYNESS_MODE = os.environ.get("POLYGON_CHAIN_MONEYNESS_MODE", "atm_otm").strip().lower()
+POLYGON_DROP_NULL_QUOTES = os.environ.get("POLYGON_DROP_NULL_QUOTES", "1").strip().lower() not in {"0", "false", "no"}
 TRADIER_CHAIN_SYMBOLS_RAW = [
     s.strip()
     for s in os.environ.get("TRADIER_CHAIN_SYMBOLS", "APLD,APLZ").split(",")
@@ -718,6 +722,52 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
         return rows, "; ".join(errs[:2]) if errs else None
 
+    def _filter_option_rows(rows: list[dict], spot_value: float | None) -> list[dict]:
+        if not rows:
+            return rows
+        expiries = sorted(
+            {str(r.get("expiration_date")) for r in rows if r.get("expiration_date")}
+        )
+        if POLYGON_CHAIN_MAX_EXPIRIES > 0 and expiries:
+            allowed_exp = set(expiries[:POLYGON_CHAIN_MAX_EXPIRIES])
+            rows = [r for r in rows if str(r.get("expiration_date")) in allowed_exp]
+
+        if spot_value is not None and spot_value > 0:
+            strike_min = spot_value * (1.0 - max(0.01, POLYGON_CHAIN_STRIKE_BAND_PCT))
+            strike_max = spot_value * (1.0 + max(0.01, POLYGON_CHAIN_STRIKE_BAND_PCT))
+            scoped: list[dict] = []
+            for r in rows:
+                strike = _safe_float(r.get("strike_price"))
+                if strike is None:
+                    continue
+                ctype = str(r.get("contract_type") or "").lower()
+                if POLYGON_CHAIN_MONEYNESS_MODE == "atm_otm":
+                    if ctype.startswith("call") and strike < spot_value:
+                        continue
+                    if ctype.startswith("put") and strike > spot_value:
+                        continue
+                if strike < strike_min or strike > strike_max:
+                    continue
+                scoped.append(r)
+            rows = scoped
+
+        if POLYGON_DROP_NULL_QUOTES:
+            rows = [
+                r
+                for r in rows
+                if _safe_float(r.get("mid")) is not None
+                or _normalize_iv(r.get("iv")) is not None
+                or _safe_float(r.get("delta")) is not None
+            ]
+
+        rows.sort(
+            key=lambda x: (
+                str(x.get("expiration_date") or ""),
+                abs(float(x.get("strike_price"))) if x.get("strike_price") is not None else 9e9,
+            )
+        )
+        return rows
+
     def _fetch_tradier_spot_map(target_symbols: list[str]) -> tuple[dict[str, float], str | None]:
         if not TRADIER_TOKEN:
             return {}, None
@@ -1235,6 +1285,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             parsed, enrich_err = _enrich_rows_with_tradier_quotes(parsed)
             if enrich_err:
                 sym_errors.append(f"tradier_quote_enrich: {enrich_err}")
+            parsed = _filter_option_rows(parsed, tradier_spot if tradier_spot is not None else under_px)
             if not parsed:
                 spot_only = tradier_spot if tradier_spot is not None else under_px
                 if spot_only is None:
@@ -1254,7 +1305,6 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 elif sym_errors:
                     out["errors_by_symbol"][sym] = "; ".join(sym_errors[:4])
                 continue
-            parsed.sort(key=lambda x: (x["expiration_date"], abs(float(x["strike_price"])) if x["strike_price"] is not None else 9e9))
             final_spot = tradier_spot if tradier_spot is not None else under_px
             if final_spot is None:
                 final_spot, spot_err = _fetch_last_spot(sym)
@@ -1274,6 +1324,15 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     out["symbols_count"] = len(out["symbols"])
     out["polygon_requests_used"] = int(total_polygon_requests)
     out["tradier_requests_used"] = int(total_tradier_requests)
+    # Normalize/prune carried cache entries so stale null-only chains do not dominate.
+    for sym, payload in list(out["symbols"].items()):
+        if not isinstance(payload, dict):
+            continue
+        rows = payload.get("options")
+        if not isinstance(rows, list):
+            continue
+        spot = _safe_float(payload.get("spot"))
+        payload["options"] = _filter_option_rows(rows, spot)
     option_rows_total = 0
     option_mid_nonnull = 0
     option_iv_nonnull = 0
