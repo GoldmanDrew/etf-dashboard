@@ -54,6 +54,7 @@ The `build-and-deploy.yml` Action will run automatically on push, build the data
 - `build-and-deploy.yml` runs once daily on weekdays (plus push/manual) for full rebuild.
 - `refresh-borrow.yml` runs every 10 minutes for borrow + shares refresh only.
 - `refresh-options.yml` runs every 5 minutes for a throttled options shard (aggressive cache reuse + spacing).
+- Refresh workflows commit JSON only; GitHub Pages deployment is handled by `build-and-deploy.yml` to avoid queue contention.
 
 ## Running Locally
 
