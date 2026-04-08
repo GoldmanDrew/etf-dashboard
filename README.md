@@ -53,7 +53,7 @@ The `build-and-deploy.yml` Action will run automatically on push, build the data
 
 - `build-and-deploy.yml` runs once daily on weekdays (plus push/manual) for full rebuild.
 - `refresh-borrow.yml` runs every 10 minutes for borrow + shares refresh only.
-- `refresh-options.yml` runs every 10 minutes for a throttled options shard (aggressive cache reuse + spacing).
+- `refresh-options.yml` runs every 5 minutes for a throttled options shard (aggressive cache reuse + spacing).
 
 ## Running Locally
 
@@ -130,6 +130,7 @@ Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 | `POLYGON_RETRY_MAX_429` | `1` | Max retries after Polygon HTTP 429 |
 | `OPTIONS_SYMBOLS_PER_RUN` | `12` | Number of symbols refreshed per run (rest served from cache) |
 | `OPTIONS_SHARD_COUNT` | `48` | Number of time shards used for staggered refresh |
+| `OPTIONS_SHARD_INTERVAL_MINUTES` | `10` | Minutes per shard slot rotation |
 | `TRADIER_CHAIN_SYMBOLS` | `APLD,APLZ` | Symbols that use Tradier chain-first path |
 | `TRADIER_MAX_REQUESTS_PER_MINUTE` | `25` | Tradier request throttle per minute |
 | `TRADIER_MAX_TOTAL_REQUESTS` | `70` | Tradier request cap per run |
@@ -147,3 +148,5 @@ For each symbol in `options_cache.json`:
 If Polygon returns HTTP 429 for snapshots, contracts fallback is skipped for that symbol in the same run, and stale cache is preferred to preserve request budget.
 
 For symbols listed in `TRADIER_CHAIN_SYMBOLS`, the builder requests Tradier chains first (no websocket), then falls back only if needed.
+
+The options workflow can override shard settings (for example, 5-minute cadence with smaller `OPTIONS_SYMBOLS_PER_RUN`) to improve freshness while keeping request budgets bounded.

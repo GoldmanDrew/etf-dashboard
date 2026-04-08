@@ -1,8 +1,8 @@
-name: Refresh Options Every 10m
+name: Refresh Options Every 5m
 
 on:
   schedule:
-    - cron: "*/10 * * * *"  # every 10 minutes
+    - cron: "*/5 * * * *"  # every 5 minutes
   workflow_dispatch:
 
 permissions:
@@ -47,9 +47,10 @@ jobs:
           POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL: "1"
           POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL: "0"
           POLYGON_RETRY_MAX_429: "1"
-          OPTIONS_REFRESH_SLEEP_MS: "400"
-          OPTIONS_SYMBOLS_PER_RUN: "12"
-          OPTIONS_SHARD_COUNT: "48"
+          OPTIONS_REFRESH_SLEEP_MS: "300"
+          OPTIONS_SYMBOLS_PER_RUN: "8"
+          OPTIONS_SHARD_COUNT: "36"
+          OPTIONS_SHARD_INTERVAL_MINUTES: "5"
           TRADIER_CHAIN_SYMBOLS: "APLD,APLZ"
           TRADIER_CHAIN_MAX_EXPIRIES: "1"
           TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL: "120"

@@ -69,6 +69,7 @@ TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL = int(os.environ.get("TRADIER_CHAIN_MAX_C
 TRADIER_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("TRADIER_CHAIN_STRIKE_BAND_PCT", "0.12"))
 OPTIONS_SYMBOLS_PER_RUN = int(os.environ.get("OPTIONS_SYMBOLS_PER_RUN", "12"))
 OPTIONS_SHARD_COUNT = int(os.environ.get("OPTIONS_SHARD_COUNT", "48"))
+OPTIONS_SHARD_INTERVAL_MINUTES = int(os.environ.get("OPTIONS_SHARD_INTERVAL_MINUTES", "10"))
 POLYGON_FORCE_SYMBOLS_RAW = [
     s.strip()
     for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "APLD,APLZ").split(",")
@@ -493,7 +494,8 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     forced_set = set(forced_symbols)
     shard_count = max(1, OPTIONS_SHARD_COUNT)
     symbols_per_run = max(1, OPTIONS_SYMBOLS_PER_RUN)
-    slot = int(time.time() // (30 * 60)) % shard_count
+    shard_interval_minutes = max(1, OPTIONS_SHARD_INTERVAL_MINUTES)
+    slot = int(time.time() // (shard_interval_minutes * 60)) % shard_count
     shard_candidates = [
         s for s in all_symbols if (hash(s) % shard_count) == slot and s not in forced_set
     ]
@@ -513,8 +515,9 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             seen_refresh.add(s)
     refresh_symbols = refresh_symbols[: max(symbols_per_run, len([s for s in tradier_chain_symbols if s in all_symbols]))]
 
+    build_time = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
     out = {
-        "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+        "build_time": build_time,
         "source": "polygon_snapshot",
         "polygon_api_configured": bool(POLYGON_API_KEY),
         "tradier_api_configured": bool(TRADIER_TOKEN),
@@ -523,6 +526,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "forced_symbols": [norm_sym(s) for s in POLYGON_FORCE_SYMBOLS_RAW],
         "tradier_chain_symbols": sorted(tradier_chain_symbols),
         "refresh_symbols_count": int(len(refresh_symbols)),
+        "shard_interval_minutes": int(shard_interval_minutes),
         "polygon_request_limits": {
             "max_requests_per_minute": int(POLYGON_MAX_REQUESTS_PER_MINUTE),
             "max_total_requests": int(POLYGON_MAX_TOTAL_REQUESTS),
@@ -533,6 +537,13 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "errors": [],
         "errors_by_symbol": {},
     }
+    for _, payload in out["symbols"].items():
+        if not isinstance(payload, dict):
+            continue
+        if "updated_at" not in payload and prior_cache.get("build_time"):
+            payload["updated_at"] = prior_cache.get("build_time")
+        if "source" not in payload:
+            payload["source"] = "cache"
     if not POLYGON_API_KEY:
         if prior_symbols:
             out["symbols_count"] = len(prior_symbols)
@@ -874,6 +885,14 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         err_msg = "; ".join(errs[:3]) if errs else None
         return out_rows, spot_value, err_msg
 
+    def _set_symbol_entry(sym: str, spot: float | None, options_rows: list[dict], source: str) -> None:
+        out["symbols"][sym] = {
+            "spot": float(spot) if spot is not None else None,
+            "options": options_rows,
+            "updated_at": build_time,
+            "source": source,
+        }
+
     tradier_spot_map, tradier_err = _fetch_tradier_spot_map(all_symbols)
     if tradier_err:
         out["errors"].append(tradier_err)
@@ -963,7 +982,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 if spot_only is None:
                     spot_only, spot_err = _fetch_last_spot(sym)
                 if spot_only is not None:
-                    out["symbols"][sym] = {"spot": float(spot_only), "options": []}
+                    _set_symbol_entry(sym, spot_only, [], "spot_only")
                     if sym_errors:
                         out["errors_by_symbol"][sym] = "; ".join(sym_errors[:3])
                     continue
@@ -1033,7 +1052,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                     if spot_err:
                         sym_errors.append(spot_err)
                 if spot_only is not None:
-                    out["symbols"][sym] = {"spot": float(spot_only), "options": []}
+                    _set_symbol_entry(sym, spot_only, [], "spot_only")
                     if sym_errors:
                         out["errors_by_symbol"][sym] = "; ".join(sym_errors[:4])
                     continue
@@ -1051,10 +1070,8 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 final_spot, spot_err = _fetch_last_spot(sym)
                 if spot_err:
                     sym_errors.append(spot_err)
-            out["symbols"][sym] = {
-                "spot": float(final_spot) if final_spot is not None else None,
-                "options": parsed[:300],
-            }
+            source = "tradier_chain" if sym in tradier_chain_symbols else "polygon_snapshot"
+            _set_symbol_entry(sym, final_spot, parsed[:300], source)
             if sym_errors:
                 out["errors_by_symbol"][sym] = "; ".join(sym_errors[:4])
             if OPTIONS_REFRESH_SLEEP_MS > 0:
@@ -1068,6 +1085,33 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     out["symbols_count"] = len(out["symbols"])
     out["polygon_requests_used"] = int(total_polygon_requests)
     out["tradier_requests_used"] = int(total_tradier_requests)
+    now_utc = dt.datetime.now(dt.UTC)
+    ages: list[int] = []
+    refreshed = 0
+    for _, payload in out["symbols"].items():
+        if not isinstance(payload, dict):
+            continue
+        ts = payload.get("updated_at")
+        age = None
+        if isinstance(ts, str) and ts:
+            try:
+                parsed = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                age = max(0, int((now_utc - parsed).total_seconds()))
+            except Exception:
+                age = None
+        if age is not None:
+            payload["cache_age_seconds"] = age
+            ages.append(age)
+            if age <= 5:
+                refreshed += 1
+    if ages:
+        out["cache_age_summary"] = {
+            "min_seconds": int(min(ages)),
+            "median_seconds": int(np.median(ages)),
+            "max_seconds": int(max(ages)),
+            "refreshed_symbols": int(refreshed),
+            "stale_symbols": int(max(0, len(ages) - refreshed)),
+        }
     if out["errors"]:
         out["errors"] = sorted(set(out["errors"]))[:50]
     else:
