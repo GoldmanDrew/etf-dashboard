@@ -562,10 +562,59 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     total_tradier_requests = 0
 
     def _safe_float(v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            s = v.strip().replace(",", "")
+            if not s:
+                return None
+            if s.endswith("%"):
+                s = s[:-1].strip()
+            try:
+                return float(s)
+            except (TypeError, ValueError):
+                return None
         try:
             return float(v)
         except (TypeError, ValueError):
             return None
+
+    def _normalize_iv(v) -> float | None:
+        iv = _safe_float(v)
+        if iv is None or iv < 0:
+            return None
+        # Providers can return IV in percent (e.g., 63.5) or decimal (0.635).
+        if iv > 5:
+            iv = iv / 100.0
+        if iv > 5:
+            return None
+        return iv
+
+    def _pick_iv(values: list[object]) -> float | None:
+        for v in values:
+            iv = _normalize_iv(v)
+            if iv is not None:
+                return iv
+        return None
+
+    def _normalize_mid(
+        bid_val: object,
+        ask_val: object,
+        *fallback_values: object,
+    ) -> float | None:
+        bid = _safe_float(bid_val)
+        ask = _safe_float(ask_val)
+        if bid is not None and ask is not None and bid >= 0 and ask >= bid:
+            return 0.5 * (bid + ask)
+        for v in fallback_values:
+            px = _safe_float(v)
+            if px is not None and px > 0:
+                return px
+        if bid is not None and bid > 0:
+            return bid
+        if ask is not None and ask > 0:
+            return ask
+        return None
 
     def _chunked(seq: list[str], n: int):
         step = max(1, int(n))
@@ -853,7 +902,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 strike = _safe_float(opt.get("strike"))
                 if strike is None:
                     continue
-                option_type = str(opt.get("option_type", "")).lower()
+                option_type = str(opt.get("option_type") or opt.get("type") or "").lower()
                 if spot_value is not None and spot_value > 0 and TRADIER_CHAIN_MONEYNESS_MODE == "atm_otm":
                     # Keep only ATM/OTM contracts:
                     # - Calls: strike >= spot (ATM or OTM)
@@ -867,23 +916,31 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 if strike_max is not None and strike > strike_max:
                     continue
 
-                bid = _safe_float(opt.get("bid"))
-                ask = _safe_float(opt.get("ask"))
-                mid = None
-                if bid is not None and ask is not None:
-                    mid = 0.5 * (bid + ask)
-                if mid is None:
-                    mid = _safe_float(opt.get("last"))
-
                 greeks = opt.get("greeks") or {}
+                iv = _pick_iv(
+                    [
+                        greeks.get("mid_iv"),
+                        greeks.get("smv_vol"),
+                        greeks.get("bid_iv"),
+                        greeks.get("ask_iv"),
+                        opt.get("implied_volatility"),
+                        opt.get("iv"),
+                    ]
+                )
                 out_rows.append(
                     {
-                        "ticker": opt.get("symbol"),
-                        "expiration_date": opt.get("expiration_date") or exp,
+                        "ticker": opt.get("symbol") or opt.get("option_symbol"),
+                        "expiration_date": opt.get("expiration_date") or opt.get("expiration") or exp,
                         "strike_price": strike,
                         "contract_type": "put" if option_type.startswith("put") else "call",
-                        "mid": mid,
-                        "iv": _safe_float(greeks.get("mid_iv") or greeks.get("smv_vol")),
+                        "mid": _normalize_mid(
+                            opt.get("bid"),
+                            opt.get("ask"),
+                            opt.get("mark"),
+                            opt.get("last"),
+                            opt.get("close"),
+                        ),
+                        "iv": iv,
                         "delta": _safe_float(greeks.get("delta")),
                     }
                 )
@@ -914,6 +971,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             sym_errors = []
             snapshot_rate_limited = False
             rows = []
+            symbol_source = "polygon_snapshot"
             payload = {}
             resp = None
 
@@ -922,6 +980,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 tradier_rows, _, tradier_chain_err = _fetch_tradier_chain(sym, tradier_spot)
                 if tradier_rows:
                     rows = tradier_rows
+                    symbol_source = "tradier_chain"
                 elif tradier_chain_err:
                     sym_errors.append(f"tradier_chain: {tradier_chain_err}")
 
@@ -984,6 +1043,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 tradier_rows, _, tradier_chain_err = _fetch_tradier_chain(sym, tradier_spot)
                 if tradier_rows:
                     rows = tradier_rows
+                    symbol_source = "tradier_chain_fallback"
                 elif tradier_chain_err:
                     sym_errors.append(f"tradier_chain: {tradier_chain_err}")
             if not rows:
@@ -1013,19 +1073,22 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 details = r.get("details") or {}
                 quote = r.get("last_quote") or {}
                 greeks = r.get("greeks") or {}
-                iv = r.get("implied_volatility")
-                bid = quote.get("bid")
-                ask = quote.get("ask")
-                mid = None
-                if bid is not None and ask is not None:
-                    try:
-                        mid = 0.5 * (float(bid) + float(ask))
-                    except Exception:
-                        mid = None
-                if mid is None:
-                    last_trade = r.get("last_trade") or {}
-                    p = last_trade.get("price")
-                    mid = float(p) if p is not None else None
+                iv = _pick_iv(
+                    [
+                        r.get("implied_volatility"),
+                        greeks.get("implied_volatility"),
+                        greeks.get("mid_iv"),
+                        greeks.get("smv_vol"),
+                    ]
+                )
+                last_trade = r.get("last_trade") or {}
+                day = r.get("day") or {}
+                mid = _normalize_mid(
+                    quote.get("bid"),
+                    quote.get("ask"),
+                    last_trade.get("price"),
+                    day.get("close"),
+                )
 
                 if under_px is None:
                     under_px = r.get("underlying_asset", {}).get("price")
@@ -1034,8 +1097,13 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                     or r.get("expiration_date")
                     or r.get("expiration_date_from")
                 )
-                strike = details.get("strike_price") if details.get("strike_price") is not None else r.get("strike_price")
-                ctype = details.get("contract_type") or r.get("contract_type")
+                strike = (
+                    details.get("strike_price")
+                    if details.get("strike_price") is not None
+                    else r.get("strike_price")
+                )
+                strike = _safe_float(strike)
+                ctype = (details.get("contract_type") or r.get("contract_type") or "").strip().lower()
                 if not ctype:
                     opt_ticker = details.get("ticker") or r.get("ticker") or ""
                     if "P" in str(opt_ticker):
@@ -1050,7 +1118,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                         "contract_type": ctype,
                         "mid": mid,
                         "iv": iv,
-                        "delta": greeks.get("delta"),
+                        "delta": _safe_float(greeks.get("delta")),
                     }
                 )
 
@@ -1080,8 +1148,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 final_spot, spot_err = _fetch_last_spot(sym)
                 if spot_err:
                     sym_errors.append(spot_err)
-            source = "tradier_chain" if sym in tradier_chain_symbols else "polygon_snapshot"
-            _set_symbol_entry(sym, final_spot, parsed[:300], source)
+            _set_symbol_entry(sym, final_spot, parsed[:300], symbol_source)
             if sym_errors:
                 out["errors_by_symbol"][sym] = "; ".join(sym_errors[:4])
             if OPTIONS_REFRESH_SLEEP_MS > 0:

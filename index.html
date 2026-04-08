@@ -745,6 +745,36 @@ const fmtTime = iso => {
   return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
 };
 const cls = (...c) => c.filter(Boolean).join(' ');
+const toFiniteNum = (v) => {
+  if (typeof v === 'string') {
+    const s = v.trim().replace(/,/g, '').replace(/%$/, '');
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+const normalizeOptionIv = (v) => {
+  const n = toFiniteNum(v);
+  if (n == null || n < 0) return null;
+  if (n > 5) return n / 100;
+  return n;
+};
+const optionMidFromContract = (c) => {
+  if (!c) return null;
+  const bid = toFiniteNum(c.bid);
+  const ask = toFiniteNum(c.ask);
+  if (bid != null && ask != null && bid >= 0 && ask >= bid) return 0.5 * (bid + ask);
+  const fallbacks = [c.mid, c.mark, c.last, c.close];
+  for (const v of fallbacks) {
+    const n = toFiniteNum(v);
+    if (n != null && n > 0) return n;
+  }
+  if (bid != null && bid > 0) return bid;
+  if (ask != null && ask > 0) return ask;
+  return null;
+};
 const getBorrowRate = r => (r?.borrow_current ?? r?.borrow_net_annual ?? null);
 const getFreshness = (data) => {
   const built = data?.build_time ? new Date(data.build_time) : null;
@@ -1507,8 +1537,8 @@ function ChartPage({ record, onBack }) {
       const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
       return {
         ...leg,
-        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : Number(c?.mid),
-        iv: Number.isFinite(Number(leg.iv)) ? Number(leg.iv) : Number(c?.iv),
+        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : optionMidFromContract(c),
+        iv: Number.isFinite(Number(leg.iv)) ? normalizeOptionIv(leg.iv) : normalizeOptionIv(c?.iv),
       };
     });
     const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
@@ -1555,8 +1585,8 @@ function ChartPage({ record, onBack }) {
       const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
       return {
         ...leg,
-        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : Number(c?.mid),
-        iv: Number.isFinite(Number(leg.iv)) ? Number(leg.iv) : Number(c?.iv),
+        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : optionMidFromContract(c),
+        iv: Number.isFinite(Number(leg.iv)) ? normalizeOptionIv(leg.iv) : normalizeOptionIv(c?.iv),
       };
     });
     return tradeFns.evaluateTradeMonteCarlo({
@@ -1585,8 +1615,8 @@ function ChartPage({ record, onBack }) {
       const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
       return {
         ...leg,
-        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : Number(c?.mid),
-        iv: Number.isFinite(Number(leg.iv)) ? Number(leg.iv) : Number(c?.iv),
+        premium: Number.isFinite(Number(leg.premium)) ? Number(leg.premium) : optionMidFromContract(c),
+        iv: Number.isFinite(Number(leg.iv)) ? normalizeOptionIv(leg.iv) : normalizeOptionIv(c?.iv),
       };
     });
     const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
@@ -1960,7 +1990,7 @@ function ChartPage({ record, onBack }) {
                           {strikes.length ? strikes.map((k) => <option key={k} value={k}>{k}</option>) : <option value={leg.strike}>{leg.strike || 0}</option>}
                         </select>
                         <input type="number" value={leg.contracts} onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, contracts: Number(e.target.value || 0) } : x))} placeholder="Contracts" />
-                        <div className="scenario-sub">mid {Number.isFinite(Number(c?.mid)) ? Number(c.mid).toFixed(2) : '—'} | iv {Number.isFinite(Number(c?.iv)) ? fmt(Number(c.iv)) : '—'}</div>
+                        <div className="scenario-sub">mid {Number.isFinite(Number(optionMidFromContract(c))) ? Number(optionMidFromContract(c)).toFixed(2) : '—'} | iv {normalizeOptionIv(c?.iv) != null ? fmt(normalizeOptionIv(c?.iv)) : '—'}</div>
                         <button onClick={() => setTradeOptionLegs((arr) => arr.filter((x) => x.id !== leg.id))}>×</button>
                       </div>
                     );
