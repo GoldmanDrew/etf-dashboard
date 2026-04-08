@@ -58,12 +58,12 @@ POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_SNAPSHOT
 POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL", "0"))
 POLYGON_RETRY_MAX_429 = int(os.environ.get("POLYGON_RETRY_MAX_429", "1"))
 POLYGON_CHAIN_MAX_EXPIRIES = int(os.environ.get("POLYGON_CHAIN_MAX_EXPIRIES", "16"))
-POLYGON_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("POLYGON_CHAIN_STRIKE_BAND_PCT", "0.12"))
+POLYGON_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("POLYGON_CHAIN_STRIKE_BAND_PCT", "0.50"))
 POLYGON_CHAIN_MONEYNESS_MODE = os.environ.get("POLYGON_CHAIN_MONEYNESS_MODE", "atm_otm").strip().lower()
 POLYGON_DROP_NULL_QUOTES = os.environ.get("POLYGON_DROP_NULL_QUOTES", "1").strip().lower() not in {"0", "false", "no"}
 TRADIER_CHAIN_SYMBOLS_RAW = [
     s.strip()
-    for s in os.environ.get("TRADIER_CHAIN_SYMBOLS", "APLD,APLZ").split(",")
+    for s in os.environ.get("TRADIER_CHAIN_SYMBOLS", "").split(",")
     if s.strip()
 ]
 TRADIER_MAX_REQUESTS_PER_MINUTE = int(os.environ.get("TRADIER_MAX_REQUESTS_PER_MINUTE", "25"))
@@ -71,15 +71,17 @@ TRADIER_MAX_TOTAL_REQUESTS = int(os.environ.get("TRADIER_MAX_TOTAL_REQUESTS", "7
 TRADIER_OPTION_QUOTES_MAX_REQUESTS = int(os.environ.get("TRADIER_OPTION_QUOTES_MAX_REQUESTS", "12"))
 TRADIER_OPTION_QUOTES_BATCH_SIZE = int(os.environ.get("TRADIER_OPTION_QUOTES_BATCH_SIZE", "75"))
 TRADIER_CHAIN_MAX_EXPIRIES = int(os.environ.get("TRADIER_CHAIN_MAX_EXPIRIES", "16"))
-TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL = int(os.environ.get("TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL", "120"))
-TRADIER_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("TRADIER_CHAIN_STRIKE_BAND_PCT", "0.12"))
+TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL = int(os.environ.get("TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL", "160"))
+TRADIER_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("TRADIER_CHAIN_STRIKE_BAND_PCT", "0.50"))
 TRADIER_CHAIN_MONEYNESS_MODE = os.environ.get("TRADIER_CHAIN_MONEYNESS_MODE", "atm_otm").strip().lower()
 OPTIONS_SYMBOLS_PER_RUN = int(os.environ.get("OPTIONS_SYMBOLS_PER_RUN", "12"))
-OPTIONS_SHARD_COUNT = int(os.environ.get("OPTIONS_SHARD_COUNT", "48"))
-OPTIONS_SHARD_INTERVAL_MINUTES = int(os.environ.get("OPTIONS_SHARD_INTERVAL_MINUTES", "10"))
+OPTIONS_SHARD_COUNT = int(os.environ.get("OPTIONS_SHARD_COUNT", "20"))
+OPTIONS_SHARD_INTERVAL_MINUTES = int(os.environ.get("OPTIONS_SHARD_INTERVAL_MINUTES", "3"))
+OPTIONS_STALE_AFTER_MINUTES = int(os.environ.get("OPTIONS_STALE_AFTER_MINUTES", "180"))
+OPTIONS_ONLY_BUCKET3 = os.environ.get("OPTIONS_ONLY_BUCKET3", "1").strip().lower() not in {"0", "false", "no"}
 POLYGON_FORCE_SYMBOLS_RAW = [
     s.strip()
-    for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "APLD,APLZ").split(",")
+    for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "").split(",")
     if s.strip()
 ]
 
@@ -496,6 +498,46 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     if not isinstance(prior_symbols, dict):
         prior_symbols = {}
 
+    def _coverage_score_for_symbol_payload(payload: dict) -> float:
+        def _num(v):
+            try:
+                x = float(v)
+                return x if np.isfinite(x) else None
+            except Exception:
+                return None
+
+        def _iv(v):
+            x = _num(v)
+            if x is None or x <= 0:
+                return None
+            if x > 5:
+                x = x / 100.0
+            return x if x <= 5 else None
+
+        rows = (payload or {}).get("options") or []
+        if not isinstance(rows, list) or not rows:
+            return 0.0
+        mid_ok = 0
+        iv_ok = 0
+        for r in rows:
+            if _num((r or {}).get("mid")) is not None:
+                mid_ok += 1
+            if _iv((r or {}).get("iv")) is not None:
+                iv_ok += 1
+        ratio_mid = mid_ok / len(rows)
+        ratio_iv = iv_ok / len(rows)
+        return float((ratio_mid + ratio_iv) / 2.0)
+
+    def _cache_age_seconds(payload: dict) -> int:
+        ts = (payload or {}).get("updated_at")
+        if not isinstance(ts, str) or not ts:
+            return 10**9
+        try:
+            parsed = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            return max(0, int((dt.datetime.now(dt.UTC) - parsed).total_seconds()))
+        except Exception:
+            return 10**9
+
     # Time-sharded refresh keeps frequent updates while controlling API pressure.
     forced_symbols = [norm_sym(s) for s in POLYGON_FORCE_SYMBOLS_RAW if str(s).strip()]
     forced_set = set(forced_symbols)
@@ -503,9 +545,15 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     symbols_per_run = max(1, OPTIONS_SYMBOLS_PER_RUN)
     shard_interval_minutes = max(1, OPTIONS_SHARD_INTERVAL_MINUTES)
     slot = int(time.time() // (shard_interval_minutes * 60)) % shard_count
-    shard_candidates = [
-        s for s in all_symbols if (hash(s) % shard_count) == slot and s not in forced_set
-    ]
+    shard_candidates = [s for s in all_symbols if (hash(s) % shard_count) == slot and s not in forced_set]
+    # Prioritize low-quality/stale symbols first inside the active shard.
+    shard_candidates.sort(
+        key=lambda s: (
+            _coverage_score_for_symbol_payload(prior_symbols.get(s) if isinstance(prior_symbols, dict) else {}),
+            -_cache_age_seconds(prior_symbols.get(s) if isinstance(prior_symbols, dict) else {}),
+            s,
+        )
+    )
     refresh_candidates = forced_symbols + shard_candidates
     seen_refresh = set()
     refresh_symbols: list[str] = []
@@ -551,6 +599,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             payload["updated_at"] = prior_cache.get("build_time")
         if "source" not in payload:
             payload["source"] = "cache"
+        payload["quote_coverage_score"] = round(_coverage_score_for_symbol_payload(payload), 4)
     if not POLYGON_API_KEY:
         if prior_symbols:
             out["symbols_count"] = len(prior_symbols)
@@ -1353,6 +1402,8 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     now_utc = dt.datetime.now(dt.UTC)
     ages: list[int] = []
     refreshed = 0
+    stale_after_s = max(60, int(OPTIONS_STALE_AFTER_MINUTES) * 60)
+    stale_symbols = 0
     for _, payload in out["symbols"].items():
         if not isinstance(payload, dict):
             continue
@@ -1366,16 +1417,21 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 age = None
         if age is not None:
             payload["cache_age_seconds"] = age
+            payload["stale"] = bool(age > stale_after_s)
+            if payload["stale"]:
+                stale_symbols += 1
             ages.append(age)
             if age <= 5:
                 refreshed += 1
+            payload["quote_coverage_score"] = round(_coverage_score_for_symbol_payload(payload), 4)
     if ages:
         out["cache_age_summary"] = {
             "min_seconds": int(min(ages)),
             "median_seconds": int(np.median(ages)),
             "max_seconds": int(max(ages)),
             "refreshed_symbols": int(refreshed),
-            "stale_symbols": int(max(0, len(ages) - refreshed)),
+            "stale_symbols": int(stale_symbols),
+            "stale_after_minutes": int(OPTIONS_STALE_AFTER_MINUTES),
         }
     if out["errors"]:
         out["errors"] = sorted(set(out["errors"]))[:50]
@@ -1409,14 +1465,20 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
         seen.add(s)
         ordered.append(s)
 
-    for s in POLYGON_FORCE_SYMBOLS_RAW:
-        add(s)
-
-    # Prefer broad, deterministic coverage: all ETF + underlying symbols sorted.
+    # Bucket-3-only universe by default (inverse ETF options only).
     base_set = set()
     for rec in records:
+        if OPTIONS_ONLY_BUCKET3 and str(rec.get("bucket")) != "bucket_3_inverse":
+            continue
         base_set.add(norm_sym(rec.get("symbol")))
-        base_set.add(norm_sym(rec.get("underlying")))
+
+    allowed_forced = {norm_sym(s) for s in base_set}
+    for s in POLYGON_FORCE_SYMBOLS_RAW:
+        ss = norm_sym(s)
+        if ss in allowed_forced:
+            add(ss)
+
+    # Deterministic ordering inside selected universe.
     base_symbols = sorted(s for s in base_set if s)
     for s in base_symbols:
         add(s)

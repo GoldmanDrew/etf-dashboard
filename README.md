@@ -53,7 +53,7 @@ The `build-and-deploy.yml` Action will run automatically on push, build the data
 
 - `build-and-deploy.yml` runs once daily on weekdays (plus push/manual) for full rebuild.
 - `refresh-borrow.yml` runs every 10 minutes for borrow + shares refresh only.
-- `refresh-options.yml` runs every 5 minutes for a throttled options shard (aggressive cache reuse + spacing).
+- `refresh-options.yml` runs every 5 minutes (GitHub Actions minimum cadence) for a throttled options shard focused on Bucket 3 inverse ETFs.
 - Refresh workflows commit JSON only; GitHub Pages deployment is handled by `build-and-deploy.yml` to avoid queue contention.
 
 ## Running Locally
@@ -122,7 +122,7 @@ Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 | `TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH` | `200` | Max symbols per Tradier quote batch |
 | `TRADIER_SPOT_MAX_REQUESTS` | `30` | Request cap per build run before fallback |
 | `POLYGON_OPTIONS_MAX_SYMBOLS` | `100` | Max symbols to request from Polygon |
-| `POLYGON_FORCE_SYMBOLS` | `APLD,APLZ` | Symbols always included in options refresh |
+| `POLYGON_FORCE_SYMBOLS` | *(empty)* | Optional symbols always included in options refresh (only if in selected universe) |
 | `OPTIONS_REFRESH_SLEEP_MS` | `0` | Throttle delay between API calls in ms |
 | `POLYGON_MAX_REQUESTS_PER_MINUTE` | `25` | Hard throttle per-minute Polygon requests in builder |
 | `POLYGON_MAX_TOTAL_REQUESTS` | `90` | Total Polygon request cap per run before stale fallback |
@@ -130,15 +130,21 @@ Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 | `POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL` | `0` | Max contracts fallback pagination depth per symbol |
 | `POLYGON_RETRY_MAX_429` | `1` | Max retries after Polygon HTTP 429 |
 | `OPTIONS_SYMBOLS_PER_RUN` | `12` | Number of symbols refreshed per run (rest served from cache) |
-| `OPTIONS_SHARD_COUNT` | `48` | Number of time shards used for staggered refresh |
-| `OPTIONS_SHARD_INTERVAL_MINUTES` | `10` | Minutes per shard slot rotation |
-| `TRADIER_CHAIN_SYMBOLS` | `APLD,APLZ` | Symbols that use Tradier chain-first path |
+| `OPTIONS_SHARD_COUNT` | `20` | Number of time shards used for staggered refresh |
+| `OPTIONS_SHARD_INTERVAL_MINUTES` | `3` | Minutes per shard slot rotation |
+| `OPTIONS_STALE_AFTER_MINUTES` | `180` | Mark symbol cache entries stale past this age |
+| `OPTIONS_ONLY_BUCKET3` | `1` | Restrict options universe to Bucket 3 inverse ETFs only |
+| `TRADIER_CHAIN_SYMBOLS` | *(empty)* | Optional symbols that use Tradier chain-first path |
 | `TRADIER_MAX_REQUESTS_PER_MINUTE` | `25` | Tradier request throttle per minute |
 | `TRADIER_MAX_TOTAL_REQUESTS` | `70` | Tradier request cap per run |
 | `TRADIER_CHAIN_MAX_EXPIRIES` | `16` | Max expiries requested per symbol from Tradier |
-| `TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL` | `120` | Max Tradier contracts retained per symbol |
-| `TRADIER_CHAIN_STRIKE_BAND_PCT` | `0.12` | Keep Tradier chain to +/- band around spot |
+| `TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL` | `160` | Max Tradier contracts retained per symbol |
+| `TRADIER_CHAIN_STRIKE_BAND_PCT` | `0.50` | Keep Tradier chain to +/- band around spot |
 | `TRADIER_CHAIN_MONEYNESS_MODE` | `atm_otm` | `atm_otm` keeps only ATM/OTM legs (drops ITM) |
+| `POLYGON_CHAIN_MAX_EXPIRIES` | `16` | Max expiries retained for Polygon/merged rows |
+| `POLYGON_CHAIN_STRIKE_BAND_PCT` | `0.50` | Keep Polygon/merged rows to +/- band around spot |
+| `POLYGON_CHAIN_MONEYNESS_MODE` | `atm_otm` | `atm_otm` keeps only ATM/OTM legs |
+| `POLYGON_DROP_NULL_QUOTES` | `1` | Drop contracts with no usable quote/greeks fields |
 
 ### Spot fallback order
 
