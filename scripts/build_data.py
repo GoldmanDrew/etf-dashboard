@@ -64,6 +64,8 @@ TRADIER_CHAIN_SYMBOLS_RAW = [
 ]
 TRADIER_MAX_REQUESTS_PER_MINUTE = int(os.environ.get("TRADIER_MAX_REQUESTS_PER_MINUTE", "25"))
 TRADIER_MAX_TOTAL_REQUESTS = int(os.environ.get("TRADIER_MAX_TOTAL_REQUESTS", "70"))
+TRADIER_OPTION_QUOTES_MAX_REQUESTS = int(os.environ.get("TRADIER_OPTION_QUOTES_MAX_REQUESTS", "12"))
+TRADIER_OPTION_QUOTES_BATCH_SIZE = int(os.environ.get("TRADIER_OPTION_QUOTES_BATCH_SIZE", "75"))
 TRADIER_CHAIN_MAX_EXPIRIES = int(os.environ.get("TRADIER_CHAIN_MAX_EXPIRIES", "16"))
 TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL = int(os.environ.get("TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL", "120"))
 TRADIER_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("TRADIER_CHAIN_STRIKE_BAND_PCT", "0.12"))
@@ -616,10 +618,105 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             return ask
         return None
 
+    def _canon_option_ticker(v: object) -> str:
+        s = str(v or "").strip().upper()
+        if not s:
+            return ""
+        if s.startswith("O:"):
+            s = s[2:]
+        return s
+
     def _chunked(seq: list[str], n: int):
         step = max(1, int(n))
         for i in range(0, len(seq), step):
             yield seq[i : i + step]
+
+    def _enrich_rows_with_tradier_quotes(rows: list[dict]) -> tuple[list[dict], str | None]:
+        if not TRADIER_TOKEN or not rows:
+            return rows, None
+
+        targets: list[str] = []
+        seen: set[str] = set()
+        for r in rows:
+            need = r.get("mid") is None or r.get("iv") is None or r.get("delta") is None
+            if not need:
+                continue
+            t = _canon_option_ticker(r.get("ticker"))
+            if t and t not in seen:
+                seen.add(t)
+                targets.append(t)
+
+        if not targets:
+            return rows, None
+
+        quote_by_ticker: dict[str, dict] = {}
+        errs: list[str] = []
+        used_requests = 0
+        for batch in _chunked(targets, TRADIER_OPTION_QUOTES_BATCH_SIZE):
+            if used_requests >= max(1, TRADIER_OPTION_QUOTES_MAX_REQUESTS):
+                errs.append(
+                    f"tradier quotes capped at {TRADIER_OPTION_QUOTES_MAX_REQUESTS} requests"
+                )
+                break
+            used_requests += 1
+            resp, req_err = _tradier_get(
+                "/markets/quotes",
+                {"symbols": ",".join(batch), "greeks": "true"},
+            )
+            if req_err and resp is None:
+                errs.append(req_err)
+                continue
+            if resp is None or not resp.ok:
+                continue
+            payload = resp.json() or {}
+            quotes = ((payload.get("quotes") or {}).get("quote")) or []
+            if isinstance(quotes, dict):
+                quotes = [quotes]
+            for q in quotes:
+                t = _canon_option_ticker(q.get("symbol") or q.get("option_symbol"))
+                if not t:
+                    continue
+                greeks = q.get("greeks") or {}
+                quote_by_ticker[t] = {
+                    "mid": _normalize_mid(
+                        q.get("bid"),
+                        q.get("ask"),
+                        q.get("mark"),
+                        q.get("last"),
+                        q.get("close"),
+                    ),
+                    "iv": _pick_iv(
+                        [
+                            greeks.get("mid_iv"),
+                            greeks.get("smv_vol"),
+                            greeks.get("bid_iv"),
+                            greeks.get("ask_iv"),
+                            greeks.get("iv"),
+                            q.get("implied_volatility"),
+                            q.get("iv"),
+                        ]
+                    ),
+                    "delta": _safe_float(greeks.get("delta") or q.get("delta")),
+                }
+
+        if not quote_by_ticker:
+            return rows, "; ".join(errs[:2]) if errs else None
+
+        for r in rows:
+            t = _canon_option_ticker(r.get("ticker"))
+            if not t:
+                continue
+            q = quote_by_ticker.get(t)
+            if not q:
+                continue
+            if r.get("mid") is None and q.get("mid") is not None:
+                r["mid"] = q["mid"]
+            if r.get("iv") is None and q.get("iv") is not None:
+                r["iv"] = q["iv"]
+            if r.get("delta") is None and q.get("delta") is not None:
+                r["delta"] = q["delta"]
+
+        return rows, "; ".join(errs[:2]) if errs else None
 
     def _fetch_tradier_spot_map(target_symbols: list[str]) -> tuple[dict[str, float], str | None]:
         if not TRADIER_TOKEN:
@@ -916,6 +1013,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 if strike_max is not None and strike > strike_max:
                     continue
 
+                quote = opt.get("quote") or {}
                 greeks = opt.get("greeks") or {}
                 iv = _pick_iv(
                     [
@@ -923,6 +1021,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                         greeks.get("smv_vol"),
                         greeks.get("bid_iv"),
                         greeks.get("ask_iv"),
+                        greeks.get("iv"),
                         opt.get("implied_volatility"),
                         opt.get("iv"),
                     ]
@@ -934,8 +1033,10 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                         "strike_price": strike,
                         "contract_type": "put" if option_type.startswith("put") else "call",
                         "mid": _normalize_mid(
-                            opt.get("bid"),
-                            opt.get("ask"),
+                            opt.get("bid") if opt.get("bid") is not None else quote.get("bid"),
+                            opt.get("ask") if opt.get("ask") is not None else quote.get("ask"),
+                            quote.get("mid"),
+                            quote.get("mark"),
                             opt.get("mark"),
                             opt.get("last"),
                             opt.get("close"),
@@ -950,6 +1051,9 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 break
 
         err_msg = "; ".join(errs[:3]) if errs else None
+        out_rows, enrich_err = _enrich_rows_with_tradier_quotes(out_rows)
+        if enrich_err:
+            err_msg = f"{err_msg}; tradier_quote_enrich: {enrich_err}" if err_msg else f"tradier_quote_enrich: {enrich_err}"
         return out_rows, spot_value, err_msg
 
     def _set_symbol_entry(sym: str, spot: float | None, options_rows: list[dict], source: str) -> None:
@@ -1076,18 +1180,23 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 iv = _pick_iv(
                     [
                         r.get("implied_volatility"),
+                        r.get("impliedVolatility"),
+                        r.get("iv"),
                         greeks.get("implied_volatility"),
+                        greeks.get("impliedVolatility"),
                         greeks.get("mid_iv"),
                         greeks.get("smv_vol"),
+                        greeks.get("iv"),
                     ]
                 )
                 last_trade = r.get("last_trade") or {}
                 day = r.get("day") or {}
                 mid = _normalize_mid(
-                    quote.get("bid"),
-                    quote.get("ask"),
-                    last_trade.get("price"),
-                    day.get("close"),
+                    quote.get("bid") if quote.get("bid") is not None else quote.get("bid_price"),
+                    quote.get("ask") if quote.get("ask") is not None else quote.get("ask_price"),
+                    quote.get("midpoint"),
+                    last_trade.get("price") if last_trade.get("price") is not None else last_trade.get("p"),
+                    day.get("close") if day.get("close") is not None else day.get("c"),
                 )
 
                 if under_px is None:
@@ -1123,6 +1232,9 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 )
 
             parsed = [x for x in parsed if x.get("expiration_date") and x.get("strike_price") is not None]
+            parsed, enrich_err = _enrich_rows_with_tradier_quotes(parsed)
+            if enrich_err:
+                sym_errors.append(f"tradier_quote_enrich: {enrich_err}")
             if not parsed:
                 spot_only = tradier_spot if tradier_spot is not None else under_px
                 if spot_only is None:
@@ -1162,6 +1274,23 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
     out["symbols_count"] = len(out["symbols"])
     out["polygon_requests_used"] = int(total_polygon_requests)
     out["tradier_requests_used"] = int(total_tradier_requests)
+    option_rows_total = 0
+    option_mid_nonnull = 0
+    option_iv_nonnull = 0
+    for payload in out["symbols"].values():
+        if not isinstance(payload, dict):
+            continue
+        for row in (payload.get("options") or []):
+            option_rows_total += 1
+            if _safe_float(row.get("mid")) is not None:
+                option_mid_nonnull += 1
+            if _normalize_iv(row.get("iv")) is not None:
+                option_iv_nonnull += 1
+    out["option_field_coverage"] = {
+        "rows_total": int(option_rows_total),
+        "mid_nonnull": int(option_mid_nonnull),
+        "iv_nonnull": int(option_iv_nonnull),
+    }
     now_utc = dt.datetime.now(dt.UTC)
     ages: list[int] = []
     refreshed = 0
