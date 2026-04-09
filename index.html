@@ -1451,8 +1451,6 @@ function ChartPage({ record, onBack }) {
     return Number.isFinite(fallback) && fallback > 0 ? fallback : 0.8;
   }, [defaultIvBySymbol]);
   const resolveLegPremium = useCallback((leg, contract) => {
-    const explicit = Number(leg?.premium);
-    if (Number.isFinite(explicit) && explicit >= 0) return explicit;
     const marketMid = optionMidFromContract(contract);
     if (Number.isFinite(Number(marketMid)) && Number(marketMid) > 0) return Number(marketMid);
 
@@ -2064,21 +2062,8 @@ function ChartPage({ record, onBack }) {
                         <select value={leg.strike} onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, strike: Number(e.target.value || 0) } : x))}>
                           {strikes.length ? strikes.map((k) => <option key={k} value={k}>{k}</option>) : <option value={leg.strike}>{leg.strike || 0}</option>}
                         </select>
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={leg.premium ?? ''}
-                          onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => {
-                            if (x.id !== leg.id) return x;
-                            const raw = e.target.value;
-                            if (raw === '') return { ...x, premium: null };
-                            const n = Number(raw);
-                            return { ...x, premium: Number.isFinite(n) ? n : null };
-                          }))}
-                          placeholder="Premium"
-                        />
                         <input type="number" value={leg.contracts} onChange={(e) => setTradeOptionLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, contracts: Number(e.target.value || 0) } : x))} placeholder="Contracts" />
-                        <div className="scenario-sub">mid {Number.isFinite(Number(optionMidFromContract(c))) ? Number(optionMidFromContract(c)).toFixed(2) : '—'} | paid {resolveLegPremium(leg, c).toFixed(2)} | iv {normalizeOptionIv(c?.iv) != null ? fmt(normalizeOptionIv(c?.iv)) : '—'}</div>
+                        <div className="scenario-sub">mid {Number.isFinite(Number(optionMidFromContract(c))) ? Number(optionMidFromContract(c)).toFixed(2) : '—'} | paid(auto) {resolveLegPremium(leg, c).toFixed(2)} | iv {normalizeOptionIv(c?.iv) != null ? fmt(normalizeOptionIv(c?.iv)) : '—'}</div>
                         <button onClick={() => setTradeOptionLegs((arr) => arr.filter((x) => x.id !== leg.id))}>×</button>
                       </div>
                     );
