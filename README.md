@@ -129,21 +129,29 @@ Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 | `POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL` | `1` | Max snapshot pagination depth per symbol |
 | `POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL` | `0` | Max contracts fallback pagination depth per symbol |
 | `POLYGON_RETRY_MAX_429` | `1` | Max retries after Polygon HTTP 429 |
-| `OPTIONS_SYMBOLS_PER_RUN` | `12` | Number of symbols refreshed per run (rest served from cache) |
-| `OPTIONS_SHARD_COUNT` | `20` | Number of time shards used for staggered refresh |
+| `OPTIONS_SYMBOLS_PER_RUN` | `100` | Number of symbols refreshed per run (rest served from cache) |
+| `OPTIONS_SHARD_COUNT` | `1` | Number of time shards used for staggered refresh |
 | `OPTIONS_SHARD_INTERVAL_MINUTES` | `3` | Minutes per shard slot rotation |
 | `OPTIONS_STALE_AFTER_MINUTES` | `180` | Mark symbol cache entries stale past this age |
 | `OPTIONS_ONLY_BUCKET3` | `1` | Restrict options universe to Bucket 3 inverse ETFs only |
 | `OPTIONS_INCLUDE_BUCKET3_UNDERLYING` | `1` | Also include each Bucket 3 ETF underlying symbol for richer strike ladders |
+| `OPTIONS_ACCUMULATE_CACHE` | `1` | Merge newly fetched contracts with prior cache rows per symbol |
+| `OPTIONS_MAX_ROWS_PER_SYMBOL` | `1200` | Max option rows retained per symbol after merge/filter |
 | `TRADIER_CHAIN_SYMBOLS` | *(empty)* | Optional symbols that use Tradier chain-first path |
 | `TRADIER_MAX_REQUESTS_PER_MINUTE` | `25` | Tradier request throttle per minute |
 | `TRADIER_MAX_TOTAL_REQUESTS` | `70` | Tradier request cap per run |
 | `TRADIER_CHAIN_MAX_EXPIRIES` | `16` | Max expiries requested per symbol from Tradier |
 | `TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL` | `320` | Max Tradier contracts retained per symbol |
-| `TRADIER_CHAIN_STRIKE_BAND_PCT` | `0.50` | Keep Tradier chain to +/- band around spot |
+| `TRADIER_CHAIN_STRIKE_BAND_PCT` | `0.50` | Legacy symmetric Tradier strike band around spot |
+| `TRADIER_CHAIN_STRIKE_BAND_DOWN_PCT` | `0.50` | Tradier minimum strike as % below spot |
+| `TRADIER_CHAIN_STRIKE_BAND_UP_PCT` | `0.50` | Tradier maximum strike as % above spot |
+| `TRADIER_APLZ_CHAIN_STRIKE_BAND_UP_PCT` | `2.00` | Extra upside strike band for APLZ (+200% default) |
 | `TRADIER_CHAIN_MONEYNESS_MODE` | `atm_otm` | `atm_otm` keeps only ATM/OTM legs (drops ITM) |
 | `POLYGON_CHAIN_MAX_EXPIRIES` | `16` | Max expiries retained for Polygon/merged rows |
-| `POLYGON_CHAIN_STRIKE_BAND_PCT` | `0.50` | Keep Polygon/merged rows to +/- band around spot |
+| `POLYGON_CHAIN_STRIKE_BAND_PCT` | `0.50` | Legacy symmetric Polygon strike band around spot |
+| `POLYGON_CHAIN_STRIKE_BAND_DOWN_PCT` | `0.50` | Polygon minimum strike as % below spot |
+| `POLYGON_CHAIN_STRIKE_BAND_UP_PCT` | `0.50` | Polygon maximum strike as % above spot |
+| `APLZ_CHAIN_STRIKE_BAND_UP_PCT` | `2.00` | Extra upside strike band for APLZ (+200% default) |
 | `POLYGON_CHAIN_MONEYNESS_MODE` | `atm_otm` | `atm_otm` keeps only ATM/OTM legs |
 | `POLYGON_DROP_NULL_QUOTES` | `0` | Keep contracts even if quote/greeks are missing (shows more strikes) |
 

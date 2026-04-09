@@ -779,7 +779,61 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
 
         return rows, "; ".join(errs[:2]) if errs else None
 
-    def _filter_option_rows(rows: list[dict], spot_value: float | None) -> list[dict]:
+    def _strike_bands_for_symbol(sym: str, spot_value: float | None, *, provider: str) -> tuple[float | None, float | None]:
+        if spot_value is None or spot_value <= 0:
+            return None, None
+        symbol = norm_sym(sym)
+        if provider == "tradier":
+            down = max(0.01, float(TRADIER_CHAIN_STRIKE_BAND_DOWN_PCT))
+            up = max(0.01, float(TRADIER_CHAIN_STRIKE_BAND_UP_PCT))
+            if symbol == "APLZ":
+                up = max(up, float(TRADIER_APLZ_CHAIN_STRIKE_BAND_UP_PCT))
+        else:
+            down = max(0.01, float(POLYGON_CHAIN_STRIKE_BAND_DOWN_PCT))
+            up = max(0.01, float(POLYGON_CHAIN_STRIKE_BAND_UP_PCT))
+            if symbol == "APLZ":
+                up = max(up, float(APLZ_CHAIN_STRIKE_BAND_UP_PCT))
+        return spot_value * (1.0 - down), spot_value * (1.0 + up)
+
+    def _merge_option_rows(prior_rows: list[dict], fresh_rows: list[dict]) -> list[dict]:
+        merged: dict[tuple[str, str, str], dict] = {}
+
+        def key_of(r: dict) -> tuple[str, str, str]:
+            exp = str(r.get("expiration_date") or "")
+            ctype = str(r.get("contract_type") or "").lower()
+            strike = _safe_float(r.get("strike_price"))
+            strike_key = f"{strike:.6f}" if strike is not None else str(r.get("strike_price") or "")
+            return (exp, ctype, strike_key)
+
+        def merge_into(base: dict, incoming: dict) -> dict:
+            out_row = dict(base)
+            for k, v in incoming.items():
+                if k in {"mid", "iv", "delta"}:
+                    if out_row.get(k) is None and v is not None:
+                        out_row[k] = v
+                elif k in {"ticker"}:
+                    if (not out_row.get(k)) and v:
+                        out_row[k] = v
+                else:
+                    if v is not None:
+                        out_row[k] = v
+            return out_row
+
+        for r in prior_rows or []:
+            if not isinstance(r, dict):
+                continue
+            merged[key_of(r)] = dict(r)
+        for r in fresh_rows or []:
+            if not isinstance(r, dict):
+                continue
+            k = key_of(r)
+            if k in merged:
+                merged[k] = merge_into(merged[k], r)
+            else:
+                merged[k] = dict(r)
+        return list(merged.values())
+
+    def _filter_option_rows(rows: list[dict], spot_value: float | None, sym: str) -> list[dict]:
         if not rows:
             return rows
         expiries = sorted(
@@ -790,8 +844,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             rows = [r for r in rows if str(r.get("expiration_date")) in allowed_exp]
 
         if spot_value is not None and spot_value > 0:
-            strike_min = spot_value * (1.0 - max(0.01, POLYGON_CHAIN_STRIKE_BAND_PCT))
-            strike_max = spot_value * (1.0 + max(0.01, POLYGON_CHAIN_STRIKE_BAND_PCT))
+            strike_min, strike_max = _strike_bands_for_symbol(sym, spot_value, provider="polygon")
             scoped: list[dict] = []
             for r in rows:
                 strike = _safe_float(r.get("strike_price"))
@@ -803,7 +856,9 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                         continue
                     if ctype.startswith("put") and strike > spot_value:
                         continue
-                if strike < strike_min or strike > strike_max:
+                if strike_min is not None and strike < strike_min:
+                    continue
+                if strike_max is not None and strike > strike_max:
                     continue
                 scoped.append(r)
             rows = scoped
@@ -1080,12 +1135,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         out_rows: list[dict] = []
         errs: list[str] = []
         spot_value = spot_hint
-        strike_min = None
-        strike_max = None
-        if spot_value is not None and spot_value > 0:
-            band = max(0.01, float(TRADIER_CHAIN_STRIKE_BAND_PCT))
-            strike_min = spot_value * (1.0 - band)
-            strike_max = spot_value * (1.0 + band)
+        strike_min, strike_max = _strike_bands_for_symbol(sym, spot_value, provider="tradier")
 
         for exp in expirations:
             chain_resp, chain_err = _tradier_get(
@@ -1342,7 +1392,15 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             parsed, enrich_err = _enrich_rows_with_tradier_quotes(parsed)
             if enrich_err:
                 sym_errors.append(f"tradier_quote_enrich: {enrich_err}")
-            parsed = _filter_option_rows(parsed, tradier_spot if tradier_spot is not None else under_px)
+            prior_rows = []
+            prior_payload = prior_symbols.get(sym) if isinstance(prior_symbols, dict) else None
+            if isinstance(prior_payload, dict):
+                pr = prior_payload.get("options")
+                if isinstance(pr, list):
+                    prior_rows = pr
+            if OPTIONS_ACCUMULATE_CACHE and prior_rows:
+                parsed = _merge_option_rows(prior_rows, parsed)
+            parsed = _filter_option_rows(parsed, tradier_spot if tradier_spot is not None else under_px, sym)
             if not parsed:
                 spot_only = tradier_spot if tradier_spot is not None else under_px
                 if spot_only is None:
@@ -1367,7 +1425,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 final_spot, spot_err = _fetch_last_spot(sym)
                 if spot_err:
                     sym_errors.append(spot_err)
-            _set_symbol_entry(sym, final_spot, parsed[:600], symbol_source)
+            _set_symbol_entry(sym, final_spot, parsed[: max(100, OPTIONS_MAX_ROWS_PER_SYMBOL)], symbol_source)
             if sym_errors:
                 out["errors_by_symbol"][sym] = "; ".join(sym_errors[:4])
             if OPTIONS_REFRESH_SLEEP_MS > 0:
@@ -1389,7 +1447,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         if not isinstance(rows, list):
             continue
         spot = _safe_float(payload.get("spot"))
-        payload["options"] = _filter_option_rows(rows, spot)
+        payload["options"] = _filter_option_rows(rows, spot, sym)
     option_rows_total = 0
     option_mid_nonnull = 0
     option_iv_nonnull = 0
