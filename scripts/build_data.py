@@ -106,7 +106,6 @@ INVERSE_ETFS = {
 }
 
 VOL_WINDOWS = ("1M", "3M", "6M", "YTD", "12M", "ALL")
-VOL_WINDOW_LOOKBACK_DAYS = {"1M": 21, "3M": 63, "6M": 126, "12M": 252}
 
 
 # ──────────────────────────────────────────────
@@ -1532,8 +1531,21 @@ def _scope_series_window(
     if window == "YTD":
         start = dt.date(points[-1][0].year, 1, 1)
         return [p for p in points if p[0] >= start]
-    lookback = VOL_WINDOW_LOOKBACK_DAYS.get(window)
-    return points[-(lookback + 1):] if lookback else points
+    months_by_window = {"1M": 1, "3M": 3, "6M": 6, "12M": 12}
+    m = months_by_window.get(window)
+    if not m:
+        return points
+    asof = points[-1][0]
+    y = asof.year
+    mo = asof.month - m
+    while mo <= 0:
+        y -= 1
+        mo += 12
+    # Clamp day to end-of-month of target month.
+    day = min(asof.day, [31, 29 if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1])
+    start = dt.date(y, mo, day)
+    scoped = [p for p in points if p[0] >= start]
+    return scoped if scoped else points[-2:]
 
 
 def _build_market_windows(
