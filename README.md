@@ -134,6 +134,7 @@ Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 | `OPTIONS_SHARD_INTERVAL_MINUTES` | `3` | Minutes per shard slot rotation |
 | `OPTIONS_STALE_AFTER_MINUTES` | `180` | Mark symbol cache entries stale past this age |
 | `OPTIONS_ONLY_BUCKET3` | `1` | Restrict options universe to Bucket 3 inverse ETFs only |
+| `OPTIONS_INCLUDE_BUCKET3_UNDERLYING` | `1` | Also include each Bucket 3 ETF underlying symbol for richer strike ladders |
 | `TRADIER_CHAIN_SYMBOLS` | *(empty)* | Optional symbols that use Tradier chain-first path |
 | `TRADIER_MAX_REQUESTS_PER_MINUTE` | `25` | Tradier request throttle per minute |
 | `TRADIER_MAX_TOTAL_REQUESTS` | `70` | Tradier request cap per run |

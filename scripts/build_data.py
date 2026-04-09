@@ -79,6 +79,7 @@ OPTIONS_SHARD_COUNT = int(os.environ.get("OPTIONS_SHARD_COUNT", "20"))
 OPTIONS_SHARD_INTERVAL_MINUTES = int(os.environ.get("OPTIONS_SHARD_INTERVAL_MINUTES", "3"))
 OPTIONS_STALE_AFTER_MINUTES = int(os.environ.get("OPTIONS_STALE_AFTER_MINUTES", "180"))
 OPTIONS_ONLY_BUCKET3 = os.environ.get("OPTIONS_ONLY_BUCKET3", "1").strip().lower() not in {"0", "false", "no"}
+OPTIONS_INCLUDE_BUCKET3_UNDERLYING = os.environ.get("OPTIONS_INCLUDE_BUCKET3_UNDERLYING", "1").strip().lower() not in {"0", "false", "no"}
 POLYGON_FORCE_SYMBOLS_RAW = [
     s.strip()
     for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "").split(",")
@@ -1471,6 +1472,8 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
         if OPTIONS_ONLY_BUCKET3 and str(rec.get("bucket")) != "bucket_3_inverse":
             continue
         base_set.add(norm_sym(rec.get("symbol")))
+        if OPTIONS_INCLUDE_BUCKET3_UNDERLYING:
+            base_set.add(norm_sym(rec.get("underlying")))
 
     allowed_forced = {norm_sym(s) for s in base_set}
     for s in POLYGON_FORCE_SYMBOLS_RAW:
