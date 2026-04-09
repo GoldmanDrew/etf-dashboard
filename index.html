@@ -1418,8 +1418,18 @@ function ChartPage({ record, onBack }) {
   const undPriceRet = Number(divPoint?.underlying_price_return);
   const etfAdjRet = Number(divPoint?.etf_adj_return);
   const undAdjRet = Number(divPoint?.underlying_adj_return);
-  const etfDivLift = (Number.isFinite(etfAdjRet) && Number.isFinite(etfPriceRet)) ? (etfAdjRet - etfPriceRet) : null;
-  const undDivLift = (Number.isFinite(undAdjRet) && Number.isFinite(undPriceRet)) ? (undAdjRet - undPriceRet) : null;
+  const etfStartClose = Number(divPoint?.etf_start_close);
+  const undStartClose = Number(divPoint?.underlying_start_close);
+  const etfLivePriceRet = (hasCachedSpotEtf && Number.isFinite(etfStartClose) && etfStartClose > 0)
+    ? (tradeSpotEtf / etfStartClose) - 1
+    : etfPriceRet;
+  const undLivePriceRet = (hasCachedSpotUnd && Number.isFinite(undStartClose) && undStartClose > 0)
+    ? (tradeSpotUnderlying / undStartClose) - 1
+    : undPriceRet;
+  const etfAdjRetDisplay = (Number.isFinite(etfLivePriceRet) && Number.isFinite(etfDivYield)) ? (etfLivePriceRet + etfDivYield) : etfAdjRet;
+  const undAdjRetDisplay = (Number.isFinite(undLivePriceRet) && Number.isFinite(undDivYield)) ? (undLivePriceRet + undDivYield) : undAdjRet;
+  const etfDivLift = (Number.isFinite(etfAdjRetDisplay) && Number.isFinite(etfLivePriceRet)) ? (etfAdjRetDisplay - etfLivePriceRet) : null;
+  const undDivLift = (Number.isFinite(undAdjRetDisplay) && Number.isFinite(undLivePriceRet)) ? (undAdjRetDisplay - undLivePriceRet) : null;
   const etfWindowDates = divPoint?.etf_start_date && divPoint?.etf_end_date ? `${divPoint.etf_start_date} to ${divPoint.etf_end_date}` : 'window unavailable';
   const undWindowDates = divPoint?.underlying_start_date && divPoint?.underlying_end_date ? `${divPoint.underlying_start_date} to ${divPoint.underlying_end_date}` : 'window unavailable';
   const scenarioFns = window.ScenarioReturns || {};
@@ -1807,13 +1817,13 @@ function ChartPage({ record, onBack }) {
             </div>
             <div className="chart-stat">
               <div className="cs-label">{etfSym} Price vs Adj Return</div>
-              <div className="cs-value">{Number.isFinite(etfPriceRet) ? fmt(etfPriceRet) : '—'} / {Number.isFinite(etfAdjRet) ? fmt(etfAdjRet) : '—'}</div>
-              <div className="cs-sub">Dividend lift: {etfDivLift == null ? '—' : fmt(etfDivLift)}</div>
+              <div className="cs-value">{Number.isFinite(etfLivePriceRet) ? fmt(etfLivePriceRet) : '—'} / {Number.isFinite(etfAdjRetDisplay) ? fmt(etfAdjRetDisplay) : '—'}</div>
+              <div className="cs-sub">live spot vs start px • dividend lift: {etfDivLift == null ? '—' : fmt(etfDivLift)}</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">{undSym || 'Underlying'} Price vs Adj Return</div>
-              <div className="cs-value">{Number.isFinite(undPriceRet) ? fmt(undPriceRet) : '—'} / {Number.isFinite(undAdjRet) ? fmt(undAdjRet) : '—'}</div>
-              <div className="cs-sub">Dividend lift: {undDivLift == null ? '—' : fmt(undDivLift)}</div>
+              <div className="cs-value">{Number.isFinite(undLivePriceRet) ? fmt(undLivePriceRet) : '—'} / {Number.isFinite(undAdjRetDisplay) ? fmt(undAdjRetDisplay) : '—'}</div>
+              <div className="cs-sub">live spot vs start px • dividend lift: {undDivLift == null ? '—' : fmt(undDivLift)}</div>
             </div>
           </div>
         </div>

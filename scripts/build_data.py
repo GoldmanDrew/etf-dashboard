@@ -59,6 +59,9 @@ POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL = int(os.environ.get("POLYGON_MAX_CONTRACT
 POLYGON_RETRY_MAX_429 = int(os.environ.get("POLYGON_RETRY_MAX_429", "1"))
 POLYGON_CHAIN_MAX_EXPIRIES = int(os.environ.get("POLYGON_CHAIN_MAX_EXPIRIES", "16"))
 POLYGON_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("POLYGON_CHAIN_STRIKE_BAND_PCT", "0.50"))
+POLYGON_CHAIN_STRIKE_BAND_DOWN_PCT = float(os.environ.get("POLYGON_CHAIN_STRIKE_BAND_DOWN_PCT", str(POLYGON_CHAIN_STRIKE_BAND_PCT)))
+POLYGON_CHAIN_STRIKE_BAND_UP_PCT = float(os.environ.get("POLYGON_CHAIN_STRIKE_BAND_UP_PCT", str(POLYGON_CHAIN_STRIKE_BAND_PCT)))
+APLZ_CHAIN_STRIKE_BAND_UP_PCT = float(os.environ.get("APLZ_CHAIN_STRIKE_BAND_UP_PCT", "2.00"))
 POLYGON_CHAIN_MONEYNESS_MODE = os.environ.get("POLYGON_CHAIN_MONEYNESS_MODE", "atm_otm").strip().lower()
 POLYGON_DROP_NULL_QUOTES = os.environ.get("POLYGON_DROP_NULL_QUOTES", "0").strip().lower() not in {"0", "false", "no"}
 TRADIER_CHAIN_SYMBOLS_RAW = [
@@ -73,6 +76,9 @@ TRADIER_OPTION_QUOTES_BATCH_SIZE = int(os.environ.get("TRADIER_OPTION_QUOTES_BAT
 TRADIER_CHAIN_MAX_EXPIRIES = int(os.environ.get("TRADIER_CHAIN_MAX_EXPIRIES", "16"))
 TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL = int(os.environ.get("TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL", "320"))
 TRADIER_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("TRADIER_CHAIN_STRIKE_BAND_PCT", "0.50"))
+TRADIER_CHAIN_STRIKE_BAND_DOWN_PCT = float(os.environ.get("TRADIER_CHAIN_STRIKE_BAND_DOWN_PCT", str(TRADIER_CHAIN_STRIKE_BAND_PCT)))
+TRADIER_CHAIN_STRIKE_BAND_UP_PCT = float(os.environ.get("TRADIER_CHAIN_STRIKE_BAND_UP_PCT", str(TRADIER_CHAIN_STRIKE_BAND_PCT)))
+TRADIER_APLZ_CHAIN_STRIKE_BAND_UP_PCT = float(os.environ.get("TRADIER_APLZ_CHAIN_STRIKE_BAND_UP_PCT", "2.00"))
 TRADIER_CHAIN_MONEYNESS_MODE = os.environ.get("TRADIER_CHAIN_MONEYNESS_MODE", "atm_otm").strip().lower()
 OPTIONS_SYMBOLS_PER_RUN = int(os.environ.get("OPTIONS_SYMBOLS_PER_RUN", "12"))
 OPTIONS_SHARD_COUNT = int(os.environ.get("OPTIONS_SHARD_COUNT", "20"))
@@ -80,6 +86,8 @@ OPTIONS_SHARD_INTERVAL_MINUTES = int(os.environ.get("OPTIONS_SHARD_INTERVAL_MINU
 OPTIONS_STALE_AFTER_MINUTES = int(os.environ.get("OPTIONS_STALE_AFTER_MINUTES", "180"))
 OPTIONS_ONLY_BUCKET3 = os.environ.get("OPTIONS_ONLY_BUCKET3", "1").strip().lower() not in {"0", "false", "no"}
 OPTIONS_INCLUDE_BUCKET3_UNDERLYING = os.environ.get("OPTIONS_INCLUDE_BUCKET3_UNDERLYING", "1").strip().lower() not in {"0", "false", "no"}
+OPTIONS_ACCUMULATE_CACHE = os.environ.get("OPTIONS_ACCUMULATE_CACHE", "1").strip().lower() not in {"0", "false", "no"}
+OPTIONS_MAX_ROWS_PER_SYMBOL = int(os.environ.get("OPTIONS_MAX_ROWS_PER_SYMBOL", "1200"))
 POLYGON_FORCE_SYMBOLS_RAW = [
     s.strip()
     for s in os.environ.get("POLYGON_FORCE_SYMBOLS", "").split(",")
@@ -1996,6 +2004,10 @@ def build():
                 "underlying_price_return": und_w.get("price_return"),
                 "etf_adj_return": etf_w.get("adj_return"),
                 "underlying_adj_return": und_w.get("adj_return"),
+                "etf_start_close": etf_w.get("start_close"),
+                "underlying_start_close": und_w.get("start_close"),
+                "etf_end_close": etf_w.get("end_close"),
+                "underlying_end_close": und_w.get("end_close"),
                 "etf_start_date": etf_w.get("start_date"),
                 "etf_end_date": etf_w.get("end_date"),
                 "underlying_start_date": und_w.get("start_date"),
