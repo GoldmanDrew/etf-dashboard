@@ -43,24 +43,43 @@ jobs:
       - name: Commit data if changed
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
+          FILES="data/dashboard_data.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/dashboard_data.json
+          git add ${FILES}
           if git diff --staged --quiet; then
             echo "No borrow changes to commit"
           else
-            git commit -m "chore: refresh borrow data [$(date -u '+%Y-%m-%d %H:%M UTC')]"
-            git stash push --include-untracked -m "ci-autostash-before-rebase" || true
+            TMP_DIR="$(mktemp -d)"
+            for f in ${FILES}; do
+              mkdir -p "${TMP_DIR}/$(dirname "$f")"
+              cp "$f" "${TMP_DIR}/$f"
+            done
             pushed=0
             for i in 1 2 3; do
               git fetch origin "${BRANCH}"
-              if git rebase "origin/${BRANCH}" && git push origin "HEAD:${BRANCH}"; then
+              git checkout -B "${BRANCH}" "origin/${BRANCH}"
+              for f in ${FILES}; do
+                if [ -f "${TMP_DIR}/$f" ]; then
+                  mkdir -p "$(dirname "$f")"
+                  cp "${TMP_DIR}/$f" "$f"
+                fi
+              done
+              git add ${FILES}
+              if git diff --staged --quiet; then
+                echo "No borrow changes against latest origin"
                 pushed=1
                 break
               fi
-              git rebase --abort || true
+              git commit -m "chore: refresh borrow data [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+              if git push origin "HEAD:${BRANCH}"; then
+                pushed=1
+                break
+              fi
+              git reset --hard "origin/${BRANCH}" || true
               sleep $((i * 5))
             done
+            rm -rf "${TMP_DIR}"
             if [ "$pushed" -ne 1 ]; then
               echo "Push failed after retries"
               exit 1
