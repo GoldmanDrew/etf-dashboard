@@ -97,6 +97,7 @@ POLYGON_FORCE_SYMBOLS_RAW = [
 OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
 BORROW_HISTORY_FILE = OUTPUT_DIR / "borrow_history.json"
+BORROW_SPIKE_RISK_FILE = OUTPUT_DIR / "borrow_spike_risk.json"
 OPTIONS_CACHE_FILE = OUTPUT_DIR / "options_cache.json"
 LS_ALGO_DATA_PATH = Path(
     os.environ.get(
@@ -376,6 +377,199 @@ def build_borrow_history_from_commits(universe_symbols: set[str]) -> dict:
         "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
     }
     return {"symbols": cleaned_symbols, "meta": meta}
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    x = np.clip(x, -40, 40)
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def _fit_logistic_l2(
+    X: np.ndarray,
+    y: np.ndarray,
+    sample_w: np.ndarray,
+    l2: float = 1.0,
+    lr: float = 0.05,
+    steps: int = 700,
+) -> tuple[np.ndarray, float]:
+    """Tiny logistic-regression trainer (no sklearn dependency)."""
+    n, d = X.shape
+    w = np.zeros(d, dtype=float)
+    b = 0.0
+    sw = np.maximum(1e-9, sample_w.astype(float))
+    sw /= np.mean(sw)
+
+    for _ in range(steps):
+        z = X @ w + b
+        p = _sigmoid(z)
+        e = (p - y) * sw
+        grad_w = (X.T @ e) / max(1, n) + l2 * w
+        grad_b = float(np.sum(e) / max(1, n))
+        w -= lr * grad_w
+        b -= lr * grad_b
+    return w, b
+
+
+def _risk_band(p: float | None) -> str:
+    if p is None or not np.isfinite(p):
+        return "unknown"
+    if p >= 0.30:
+        return "high"
+    if p >= 0.10:
+        return "elevated"
+    return "low"
+
+
+def build_borrow_spike_risk_payload(
+    borrow_history_symbols: dict[str, list[dict]],
+    as_of_date: str,
+    horizon_days: int = 5,
+) -> dict:
+    """
+    Build per-symbol P(spike within next horizon) from borrow/shares history.
+    v1 model: panel logistic regression using handcrafted stress features.
+    """
+    rows: list[dict] = []
+    latest_feats: dict[str, dict] = {}
+
+    for sym, hist in (borrow_history_symbols or {}).items():
+        if not hist:
+            continue
+        s = (
+            pd.DataFrame(hist)
+            .assign(
+                date=lambda d: pd.to_datetime(d["date"], errors="coerce"),
+                borrow_current=lambda d: pd.to_numeric(d.get("borrow_current"), errors="coerce"),
+                shares_available=lambda d: pd.to_numeric(d.get("shares_available"), errors="coerce"),
+            )
+            .dropna(subset=["date"])
+            .sort_values("date")
+            .drop_duplicates(subset=["date"], keep="last")
+            .reset_index(drop=True)
+        )
+        if len(s) < 12:
+            continue
+
+        s["borrow_lag1"] = s["borrow_current"].shift(1)
+        s["borrow_lag5"] = s["borrow_current"].shift(5)
+        s["shares_lag1"] = s["shares_available"].shift(1)
+        s["shares_lag3"] = s["shares_available"].shift(3)
+        s["shares_lag5"] = s["shares_available"].shift(5)
+        s["med60"] = s["borrow_current"].rolling(60, min_periods=10).median()
+        s["std60"] = s["borrow_current"].rolling(60, min_periods=10).std()
+        s["p99_180"] = s["borrow_current"].rolling(180, min_periods=20).quantile(0.99)
+        s["p90_60"] = s["borrow_current"].rolling(60, min_periods=10).quantile(0.90)
+        s["borrow_slope5"] = (s["borrow_current"] - s["borrow_lag5"]) / 5.0
+        s["borrow_d1"] = s["borrow_current"] - s["borrow_lag1"]
+        s["borrow_vol10"] = s["borrow_d1"].rolling(10, min_periods=4).std()
+        s["borrow_z60"] = (s["borrow_current"] - s["med60"]) / s["std60"].replace(0, np.nan)
+        s["shares_drop1"] = (s["shares_lag1"] - s["shares_available"]) / s["shares_lag1"].clip(lower=1)
+        s["shares_drop3"] = (s["shares_lag3"] - s["shares_available"]) / s["shares_lag3"].clip(lower=1)
+        s["shares_drop5"] = (s["shares_lag5"] - s["shares_available"]) / s["shares_lag5"].clip(lower=1)
+        s["near_zero_shares"] = (s["shares_available"] <= 1000).astype(float)
+
+        fut_max = s["borrow_current"].rolling(horizon_days, min_periods=1).max().shift(-horizon_days)
+        fut_jump = (fut_max - s["borrow_current"]).astype(float)
+        spike_threshold = np.maximum(1.0, np.maximum(3.0 * s["med60"], s["p99_180"]))
+        s["spike_event"] = ((fut_max > spike_threshold) & (fut_jump > 0.25)).astype(float)
+
+        feature_cols = [
+            "borrow_current",
+            "borrow_z60",
+            "borrow_slope5",
+            "borrow_vol10",
+            "shares_available",
+            "shares_drop1",
+            "shares_drop3",
+            "shares_drop5",
+            "near_zero_shares",
+        ]
+
+        usable = s.iloc[:-horizon_days].copy() if len(s) > horizon_days else s.iloc[0:0].copy()
+        usable = usable.dropna(subset=["spike_event"])
+        for c in feature_cols:
+            if c not in usable.columns:
+                usable[c] = np.nan
+        usable = usable.dropna(subset=["borrow_current", "med60", "p99_180"])
+        if not usable.empty:
+            temp = usable[feature_cols + ["spike_event"]].copy()
+            temp["symbol"] = sym
+            temp["date"] = usable["date"].dt.strftime("%Y-%m-%d")
+            rows.extend(temp.to_dict("records"))
+
+        latest = s.iloc[-1].copy()
+        latest_date = latest["date"].strftime("%Y-%m-%d") if pd.notna(latest["date"]) else None
+        lf = {c: latest.get(c) for c in feature_cols}
+        lf["obs_count"] = int(s["borrow_current"].notna().sum())
+        lf["latest_date"] = latest_date
+        latest_feats[sym] = lf
+
+    if not rows:
+        return {
+            "as_of": as_of_date,
+            "horizon_days": horizon_days,
+            "model": {"name": "logistic_v1", "status": "insufficient_training_data"},
+            "symbols": {},
+        }
+
+    train_df = pd.DataFrame(rows)
+    y = train_df["spike_event"].to_numpy(dtype=float)
+    X_raw = train_df.drop(columns=["spike_event", "symbol", "date"], errors="ignore")
+    X_raw["log_shares"] = np.log1p(X_raw["shares_available"].clip(lower=0))
+    X_raw = X_raw.drop(columns=["shares_available"], errors="ignore")
+    X_raw = X_raw.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    feat_names = list(X_raw.columns)
+    X = X_raw.to_numpy(dtype=float)
+    mean = X.mean(axis=0)
+    std = X.std(axis=0)
+    std = np.where(std < 1e-9, 1.0, std)
+    Xs = (X - mean) / std
+
+    pos = int((y > 0.5).sum())
+    neg = int((y <= 0.5).sum())
+    pos_weight = float(neg / max(1, pos))
+    pos_weight = min(25.0, max(1.0, pos_weight))
+    sample_w = np.where(y > 0.5, pos_weight, 1.0)
+
+    w, b = _fit_logistic_l2(Xs, y, sample_w, l2=0.03, lr=0.08, steps=650)
+
+    symbols_payload: dict[str, dict] = {}
+    for sym, lf in latest_feats.items():
+        x = []
+        for c in feat_names:
+            if c == "log_shares":
+                raw_sh = float(lf.get("shares_available") or 0.0)
+                x.append(np.log1p(max(0.0, raw_sh)))
+            else:
+                v = lf.get(c)
+                x.append(float(v) if v is not None and np.isfinite(v) else 0.0)
+        xv = (np.array(x, dtype=float) - mean) / std
+        p = float(_sigmoid(np.array([xv @ w + b]))[0])
+        p = max(0.0, min(1.0, p))
+        symbols_payload[sym] = {
+            "p_spike_5d": round(p, 6),
+            "risk_band": _risk_band(p),
+            "obs_count": int(lf.get("obs_count", 0)),
+            "asof_history_date": lf.get("latest_date"),
+        }
+
+    return {
+        "as_of": as_of_date,
+        "horizon_days": horizon_days,
+        "label_definition": {
+            "borrow_threshold": "future_max_borrow > max(1.00, 3x_med60, p99_180)",
+            "jump_threshold": "future_max_borrow - today_borrow > 0.25",
+        },
+        "model": {
+            "name": "logistic_v1",
+            "status": "ok",
+            "train_rows": int(len(train_df)),
+            "positives": int(pos),
+            "negatives": int(neg),
+            "positive_weight": round(pos_weight, 4),
+        },
+        "symbols": symbols_payload,
+    }
 
 
 def try_fetch_ibkr_ftp() -> dict:
@@ -1926,12 +2120,61 @@ def refresh_borrow_only() -> None:
     output["polygon_api_configured"] = bool(POLYGON_API_KEY)
     output["tradier_api_configured"] = bool(TRADIER_TOKEN)
     output["options_cache_file"] = "data/options_cache.json"
+    output["borrow_spike_risk_file"] = "data/borrow_spike_risk.json"
+
+    today_utc = dt.datetime.now(dt.UTC).date().isoformat()
+    hist_payload = {"symbols": {}}
+    if BORROW_HISTORY_FILE.exists():
+        try:
+            with open(BORROW_HISTORY_FILE, "r", encoding="utf-8") as f:
+                hist_payload = json.load(f) or {"symbols": {}}
+        except Exception:
+            hist_payload = {"symbols": {}}
+    hist_symbols = hist_payload.get("symbols", {}) if isinstance(hist_payload, dict) else {}
+    if not isinstance(hist_symbols, dict):
+        hist_symbols = {}
+
+    for rec in records:
+        sym = norm_sym(rec.get("symbol", ""))
+        if not sym:
+            continue
+        b = rec.get("borrow_current")
+        sh = rec.get("shares_available")
+        if b is None and sh is None:
+            continue
+        rows = hist_symbols.get(sym, [])
+        if not isinstance(rows, list):
+            rows = []
+        by_day = {str(x.get("date")): x for x in rows if isinstance(x, dict) and x.get("date")}
+        by_day[today_utc] = {
+            "date": today_utc,
+            "borrow_current": round(float(b), 6) if b is not None else None,
+            "shares_available": int(sh) if sh is not None else None,
+        }
+        hist_symbols[sym] = sorted(by_day.values(), key=lambda x: str(x.get("date", "")))
+    hist_payload["symbols"] = hist_symbols
+    hist_payload["meta"] = {
+        **(hist_payload.get("meta", {}) if isinstance(hist_payload, dict) else {}),
+        "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+        "refresh_type": "borrow_only",
+    }
+    borrow_spike_risk = build_borrow_spike_risk_payload(
+        borrow_history_symbols=hist_symbols,
+        as_of_date=today_utc,
+        horizon_days=5,
+    )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=None, separators=(",", ":"))
+    with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(hist_payload, f, indent=None, separators=(",", ":"))
+    with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
+        json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
 
     print(f"[OK] Borrow-only refresh wrote {OUTPUT_FILE}")
+    print(f"[OK] Borrow-only refresh wrote {BORROW_HISTORY_FILE}")
+    print(f"[OK] Borrow-only refresh wrote {BORROW_SPIKE_RISK_FILE}")
     print(f"  Updated from IBKR FTP: {updated}/{len(records)} symbols")
     print(f"  Updated from latest CSV fallback: {updated_csv}/{len(records)} symbols")
 
@@ -2130,6 +2373,11 @@ def build():
     summary = _calc_summary(records)
 
     build_time = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+    borrow_spike_risk = build_borrow_spike_risk_payload(
+        borrow_history_symbols=borrow_history_symbols,
+        as_of_date=today_utc,
+        horizon_days=5,
+    )
 
     output = {
         "build_time": build_time,
@@ -2141,6 +2389,7 @@ def build():
         "refresh_type": "full",
         "decay_method": "linear_daily_pnl_1_over_beta_hedge",
         "borrow_history_file": "data/borrow_history.json",
+        "borrow_spike_risk_file": "data/borrow_spike_risk.json",
         "polygon_api_configured": bool(POLYGON_API_KEY),
         "tradier_api_configured": bool(TRADIER_TOKEN),
         "options_cache_file": "data/options_cache.json",
@@ -2154,6 +2403,8 @@ def build():
         json.dump(output, f, indent=None, separators=(",", ":"))
     with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(borrow_history, f, indent=None, separators=(",", ":"))
+    with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
+        json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
     symbols_for_options = select_symbols_for_polygon_cache(records)
     options_cache = build_polygon_options_cache(symbols_for_options)
     with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
@@ -2163,6 +2414,8 @@ def build():
     print(f"\n[OK] Wrote {OUTPUT_FILE} ({file_size:,} bytes)")
     if BORROW_HISTORY_FILE.exists():
         print(f"  [OK] Wrote {BORROW_HISTORY_FILE} ({BORROW_HISTORY_FILE.stat().st_size:,} bytes)")
+    if BORROW_SPIKE_RISK_FILE.exists():
+        print(f"  [OK] Wrote {BORROW_SPIKE_RISK_FILE} ({BORROW_SPIKE_RISK_FILE.stat().st_size:,} bytes)")
     if OPTIONS_CACHE_FILE.exists():
         print(f"  [OK] Wrote {OPTIONS_CACHE_FILE} ({OPTIONS_CACHE_FILE.stat().st_size:,} bytes)")
     print(f"  {len(records)} records | B1={summary['bucket_1_count']} B2={summary['bucket_2_count']} B3={summary['bucket_3_count']}")

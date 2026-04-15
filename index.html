@@ -733,8 +733,10 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 const DATA_URL = "data/dashboard_data.json";
 const BORROW_HISTORY_URL = "data/borrow_history.json";
+const BORROW_SPIKE_RISK_URL = "data/borrow_spike_risk.json";
 const OPTIONS_CACHE_URL = "data/options_cache.json";
 let BORROW_HISTORY_CACHE = null;
+let BORROW_SPIKE_RISK_CACHE = null;
 
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
@@ -873,6 +875,89 @@ const quantileSorted = (arr, q) => {
   if (lo === hi) return arr[lo];
   const w = idx - lo;
   return arr[lo] * (1 - w) + arr[hi] * w;
+};
+const parseIsoDate = (raw) => {
+  if (!raw) return null;
+  const d = new Date(`${raw}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+const isoFromDate = (d) => {
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+};
+const addDaysIso = (iso, days) => {
+  const d = parseIsoDate(iso);
+  if (!d) return null;
+  d.setUTCDate(d.getUTCDate() + Number(days || 0));
+  return isoFromDate(d);
+};
+const buildBorrowForecast = (series, horizonDays = 7) => {
+  const clean = (Array.isArray(series) ? series : [])
+    .map((p) => ({
+      date: String(p?.date || ''),
+      borrow_current: Number(p?.borrow_current),
+    }))
+    .filter((p) => p.date && Number.isFinite(p.borrow_current))
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  if (clean.length < 4) {
+    return { ok: false, error: 'Need at least 4 borrow observations for forecast.' };
+  }
+
+  const recent = clean.slice(-30);
+  const vals = recent.map((p) => p.borrow_current);
+  const sortedVals = [...vals].sort((a, b) => a - b);
+  const p10 = quantileSorted(sortedVals, 0.1);
+  const p90 = quantileSorted(sortedVals, 0.9);
+  const winsor = vals.map((v) => clampNum(v, p10 ?? v, p90 ?? v));
+  const n = winsor.length;
+
+  let sumX = 0;
+  let sumY = 0;
+  let sumXY = 0;
+  let sumXX = 0;
+  for (let i = 0; i < n; i += 1) {
+    const x = i;
+    const y = winsor[i];
+    sumX += x;
+    sumY += y;
+    sumXY += x * y;
+    sumXX += x * x;
+  }
+  const denom = n * sumXX - sumX * sumX;
+  const slope = Math.abs(denom) < 1e-12 ? 0 : (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / Math.max(1, n);
+
+  const alpha = 0.35;
+  let ewma = winsor[0];
+  for (let i = 1; i < n; i += 1) ewma = alpha * winsor[i] + (1 - alpha) * ewma;
+
+  const dampedSlope = slope * 0.55;
+  const lastDate = recent[recent.length - 1].date;
+  const maxCap = Math.max(0.15, (p90 ?? ewma) * 2.2, ewma * 3);
+  const points = [];
+  let ewmaStep = ewma;
+  for (let step = 1; step <= Math.max(1, Math.floor(horizonDays)); step += 1) {
+    const trendStep = intercept + (n - 1 + step) * dampedSlope;
+    ewmaStep = alpha * trendStep + (1 - alpha) * ewmaStep;
+    const pred = clampNum(0.6 * trendStep + 0.4 * ewmaStep, 0, maxCap);
+    points.push({
+      date: addDaysIso(lastDate, step),
+      borrow_current: pred,
+    });
+  }
+  const next1 = points[0]?.borrow_current ?? null;
+  const nextAvg = points.length
+    ? points.reduce((a, b) => a + b.borrow_current, 0) / points.length
+    : null;
+  const deltaToSpot = Number.isFinite(next1) ? (next1 - recent[recent.length - 1].borrow_current) : null;
+  return {
+    ok: true,
+    method: 'EWMA + damped trend',
+    points,
+    next1,
+    nextAvg,
+    deltaToSpot,
+  };
 };
 function MonteCarloPlot({ result, mode = 'short' }) {
   if (!result?.ok) return null;
@@ -1326,6 +1411,9 @@ function ChartPage({ record, onBack }) {
   const [borrowHistoryMap, setBorrowHistoryMap] = useState({});
   const [borrowHistoryLoading, setBorrowHistoryLoading] = useState(false);
   const [borrowHistoryError, setBorrowHistoryError] = useState(null);
+  const [borrowSpikeRiskMap, setBorrowSpikeRiskMap] = useState({});
+  const [borrowSpikeRiskLoading, setBorrowSpikeRiskLoading] = useState(false);
+  const [borrowSpikeRiskError, setBorrowSpikeRiskError] = useState(null);
   const [optionsCache, setOptionsCache] = useState(null);
   const [optionsCacheError, setOptionsCacheError] = useState(null);
   const [tradeUseScenarioAssumptions, setTradeUseScenarioAssumptions] = useState(true);
@@ -1377,6 +1465,32 @@ function ChartPage({ record, onBack }) {
         if (!cancelled) setBorrowHistoryError(e?.message || 'borrow history unavailable');
       } finally {
         if (!cancelled) setBorrowHistoryLoading(false);
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (BORROW_SPIKE_RISK_CACHE) {
+        setBorrowSpikeRiskMap(BORROW_SPIKE_RISK_CACHE);
+        return;
+      }
+      setBorrowSpikeRiskLoading(true);
+      setBorrowSpikeRiskError(null);
+      try {
+        const cacheBust = `?t=${Math.floor(Date.now() / 1800)}`;
+        const res = await fetch(`${BORROW_SPIKE_RISK_URL}${cacheBust}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`borrow spike risk HTTP ${res.status}`);
+        const payload = await res.json();
+        const symbols = payload?.symbols && typeof payload.symbols === 'object' ? payload.symbols : {};
+        BORROW_SPIKE_RISK_CACHE = symbols;
+        if (!cancelled) setBorrowSpikeRiskMap(symbols);
+      } catch (e) {
+        if (!cancelled) setBorrowSpikeRiskError(e?.message || 'borrow spike risk unavailable');
+      } finally {
+        if (!cancelled) setBorrowSpikeRiskLoading(false);
       }
     };
     run();
@@ -1443,6 +1557,20 @@ function ChartPage({ record, onBack }) {
     if (!vals.length) return null;
     return vals.reduce((a, b) => a + b, 0) / vals.length;
   })();
+  const borrowForecast = useMemo(
+    () => buildBorrowForecast(etfBorrowSeries, 7),
+    [etfBorrowSeries],
+  );
+  const etfSpikeRisk = borrowSpikeRiskMap?.[etfSym] || null;
+  const etfSpikeProb = Number(etfSpikeRisk?.p_spike_5d);
+  const etfSpikeBand = String(etfSpikeRisk?.risk_band || 'unknown').toLowerCase();
+  const etfSpikeBandCls = etfSpikeBand === 'high'
+    ? 'val-negative'
+    : etfSpikeBand === 'elevated'
+    ? 'val-warning'
+    : etfSpikeBand === 'low'
+    ? 'val-positive'
+    : 'val-muted';
   const annualCarryDragRaw = Number.isFinite(avgBorrowFromHistory)
     ? avgBorrowFromHistory
     : (Number.isFinite(Number(r.borrow_avg_annual)) ? Number(r.borrow_avg_annual) : Number(getBorrowRate(r)));
@@ -2271,6 +2399,74 @@ function ChartPage({ record, onBack }) {
                   formatValue={(v) => fmt(v)}
                   zeroLabel="0% borrow"
                 />
+              )}
+              {!borrowHistoryLoading && !borrowHistoryError && (
+                <div className="trade-card" style={{ marginTop: 10 }}>
+                  <div className="trade-head">
+                    <div className="scenario-title">Spike Risk (5D)</div>
+                    <div className="scenario-sub">Borrow jump stress probability</div>
+                  </div>
+                  {borrowSpikeRiskLoading ? (
+                    <div className="scenario-warning">Loading spike risk…</div>
+                  ) : borrowSpikeRiskError ? (
+                    <div className="scenario-warning">{borrowSpikeRiskError}</div>
+                  ) : !Number.isFinite(etfSpikeProb) ? (
+                    <div className="scenario-warning">Spike risk not available for this symbol yet.</div>
+                  ) : (
+                    <div className="chart-stats">
+                      <div className="stat-pill">
+                        <div className="k">P_spike_5d</div>
+                        <div className={cls('v', etfSpikeBandCls)}>{fmt(etfSpikeProb)}</div>
+                      </div>
+                      <div className="stat-pill">
+                        <div className="k">Risk Band</div>
+                        <div className={cls('v', etfSpikeBandCls)}>{etfSpikeBand.toUpperCase()}</div>
+                      </div>
+                      <div className="stat-pill">
+                        <div className="k">History Points</div>
+                        <div className="v">{fmtNum(Number(etfSpikeRisk?.obs_count) || 0)}</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              {!borrowHistoryLoading && !borrowHistoryError && (
+                <div className="trade-card" style={{ marginTop: 10 }}>
+                  <div className="trade-head">
+                    <div className="scenario-title">Borrow Prediction (next 7 days)</div>
+                    <div className="scenario-sub">{borrowForecast?.method || '—'}</div>
+                  </div>
+                  {!borrowForecast?.ok ? (
+                    <div className="scenario-warning">{borrowForecast?.error || 'Forecast unavailable.'}</div>
+                  ) : (
+                    <>
+                      <div className="chart-stats" style={{ marginBottom: 8 }}>
+                        <div className="stat-pill">
+                          <div className="k">Next Day</div>
+                          <div className="v">{fmt(borrowForecast.next1)}</div>
+                        </div>
+                        <div className="stat-pill">
+                          <div className="k">7D Avg</div>
+                          <div className="v">{fmt(borrowForecast.nextAvg)}</div>
+                        </div>
+                        <div className="stat-pill">
+                          <div className="k">Δ vs Spot</div>
+                          <div className={cls('v', spreadCls(borrowForecast.deltaToSpot))}>
+                            {fmt(borrowForecast.deltaToSpot)}
+                          </div>
+                        </div>
+                      </div>
+                      <table className="ttx-table">
+                        <thead><tr><th>Date</th><th>Predicted Borrow</th></tr></thead>
+                        <tbody>
+                          {(borrowForecast.points || []).map((p) => (
+                            <tr key={`bf-${p.date}`}><td>{p.date}</td><td>{fmt(p.borrow_current)}</td></tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </>
+                  )}
+                </div>
               )}
             </div>
 
