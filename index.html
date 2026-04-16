@@ -445,6 +445,38 @@
     font-size: 10px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
     flex-shrink: 0;
   }
+  .metrics-panel {
+    margin-top: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-card);
+    padding: 14px;
+  }
+  .metrics-panel-head {
+    margin-bottom: 10px;
+  }
+  .metrics-panel .scenario-title {
+    margin-bottom: 4px;
+  }
+  .metrics-stack {
+    display: grid;
+    gap: 18px;
+  }
+  .metrics-stack .simple-series-card {
+    margin-top: 0;
+    padding: 14px;
+  }
+  .metrics-stack .simple-series-svg {
+    margin-top: 8px;
+  }
+  .metrics-panel .scenario-table-wrap {
+    margin-top: 16px;
+  }
+  .metrics-panel .scenario-table td,
+  .metrics-panel .scenario-table th {
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
   .chart-section {
     display: flex;
     flex-direction: column;
@@ -2017,36 +2049,38 @@ function ChartPage({ record, onBack }) {
           {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics panel…</div>}
           {etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
           {!etfMetricsLoading && !etfMetricsError && etfMetricsSeries.length > 0 && (
-            <>
-              <div className="scenario-card" style={{ marginTop: 10 }}>
+            <div className="metrics-panel">
+              <div className="metrics-panel-head">
                 <div className="scenario-title">ETF Metrics Daily Time Series</div>
                 <div className="scenario-sub">{etfSym} — {etfMetricsSeries.length} observations</div>
               </div>
-              <SimpleSeriesPlot
-                series={etfMetricsSeries}
-                valueKey="nav"
-                color="rgba(59,130,246,0.95)"
-                label={`${etfSym} NAV`}
-                formatValue={(v) => fmtUsd(v)}
-                zeroLabel="$0"
-              />
-              <SimpleSeriesPlot
-                series={etfMetricsSeries}
-                valueKey="aum"
-                color="rgba(16,185,129,0.95)"
-                label={`${etfSym} AUM / TNA`}
-                formatValue={(v) => fmtMoney(v)}
-                zeroLabel="$0"
-              />
-              <SimpleSeriesPlot
-                series={etfMetricsSeries}
-                valueKey="shares_outstanding"
-                color="rgba(245,158,11,0.95)"
-                label={`${etfSym} Shares Outstanding`}
-                formatValue={(v) => fmtNum(v)}
-                zeroLabel="0"
-              />
-              <div className="scenario-table-wrap" style={{ marginTop: 10 }}>
+              <div className="metrics-stack">
+                <SimpleSeriesPlot
+                  series={etfMetricsSeries}
+                  valueKey="nav"
+                  color="rgba(59,130,246,0.95)"
+                  label={`${etfSym} NAV`}
+                  formatValue={(v) => fmtUsd(v)}
+                  zeroLabel="$0"
+                />
+                <SimpleSeriesPlot
+                  series={etfMetricsSeries}
+                  valueKey="aum"
+                  color="rgba(16,185,129,0.95)"
+                  label={`${etfSym} AUM / TNA`}
+                  formatValue={(v) => fmtMoney(v)}
+                  zeroLabel="$0"
+                />
+                <SimpleSeriesPlot
+                  series={etfMetricsSeries}
+                  valueKey="shares_outstanding"
+                  color="rgba(245,158,11,0.95)"
+                  label={`${etfSym} Shares Outstanding`}
+                  formatValue={(v) => fmtNum(v)}
+                  zeroLabel="0"
+                />
+              </div>
+              <div className="scenario-table-wrap">
                 <table className="scenario-table">
                   <thead>
                     <tr>
@@ -2070,7 +2104,7 @@ function ChartPage({ record, onBack }) {
                   </tbody>
                 </table>
               </div>
-            </>
+            </div>
           )}
           {!etfMetricsLoading && !etfMetricsError && etfMetricsSeries.length === 0 && (
             <div className="scenario-warning">No ETF metrics history available yet for {etfSym}.</div>
