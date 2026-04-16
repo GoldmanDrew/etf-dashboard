@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -141,6 +142,92 @@ class TradrAxsProvider:
             status = "missing"
 
         return ProviderResult(as_of, ticker, nav, aum, shares, self.name, source_url, status)
+
+
+class PolygonProvider:
+    name = "polygon"
+
+    def __init__(self, session: requests.Session | None = None):
+        self.session = session or _build_session()
+        self.api_key = os.getenv("POLYGON_API_KEY") or os.getenv("POLYGON_IO_API_KEY")
+        self._meta_cache: dict[str, tuple[float | None, float | None]] = {}
+        self._price_cache: dict[tuple[str, str], float | None] = {}
+
+    def _get_meta(self, ticker: str) -> tuple[float | None, float | None]:
+        key = ticker.upper()
+        if key in self._meta_cache:
+            return self._meta_cache[key]
+        if not self.api_key:
+            self._meta_cache[key] = (None, None)
+            return self._meta_cache[key]
+        url = f"https://api.polygon.io/v3/reference/tickers/{key}?apiKey={self.api_key}"
+        try:
+            r = self.session.get(url, timeout=getattr(self.session, "timeout_sec", 20))
+            if r.status_code != 200:
+                self._meta_cache[key] = (None, None)
+                return self._meta_cache[key]
+            data = r.json() if r.text else {}
+            res = data.get("results") or {}
+            shares = pd.to_numeric(res.get("weighted_shares_outstanding"), errors="coerce")
+            market_cap = pd.to_numeric(res.get("market_cap"), errors="coerce")
+            s_val = float(shares) if pd.notna(shares) and float(shares) > 0 else None
+            mc_val = float(market_cap) if pd.notna(market_cap) and float(market_cap) > 0 else None
+            self._meta_cache[key] = (s_val, mc_val)
+            return self._meta_cache[key]
+        except Exception:
+            self._meta_cache[key] = (None, None)
+            return self._meta_cache[key]
+
+    def _get_close(self, ticker: str, as_of: date) -> float | None:
+        key = ticker.upper()
+        dkey = (key, as_of.isoformat())
+        if dkey in self._price_cache:
+            return self._price_cache[dkey]
+        if not self.api_key:
+            self._price_cache[dkey] = None
+            return None
+        ds = as_of.isoformat()
+        url = (
+            f"https://api.polygon.io/v2/aggs/ticker/{key}/range/1/day/{ds}/{ds}"
+            f"?adjusted=true&sort=desc&limit=1&apiKey={self.api_key}"
+        )
+        try:
+            r = self.session.get(url, timeout=getattr(self.session, "timeout_sec", 20))
+            if r.status_code != 200:
+                self._price_cache[dkey] = None
+                return None
+            data = r.json() if r.text else {}
+            rows = data.get("results") or []
+            if not rows:
+                self._price_cache[dkey] = None
+                return None
+            close = pd.to_numeric(rows[0].get("c"), errors="coerce")
+            val = float(close) if pd.notna(close) and float(close) > 0 else None
+            self._price_cache[dkey] = val
+            return val
+        except Exception:
+            self._price_cache[dkey] = None
+            return None
+
+    def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
+        close = self._get_close(ticker, as_of)
+        shares, market_cap = self._get_meta(ticker)
+        aum = market_cap
+        if (aum is None or aum <= 0) and close is not None and shares is not None and shares > 0:
+            aum = close * shares
+        status = "ok"
+        if close is None or shares is None or aum is None or close <= 0 or shares <= 0 or aum <= 0:
+            status = "missing"
+        return ProviderResult(
+            date=as_of,
+            ticker=ticker,
+            nav=close,
+            aum=aum,
+            shares_outstanding=shares,
+            source_provider=self.name,
+            source_url=f"polygon://{ticker}",
+            status=status,
+        )
 
 
 def _normalize_symbol(v: object) -> str:
@@ -284,7 +371,8 @@ def ingest(
     start_date: date | None = None,
     end_date: date | None = None,
 ) -> pd.DataFrame:
-    provider = TradrAxsProvider()
+    tradr_provider = TradrAxsProvider()
+    polygon_provider = PolygonProvider()
     if end_date is None:
         end_date = date.today()
     if start_date is None:
@@ -296,17 +384,30 @@ def ingest(
             found = False
             for i in range(max(1, lookback_days)):
                 d = end_date - timedelta(days=i)
-                r = provider.fetch_for_date(t, d)
+                r = tradr_provider.fetch_for_date(t, d)
                 if r.status == "ok":
                     rows.append(r)
                     found = True
                     break
             if not found:
-                rows.append(provider.fetch_for_date(t, end_date))
+                poly_found = False
+                for i in range(max(1, lookback_days)):
+                    d = end_date - timedelta(days=i)
+                    p = polygon_provider.fetch_for_date(t, d)
+                    if p.status == "ok":
+                        rows.append(p)
+                        poly_found = True
+                        break
+                if not poly_found:
+                    rows.append(tradr_provider.fetch_for_date(t, end_date))
     else:
         for d in _iter_dates(start_date, end_date):
             for t in tickers:
-                rows.append(provider.fetch_for_date(t, d))
+                r = tradr_provider.fetch_for_date(t, d)
+                if r.status == "ok":
+                    rows.append(r)
+                else:
+                    rows.append(polygon_provider.fetch_for_date(t, d))
 
     out = _records_to_df(rows, ingested_at=datetime.now(UTC))
     out = enforce_status_consistency(out)

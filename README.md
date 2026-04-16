@@ -173,3 +173,12 @@ If Polygon returns HTTP 429 for snapshots, contracts fallback is skipped for tha
 For symbols listed in `TRADIER_CHAIN_SYMBOLS`, the builder requests Tradier chains first (no websocket), then falls back only if needed.
 
 The options workflow can override shard settings (for example, 5-minute cadence with smaller `OPTIONS_SYMBOLS_PER_RUN`) to improve freshness while keeping request budgets bounded.
+
+## ETF Metrics Coverage (All ETFs)
+
+The ETF metrics pipeline covers the full universe with a provider cascade:
+
+1. `tradr_axs` for Tradr/AXS symbols (`NSDEAXS2` + holdings fallback)
+2. `polygon` fallback for non-Tradr ETFs (daily close + shares/market-cap metadata)
+
+This ensures Stats-tab NAV/AUM/shares fields are populated for substantially more symbols across the entire dashboard universe.
