@@ -1,0 +1,115 @@
+name: Update ETF Metrics Daily
+
+on:
+  schedule:
+    # 5:00 AM ET across DST transitions.
+    - cron: "0 9 * * 1-5"
+    - cron: "0 10 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "etf-metrics-refresh"
+  cancel-in-progress: true
+
+jobs:
+  refresh-etf-metrics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Skip duplicate DST slot
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          ET_HOUR=$(python - <<'PY'
+          from datetime import datetime
+          import pytz
+          print(datetime.now(pytz.timezone("America/New_York")).hour)
+          PY
+          )
+          echo "Current ET hour: $ET_HOUR"
+          if [ "$ET_HOUR" != "5" ]; then
+            echo "Not 5 AM ET slot; exiting."
+            exit 0
+          fi
+
+      - name: Ingest ETF metrics
+        run: python scripts/ingest_etf_metrics.py --lookback-days 10
+
+      - name: Print latest metrics status
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("data/etf_metrics_latest.json")
+          if not p.exists():
+              raise SystemExit("Missing data/etf_metrics_latest.json")
+          payload = json.loads(p.read_text(encoding="utf-8"))
+          latest_date = payload.get("latest_date")
+          rows = payload.get("rows", [])
+          ok = sum(1 for r in rows if r.get("status") == "ok")
+          missing = sum(1 for r in rows if r.get("status") == "missing")
+          unsupported = sum(1 for r in rows if r.get("status") == "unsupported_provider")
+          print(f"latest_date={latest_date} rows={len(rows)} ok={ok} missing={missing} unsupported={unsupported}")
+          PY
+
+      - name: Commit metrics artifacts
+        run: |
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${FILES}
+          if git diff --staged --quiet; then
+            echo "No ETF metrics changes to commit"
+          else
+            TMP_DIR="$(mktemp -d)"
+            for f in ${FILES}; do
+              mkdir -p "${TMP_DIR}/$(dirname "$f")"
+              cp "$f" "${TMP_DIR}/$f"
+            done
+            pushed=0
+            for i in 1 2 3; do
+              git fetch origin "${BRANCH}"
+              git checkout -B "${BRANCH}" "origin/${BRANCH}"
+              for f in ${FILES}; do
+                if [ -f "${TMP_DIR}/$f" ]; then
+                  mkdir -p "$(dirname "$f")"
+                  cp "${TMP_DIR}/$f" "$f"
+                fi
+              done
+              git add ${FILES}
+              if git diff --staged --quiet; then
+                echo "No ETF metrics changes against latest origin"
+                pushed=1
+                break
+              fi
+              git commit -m "chore: refresh ETF metrics [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+              if git push origin "HEAD:${BRANCH}"; then
+                pushed=1
+                break
+              fi
+              git reset --hard "origin/${BRANCH}" || true
+              sleep $((i * 5))
+            done
+            rm -rf "${TMP_DIR}"
+            if [ "$pushed" -ne 1 ]; then
+              echo "Push failed after retries"
+              exit 1
+            fi
+          fi

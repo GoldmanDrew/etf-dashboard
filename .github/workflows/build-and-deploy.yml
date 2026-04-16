@@ -71,8 +71,8 @@ jobs:
           POLYGON_CHAIN_MONEYNESS_MODE: "atm_otm"
           POLYGON_DROP_NULL_QUOTES: "0"
           OPTIONS_REFRESH_SLEEP_MS: "400"
-          OPTIONS_SYMBOLS_PER_RUN: "100"
-          OPTIONS_SHARD_COUNT: "1"
+          OPTIONS_SYMBOLS_PER_RUN: "8"
+          OPTIONS_SHARD_COUNT: "12"
           OPTIONS_SHARD_INTERVAL_MINUTES: "3"
           OPTIONS_STALE_AFTER_MINUTES: "120"
           OPTIONS_ONLY_BUCKET3: "1"
@@ -91,13 +91,16 @@ jobs:
           TRADIER_MAX_TOTAL_REQUESTS: "70"
         run: python scripts/build_data.py
 
+      - name: Ingest ETF metrics panel
+        run: python scripts/ingest_etf_metrics.py --lookback-days 10
+
       - name: Print options coverage diagnostics (with hard gate)
         run: python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero
 
       - name: Commit data if changed
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json"
+          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ${FILES}

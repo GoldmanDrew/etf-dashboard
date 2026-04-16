@@ -735,8 +735,10 @@ const DATA_URL = "data/dashboard_data.json";
 const BORROW_HISTORY_URL = "data/borrow_history.json";
 const BORROW_SPIKE_RISK_URL = "data/borrow_spike_risk.json";
 const OPTIONS_CACHE_URL = "data/options_cache.json";
+const ETF_METRICS_DAILY_URL = "data/etf_metrics_daily.json";
 let BORROW_HISTORY_CACHE = null;
 let BORROW_SPIKE_RISK_CACHE = null;
+let ETF_METRICS_CACHE = null;
 
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
@@ -1431,6 +1433,9 @@ function ChartPage({ record, onBack }) {
   const [borrowSpikeRiskError, setBorrowSpikeRiskError] = useState(null);
   const [optionsCache, setOptionsCache] = useState(null);
   const [optionsCacheError, setOptionsCacheError] = useState(null);
+  const [etfMetricsMap, setEtfMetricsMap] = useState({});
+  const [etfMetricsLoading, setEtfMetricsLoading] = useState(false);
+  const [etfMetricsError, setEtfMetricsError] = useState(null);
   const [tradeUseScenarioAssumptions, setTradeUseScenarioAssumptions] = useState(true);
   const [tradeBaseLegs, setTradeBaseLegs] = useState([]);
   const [tradeOptionLegs, setTradeOptionLegs] = useState([]);
@@ -1541,6 +1546,42 @@ function ChartPage({ record, onBack }) {
     run();
     return () => { cancelled = true; };
   }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (ETF_METRICS_CACHE?.bySymbol) {
+        if (!cancelled) setEtfMetricsMap(ETF_METRICS_CACHE.bySymbol);
+        return;
+      }
+      setEtfMetricsLoading(true);
+      setEtfMetricsError(null);
+      try {
+        const cacheBust = `?t=${Math.floor(Date.now() / 3600000)}`;
+        const res = await fetch(`${ETF_METRICS_DAILY_URL}${cacheBust}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`etf metrics HTTP ${res.status}`);
+        const payload = await res.json();
+        const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+        const bySymbol = {};
+        rows.forEach((row) => {
+          const sym = String(row?.ticker || '').toUpperCase();
+          if (!sym) return;
+          if (!bySymbol[sym]) bySymbol[sym] = [];
+          bySymbol[sym].push(row);
+        });
+        Object.keys(bySymbol).forEach((sym) => {
+          bySymbol[sym].sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
+        });
+        ETF_METRICS_CACHE = { bySymbol };
+        if (!cancelled) setEtfMetricsMap(bySymbol);
+      } catch (e) {
+        if (!cancelled) setEtfMetricsError(e?.message || 'ETF metrics unavailable');
+      } finally {
+        if (!cancelled) setEtfMetricsLoading(false);
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, []);
 
   const volWindowKey = VOL_TF_KEY_BY_RANGE[activeTf.range] || '6M';
   const volPoint = r?.realized_vol?.[volWindowKey] || null;
@@ -1580,6 +1621,14 @@ function ChartPage({ record, onBack }) {
     : NaN;
   const scenarioLeverage = Number.isFinite(Number(r.beta)) ? Number(r.beta) : 1;
   const etfBorrowSeries = Array.isArray(borrowHistoryMap?.[etfSym]) ? borrowHistoryMap[etfSym] : [];
+  const etfMetricsSeries = useMemo(() => {
+    const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
+    return raw.filter((x) => String(x?.status || '').toLowerCase() === 'ok');
+  }, [etfMetricsMap, etfSym]);
+  const latestEtfMetric = useMemo(
+    () => (etfMetricsSeries.length ? etfMetricsSeries[etfMetricsSeries.length - 1] : null),
+    [etfMetricsSeries],
+  );
   const avgBorrowFromHistory = (() => {
     const vals = etfBorrowSeries.map(x => Number(x?.borrow_current)).filter(Number.isFinite);
     if (!vals.length) return null;
@@ -2047,11 +2096,87 @@ function ChartPage({ record, onBack }) {
               <div className="cs-value" style={{ fontSize: 14 }}>{fmt(r.borrow_fee_annual)} / {fmt(r.borrow_rebate_annual)}</div>
               <div className="cs-sub">gross / rebate</div>
             </div>
+            <div className="chart-stat">
+              <div className="cs-label">NAV (Daily)</div>
+              <div className="cs-value">{latestEtfMetric ? fmtUsd(Number(latestEtfMetric.nav)) : '—'}</div>
+              <div className="cs-sub">{latestEtfMetric?.date || '—'}</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">AUM / TNA</div>
+              <div className="cs-value">{latestEtfMetric ? fmtMoney(Number(latestEtfMetric.aum)) : '—'}</div>
+              <div className="cs-sub">{latestEtfMetric?.date || '—'}</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">Shares Outstanding</div>
+              <div className="cs-value">{latestEtfMetric ? fmtNum(Number(latestEtfMetric.shares_outstanding)) : '—'}</div>
+              <div className="cs-sub">{latestEtfMetric?.date || '—'}</div>
+            </div>
           </div>
 
           <div className="chart-note">
-            Statistics are synchronized to the active lookback selection.
+            Statistics are synchronized to the active lookback selection. ETF metrics (NAV/AUM/shares outstanding) refresh daily on a scheduled job.
           </div>
+          {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics panel…</div>}
+          {etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
+          {!etfMetricsLoading && !etfMetricsError && etfMetricsSeries.length > 0 && (
+            <>
+              <div className="scenario-card" style={{ marginTop: 10 }}>
+                <div className="scenario-title">ETF Metrics Daily Time Series</div>
+                <div className="scenario-sub">{etfSym} — {etfMetricsSeries.length} observations</div>
+              </div>
+              <SimpleSeriesPlot
+                series={etfMetricsSeries}
+                valueKey="nav"
+                color="rgba(59,130,246,0.95)"
+                label={`${etfSym} NAV`}
+                formatValue={(v) => fmtUsd(v)}
+                zeroLabel="$0"
+              />
+              <SimpleSeriesPlot
+                series={etfMetricsSeries}
+                valueKey="aum"
+                color="rgba(16,185,129,0.95)"
+                label={`${etfSym} AUM / TNA`}
+                formatValue={(v) => fmtMoney(v)}
+                zeroLabel="$0"
+              />
+              <SimpleSeriesPlot
+                series={etfMetricsSeries}
+                valueKey="shares_outstanding"
+                color="rgba(245,158,11,0.95)"
+                label={`${etfSym} Shares Outstanding`}
+                formatValue={(v) => fmtNum(v)}
+                zeroLabel="0"
+              />
+              <div className="scenario-table-wrap" style={{ marginTop: 10 }}>
+                <table className="scenario-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>NAV</th>
+                      <th>AUM / TNA</th>
+                      <th>Shares Outstanding</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...etfMetricsSeries].slice(-15).reverse().map((m, idx) => (
+                      <tr key={`${m.date}-${idx}`}>
+                        <td>{m.date || '—'}</td>
+                        <td>{fmtUsd(Number(m.nav))}</td>
+                        <td>{fmtMoney(Number(m.aum))}</td>
+                        <td>{fmtNum(Number(m.shares_outstanding))}</td>
+                        <td>{m.status || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+          {!etfMetricsLoading && !etfMetricsError && etfMetricsSeries.length === 0 && (
+            <div className="scenario-warning">No ETF metrics history available yet for {etfSym}.</div>
+          )}
         </div>
       )}
 
@@ -2639,6 +2764,7 @@ function InfoPage({ data }) {
         Universe/analytics refresh daily via GitHub Actions. Borrow rates and shares available refresh every 30 minutes.
         Borrow shown in the dashboard is fee-only (not net of rebate). Data comes from
         IBKR's public FTP when reachable, otherwise from the screener CSV.
+        ETF metrics (NAV, AUM/TNA, shares outstanding) refresh daily at 5:00 AM ET via Tradr/AXS files.
         Decay is measured as simple linear annualized rate from total-return series.
       </div>
     </div>
