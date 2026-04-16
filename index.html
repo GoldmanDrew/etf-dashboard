@@ -751,20 +751,6 @@ const fmtTime = iso => {
   return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
 };
 const cls = (...c) => c.filter(Boolean).join(' ');
-const prettyRiskFeature = (k) => {
-  const map = {
-    borrow_current: 'Current Borrow',
-    borrow_z60: 'Borrow Z-Score (60d)',
-    borrow_slope5: 'Borrow Slope (5d)',
-    borrow_vol10: 'Borrow Volatility (10d)',
-    shares_available_log: 'Shares Available (log)',
-    shares_drop1: 'Shares Drop (1d)',
-    shares_drop3: 'Shares Drop (3d)',
-    shares_drop5: 'Shares Drop (5d)',
-    near_zero_shares: 'Near-Zero Shares Flag',
-  };
-  return map[k] || k || 'Unknown';
-};
 const toFiniteNum = (v) => {
   if (typeof v === 'string') {
     const s = v.trim().replace(/,/g, '').replace(/%$/, '');
@@ -891,89 +877,6 @@ const quantileSorted = (arr, q) => {
   if (lo === hi) return arr[lo];
   const w = idx - lo;
   return arr[lo] * (1 - w) + arr[hi] * w;
-};
-const parseIsoDate = (raw) => {
-  if (!raw) return null;
-  const d = new Date(`${raw}T00:00:00Z`);
-  return Number.isNaN(d.getTime()) ? null : d;
-};
-const isoFromDate = (d) => {
-  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
-};
-const addDaysIso = (iso, days) => {
-  const d = parseIsoDate(iso);
-  if (!d) return null;
-  d.setUTCDate(d.getUTCDate() + Number(days || 0));
-  return isoFromDate(d);
-};
-const buildBorrowForecast = (series, horizonDays = 7) => {
-  const clean = (Array.isArray(series) ? series : [])
-    .map((p) => ({
-      date: String(p?.date || ''),
-      borrow_current: Number(p?.borrow_current),
-    }))
-    .filter((p) => p.date && Number.isFinite(p.borrow_current))
-    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
-  if (clean.length < 4) {
-    return { ok: false, error: 'Need at least 4 borrow observations for forecast.' };
-  }
-
-  const recent = clean.slice(-30);
-  const vals = recent.map((p) => p.borrow_current);
-  const sortedVals = [...vals].sort((a, b) => a - b);
-  const p10 = quantileSorted(sortedVals, 0.1);
-  const p90 = quantileSorted(sortedVals, 0.9);
-  const winsor = vals.map((v) => clampNum(v, p10 ?? v, p90 ?? v));
-  const n = winsor.length;
-
-  let sumX = 0;
-  let sumY = 0;
-  let sumXY = 0;
-  let sumXX = 0;
-  for (let i = 0; i < n; i += 1) {
-    const x = i;
-    const y = winsor[i];
-    sumX += x;
-    sumY += y;
-    sumXY += x * y;
-    sumXX += x * x;
-  }
-  const denom = n * sumXX - sumX * sumX;
-  const slope = Math.abs(denom) < 1e-12 ? 0 : (n * sumXY - sumX * sumY) / denom;
-  const intercept = (sumY - slope * sumX) / Math.max(1, n);
-
-  const alpha = 0.35;
-  let ewma = winsor[0];
-  for (let i = 1; i < n; i += 1) ewma = alpha * winsor[i] + (1 - alpha) * ewma;
-
-  const dampedSlope = slope * 0.55;
-  const lastDate = recent[recent.length - 1].date;
-  const maxCap = Math.max(0.15, (p90 ?? ewma) * 2.2, ewma * 3);
-  const points = [];
-  let ewmaStep = ewma;
-  for (let step = 1; step <= Math.max(1, Math.floor(horizonDays)); step += 1) {
-    const trendStep = intercept + (n - 1 + step) * dampedSlope;
-    ewmaStep = alpha * trendStep + (1 - alpha) * ewmaStep;
-    const pred = clampNum(0.6 * trendStep + 0.4 * ewmaStep, 0, maxCap);
-    points.push({
-      date: addDaysIso(lastDate, step),
-      borrow_current: pred,
-    });
-  }
-  const next1 = points[0]?.borrow_current ?? null;
-  const nextAvg = points.length
-    ? points.reduce((a, b) => a + b.borrow_current, 0) / points.length
-    : null;
-  const deltaToSpot = Number.isFinite(next1) ? (next1 - recent[recent.length - 1].borrow_current) : null;
-  return {
-    ok: true,
-    method: 'EWMA + damped trend',
-    points,
-    next1,
-    nextAvg,
-    deltaToSpot,
-  };
 };
 function MonteCarloPlot({ result, mode = 'short' }) {
   if (!result?.ok) return null;
@@ -1634,10 +1537,6 @@ function ChartPage({ record, onBack }) {
     if (!vals.length) return null;
     return vals.reduce((a, b) => a + b, 0) / vals.length;
   })();
-  const borrowForecast = useMemo(
-    () => buildBorrowForecast(etfBorrowSeries, 7),
-    [etfBorrowSeries],
-  );
   const etfSpikeRisk = borrowSpikeRiskMap?.[etfSym] || null;
   const etfSpikeProb = Number(etfSpikeRisk?.p_spike_5d);
   const etfSpikeBand = String(etfSpikeRisk?.risk_band || 'unknown').toLowerCase();
@@ -1654,7 +1553,6 @@ function ChartPage({ record, onBack }) {
     : etfSpikeQualityBand === 'moderate'
     ? 'val-warning'
     : 'val-negative';
-  const etfSpikeTopDrivers = Array.isArray(etfSpikeRisk?.top_drivers) ? etfSpikeRisk.top_drivers : [];
   const spikeAccuracy = borrowSpikeRiskMeta?.accuracy_tracking || null;
   const annualCarryDragRaw = Number.isFinite(avgBorrowFromHistory)
     ? avgBorrowFromHistory
@@ -2588,10 +2486,6 @@ function ChartPage({ record, onBack }) {
                           <div className="k">Risk Band</div>
                           <div className={cls('v', etfSpikeBandCls)}>{etfSpikeBand.toUpperCase()}</div>
                         </div>
-                        <div className="stat-pill">
-                          <div className="k">History Points</div>
-                          <div className="v">{fmtNum(Number(etfSpikeRisk?.obs_count) || 0)}</div>
-                        </div>
                       </div>
                       <div className="chart-stats" style={{ marginTop: 8 }}>
                         <div className="stat-pill">
@@ -2599,98 +2493,10 @@ function ChartPage({ record, onBack }) {
                           <div className={cls('v', etfSpikeQualityCls)}>{etfSpikeQualityBand.toUpperCase()}</div>
                         </div>
                         <div className="stat-pill">
-                          <div className="k">Shares Coverage</div>
-                          <div className="v">{fmt(Number(etfSpikeRisk?.shares_coverage))}</div>
-                        </div>
-                        <div className="stat-pill">
-                          <div className="k">Borrow Percentile (60d)</div>
-                          <div className="v">{fmt(Number(etfSpikeRisk?.borrow_pctile_60))}</div>
-                        </div>
-                      </div>
-                      {!!etfSpikeTopDrivers.length && (
-                        <div className="trade-note" style={{ marginTop: 8 }}>
-                          Drivers: {etfSpikeTopDrivers.map((d, i) => `${i + 1}) ${prettyRiskFeature(d?.feature)} (${d?.direction === 'up_risk' ? 'up risk' : 'down risk'})`).join(' • ')}
-                        </div>
-                      )}
-                    </>
-                  )}
-                  {(spikeAccuracy?.status === 'ok' || spikeAccuracy?.status === 'ok_no_positive_events') && (
-                    <div style={{ marginTop: 10 }}>
-                      <div className="scenario-sub">
-                        Forecast Accuracy Tracker (out-of-time holdout from {spikeAccuracy?.eval_start_date || '—'})
-                      </div>
-                      {spikeAccuracy?.status === 'ok_no_positive_events' && (
-                        <div className="trade-note" style={{ marginTop: 6 }}>
-                          Holdout window has no realized spike events yet; use calibration as directional until more events accumulate.
-                        </div>
-                      )}
-                      <div className="chart-stats" style={{ marginTop: 6 }}>
-                        <div className="stat-pill">
                           <div className="k">Brier Score</div>
                           <div className="v">{Number.isFinite(Number(spikeAccuracy?.brier_score)) ? Number(spikeAccuracy.brier_score).toFixed(4) : '—'}</div>
                         </div>
-                        <div className="stat-pill">
-                          <div className="k">Log Loss</div>
-                          <div className="v">{Number.isFinite(Number(spikeAccuracy?.log_loss)) ? Number(spikeAccuracy.log_loss).toFixed(4) : '—'}</div>
-                        </div>
-                        <div className="stat-pill">
-                          <div className="k">Eval Positives</div>
-                          <div className="v">{fmtNum(Number(spikeAccuracy?.eval_positives) || 0)} / {fmtNum(Number(spikeAccuracy?.eval_rows) || 0)}</div>
-                        </div>
                       </div>
-                      {Array.isArray(spikeAccuracy?.calibration_by_band) && spikeAccuracy.calibration_by_band.length > 0 && (
-                        <table className="ttx-table" style={{ marginTop: 8 }}>
-                          <thead><tr><th>Band</th><th>Count</th><th>Avg Pred</th><th>Realized</th></tr></thead>
-                          <tbody>
-                            {spikeAccuracy.calibration_by_band.map((row) => (
-                              <tr key={`acc-${row.band}`}>
-                                <td>{String(row.band || '').toUpperCase()}</td>
-                                <td>{fmtNum(Number(row.count) || 0)}</td>
-                                <td>{fmt(Number(row.avg_pred))}</td>
-                                <td>{fmt(Number(row.realized_rate))}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-              {!borrowHistoryLoading && !borrowHistoryError && (
-                <div className="trade-card" style={{ marginTop: 10 }}>
-                  <div className="trade-head">
-                    <div className="scenario-title">Borrow Prediction (next 7 days)</div>
-                    <div className="scenario-sub">{borrowForecast?.method || '—'}</div>
-                  </div>
-                  {!borrowForecast?.ok ? (
-                    <div className="scenario-warning">{borrowForecast?.error || 'Forecast unavailable.'}</div>
-                  ) : (
-                    <>
-                      <div className="chart-stats" style={{ marginBottom: 8 }}>
-                        <div className="stat-pill">
-                          <div className="k">Next Day</div>
-                          <div className="v">{fmt(borrowForecast.next1)}</div>
-                        </div>
-                        <div className="stat-pill">
-                          <div className="k">7D Avg</div>
-                          <div className="v">{fmt(borrowForecast.nextAvg)}</div>
-                        </div>
-                        <div className="stat-pill">
-                          <div className="k">Δ vs Spot</div>
-                          <div className={cls('v', spreadCls(borrowForecast.deltaToSpot))}>
-                            {fmt(borrowForecast.deltaToSpot)}
-                          </div>
-                        </div>
-                      </div>
-                      <table className="ttx-table">
-                        <thead><tr><th>Date</th><th>Predicted Borrow</th></tr></thead>
-                        <tbody>
-                          {(borrowForecast.points || []).map((p) => (
-                            <tr key={`bf-${p.date}`}><td>{p.date}</td><td>{fmt(p.borrow_current)}</td></tr>
-                          ))}
-                        </tbody>
-                      </table>
                     </>
                   )}
                 </div>
