@@ -749,6 +749,20 @@ const fmtTime = iso => {
   return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
 };
 const cls = (...c) => c.filter(Boolean).join(' ');
+const prettyRiskFeature = (k) => {
+  const map = {
+    borrow_current: 'Current Borrow',
+    borrow_z60: 'Borrow Z-Score (60d)',
+    borrow_slope5: 'Borrow Slope (5d)',
+    borrow_vol10: 'Borrow Volatility (10d)',
+    shares_available_log: 'Shares Available (log)',
+    shares_drop1: 'Shares Drop (1d)',
+    shares_drop3: 'Shares Drop (3d)',
+    shares_drop5: 'Shares Drop (5d)',
+    near_zero_shares: 'Near-Zero Shares Flag',
+  };
+  return map[k] || k || 'Unknown';
+};
 const toFiniteNum = (v) => {
   if (typeof v === 'string') {
     const s = v.trim().replace(/,/g, '').replace(/%$/, '');
@@ -1412,6 +1426,7 @@ function ChartPage({ record, onBack }) {
   const [borrowHistoryLoading, setBorrowHistoryLoading] = useState(false);
   const [borrowHistoryError, setBorrowHistoryError] = useState(null);
   const [borrowSpikeRiskMap, setBorrowSpikeRiskMap] = useState({});
+  const [borrowSpikeRiskMeta, setBorrowSpikeRiskMeta] = useState({});
   const [borrowSpikeRiskLoading, setBorrowSpikeRiskLoading] = useState(false);
   const [borrowSpikeRiskError, setBorrowSpikeRiskError] = useState(null);
   const [optionsCache, setOptionsCache] = useState(null);
@@ -1474,7 +1489,15 @@ function ChartPage({ record, onBack }) {
     let cancelled = false;
     const run = async () => {
       if (BORROW_SPIKE_RISK_CACHE) {
-        setBorrowSpikeRiskMap(BORROW_SPIKE_RISK_CACHE);
+        const symbols = BORROW_SPIKE_RISK_CACHE?.symbols && typeof BORROW_SPIKE_RISK_CACHE.symbols === 'object'
+          ? BORROW_SPIKE_RISK_CACHE.symbols
+          : {};
+        setBorrowSpikeRiskMap(symbols);
+        setBorrowSpikeRiskMeta({
+          quality_gate: BORROW_SPIKE_RISK_CACHE?.quality_gate || null,
+          accuracy_tracking: BORROW_SPIKE_RISK_CACHE?.accuracy_tracking || null,
+          model: BORROW_SPIKE_RISK_CACHE?.model || null,
+        });
         return;
       }
       setBorrowSpikeRiskLoading(true);
@@ -1485,8 +1508,13 @@ function ChartPage({ record, onBack }) {
         if (!res.ok) throw new Error(`borrow spike risk HTTP ${res.status}`);
         const payload = await res.json();
         const symbols = payload?.symbols && typeof payload.symbols === 'object' ? payload.symbols : {};
-        BORROW_SPIKE_RISK_CACHE = symbols;
+        BORROW_SPIKE_RISK_CACHE = payload;
         if (!cancelled) setBorrowSpikeRiskMap(symbols);
+        if (!cancelled) setBorrowSpikeRiskMeta({
+          quality_gate: payload?.quality_gate || null,
+          accuracy_tracking: payload?.accuracy_tracking || null,
+          model: payload?.model || null,
+        });
       } catch (e) {
         if (!cancelled) setBorrowSpikeRiskError(e?.message || 'borrow spike risk unavailable');
       } finally {
@@ -1571,6 +1599,14 @@ function ChartPage({ record, onBack }) {
     : etfSpikeBand === 'low'
     ? 'val-positive'
     : 'val-muted';
+  const etfSpikeQualityBand = String(etfSpikeRisk?.quality_band || 'insufficient').toLowerCase();
+  const etfSpikeQualityCls = etfSpikeQualityBand === 'strong'
+    ? 'val-positive'
+    : etfSpikeQualityBand === 'moderate'
+    ? 'val-warning'
+    : 'val-negative';
+  const etfSpikeTopDrivers = Array.isArray(etfSpikeRisk?.top_drivers) ? etfSpikeRisk.top_drivers : [];
+  const spikeAccuracy = borrowSpikeRiskMeta?.accuracy_tracking || null;
   const annualCarryDragRaw = Number.isFinite(avgBorrowFromHistory)
     ? avgBorrowFromHistory
     : (Number.isFinite(Number(r.borrow_avg_annual)) ? Number(r.borrow_avg_annual) : Number(getBorrowRate(r)));
@@ -2410,22 +2446,88 @@ function ChartPage({ record, onBack }) {
                     <div className="scenario-warning">Loading spike risk…</div>
                   ) : borrowSpikeRiskError ? (
                     <div className="scenario-warning">{borrowSpikeRiskError}</div>
+                  ) : etfSpikeRisk?.scoring_eligible === false ? (
+                    <div className="scenario-warning">
+                      Insufficient history for stable spike probability (need at least {fmtNum(Number(borrowSpikeRiskMeta?.quality_gate?.min_obs_for_scoring) || 30)} borrow points).
+                    </div>
                   ) : !Number.isFinite(etfSpikeProb) ? (
                     <div className="scenario-warning">Spike risk not available for this symbol yet.</div>
                   ) : (
-                    <div className="chart-stats">
-                      <div className="stat-pill">
-                        <div className="k">P_spike_5d</div>
-                        <div className={cls('v', etfSpikeBandCls)}>{fmt(etfSpikeProb)}</div>
+                    <>
+                      <div className="chart-stats">
+                        <div className="stat-pill">
+                          <div className="k">P_spike_5d</div>
+                          <div className={cls('v', etfSpikeBandCls)}>{fmt(etfSpikeProb)}</div>
+                        </div>
+                        <div className="stat-pill">
+                          <div className="k">Risk Band</div>
+                          <div className={cls('v', etfSpikeBandCls)}>{etfSpikeBand.toUpperCase()}</div>
+                        </div>
+                        <div className="stat-pill">
+                          <div className="k">History Points</div>
+                          <div className="v">{fmtNum(Number(etfSpikeRisk?.obs_count) || 0)}</div>
+                        </div>
                       </div>
-                      <div className="stat-pill">
-                        <div className="k">Risk Band</div>
-                        <div className={cls('v', etfSpikeBandCls)}>{etfSpikeBand.toUpperCase()}</div>
+                      <div className="chart-stats" style={{ marginTop: 8 }}>
+                        <div className="stat-pill">
+                          <div className="k">Data Quality</div>
+                          <div className={cls('v', etfSpikeQualityCls)}>{etfSpikeQualityBand.toUpperCase()}</div>
+                        </div>
+                        <div className="stat-pill">
+                          <div className="k">Shares Coverage</div>
+                          <div className="v">{fmt(Number(etfSpikeRisk?.shares_coverage))}</div>
+                        </div>
+                        <div className="stat-pill">
+                          <div className="k">Borrow Percentile (60d)</div>
+                          <div className="v">{fmt(Number(etfSpikeRisk?.borrow_pctile_60))}</div>
+                        </div>
                       </div>
-                      <div className="stat-pill">
-                        <div className="k">History Points</div>
-                        <div className="v">{fmtNum(Number(etfSpikeRisk?.obs_count) || 0)}</div>
+                      {!!etfSpikeTopDrivers.length && (
+                        <div className="trade-note" style={{ marginTop: 8 }}>
+                          Drivers: {etfSpikeTopDrivers.map((d, i) => `${i + 1}) ${prettyRiskFeature(d?.feature)} (${d?.direction === 'up_risk' ? 'up risk' : 'down risk'})`).join(' • ')}
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {(spikeAccuracy?.status === 'ok' || spikeAccuracy?.status === 'ok_no_positive_events') && (
+                    <div style={{ marginTop: 10 }}>
+                      <div className="scenario-sub">
+                        Forecast Accuracy Tracker (out-of-time holdout from {spikeAccuracy?.eval_start_date || '—'})
                       </div>
+                      {spikeAccuracy?.status === 'ok_no_positive_events' && (
+                        <div className="trade-note" style={{ marginTop: 6 }}>
+                          Holdout window has no realized spike events yet; use calibration as directional until more events accumulate.
+                        </div>
+                      )}
+                      <div className="chart-stats" style={{ marginTop: 6 }}>
+                        <div className="stat-pill">
+                          <div className="k">Brier Score</div>
+                          <div className="v">{Number.isFinite(Number(spikeAccuracy?.brier_score)) ? Number(spikeAccuracy.brier_score).toFixed(4) : '—'}</div>
+                        </div>
+                        <div className="stat-pill">
+                          <div className="k">Log Loss</div>
+                          <div className="v">{Number.isFinite(Number(spikeAccuracy?.log_loss)) ? Number(spikeAccuracy.log_loss).toFixed(4) : '—'}</div>
+                        </div>
+                        <div className="stat-pill">
+                          <div className="k">Eval Positives</div>
+                          <div className="v">{fmtNum(Number(spikeAccuracy?.eval_positives) || 0)} / {fmtNum(Number(spikeAccuracy?.eval_rows) || 0)}</div>
+                        </div>
+                      </div>
+                      {Array.isArray(spikeAccuracy?.calibration_by_band) && spikeAccuracy.calibration_by_band.length > 0 && (
+                        <table className="ttx-table" style={{ marginTop: 8 }}>
+                          <thead><tr><th>Band</th><th>Count</th><th>Avg Pred</th><th>Realized</th></tr></thead>
+                          <tbody>
+                            {spikeAccuracy.calibration_by_band.map((row) => (
+                              <tr key={`acc-${row.band}`}>
+                                <td>{String(row.band || '').toUpperCase()}</td>
+                                <td>{fmtNum(Number(row.count) || 0)}</td>
+                                <td>{fmt(Number(row.avg_pred))}</td>
+                                <td>{fmt(Number(row.realized_rate))}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
                     </div>
                   )}
                 </div>

@@ -431,6 +431,7 @@ def build_borrow_spike_risk_payload(
     """
     rows: list[dict] = []
     latest_feats: dict[str, dict] = {}
+    min_obs_for_scoring = 30
 
     for sym, hist in (borrow_history_symbols or {}).items():
         if not hist:
@@ -449,6 +450,17 @@ def build_borrow_spike_risk_payload(
         )
         if len(s) < 12:
             continue
+
+        obs_count = int(s["borrow_current"].notna().sum())
+        shares_obs_count = int(s["shares_available"].notna().sum())
+        shares_cov = float(shares_obs_count / max(1, len(s)))
+        quality_band = (
+            "strong"
+            if obs_count >= 60 and shares_cov >= 0.70
+            else "moderate"
+            if obs_count >= min_obs_for_scoring and shares_cov >= 0.40
+            else "insufficient"
+        )
 
         s["borrow_lag1"] = s["borrow_current"].shift(1)
         s["borrow_lag5"] = s["borrow_current"].shift(5)
@@ -500,7 +512,16 @@ def build_borrow_spike_risk_payload(
         latest = s.iloc[-1].copy()
         latest_date = latest["date"].strftime("%Y-%m-%d") if pd.notna(latest["date"]) else None
         lf = {c: latest.get(c) for c in feature_cols}
-        lf["obs_count"] = int(s["borrow_current"].notna().sum())
+        recent_borrows = s["borrow_current"].dropna().tail(60)
+        borrow_pctile_60 = None
+        if not recent_borrows.empty and pd.notna(latest.get("borrow_current")):
+            borrow_pctile_60 = float((recent_borrows <= float(latest["borrow_current"])).mean())
+        lf["obs_count"] = obs_count
+        lf["shares_obs_count"] = shares_obs_count
+        lf["shares_coverage"] = shares_cov
+        lf["quality_band"] = quality_band
+        lf["scoring_eligible"] = bool(obs_count >= min_obs_for_scoring)
+        lf["borrow_pctile_60"] = borrow_pctile_60
         lf["latest_date"] = latest_date
         latest_feats[sym] = lf
 
@@ -509,32 +530,102 @@ def build_borrow_spike_risk_payload(
             "as_of": as_of_date,
             "horizon_days": horizon_days,
             "model": {"name": "logistic_v1", "status": "insufficient_training_data"},
+            "quality_gate": {
+                "min_obs_for_scoring": min_obs_for_scoring,
+                "bands": {
+                    "strong": "obs>=60 and shares_coverage>=0.70",
+                    "moderate": "obs>=30 and shares_coverage>=0.40",
+                    "insufficient": "otherwise",
+                },
+            },
+            "accuracy_tracking": {"status": "no_training_rows"},
             "symbols": {},
         }
 
-    train_df = pd.DataFrame(rows)
-    y = train_df["spike_event"].to_numpy(dtype=float)
-    X_raw = train_df.drop(columns=["spike_event", "symbol", "date"], errors="ignore")
-    X_raw["log_shares"] = np.log1p(X_raw["shares_available"].clip(lower=0))
-    X_raw = X_raw.drop(columns=["shares_available"], errors="ignore")
-    X_raw = X_raw.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    feat_names = list(X_raw.columns)
-    X = X_raw.to_numpy(dtype=float)
-    mean = X.mean(axis=0)
-    std = X.std(axis=0)
-    std = np.where(std < 1e-9, 1.0, std)
-    Xs = (X - mean) / std
+    all_df = pd.DataFrame(rows)
+    all_df["date"] = pd.to_datetime(all_df["date"], errors="coerce")
+    all_df = all_df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    y_all = all_df["spike_event"].to_numpy(dtype=float)
+    X_base_all = all_df.drop(columns=["spike_event", "symbol", "date"], errors="ignore")
+    X_base_all["log_shares"] = np.log1p(X_base_all["shares_available"].clip(lower=0))
+    X_base_all = X_base_all.drop(columns=["shares_available"], errors="ignore")
+    X_base_all = X_base_all.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    feat_names = list(X_base_all.columns)
 
-    pos = int((y > 0.5).sum())
-    neg = int((y <= 0.5).sum())
+    def _fit_and_score(
+        x_train_raw: pd.DataFrame,
+        y_train: np.ndarray,
+        x_score_raw: pd.DataFrame,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, np.ndarray]:
+        x_train = x_train_raw.to_numpy(dtype=float)
+        mean_v = x_train.mean(axis=0)
+        std_v = x_train.std(axis=0)
+        std_v = np.where(std_v < 1e-9, 1.0, std_v)
+        x_train_s = (x_train - mean_v) / std_v
+        pos_n = int((y_train > 0.5).sum())
+        neg_n = int((y_train <= 0.5).sum())
+        pos_w = float(neg_n / max(1, pos_n))
+        pos_w = min(25.0, max(1.0, pos_w))
+        sample_w = np.where(y_train > 0.5, pos_w, 1.0)
+        w_v, b_v = _fit_logistic_l2(x_train_s, y_train, sample_w, l2=0.03, lr=0.08, steps=650)
+        x_score = x_score_raw.to_numpy(dtype=float)
+        x_score_s = (x_score - mean_v) / std_v
+        p_score = _sigmoid(x_score_s @ w_v + b_v)
+        return w_v, mean_v, std_v, b_v, p_score
+
+    # Accuracy tracking: out-of-time split (last 20% by date as holdout).
+    eval_metrics: dict = {"status": "insufficient_eval_window"}
+    unique_dates = sorted({d for d in all_df["date"].dropna().tolist()})
+    if len(unique_dates) >= 10:
+        split_idx = max(1, int(len(unique_dates) * 0.80))
+        eval_start = unique_dates[split_idx - 1]
+        train_mask = all_df["date"] < eval_start
+        eval_mask = all_df["date"] >= eval_start
+        if int(train_mask.sum()) >= 40 and int(eval_mask.sum()) >= 20:
+            y_train = y_all[train_mask.to_numpy()]
+            y_eval = y_all[eval_mask.to_numpy()]
+            x_train_raw = X_base_all.loc[train_mask].copy()
+            x_eval_raw = X_base_all.loc[eval_mask].copy()
+            _, _, _, _, p_eval = _fit_and_score(x_train_raw, y_train, x_eval_raw)
+            p_eval = np.clip(p_eval, 1e-6, 1.0 - 1e-6)
+            brier = float(np.mean((p_eval - y_eval) ** 2))
+            log_loss = float(-np.mean(y_eval * np.log(p_eval) + (1.0 - y_eval) * np.log(1.0 - p_eval)))
+            pred_band_eval = np.array([_risk_band(float(p)) for p in p_eval], dtype=object)
+            calib = []
+            for bname in ("low", "elevated", "high"):
+                mask = pred_band_eval == bname
+                n = int(mask.sum())
+                if n == 0:
+                    continue
+                calib.append(
+                    {
+                        "band": bname,
+                        "count": n,
+                        "avg_pred": round(float(np.mean(p_eval[mask])), 6),
+                        "realized_rate": round(float(np.mean(y_eval[mask])), 6),
+                    }
+                )
+            eval_metrics = {
+                "status": "ok" if int((y_eval > 0.5).sum()) > 0 else "ok_no_positive_events",
+                "method": "out_of_time_holdout",
+                "eval_start_date": pd.Timestamp(eval_start).strftime("%Y-%m-%d"),
+                "eval_rows": int(len(y_eval)),
+                "eval_positives": int((y_eval > 0.5).sum()),
+                "brier_score": round(brier, 6),
+                "log_loss": round(log_loss, 6),
+                "calibration_by_band": calib,
+            }
+
+    # Final model for production scoring on full history.
+    w, mean, std, b, _ = _fit_and_score(X_base_all, y_all, X_base_all)
+    pos = int((y_all > 0.5).sum())
+    neg = int((y_all <= 0.5).sum())
     pos_weight = float(neg / max(1, pos))
     pos_weight = min(25.0, max(1.0, pos_weight))
-    sample_w = np.where(y > 0.5, pos_weight, 1.0)
-
-    w, b = _fit_logistic_l2(Xs, y, sample_w, l2=0.03, lr=0.08, steps=650)
 
     symbols_payload: dict[str, dict] = {}
     for sym, lf in latest_feats.items():
+        eligible = bool(lf.get("scoring_eligible", False))
         x = []
         for c in feat_names:
             if c == "log_shares":
@@ -546,11 +637,31 @@ def build_borrow_spike_risk_payload(
         xv = (np.array(x, dtype=float) - mean) / std
         p = float(_sigmoid(np.array([xv @ w + b]))[0])
         p = max(0.0, min(1.0, p))
+        contrib = np.array(xv * w, dtype=float)
+        top_idx = np.argsort(np.abs(contrib))[-2:][::-1]
+        top_drivers = []
+        for idx in top_idx:
+            fname = feat_names[int(idx)]
+            if fname == "log_shares":
+                fname = "shares_available_log"
+            top_drivers.append(
+                {
+                    "feature": fname,
+                    "direction": "up_risk" if float(contrib[idx]) >= 0 else "down_risk",
+                    "strength": round(float(abs(contrib[idx])), 6),
+                }
+            )
         symbols_payload[sym] = {
-            "p_spike_5d": round(p, 6),
-            "risk_band": _risk_band(p),
+            "p_spike_5d": round(p, 6) if eligible else None,
+            "risk_band": _risk_band(p) if eligible else "insufficient",
             "obs_count": int(lf.get("obs_count", 0)),
+            "shares_obs_count": int(lf.get("shares_obs_count", 0)),
+            "shares_coverage": round(float(lf.get("shares_coverage", 0.0)), 6),
+            "quality_band": str(lf.get("quality_band", "insufficient")),
+            "scoring_eligible": eligible,
+            "borrow_pctile_60": round(float(lf.get("borrow_pctile_60")), 6) if lf.get("borrow_pctile_60") is not None else None,
             "asof_history_date": lf.get("latest_date"),
+            "top_drivers": top_drivers,
         }
 
     return {
@@ -563,11 +674,20 @@ def build_borrow_spike_risk_payload(
         "model": {
             "name": "logistic_v1",
             "status": "ok",
-            "train_rows": int(len(train_df)),
+            "train_rows": int(len(all_df)),
             "positives": int(pos),
             "negatives": int(neg),
             "positive_weight": round(pos_weight, 4),
         },
+        "quality_gate": {
+            "min_obs_for_scoring": min_obs_for_scoring,
+            "bands": {
+                "strong": "obs>=60 and shares_coverage>=0.70",
+                "moderate": "obs>=30 and shares_coverage>=0.40",
+                "insufficient": "otherwise",
+            },
+        },
+        "accuracy_tracking": eval_metrics,
         "symbols": symbols_payload,
     }
 
