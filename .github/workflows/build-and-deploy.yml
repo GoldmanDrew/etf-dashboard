@@ -91,16 +91,13 @@ jobs:
           TRADIER_MAX_TOTAL_REQUESTS: "70"
         run: python scripts/build_data.py
 
-      - name: Ingest ETF metrics panel
-        run: python scripts/ingest_etf_metrics.py --lookback-days 10
-
       - name: Print options coverage diagnostics (with hard gate)
         run: python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero
 
       - name: Commit data if changed
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json"
+          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/borrow_spike_risk.json data/options_cache.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ${FILES}
@@ -115,7 +112,9 @@ jobs:
             pushed=0
             for i in 1 2 3; do
               git fetch origin "${BRANCH}"
-              git checkout -B "${BRANCH}" "origin/${BRANCH}"
+              git reset --hard || true
+              git clean -fd || true
+              git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
               for f in ${FILES}; do
                 if [ -f "${TMP_DIR}/$f" ]; then
                   mkdir -p "$(dirname "$f")"

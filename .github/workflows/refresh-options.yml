@@ -95,7 +95,9 @@ jobs:
             pushed=0
             for i in 1 2 3; do
               git fetch origin "${BRANCH}"
-              git checkout -B "${BRANCH}" "origin/${BRANCH}"
+              git reset --hard || true
+              git clean -fd || true
+              git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
               for f in ${FILES}; do
                 if [ -f "${TMP_DIR}/$f" ]; then
                   mkdir -p "$(dirname "$f")"
