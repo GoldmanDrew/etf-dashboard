@@ -61,7 +61,7 @@ jobs:
           fi
 
       - name: Ingest ETF metrics
-        run: python scripts/ingest_etf_metrics.py --lookback-days 10 --polygon-lookback-days 1
+        run: python scripts/ingest_etf_metrics.py --lookback-days 10 --polygon-lookback-days 5
 
       - name: Print latest metrics status
         run: |

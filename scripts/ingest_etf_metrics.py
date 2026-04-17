@@ -554,6 +554,20 @@ def ingest(
             int(lookback_days),
             int(polygon_probe_days),
         )
+
+        def _anchor_to_end(res: ProviderResult) -> ProviderResult:
+            """Stamp a successful fetch to end_date, flagging stale age when sourced from an earlier day."""
+            if res.date == end_date:
+                return res
+            try:
+                age = int(np.busday_count(str(res.date), str(end_date)))
+            except Exception:
+                age = None
+            res.stale = True
+            res.stale_age_bdays = age
+            res.date = end_date
+            return res
+
         for t in tickers:
             probe_dates = [end_date - timedelta(days=i) for i in range(max(1, lookback_days))]
             found = False
@@ -562,7 +576,7 @@ def ingest(
                 for d in tradr_dates:
                     r = tradr_provider.fetch_for_date(t, d)
                     if r.status == "ok":
-                        rows.append(r)
+                        rows.append(_anchor_to_end(r))
                         found = True
                         break
             if not found:
@@ -571,7 +585,7 @@ def ingest(
                     d = end_date - timedelta(days=i)
                     p = polygon_provider.fetch_for_date(t, d)
                     if p.status == "ok":
-                        rows.append(p)
+                        rows.append(_anchor_to_end(p))
                         poly_found = True
                         break
                 if not poly_found:
