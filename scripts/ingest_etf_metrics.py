@@ -530,6 +530,7 @@ def save_outputs(df: pd.DataFrame) -> None:
 def ingest(
     tickers: list[str],
     lookback_days: int = 10,
+    polygon_lookback_days: int = 3,
     start_date: date | None = None,
     end_date: date | None = None,
 ) -> pd.DataFrame:
@@ -544,6 +545,12 @@ def ingest(
     rows: list[ProviderResult] = []
 
     if start_date == end_date:
+        polygon_probe_days = max(1, min(int(polygon_lookback_days), int(lookback_days)))
+        LOGGER.info(
+            "Single-day ingest settings: tradr_lookback_days=%d polygon_lookback_days=%d",
+            int(lookback_days),
+            int(polygon_probe_days),
+        )
         for t in tickers:
             probe_dates = [end_date - timedelta(days=i) for i in range(max(1, lookback_days))]
             found = False
@@ -557,7 +564,8 @@ def ingest(
                         break
             if not found:
                 poly_found = False
-                for d in probe_dates:
+                for i in range(polygon_probe_days):
+                    d = end_date - timedelta(days=i)
                     p = polygon_provider.fetch_for_date(t, d)
                     if p.status == "ok":
                         rows.append(p)
@@ -599,6 +607,7 @@ def parse_date_arg(value: str | None) -> date | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest ETF NAV/AUM/shares metrics for etf-dashboard.")
     parser.add_argument("--lookback-days", type=int, default=10)
+    parser.add_argument("--polygon-lookback-days", type=int, default=3)
     parser.add_argument("--start-date", default=None, help="YYYY-MM-DD")
     parser.add_argument("--end-date", default=None, help="YYYY-MM-DD")
     args = parser.parse_args()
@@ -611,6 +620,7 @@ def main() -> None:
     incoming = ingest(
         tickers=tickers,
         lookback_days=args.lookback_days,
+        polygon_lookback_days=args.polygon_lookback_days,
         start_date=parse_date_arg(args.start_date),
         end_date=parse_date_arg(args.end_date),
     )

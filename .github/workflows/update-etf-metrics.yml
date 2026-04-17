@@ -17,7 +17,7 @@ concurrency:
 jobs:
   refresh-etf-metrics:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
     steps:
@@ -58,7 +58,7 @@ jobs:
           fi
 
       - name: Ingest ETF metrics
-        run: python scripts/ingest_etf_metrics.py --lookback-days 10
+        run: python scripts/ingest_etf_metrics.py --lookback-days 10 --polygon-lookback-days 3
 
       - name: Print latest metrics status
         run: |
