@@ -46,9 +46,12 @@ REQUIRED_COLUMNS = [
 
 
 def _build_session(timeout_sec: int = 20) -> requests.Session:
+    timeout_sec = int(os.getenv("ETF_METRICS_HTTP_TIMEOUT_SEC", str(timeout_sec)))
+    retry_total = int(os.getenv("ETF_METRICS_HTTP_RETRY_TOTAL", "1"))
+    retry_backoff = float(os.getenv("ETF_METRICS_HTTP_RETRY_BACKOFF", "0.25"))
     retry = Retry(
-        total=3,
-        backoff_factor=0.5,
+        total=max(0, retry_total),
+        backoff_factor=max(0.0, retry_backoff),
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=("GET",),
         raise_on_status=False,
@@ -613,6 +616,12 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    LOGGER.info(
+        "HTTP settings: timeout_sec=%s retry_total=%s retry_backoff=%s",
+        os.getenv("ETF_METRICS_HTTP_TIMEOUT_SEC", "20"),
+        os.getenv("ETF_METRICS_HTTP_RETRY_TOTAL", "1"),
+        os.getenv("ETF_METRICS_HTTP_RETRY_BACKOFF", "0.25"),
+    )
 
     tickers = load_universe_tickers()
     LOGGER.info("Universe tickers: %d", len(tickers))
