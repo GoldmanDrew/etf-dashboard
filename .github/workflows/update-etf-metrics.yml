@@ -20,9 +20,12 @@ jobs:
     timeout-minutes: 180
     env:
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
-      ETF_METRICS_HTTP_TIMEOUT_SEC: "8"
-      ETF_METRICS_HTTP_RETRY_TOTAL: "1"
-      ETF_METRICS_HTTP_RETRY_BACKOFF: "0.25"
+      # Issuer feeds (ProShares bulk CSV, Direxion per-ticker CSV, AXS/Tradr) take the bulk of
+      # traffic now. Keep timeouts generous so we don't abort mid-request on transient stalls.
+      ETF_METRICS_HTTP_TIMEOUT_SEC: "30"
+      ETF_METRICS_HTTP_RETRY_TOTAL: "3"
+      ETF_METRICS_HTTP_RETRY_BACKOFF: "0.5"
+      ETF_METRICS_MAX_STALE_BUSINESS_DAYS: "3"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,15 +78,19 @@ jobs:
           latest_date = payload.get("latest_date")
           rows = payload.get("rows", [])
           ok = sum(1 for r in rows if r.get("status") == "ok")
+          partial = sum(1 for r in rows if r.get("status") == "partial")
           missing = sum(1 for r in rows if r.get("status") == "missing")
-          unsupported = sum(1 for r in rows if r.get("status") == "unsupported_provider")
-          print(f"latest_date={latest_date} rows={len(rows)} ok={ok} missing={missing} unsupported={unsupported}")
+          print(f"latest_date={latest_date} rows={len(rows)} ok={ok} partial={partial} missing={missing}")
           hp = Path("data/etf_metrics_health.json")
           if hp.exists():
               h = json.loads(hp.read_text(encoding="utf-8"))
               print("health.provider_counts=", h.get("latest_provider_counts"))
               print("health.provider_status_counts=", h.get("latest_provider_status_counts"))
               print("health.latest_stale_ok=", h.get("latest_stale_ok"))
+              mt = h.get("missing_tickers") or []
+              print(f"health.missing_tickers ({len(mt)}):", mt[:30], "..." if len(mt) > 30 else "")
+              pt = h.get("partial_tickers") or []
+              print(f"health.partial_tickers ({len(pt)}):", pt[:30], "..." if len(pt) > 30 else "")
           PY
 
       - name: Commit metrics artifacts
