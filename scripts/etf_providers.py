@@ -5,8 +5,11 @@ Layered fetch strategy (per ticker, tried in order):
   1) AXS / Tradr bulk CSV (authoritative; covers AXS + Tradr single-stock ETFs)
   2) ProShares bulk historical_nav.csv (authoritative; covers all ProShares funds)
   3) Direxion per-ticker holdings CSV (authoritative; covers Direxion 2x/3x)
-  4) YFinanceProvider (broad fallback via Yahoo Finance fast_info / info)
-  5) PolygonProvider (last-resort close + meta)
+  4) Roundhill bulk FilepointRoundhill DailyNAV.csv (authoritative; covers all Roundhill ETFs)
+  5) YieldMax per-ticker HTML scrape (authoritative; covers YieldMax option-income ETFs)
+  6) REX Shares per-ticker HTML scrape (authoritative; covers T-REX / REX lineup)
+  7) YFinanceProvider (broad fallback via Yahoo Finance fast_info / info)
+  8) PolygonProvider (last-resort close + meta)
 
 Each provider returns a ProviderResult with:
   nav, aum, shares_outstanding, source_provider, source_url, status, stale, stale_age_bdays
@@ -24,7 +27,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import numpy as np
@@ -408,7 +411,356 @@ class DirexionProvider:
 
 
 # ---------------------------------------------------------------------------
-# 4) YFinance broad fallback
+# 4) Roundhill bulk DailyNAV CSV
+# ---------------------------------------------------------------------------
+
+class RoundhillProvider:
+    """
+    Single authoritative bulk CSV at
+        https://www.roundhillinvestments.com/assets/data/FilepointRoundhill.40RU.RU_DailyNAV.csv
+
+    Columns: Fund Name, Fund Ticker, CUSIP, Net Assets, Shares Outstanding, NAV,
+             NAV Change Dollars, NAV Change Percentage, Market Price, ..., Rate Date
+
+    Covers all Roundhill ETFs (weekly-pay single-stock ETFs ending in 'W', XDTE, YBTC, YETH,
+    DEEP, MAGS, etc.). One HTTP request loads them all.
+    """
+
+    name = "roundhill"
+    URL = "https://www.roundhillinvestments.com/assets/data/FilepointRoundhill.40RU.RU_DailyNAV.csv"
+
+    def __init__(self, session: requests.Session | None = None):
+        self.session = session or _build_session()
+        self._df: pd.DataFrame | None = None
+        self._tickers: set[str] = set()
+        self._by_ticker: dict[str, pd.Series] = {}
+        self._latest_date: date | None = None
+        self._loaded = False
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            r = _get(self.session, self.URL)
+            if r.status_code != 200 or not r.text or "Fund Ticker" not in r.text[:200]:
+                LOGGER.warning("Roundhill DailyNAV http=%s len=%s", r.status_code, len(r.text or ""))
+                return
+            df = pd.read_csv(io.StringIO(r.text))
+            df.columns = [c.strip() for c in df.columns]
+            if "Fund Ticker" not in df.columns:
+                LOGGER.warning("Roundhill DailyNAV missing expected columns: %s", df.columns.tolist())
+                return
+            df["Fund Ticker"] = df["Fund Ticker"].astype(str).str.strip().str.upper()
+            df["Rate Date"] = pd.to_datetime(df["Rate Date"], errors="coerce").dt.date
+            df = df.dropna(subset=["Fund Ticker"])
+            self._df = df
+            self._tickers = set(df["Fund Ticker"].tolist())
+            # Keep one row per ticker (latest if dupes)
+            self._by_ticker = {str(r["Fund Ticker"]).upper(): r for _, r in df.iterrows()}
+            self._latest_date = df["Rate Date"].dropna().max() if df["Rate Date"].notna().any() else None
+            LOGGER.info(
+                "Roundhill DailyNAV loaded: %d funds, latest_rate_date=%s",
+                len(self._tickers), self._latest_date,
+            )
+        except Exception as e:
+            LOGGER.warning("Roundhill DailyNAV load failed: %s", e)
+
+    def supports_ticker(self, ticker: str, as_of: date) -> bool:
+        self._load()
+        return ticker.upper() in self._tickers
+
+    def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
+        self._load()
+        t = ticker.upper()
+        if t not in self._by_ticker:
+            return ProviderResult(as_of, ticker, None, None, None, self.name, self.URL, "missing")
+        row = self._by_ticker[t]
+        nav = pd.to_numeric(row.get("NAV"), errors="coerce")
+        aum = pd.to_numeric(row.get("Net Assets"), errors="coerce")
+        shares = pd.to_numeric(row.get("Shares Outstanding"), errors="coerce")
+        row_date = row.get("Rate Date")
+
+        nav_f = float(nav) if pd.notna(nav) and nav > 0 else None
+        aum_f = float(aum) if pd.notna(aum) and aum > 0 else None
+        sh_f = float(shares) if pd.notna(shares) and shares > 0 else None
+
+        stale = False
+        age_b = None
+        if isinstance(row_date, date) and row_date != as_of:
+            stale = True
+            try:
+                age_b = int(np.busday_count(str(row_date), str(as_of)))
+            except Exception:
+                age_b = None
+
+        status = _classify_status(nav_f, aum_f, sh_f)
+        return ProviderResult(
+            date=as_of, ticker=t, nav=nav_f, aum=aum_f, shares_outstanding=sh_f,
+            source_provider=self.name,
+            source_url=self.URL + f"#ticker={t}&date={row_date}",
+            status=status, stale=stale, stale_age_bdays=age_b,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5) YieldMax per-ticker HTML scrape
+# ---------------------------------------------------------------------------
+
+class YieldMaxProvider:
+    """
+    YieldMax publishes live fund stats in the SSR HTML of each fund page. Target:
+        https://yieldmaxetfs.com/our-etfs/{ticker_lower}/
+
+    The info table embeds four labelled rows we consume directly:
+        As of:             04/16/2026
+        Net Assets:        $1.15B           (or full $ amount, B/M suffix handled)
+        NAV:               $23.41
+        Shares Outstanding:49,294,959
+
+    We also keep a KNOWN_TICKERS set so the stack skips URL probes for tickers that
+    aren't YieldMax-listed (avoids 404 churn on look-alike symbols like *YY).
+    """
+
+    name = "yieldmax"
+    URL = "https://yieldmaxetfs.com/our-etfs/{t}/"
+
+    # Confirmed via _probe_coverage: every one of these currently renders a real
+    # YieldMax fund page with an 'As of / Net Assets / NAV / Shares' table.
+    KNOWN_TICKERS: set[str] = {
+        "ABNY", "AIYY", "AMDY", "AMZY", "APLY", "BABO", "CHPY", "CONY", "CVNY",
+        "DIPS", "DISO", "DRAY", "FBY", "FBTC", "FIAT", "FIVY", "GDXY", "GLDY",
+        "GMEY", "GOOX", "GOOY", "HIYY", "HOOY", "LFGY", "MARO", "MRNY", "MSTY",
+        "NFLY", "NVDY", "OARK", "PLTY", "PYPY", "QDTE", "RBLY", "RDTE", "RDTY",
+        "RDYY", "SMCY", "SNOY", "TSLY", "TSMY", "ULTY", "XDTE", "XOMO", "XYZY",
+        "YMAG", "YMAX", "YBIT",
+    }
+
+    def __init__(self, session: requests.Session | None = None):
+        self.session = session or _build_session()
+        self._cache: dict[str, ProviderResult] = {}
+
+    def supports_ticker(self, ticker: str, as_of: date) -> bool:
+        return ticker.upper() in self.KNOWN_TICKERS
+
+    @staticmethod
+    def _parse_currency(s: str | None) -> float | None:
+        if not s:
+            return None
+        s = str(s).strip().upper().replace("$", "").replace(",", "").replace(" ", "")
+        m = re.match(r"^([\d.]+)([BMK]?)$", s)
+        if not m:
+            return None
+        try:
+            val = float(m.group(1))
+        except Exception:
+            return None
+        mult = {"B": 1e9, "M": 1e6, "K": 1e3, "": 1.0}[m.group(2)]
+        return val * mult
+
+    @staticmethod
+    def _parse_int(s: str | None) -> float | None:
+        if not s:
+            return None
+        try:
+            return float(str(s).replace(",", "").strip())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_date(s: str | None) -> date | None:
+        if not s:
+            return None
+        for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+            try:
+                return datetime.strptime(str(s).strip(), fmt).date()
+            except Exception:
+                continue
+        return None
+
+    def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
+        t = ticker.upper()
+        url = self.URL.format(t=t.lower())
+        if t in self._cache:
+            cached = self._cache[t]
+            return ProviderResult(
+                date=as_of, ticker=t, nav=cached.nav, aum=cached.aum,
+                shares_outstanding=cached.shares_outstanding,
+                source_provider=self.name, source_url=cached.source_url,
+                status=cached.status, stale=cached.stale,
+                stale_age_bdays=cached.stale_age_bdays,
+            )
+        try:
+            r = _get(self.session, url)
+            if r.status_code != 200 or not r.text or "fund-label" not in r.text:
+                res = ProviderResult(as_of, ticker, None, None, None, self.name,
+                                     url + f"?status={r.status_code}", "missing")
+                self._cache[t] = res
+                return res
+            html = r.text
+            row_re = lambda label: re.search(
+                rf'<div class="fund-label">\s*{re.escape(label)}[:\s]*</div>\s*'
+                rf'<div class="fund-value">\s*([^<]+?)\s*</div>',
+                html, re.IGNORECASE,
+            )
+            as_of_str = (m.group(1) if (m := row_re("As of")) else None)
+            aum_str   = (m.group(1) if (m := row_re("Net Assets")) else None)
+            nav_str   = (m.group(1) if (m := row_re("NAV")) else None)
+            shares_str = (m.group(1) if (m := row_re("Shares Outstanding")) else None)
+
+            nav = self._parse_currency(nav_str)
+            aum = self._parse_currency(aum_str)
+            shares = self._parse_int(shares_str)
+            row_date = self._parse_date(as_of_str)
+
+            stale = False
+            age_b = None
+            if row_date and row_date != as_of:
+                stale = True
+                try:
+                    age_b = int(np.busday_count(str(row_date), str(as_of)))
+                except Exception:
+                    age_b = None
+            status = _classify_status(nav, aum, shares)
+            res = ProviderResult(
+                date=as_of, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
+                source_provider=self.name, source_url=url + f"#as_of={row_date}",
+                status=status, stale=stale, stale_age_bdays=age_b,
+            )
+            self._cache[t] = res
+            return res
+        except Exception as e:
+            res = ProviderResult(as_of, ticker, None, None, None, self.name,
+                                 url + f"?exc={type(e).__name__}", "missing")
+            self._cache[t] = res
+            return res
+
+
+# ---------------------------------------------------------------------------
+# 6) REX Shares / T-REX per-ticker HTML scrape
+# ---------------------------------------------------------------------------
+
+class REXSharesProvider:
+    """
+    REX Shares (incl. T-REX) publishes per-fund stats in SSR HTML rows:
+        https://www.rexshares.com/{TICKER}/
+
+    Structure (all rows live inside a `fund-details` section):
+        <div class="t-col t-label">Fund Assets</div>
+        <div class="t-col t-data">$92,510,000.00</div>
+        <div class="t-col t-label">Shares Outstanding</div>
+        <div class="t-col t-data">11,000,000</div>
+        <div class="t-col t-label">Closing Price</div>
+        <div class="t-col t-data">$8.41</div>
+
+    NAV is not a distinct field on most REX pages; we compute nav = aum / shares.
+    """
+
+    name = "rex_shares"
+    URL = "https://www.rexshares.com/{t}/"
+
+    # Confirmed via probe + REX public lineup (T-REX 2x leveraged + income ETFs).
+    # NOTE: QDTE / XDTE / RDTE are Roundhill funds, not REX -- they intentionally sit
+    # in RoundhillProvider.KNOWN_TICKERS (via DailyNAV.csv).
+    KNOWN_TICKERS: set[str] = {
+        # T-REX 2x long/inverse single-stock
+        "MSTU", "MSTZ", "NVDX", "NVDQ", "AAPX", "TSLT", "TSLZ", "AMZX", "AMZZ",
+        "BITX", "BITZ", "BRKX", "BRKZ", "ETH2", "ETHZ", "CONG",
+        # Income / thematic
+        "FEPI", "AIPI", "BMAX", "SIXJ", "BKCH", "BITC", "BTCL", "BTCZ",
+    }
+
+    def __init__(self, session: requests.Session | None = None):
+        self.session = session or _build_session()
+        self._cache: dict[str, ProviderResult] = {}
+
+    def supports_ticker(self, ticker: str, as_of: date) -> bool:
+        return ticker.upper() in self.KNOWN_TICKERS
+
+    @staticmethod
+    def _row_match(html: str, label: str) -> str | None:
+        m = re.search(
+            rf'>{re.escape(label)}</div>\s*<div[^>]*class="[^"]*t-data[^"]*"[^>]*>\s*([^<]+?)\s*</div>',
+            html, re.IGNORECASE | re.DOTALL,
+        )
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _to_float(s: str | None) -> float | None:
+        if not s:
+            return None
+        try:
+            return float(str(s).replace("$", "").replace(",", "").strip())
+        except Exception:
+            return None
+
+    def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
+        t = ticker.upper()
+        url = self.URL.format(t=t)
+        if t in self._cache:
+            cached = self._cache[t]
+            return ProviderResult(
+                date=as_of, ticker=t, nav=cached.nav, aum=cached.aum,
+                shares_outstanding=cached.shares_outstanding,
+                source_provider=self.name, source_url=cached.source_url,
+                status=cached.status, stale=cached.stale,
+                stale_age_bdays=cached.stale_age_bdays,
+            )
+        try:
+            r = _get(self.session, url)
+            if r.status_code != 200 or not r.text or "Fund Assets" not in r.text:
+                res = ProviderResult(as_of, ticker, None, None, None, self.name,
+                                     url + f"?status={r.status_code}", "missing")
+                self._cache[t] = res
+                return res
+            html = r.text
+            aum = self._to_float(self._row_match(html, "Fund Assets"))
+            shares_str = self._row_match(html, "Shares Outstanding")
+            shares = self._to_float(shares_str)
+            close = self._to_float(self._row_match(html, "Closing Price"))
+            as_of_str = self._row_match(html, "As of")
+
+            nav = None
+            if aum and shares and shares > 0:
+                nav = aum / shares
+            elif close:
+                nav = close
+
+            row_date = None
+            if as_of_str:
+                for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+                    try:
+                        row_date = datetime.strptime(as_of_str.strip(), fmt).date()
+                        break
+                    except Exception:
+                        continue
+
+            stale = False
+            age_b = None
+            if row_date and row_date != as_of:
+                stale = True
+                try:
+                    age_b = int(np.busday_count(str(row_date), str(as_of)))
+                except Exception:
+                    age_b = None
+
+            status = _classify_status(nav, aum, shares)
+            res = ProviderResult(
+                date=as_of, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
+                source_provider=self.name, source_url=url + f"#as_of={row_date}",
+                status=status, stale=stale, stale_age_bdays=age_b,
+            )
+            self._cache[t] = res
+            return res
+        except Exception as e:
+            res = ProviderResult(as_of, ticker, None, None, None, self.name,
+                                 url + f"?exc={type(e).__name__}", "missing")
+            self._cache[t] = res
+            return res
+
+
+# ---------------------------------------------------------------------------
+# 7) YFinance broad fallback
 # ---------------------------------------------------------------------------
 
 class YFinanceProvider:
@@ -596,12 +948,19 @@ class PolygonProvider:
 # ---------------------------------------------------------------------------
 
 def build_default_stack(session: requests.Session | None = None) -> list:
-    """Build the default provider stack (order matters: first success wins for 'ok')."""
+    """Build the default provider stack (order matters: first success wins for 'ok').
+
+    Issuer-authoritative providers run before YFinance/Polygon so leveraged/single-stock
+    ETF AUM and NAV come from the fund admins (matching the dashboard's exposure math).
+    """
     s = session or _build_session()
     return [
         TradrAxsProvider(s),
         ProSharesProvider(s),
         DirexionProvider(s),
+        RoundhillProvider(s),
+        YieldMaxProvider(s),
+        REXSharesProvider(s),
         YFinanceProvider(),
         PolygonProvider(s),
     ]

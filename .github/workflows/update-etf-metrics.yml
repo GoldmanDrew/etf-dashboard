@@ -2,9 +2,27 @@ name: Update ETF Metrics Daily
 
 on:
   schedule:
-    # 5:00 AM ET across DST transitions.
-    - cron: "0 9 * * 1-5"
-    - cron: "0 10 * * 1-5"
+    # Run Tue-Sat at 6:00 AM ET (handles both EDT and EST).
+    #   ET 6 AM = 10:00 UTC during EDT (Mar-Nov) / 11:00 UTC during EST (Nov-Mar)
+    #
+    # Schedule rationale (see README: docs/etf-metrics-freshness.md):
+    #   Trading day T's EOD metrics become available at these times:
+    #     - AXS / Tradr (NSDEAXS2.MMDDYYYY.csv)         : T   ~18:00 ET (same day)
+    #     - ProShares   (historical_nav.csv)           : T   ~21:00 ET (same day)
+    #     - Direxion    (per-ticker holdings CSV)      : T+1 ~05:00 ET
+    #     - Roundhill   (FilepointRoundhill DailyNAV)  : T   ~EOD    (same day)
+    #     - YieldMax    (HTML fund-info-table)         : T   ~EOD    (same day)
+    #     - REX Shares  (HTML fund-details table)      : T   ~EOD    (same day)
+    #     - Polygon     (v2/aggs/ticker)               : T+1 ~04:00 ET
+    #     - yfinance    (fast_info/info)               : T+1 morning
+    #
+    #   Running at T+1 06:00 ET means every provider has had at least 1 hour to publish.
+    #   Day-of-week set to 2-6 (Tue-Sat) so:
+    #     Tue -> Mon EOD,  Wed -> Tue EOD, Thu -> Wed EOD,
+    #     Fri -> Thu EOD,  Sat -> Fri EOD
+    #   Sunday and Monday are skipped (no new trading-day data since Friday's close).
+    - cron: "0 10 * * 2-6"
+    - cron: "0 11 * * 2-6"
   workflow_dispatch:
 
 permissions:
@@ -48,18 +66,26 @@ jobs:
             exit 1
           fi
 
-      - name: Skip duplicate DST slot
+      - name: Skip duplicate DST slot (run only at 6 AM ET Tue-Sat)
         if: ${{ github.event_name == 'schedule' }}
         run: |
-          ET_HOUR=$(python - <<'PY'
+          SLOT=$(python - <<'PY'
           from datetime import datetime
           import pytz
-          print(datetime.now(pytz.timezone("America/New_York")).hour)
+          now_et = datetime.now(pytz.timezone("America/New_York"))
+          # dow: Mon=0 ... Sun=6 ; we want Tue(1)..Sat(5)
+          print(f"{now_et.hour} {now_et.weekday()}")
           PY
           )
-          echo "Current ET hour: $ET_HOUR"
-          if [ "$ET_HOUR" != "5" ]; then
-            echo "Not 5 AM ET slot; exiting."
+          ET_HOUR=$(echo $SLOT | awk '{print $1}')
+          ET_DOW=$(echo $SLOT | awk '{print $2}')
+          echo "Current ET hour=$ET_HOUR weekday(0=Mon)=$ET_DOW"
+          if [ "$ET_HOUR" != "6" ]; then
+            echo "Not 6 AM ET slot; exiting."
+            exit 0
+          fi
+          if [ "$ET_DOW" -lt "1" ] || [ "$ET_DOW" -gt "5" ]; then
+            echo "Not a Tue-Sat run (weekday=$ET_DOW); exiting."
             exit 0
           fi
 

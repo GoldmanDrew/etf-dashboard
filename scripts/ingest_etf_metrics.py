@@ -3,12 +3,15 @@
 Ingest daily ETF NAV / AUM / Shares Outstanding metrics for the dashboard universe.
 
 Provider stack (tried per ticker, in order):
-  1) TradrAxsProvider   -- AXS / Tradr NSDEAXS2 + BBH_AXS_ETF_PVAL_WEB CSVs (authoritative)
-  2) ProSharesProvider  -- ProShares historical_nav.csv bulk file (authoritative)
-  3) DirexionProvider   -- Direxion per-ticker holdings CSV (authoritative; NAV = AUM/shares)
-  4) YFinanceProvider   -- Yahoo fast_info + info (broad fallback; covers YieldMax, GraniteShares,
-                           Defiance, Roundhill, REX, Tuttle, JPMorgan JEPI/JEPQ, Global X, etc.)
-  5) PolygonProvider    -- Polygon v2/aggs + v3/reference (last resort; reliable for close price)
+  1) TradrAxsProvider    -- AXS / Tradr NSDEAXS2 + BBH_AXS_ETF_PVAL_WEB CSVs (authoritative)
+  2) ProSharesProvider   -- ProShares historical_nav.csv bulk file (authoritative)
+  3) DirexionProvider    -- Direxion per-ticker holdings CSV (authoritative; NAV = AUM/shares)
+  4) RoundhillProvider   -- Roundhill FilepointRoundhill.40RU.RU_DailyNAV.csv bulk (authoritative)
+  5) YieldMaxProvider    -- per-ticker HTML scrape of yieldmaxetfs.com (authoritative)
+  6) REXSharesProvider   -- per-ticker HTML scrape of rexshares.com (authoritative; NAV=AUM/shares)
+  7) YFinanceProvider    -- Yahoo fast_info + info (broad fallback; covers GraniteShares,
+                            JPMorgan JEPI/JEPQ, Global X, NEOS, Innovator, Tuttle, etc.)
+  8) PolygonProvider     -- Polygon v2/aggs + v3/reference (last resort; reliable for close price)
 
 Row statuses:
   'ok'      -> all of (nav, aum, shares) present and positive
@@ -262,11 +265,18 @@ def save_outputs(df: pd.DataFrame) -> None:
             "rows": json_rows.to_dict("records"),
         }, f, separators=(",", ":"), allow_nan=False)
 
-    # Latest snapshot JSON
+    # Latest snapshot JSON.
+    # After dedup-style collapsing, a ticker's most-recent row may be older than
+    # the overall max date.  We take the newest row per ticker so every ticker
+    # is always represented in the latest snapshot.
     work = df.copy()
     work["date"] = pd.to_datetime(work["date"]).dt.date
     latest_date = work["date"].max() if not work.empty else None
-    latest_rows = work[work["date"] == latest_date] if latest_date is not None else work.iloc[0:0]
+    if not work.empty:
+        idx = work.groupby("ticker")["date"].idxmax()
+        latest_rows = work.loc[idx].sort_values("ticker").reset_index(drop=True)
+    else:
+        latest_rows = work.iloc[0:0]
     latest_rows_json = _sanitize_json_df(latest_rows)
     latest_map_json = {str(r["ticker"]).upper(): r.to_dict() for _, r in latest_rows_json.iterrows()}
     with open(LATEST_JSON_PATH, "w", encoding="utf-8") as f:
@@ -372,6 +382,7 @@ def ingest(
 
     from etf_providers import (
         TradrAxsProvider, ProSharesProvider, DirexionProvider,
+        RoundhillProvider, YieldMaxProvider, REXSharesProvider,
         YFinanceProvider, PolygonProvider,
     )
 
@@ -383,6 +394,13 @@ def ingest(
             "Single-day ingest: end=%s tradr_lookback=%d polygon_lookback=%d providers=%s",
             end_date, int(lookback_days), int(polygon_probe_days),
             [type(p).__name__ for p in providers],
+        )
+
+        # Providers that simply try end_date directly (bulk feeds or per-ticker HTML scrapes).
+        single_shot_types = (
+            ProSharesProvider, DirexionProvider,
+            RoundhillProvider, YieldMaxProvider, REXSharesProvider,
+            YFinanceProvider,
         )
 
         for t in tickers:
@@ -408,33 +426,6 @@ def ingest(
                                 best = picked
                                 break
 
-                    elif isinstance(provider, ProSharesProvider):
-                        if provider.supports_ticker(t, end_date):
-                            r = provider.fetch_for_date(t, end_date)
-                            r = _anchor(r, end_date)
-                            attempts.append(r)
-                            if r.status == "ok":
-                                best = r
-                                break
-
-                    elif isinstance(provider, DirexionProvider):
-                        if provider.supports_ticker(t, end_date):
-                            r = provider.fetch_for_date(t, end_date)
-                            r = _anchor(r, end_date)
-                            attempts.append(r)
-                            if r.status == "ok":
-                                best = r
-                                break
-
-                    elif isinstance(provider, YFinanceProvider):
-                        if provider.supports_ticker(t, end_date):
-                            r = provider.fetch_for_date(t, end_date)
-                            r = _anchor(r, end_date)
-                            attempts.append(r)
-                            if r.status == "ok":
-                                best = r
-                                break
-
                     elif isinstance(provider, PolygonProvider):
                         if provider.supports_ticker(t, end_date):
                             picked = None
@@ -451,6 +442,16 @@ def ingest(
                             if picked.status == "ok":
                                 best = picked
                                 break
+
+                    elif isinstance(provider, single_shot_types):
+                        if provider.supports_ticker(t, end_date):
+                            r = provider.fetch_for_date(t, end_date)
+                            r = _anchor(r, end_date)
+                            attempts.append(r)
+                            if r.status == "ok":
+                                best = r
+                                break
+
                     else:
                         if provider.supports_ticker(t, end_date):
                             r = provider.fetch_for_date(t, end_date)
@@ -505,6 +506,32 @@ def parse_date_arg(value: str | None) -> date | None:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+def previous_business_day(ref: date) -> date:
+    """Return the most recent US business day strictly earlier than ``ref``.
+
+    Used when the workflow runs at T+1 06:00 ET and we want rows stamped at the actual
+    trading day (T), not the run day. Business-day calendar matches np.busday_count's
+    default (Mon-Fri, no US holiday adjustments -- good enough for market-close stamping).
+    """
+    d = ref - timedelta(days=1)
+    while d.weekday() >= 5:  # 5=Sat, 6=Sun
+        d -= timedelta(days=1)
+    return d
+
+
+def resolve_ingest_end_date(ref: date | None = None) -> date:
+    """Pick the correct trading-day stamp for an automated run.
+
+    - If today is Mon-Fri (weekday 0..4): we run at T+1 06:00 ET for the PRIOR business day.
+    - If today is Sat (weekday 5): the run captures Fri EOD -> use yesterday.
+    - Sun (weekday 6) is not on the cron schedule, but if called manually we still return Fri.
+    """
+    ref = ref or date.today()
+    if ref.weekday() < 5 or ref.weekday() == 5:  # Mon-Sat
+        return previous_business_day(ref)
+    return previous_business_day(ref)  # Sun -> Fri
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest ETF NAV/AUM/Shares metrics for etf-dashboard.")
     parser.add_argument("--lookback-days", type=int, default=10)
@@ -525,16 +552,30 @@ def main() -> None:
     tickers = load_universe_tickers()
     LOGGER.info("Universe tickers: %d", len(tickers))
 
+    # Resolve end_date: CLI arg wins, else use previous business day (the data-date
+    # for a T+1 run). This keeps rows stamped on their actual trading day and avoids
+    # every row looking "stale" on a routine Tue-Sat run.
+    resolved_end_date = parse_date_arg(args.end_date) or resolve_ingest_end_date()
+    resolved_start_date = parse_date_arg(args.start_date) or resolved_end_date
+    LOGGER.info(
+        "Run target dates: start=%s end=%s (today=%s, resolved_as_prev_bday=%s)",
+        resolved_start_date, resolved_end_date, date.today(), parse_date_arg(args.end_date) is None,
+    )
+
     session = _build_session()
     # Build provider stack; let YFinance enable-flag honor CLI + env
     from etf_providers import (
         TradrAxsProvider, ProSharesProvider, DirexionProvider,
+        RoundhillProvider, YieldMaxProvider, REXSharesProvider,
         YFinanceProvider, PolygonProvider,
     )
     providers = [
         TradrAxsProvider(session),
         ProSharesProvider(session),
         DirexionProvider(session),
+        RoundhillProvider(session),
+        YieldMaxProvider(session),
+        REXSharesProvider(session),
         YFinanceProvider(enable=not args.disable_yfinance),
         PolygonProvider(session),
     ]
@@ -543,19 +584,18 @@ def main() -> None:
         tickers=tickers,
         lookback_days=args.lookback_days,
         polygon_lookback_days=args.polygon_lookback_days,
-        start_date=parse_date_arg(args.start_date),
-        end_date=parse_date_arg(args.end_date),
+        start_date=resolved_start_date,
+        end_date=resolved_end_date,
         providers=providers,
     )
     LOGGER.info("Incoming summary: %s", get_summary(incoming))
 
     existing = load_existing()
     max_stale_business_days = int(os.getenv("ETF_METRICS_MAX_STALE_BUSINESS_DAYS", "3"))
-    as_of_date = parse_date_arg(args.end_date) or date.today()
     incoming = apply_stale_carry_forward(
         existing=existing,
         incoming=incoming,
-        as_of_date=as_of_date,
+        as_of_date=resolved_end_date,
         max_stale_business_days=max_stale_business_days,
     )
     merged = upsert(existing, incoming)
