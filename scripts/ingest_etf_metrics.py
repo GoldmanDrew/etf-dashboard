@@ -9,9 +9,9 @@ Provider stack (tried per ticker, in order):
   4) RoundhillProvider   -- Roundhill FilepointRoundhill.40RU.RU_DailyNAV.csv bulk (authoritative)
   5) YieldMaxProvider    -- per-ticker HTML scrape of yieldmaxetfs.com (authoritative)
   6) REXSharesProvider   -- per-ticker HTML scrape of rexshares.com (authoritative; NAV=AUM/shares)
-  7) YFinanceProvider    -- Yahoo fast_info + info (broad fallback; covers GraniteShares,
-                            JPMorgan JEPI/JEPQ, Global X, NEOS, Innovator, Tuttle, etc.)
-  8) PolygonProvider     -- Polygon v2/aggs + v3/reference (last resort; reliable for close price)
+  7) GraniteSharesProvider -- graniteshares.com /product/{id}/ JSON (authoritative for Granite ETFs)
+  8) YFinanceProvider    -- Yahoo fast_info + info (broad fallback; JPMorgan JEPI/JEPQ, Global X, etc.)
+  9) PolygonProvider     -- Polygon v2/aggs + v3/reference (last resort; reliable for close price)
 
 Row statuses:
   'ok'      -> all of (nav, aum, shares) present and positive
@@ -39,6 +39,7 @@ from etf_providers import (
     ProviderResult,
     _build_session,
     build_default_stack,
+    merge_provider_attempts,
 )
 
 
@@ -348,22 +349,6 @@ def _anchor(res: ProviderResult, end_date: date) -> ProviderResult:
     return res
 
 
-def _best_of(results: list[ProviderResult], ticker: str, end_date: date) -> ProviderResult:
-    """Select the richest result among provider attempts (ok > partial > missing)."""
-    if not results:
-        return ProviderResult(end_date, ticker, None, None, None, "none", "none://no-providers", "missing")
-    rank = {"ok": 3, "partial": 2, "missing": 1}
-    results_sorted = sorted(
-        results,
-        key=lambda r: (rank.get(r.status, 0),
-                        1 if r.nav is not None else 0,
-                        1 if r.aum is not None else 0,
-                        1 if r.shares_outstanding is not None else 0),
-        reverse=True,
-    )
-    return results_sorted[0]
-
-
 def ingest(
     tickers: list[str],
     lookback_days: int = 10,
@@ -383,6 +368,7 @@ def ingest(
     from etf_providers import (
         TradrAxsProvider, ProSharesProvider, DirexionProvider,
         RoundhillProvider, YieldMaxProvider, REXSharesProvider,
+        GraniteSharesProvider,
         YFinanceProvider, PolygonProvider,
     )
 
@@ -400,6 +386,7 @@ def ingest(
         single_shot_types = (
             ProSharesProvider, DirexionProvider,
             RoundhillProvider, YieldMaxProvider, REXSharesProvider,
+            GraniteSharesProvider,
             YFinanceProvider,
         )
 
@@ -464,7 +451,7 @@ def ingest(
                     LOGGER.warning("provider=%s ticker=%s error=%s", type(provider).__name__, t, e)
                     continue
 
-            rows.append(best or _best_of(attempts, t, end_date))
+            rows.append(best or merge_provider_attempts(attempts, t, end_date))
 
     else:
         # Multi-day range: replay per-date using the same stack. Used rarely; keep simple.
@@ -482,7 +469,7 @@ def ingest(
                                 break
                     except Exception:
                         continue
-                rows.append(best or _best_of(attempts, t, d))
+                rows.append(best or merge_provider_attempts(attempts, t, d))
 
     out = _records_to_df(rows, ingested_at=datetime.now(UTC))
     out = enforce_status_consistency(out)
@@ -567,6 +554,7 @@ def main() -> None:
     from etf_providers import (
         TradrAxsProvider, ProSharesProvider, DirexionProvider,
         RoundhillProvider, YieldMaxProvider, REXSharesProvider,
+        GraniteSharesProvider,
         YFinanceProvider, PolygonProvider,
     )
     providers = [
@@ -576,6 +564,7 @@ def main() -> None:
         RoundhillProvider(session),
         YieldMaxProvider(session),
         REXSharesProvider(session),
+        GraniteSharesProvider(),
         YFinanceProvider(enable=not args.disable_yfinance),
         PolygonProvider(session),
     ]

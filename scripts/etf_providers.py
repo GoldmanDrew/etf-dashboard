@@ -8,8 +8,10 @@ Layered fetch strategy (per ticker, tried in order):
   4) Roundhill bulk FilepointRoundhill DailyNAV.csv (authoritative; covers all Roundhill ETFs)
   5) YieldMax per-ticker HTML scrape (authoritative; covers YieldMax option-income ETFs)
   6) REX Shares per-ticker HTML scrape (authoritative; covers T-REX / REX lineup)
-  7) YFinanceProvider (broad fallback via Yahoo Finance fast_info / info)
-  8) PolygonProvider (last-resort close + meta)
+  7) GraniteSharesProvider -- JSON from graniteshares.com /product/{id}/ (session + XHR; NAV/AUM;
+     shares = AUM/NAV when not in payload)
+  8) YFinanceProvider (broad fallback via Yahoo Finance fast_info / info)
+  9) PolygonProvider (last-resort close + meta)
 
 Each provider returns a ProviderResult with:
   nav, aum, shares_outstanding, source_provider, source_url, status, stale, stale_age_bdays
@@ -68,6 +70,91 @@ def _classify_status(nav, aum, shares) -> str:
     if has_nav or has_aum or has_shares:
         return "partial"
     return "missing"
+
+
+# When multiple providers each return partial rows (common for yfinance + polygon), pick each
+# field from the most authoritative source that has it, then derive the third from identity.
+PROVIDER_MERGE_PRIORITY: tuple[str, ...] = (
+    "tradr_axs",
+    "proshares",
+    "direxion",
+    "roundhill",
+    "yieldmax",
+    "rex_shares",
+    "granite_shares",
+    "yfinance",
+    "polygon",
+)
+
+
+def merge_provider_attempts(
+    attempts: list[ProviderResult],
+    ticker: str,
+    end_date: date,
+) -> ProviderResult:
+    """Combine non-null fields from all partial/ok attempts; prefer issuer feeds over Yahoo/Polygon."""
+    if not attempts:
+        return ProviderResult(
+            end_date, ticker, None, None, None, "none", "none://no-providers", "missing",
+        )
+    pri = {n: i for i, n in enumerate(PROVIDER_MERGE_PRIORITY)}
+    attempts_sorted = sorted(attempts, key=lambda r: pri.get(r.source_provider, 99))
+
+    def _pick_first_positive(attr: str) -> float | None:
+        for r in attempts_sorted:
+            v = getattr(r, attr)
+            if v is None or pd.isna(v):
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                return f
+        return None
+
+    nav = _pick_first_positive("nav")
+    aum = _pick_first_positive("aum")
+    shares = _pick_first_positive("shares_outstanding")
+
+    if (aum is None or aum <= 0) and nav and shares:
+        aum = float(nav * shares)
+    if (shares is None or shares <= 0) and aum and nav and float(nav) > 0:
+        shares = float(aum / nav)
+    if (nav is None or nav <= 0) and aum and shares and float(shares) > 0:
+        nav = float(aum / shares)
+
+    status = _classify_status(nav, aum, shares)
+
+    urls: list[str] = []
+    for r in attempts:
+        u = (r.source_url or "").strip()
+        if u and u not in urls:
+            urls.append(u)
+    source_url = "|".join(urls) if urls else "merged://"
+    if len(source_url) > 4000:
+        source_url = source_url[:3997] + "..."
+
+    stale = any(r.stale for r in attempts)
+    stale_age: int | None = None
+    for r in attempts:
+        if r.stale_age_bdays is not None:
+            stale_age = max(stale_age or 0, int(r.stale_age_bdays))
+    if not stale:
+        stale_age = None
+
+    return ProviderResult(
+        date=end_date,
+        ticker=ticker.upper(),
+        nav=nav,
+        aum=aum,
+        shares_outstanding=shares,
+        source_provider="merged",
+        source_url=source_url,
+        status=status,
+        stale=stale,
+        stale_age_bdays=stale_age,
+    )
 
 
 def _build_session(timeout_sec: int = 15) -> requests.Session:
@@ -760,7 +847,201 @@ class REXSharesProvider:
 
 
 # ---------------------------------------------------------------------------
-# 7) YFinance broad fallback
+# 7) GraniteShares (issuer JSON API behind session cookie)
+# ---------------------------------------------------------------------------
+
+class GraniteSharesProvider:
+    """
+    GraniteShares publishes NAV / AUM via JSON:
+        GET https://www.graniteshares.com/product/{productId}/en-us/
+
+    The endpoint returns ``application/json`` only after the same session has loaded any
+    page on graniteshares.com (sets the cookie the CDN expects). The public site embeds
+    product ids in ETF listing HTML; we resolve ``productId`` from ``/etfs/{slug}/``.
+
+    Shares outstanding are not always in the payload; we use ``shares = AUM / NAV`` when
+    both are present (same identity as other issuer-derived rows).
+    """
+
+    name = "granite_shares"
+    BASE = "https://www.graniteshares.com"
+
+    def __init__(self, session: requests.Session | None = None):
+        # ``session`` is ignored: GraniteShares' CDN serves full ETF markup only on the
+        # first HTTP request in a session to graniteshares.com. The shared ingest
+        # session may already have loaded another Granite ticker (slim shell), so each
+        # fetch uses a fresh session for the detail page + product JSON pair.
+        _ = session
+        self._catalog: set[str] | None = None
+        self._cache: dict[str, ProviderResult] = {}
+
+    def _load_catalog(self) -> None:
+        if self._catalog is not None:
+            return
+        self._catalog = set()
+        # Use a one-off request, not ``self.session``. The GraniteShares CDN returns a
+        # full HTML document on the first request in a session, but a slim shell (~360KB)
+        # on subsequent navigations—so loading /etfs/ on the same session as /etfs/{slug}/
+        # would strip the ETF table and break product-id extraction.
+        try:
+            r = _get(_build_session(), f"{self.BASE}/etfs/")
+            if r.status_code != 200 or not r.text:
+                LOGGER.warning("GraniteShares catalog fetch http=%s", r.status_code)
+                return
+            for m in re.finditer(r'href="/etfs/([a-z0-9.-]+)/"', r.text, re.I):
+                self._catalog.add(m.group(1).upper())
+            LOGGER.info("GraniteShares ETF catalog: %d symbols", len(self._catalog))
+        except Exception as e:
+            LOGGER.warning("GraniteShares catalog load failed: %s", e)
+
+    def supports_ticker(self, ticker: str, as_of: date) -> bool:
+        self._load_catalog()
+        return ticker.upper() in (self._catalog or set())
+
+    @staticmethod
+    def _slug_for_ticker(ticker: str) -> str:
+        return ticker.strip().lower()
+
+    @staticmethod
+    def _product_id_from_page(html: str, slug: str, ticker_upper: str) -> str | None:
+        m = re.search(
+            rf'data-id="(\d+)"[^>]*>\s*<a[^>]*href="/etfs/{re.escape(slug)}/"',
+            html,
+            re.I | re.DOTALL,
+        )
+        if m:
+            return m.group(1)
+        m2 = re.search(
+            rf'class="stocks-scrolling-ticker pId"\s+data-id="(\d+)"[\s\S]{{0,520}}?'
+            rf'{re.escape(ticker_upper)}</span>',
+            html,
+            re.I,
+        )
+        if m2:
+            return m2.group(1)
+        return None
+
+    @staticmethod
+    def _parse_nav_date(raw: object) -> date | None:
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            try:
+                return datetime.strptime(s[:10], "%Y-%m-%d").date()
+            except Exception:
+                return None
+        return None
+
+    def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
+        t = ticker.upper()
+        slug = self._slug_for_ticker(ticker)
+        page_url = f"{self.BASE}/etfs/{slug}/"
+        api_url = None
+
+        if t in self._cache:
+            cached = self._cache[t]
+            return ProviderResult(
+                date=as_of, ticker=t, nav=cached.nav, aum=cached.aum,
+                shares_outstanding=cached.shares_outstanding,
+                source_provider=self.name, source_url=cached.source_url,
+                status=cached.status, stale=cached.stale,
+                stale_age_bdays=cached.stale_age_bdays,
+            )
+
+        try:
+            sess = _build_session()
+            # First request on ``sess`` is always the ETF page, then the product JSON on
+            # the same session (cookie gate for application/json on /product/...).
+            pr = _get(sess, page_url, extra_headers={"Referer": f"{self.BASE}/etfs/"})
+            if pr.status_code != 200 or not pr.text:
+                res = ProviderResult(
+                    as_of, ticker, None, None, None, self.name,
+                    page_url + f"?status={pr.status_code}", "missing",
+                )
+                self._cache[t] = res
+                return res
+
+            product_id = self._product_id_from_page(pr.text, slug, t)
+            if not product_id:
+                res = ProviderResult(as_of, ticker, None, None, None, self.name, page_url + "?err=no-product-id", "missing")
+                self._cache[t] = res
+                return res
+
+            api_url = f"{self.BASE}/product/{product_id}/en-us/"
+            jr = sess.get(
+                api_url,
+                timeout=getattr(sess, "timeout_sec", 15),
+                headers={
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": page_url,
+                },
+            )
+            if jr.status_code != 200 or not jr.text:
+                res = ProviderResult(
+                    as_of, ticker, None, None, None, self.name,
+                    api_url + f"?status={jr.status_code}", "missing",
+                )
+                self._cache[t] = res
+                return res
+            ctype = jr.headers.get("content-type", "")
+            if "application/json" not in ctype:
+                res = ProviderResult(as_of, ticker, None, None, None, self.name, api_url + "?err=not-json", "missing")
+                self._cache[t] = res
+                return res
+
+            try:
+                payload = jr.json()
+            except ValueError:
+                res = ProviderResult(as_of, ticker, None, None, None, self.name, api_url + "?err=json", "missing")
+                self._cache[t] = res
+                return res
+
+            nav = pd.to_numeric(payload.get("Nav"), errors="coerce")
+            close_px = pd.to_numeric(payload.get("ClosingPrice"), errors="coerce")
+            if pd.isna(nav) or float(nav) <= 0:
+                nav = close_px
+            aum = pd.to_numeric(payload.get("AUM"), errors="coerce")
+
+            nav_f = float(nav) if pd.notna(nav) and float(nav) > 0 else None
+            aum_f = float(aum) if pd.notna(aum) and float(aum) > 0 else None
+
+            shares_f: float | None = None
+            if nav_f and aum_f and nav_f > 0:
+                shares_f = float(aum_f / nav_f)
+
+            nav_date = self._parse_nav_date(payload.get("NavDate"))
+            stale = False
+            age_b = None
+            if nav_date and nav_date != as_of:
+                stale = True
+                try:
+                    age_b = int(np.busday_count(str(nav_date), str(as_of)))
+                except Exception:
+                    age_b = None
+
+            status = _classify_status(nav_f, aum_f, shares_f)
+            res = ProviderResult(
+                date=as_of, ticker=t,
+                nav=nav_f, aum=aum_f, shares_outstanding=shares_f,
+                source_provider=self.name,
+                source_url=api_url + f"#nav_date={nav_date}",
+                status=status, stale=stale, stale_age_bdays=age_b,
+            )
+            self._cache[t] = res
+            return res
+        except Exception as e:
+            res = ProviderResult(
+                as_of, ticker, None, None, None, self.name,
+                (api_url or page_url) + f"?exc={type(e).__name__}", "missing",
+            )
+            self._cache[t] = res
+            return res
+
+
+# ---------------------------------------------------------------------------
+# 8) YFinance broad fallback
 # ---------------------------------------------------------------------------
 
 class YFinanceProvider:
@@ -889,7 +1170,10 @@ class PolygonProvider:
                 return self._meta_cache[key]
             data = r.json() if r.text else {}
             res = data.get("results") or {}
-            shares = pd.to_numeric(res.get("weighted_shares_outstanding"), errors="coerce")
+            wo = res.get("weighted_shares_outstanding")
+            sc = res.get("share_class_shares_outstanding")
+            shares_raw = wo if wo not in (None, "") else sc
+            shares = pd.to_numeric(shares_raw, errors="coerce")
             mcap = pd.to_numeric(res.get("market_cap"), errors="coerce")
             s = float(shares) if pd.notna(shares) and shares > 0 else None
             m = float(mcap) if pd.notna(mcap) and mcap > 0 else None
@@ -961,6 +1245,7 @@ def build_default_stack(session: requests.Session | None = None) -> list:
         RoundhillProvider(s),
         YieldMaxProvider(s),
         REXSharesProvider(s),
+        GraniteSharesProvider(),
         YFinanceProvider(),
         PolygonProvider(s),
     ]
