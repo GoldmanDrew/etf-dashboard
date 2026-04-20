@@ -44,6 +44,10 @@ jobs:
       ETF_METRICS_HTTP_RETRY_TOTAL: "3"
       ETF_METRICS_HTTP_RETRY_BACKOFF: "0.5"
       ETF_METRICS_MAX_STALE_BUSINESS_DAYS: "3"
+      # Scheduled runs only: skip a full re-pull if we already ingested the target trading day
+      # for the full universe within this many hours (avoids duplicate work when cron overlaps
+      # or Actions retries). Manual workflow_dispatch sets 0 via the expression below.
+      ETF_METRICS_SKIP_IF_RECENT_HOURS: ${{ github.event_name == 'schedule' && '8' || '0' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

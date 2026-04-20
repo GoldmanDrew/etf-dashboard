@@ -20,6 +20,12 @@ Row statuses:
 
 Every ticker ends up with exactly one row stamped at ``end_date`` in single-day mode; results
 sourced from an earlier date are flagged ``stale=True`` with ``stale_age_bdays``.
+
+After each merge, ``collapse_redundant_consecutive_rows`` drops calendar days where
+(nav, aum, shares_outstanding) match the prior kept row for that ticker—removing flat
+runs caused by repeat jobs before issuers publish new figures. Scheduled GitHub Actions
+runs can skip a full re-fetch when ``ETF_METRICS_SKIP_IF_RECENT_HOURS`` is set and the
+last ingest for the target date was recent (see workflow env).
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -175,6 +182,51 @@ def load_existing(parquet_path: Path = PARQUET_PATH) -> pd.DataFrame:
     if CSV_PATH.exists():
         return pd.read_csv(CSV_PATH)
     return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+
+def _metric_triple_equal(a, b) -> bool:
+    """Compare nav/aum/shares for redundancy; NaN matches NaN; floats use isclose."""
+    if a is None and b is None:
+        return True
+    try:
+        fa, fb = float(a), float(b)
+        if math.isnan(fa) and math.isnan(fb):
+            return True
+        if math.isnan(fa) or math.isnan(fb):
+            return False
+        return math.isclose(fa, fb, rel_tol=1e-9, abs_tol=1e-6)
+    except (TypeError, ValueError):
+        return a == b
+
+
+def collapse_redundant_consecutive_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Drop consecutive calendar rows per ticker when (nav, aum, shares) are unchanged.
+
+    Multiple scheduler or manual runs can re-ingest the same issuer figures for a new
+    stamped date even when public feeds have not updated, producing flat stretches of
+    identical triples. Removing interior duplicates keeps history compact without losing
+    the first date a value appeared or real step-changes.
+    """
+    if df.empty:
+        return df, 0
+    work = df.copy()
+    work["date"] = pd.to_datetime(work["date"], errors="coerce").dt.date
+    work = work.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+    keep_mask = [True] * len(work)
+    last_triple_by_ticker: dict[str, tuple] = {}
+    for i, row in work.iterrows():
+        t = str(row["ticker"]).upper()
+        triple = (row.get("nav"), row.get("aum"), row.get("shares_outstanding"))
+        prev = last_triple_by_ticker.get(t)
+        if prev is not None and all(_metric_triple_equal(a, b) for a, b in zip(prev, triple)):
+            keep_mask[i] = False
+        else:
+            last_triple_by_ticker[t] = triple
+
+    cleaned = work.loc[keep_mask].reset_index(drop=True)
+    dropped = int(sum(1 for k in keep_mask if not k))
+    return cleaned, dropped
 
 
 def upsert(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
@@ -506,6 +558,51 @@ def previous_business_day(ref: date) -> date:
     return d
 
 
+def should_skip_scheduled_redundant_ingest(
+    existing: pd.DataFrame,
+    tickers: list[str],
+    end_date: date,
+) -> bool:
+    """If we just fully ingested ``end_date`` for the whole universe, skip a repeat scheduled run.
+
+    Issuer sites and Yahoo rarely change between duplicate pipeline triggers; re-pulling only
+    refreshes ``ingested_at_utc`` and can add redundant consecutive days after merge.  Manual
+    ``workflow_dispatch`` runs are never skipped (``GITHUB_EVENT_NAME`` != ``schedule``).
+
+    Set ``ETF_METRICS_SKIP_IF_RECENT_HOURS=0`` (default) to disable.
+    """
+    hours = int(os.getenv("ETF_METRICS_SKIP_IF_RECENT_HOURS", "0"))
+    if hours <= 0:
+        return False
+    if os.getenv("GITHUB_EVENT_NAME", "") != "schedule":
+        return False
+    if existing.empty:
+        return False
+    need = {t.upper() for t in tickers}
+    sub = existing.copy()
+    sub["date"] = pd.to_datetime(sub["date"], errors="coerce").dt.date
+    sub = sub[sub["date"] == end_date]
+    have = set(sub["ticker"].astype(str).str.upper())
+    if have != need:
+        return False
+    ing = pd.to_datetime(sub["ingested_at_utc"], errors="coerce", utc=True)
+    if ing.isna().all():
+        return False
+    latest = ing.max()
+    if pd.isna(latest):
+        return False
+    age_sec = (pd.Timestamp.now(tz=UTC) - latest).total_seconds()
+    if age_sec > hours * 3600:
+        return False
+    LOGGER.info(
+        "Skipping ingest: scheduled run within %dh of last full snapshot for %s (latest ingested %s)",
+        hours,
+        end_date,
+        latest,
+    )
+    return True
+
+
 def resolve_ingest_end_date(ref: date | None = None) -> date:
     """Pick the correct trading-day stamp for an automated run.
 
@@ -549,6 +646,11 @@ def main() -> None:
         resolved_start_date, resolved_end_date, date.today(), parse_date_arg(args.end_date) is None,
     )
 
+    existing = load_existing()
+    if should_skip_scheduled_redundant_ingest(existing, tickers, resolved_end_date):
+        LOGGER.info("Exiting without network ingest (redundant scheduled run).")
+        return
+
     session = _build_session()
     # Build provider stack; let YFinance enable-flag honor CLI + env
     from etf_providers import (
@@ -579,7 +681,6 @@ def main() -> None:
     )
     LOGGER.info("Incoming summary: %s", get_summary(incoming))
 
-    existing = load_existing()
     max_stale_business_days = int(os.getenv("ETF_METRICS_MAX_STALE_BUSINESS_DAYS", "3"))
     incoming = apply_stale_carry_forward(
         existing=existing,
@@ -588,6 +689,9 @@ def main() -> None:
         max_stale_business_days=max_stale_business_days,
     )
     merged = upsert(existing, incoming)
+    merged, n_collapse = collapse_redundant_consecutive_rows(merged)
+    if n_collapse:
+        LOGGER.info("Collapsed %d redundant consecutive (nav,aum,shares) rows", n_collapse)
     validate_df(merged)
     save_outputs(merged)
     LOGGER.info("Saved merged summary: %s", get_summary(merged))
