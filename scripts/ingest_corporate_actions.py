@@ -18,14 +18,33 @@ from ~900 ticker-by-ticker calls to ~15-30 paginated bulk calls, which comfortab
 fits the GitHub Actions timeout.
 
 Pipeline phases:
-    phase_1_splits       -- Polygon /v3/reference/splits bulk sweep (date-windowed),
-                            filtered to our universe client-side
-    phase_2_delistings   -- Polygon /v3/reference/tickers?active=false bulk sweep
-    phase_3_news         -- Polygon /v2/reference/news bulk sweep (date-windowed),
-                            capped by page budget; each article's tickers[] array is
-                            intersected with our universe and regex-classified
-    merge / dedupe       -- attach linked_event_id, collapse duplicate headlines
-    persist              -- write both JSON files
+    phase_1_splits          -- Polygon /v3/reference/splits bulk sweep (date-windowed),
+                               filtered to our universe client-side
+    phase_2_delistings      -- Polygon /v3/reference/tickers?active=false bulk sweep,
+                               intersected with the **ever-known** universe so
+                               already-delisted ETFs (which are gone from the
+                               screener) still match
+    phase_3_news            -- Polygon /v2/reference/news bulk sweep (date-windowed),
+                               capped by page budget; each article's tickers[] array is
+                               intersected with our universe and regex-classified
+    phase_4_symbol_changes  -- Per-ticker /vX/reference/tickers/{t}/events?types=
+                               ticker_change sweep for current universe +
+                               underlyings + ever-known universe.  Caches responses
+                               per ticker on disk with a configurable TTL so the
+                               daily sweep is cheap even on free-tier Polygon.
+                               Emits a ticker_alias_map.json side-output.
+    phase_5_google_news     -- Google News RSS sweep (no API key) for issuer
+                               press-release coverage of *announced but not yet
+                               executed* liquidations / renames / splits.
+                               Synthesizes ``status="pending"`` CorporateEvents
+                               whose ids match Polygon's format, so once Polygon
+                               confirms the event the two records merge cleanly.
+    merge / dedupe          -- status-aware: executed beats pending, missing fields
+                               back-fill across records; attach linked_event_id,
+                               collapse duplicate headlines
+    persist                 -- write corporate_actions.json, etf_news.json,
+                               polygon_ticker_events_cache.json,
+                               ticker_alias_map.json
 
 Run manually::
 
@@ -65,6 +84,15 @@ METRICS_PARQUET = DATA_DIR / "etf_metrics_daily.parquet"
 METRICS_CSV = DATA_DIR / "etf_metrics_daily.csv"
 OUT_EVENTS = DATA_DIR / "corporate_actions.json"
 OUT_NEWS = DATA_DIR / "etf_news.json"
+# Phase 4: per-ticker Polygon /vX/reference/tickers/{t}/events cache (TTL in
+# days, default 14) so the daily run doesn't re-query every ticker.  The cache
+# is checked into git alongside the other artifacts — its size is bounded by
+# the ever-known universe (~450 tickers × a few events each ≈ tens of KB).
+TICKER_EVENTS_CACHE_PATH = DATA_DIR / "polygon_ticker_events_cache.json"
+# Stable alias map derived from accumulated symbol_change events: {old: {"new":..., "effective_date":...}}.
+# Downstream consumers (universe normalizers, chart deep-links, future chains
+# across multiple renames) can read this without re-parsing every event record.
+TICKER_ALIAS_MAP_PATH = DATA_DIR / "ticker_alias_map.json"
 
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY") or os.getenv("POLYGON_IO_API_KEY") or ""
 HTTP_TIMEOUT_SEC = int(os.getenv("ETF_METRICS_HTTP_TIMEOUT_SEC", "30"))
@@ -77,6 +105,20 @@ NEWS_PAGE_LIMIT = int(os.getenv("CORP_ACTIONS_NEWS_PAGE_LIMIT", "1000"))
 NEWS_MAX_PAGES = int(os.getenv("CORP_ACTIONS_NEWS_MAX_PAGES", "25"))
 SPLITS_MAX_PAGES = int(os.getenv("CORP_ACTIONS_SPLITS_MAX_PAGES", "10"))
 DELISTINGS_MAX_PAGES = int(os.getenv("CORP_ACTIONS_DELISTINGS_MAX_PAGES", "10"))
+# Phase 4 (symbol changes) config.  Lookback is long (default 540d) so renames
+# that happened before the next refresh still surface during the initial
+# backfill period.  Cache TTL controls per-ticker re-query cadence.
+SYMBOL_CHANGE_LOOKBACK_DAYS = int(os.getenv("CORP_ACTIONS_SYMBOL_CHANGE_LOOKBACK_DAYS", "540"))
+TICKER_EVENTS_CACHE_TTL_DAYS = int(os.getenv("CORP_ACTIONS_TICKER_EVENTS_CACHE_TTL_DAYS", "14"))
+# Hard ceiling on per-ticker calls we'll make in one run.  On the free tier
+# (5/min) an unbounded initial sweep would take 100+ min and blow the workflow
+# timeout.  Cache rollover across multiple runs lets us backfill over a few days.
+SYMBOL_CHANGE_MAX_CALLS_PER_RUN = int(os.getenv("CORP_ACTIONS_SYMBOL_CHANGE_MAX_CALLS", "120"))
+# Phase 5 (Google News RSS) config.  Independent of Polygon rate limits.  Set
+# CORP_ACTIONS_ENABLE_GOOGLE_NEWS=0 to skip (e.g. if Google throttles a runner).
+ENABLE_GOOGLE_NEWS = os.getenv("CORP_ACTIONS_ENABLE_GOOGLE_NEWS", "1") not in {"0", "false", "False", ""}
+GOOGLE_NEWS_MAX_ARTICLES_PER_QUERY = int(os.getenv("CORP_ACTIONS_GOOGLE_NEWS_MAX_PER_QUERY", "100"))
+GOOGLE_NEWS_WINDOW_DAYS = int(os.getenv("CORP_ACTIONS_GOOGLE_NEWS_WINDOW_DAYS", "45"))
 # Polygon tier rate limit (req/min). Defaults to the free-tier cap of 5 so the
 # script is safe on basic plans out-of-the-box. Bump via env for paid tiers:
 #   Starter=100, Developer/Advanced=600+.
@@ -112,7 +154,21 @@ CATEGORY_PRIORITY = {
 
 @dataclass
 class CorporateEvent:
-    """Structured corporate-action event.  Surfaced in the pinned strip."""
+    """Structured corporate-action event.  Surfaced in the pinned strip.
+
+    Status semantics:
+
+    * ``executed``  — event has happened (Polygon confirms delisting / split
+      executed / ticker change completed).
+    * ``pending``   — event announced but not yet executed (source is an issuer
+      press-release, Google News RSS, SEC filing, etc.).  Rendered with an
+      "Announced" pill on the frontend so users can plan around the upcoming
+      date.  Once the event actually fires, a subsequent run promotes the row
+      to ``executed`` by id-merge in :func:`dedupe_events`.
+
+    ``prior_ticker`` is populated for ``symbol_change`` events (e.g. BITF → KEEL
+    stores ``prior_ticker="BITF"`` alongside ``ticker="KEEL"``).
+    """
 
     id: str
     type: str
@@ -129,6 +185,7 @@ class CorporateEvent:
     underlying: str | None = None
     headline: str | None = None
     summary: str | None = None
+    prior_ticker: str | None = None
 
 
 @dataclass
@@ -240,13 +297,13 @@ def load_ever_known_universe(current_universe: set[str]) -> set[str]:
     return out
 
 
-def load_prior_delistings() -> dict[str, CorporateEvent]:
-    """Return ``{event_id: CorporateEvent}`` for every delisting already recorded.
+def _load_prior_events_of_type(event_type: str) -> dict[str, CorporateEvent]:
+    """Return ``{event_id: CorporateEvent}`` for every prior event matching ``event_type``.
 
-    Delistings are immutable once confirmed: a fund that wound down last month
-    should not vanish from the feed just because Polygon's paginated
-    ``active=false`` sweep rotated it out of the top 10 pages.  We merge these
-    into every run's output so the delistings grow monotonically.
+    Shared helper for types that are considered immutable once seen (delistings,
+    symbol_changes).  The merge happens upstream in ``main()`` via
+    :func:`dedupe_events`, which promotes pending→executed and back-fills any
+    missing fields.
     """
     out: dict[str, CorporateEvent] = {}
     if not OUT_EVENTS.exists():
@@ -254,18 +311,26 @@ def load_prior_delistings() -> dict[str, CorporateEvent]:
     try:
         payload = json.loads(OUT_EVENTS.read_text(encoding="utf-8"))
     except Exception as e:  # noqa: BLE001
-        LOGGER.warning("prior delistings: could not read %s (%s)", OUT_EVENTS, e)
+        LOGGER.warning("prior events (%s): could not read %s (%s)", event_type, OUT_EVENTS, e)
         return out
+    fields = set(CorporateEvent.__dataclass_fields__.keys())
     for raw in payload.get("events") or []:
-        if raw.get("type") != "delisting":
+        if raw.get("type") != event_type:
             continue
         try:
-            ev = CorporateEvent(**{k: raw.get(k) for k in CorporateEvent.__dataclass_fields__.keys()})
+            # Tolerate legacy rows written before new fields existed.
+            kwargs = {k: raw.get(k) for k in fields}
+            ev = CorporateEvent(**kwargs)
         except Exception:  # noqa: BLE001
             continue
         if ev.id:
             out[ev.id] = ev
     return out
+
+
+def load_prior_delistings() -> dict[str, CorporateEvent]:
+    """Back-compat wrapper around :func:`_load_prior_events_of_type`."""
+    return _load_prior_events_of_type("delisting")
 
 
 # ---------------------------------------------------------------------------
@@ -770,19 +835,555 @@ def phase_3_news(
 
 
 # ---------------------------------------------------------------------------
+# Phase 4 - symbol changes (per-ticker Polygon events, cached)
+# ---------------------------------------------------------------------------
+
+def _load_ticker_events_cache() -> dict:
+    """Return ``{ticker: {"fetched_at":iso, "events":[...]}}`` from disk.
+
+    Missing file or malformed JSON yields an empty dict — the sweep will just
+    re-populate it on this run.
+    """
+    if not TICKER_EVENTS_CACHE_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(TICKER_EVENTS_CACHE_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("ticker-events cache: corrupt (%s); starting fresh", e)
+        return {}
+
+
+def _save_ticker_events_cache(cache: dict) -> None:
+    TICKER_EVENTS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TICKER_EVENTS_CACHE_PATH.write_text(
+        json.dumps(cache, separators=(",", ":"), sort_keys=True, allow_nan=False),
+        encoding="utf-8",
+    )
+
+
+def _cache_is_fresh(entry: dict | None, ttl_days: int) -> bool:
+    if not entry:
+        return False
+    stamp = entry.get("fetched_at")
+    if not stamp:
+        return False
+    try:
+        then = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (datetime.now(UTC) - then) < timedelta(days=ttl_days)
+
+
+def _fetch_ticker_events(session: requests.Session, ticker: str) -> list[dict]:
+    """Call Polygon /vX/reference/tickers/{t}/events?types=ticker_change.
+
+    Returns the ``events`` array (possibly empty) or an empty list on any error.
+    The endpoint resolves both the old and new symbol back to the same FIGI, so
+    querying by either side of a rename surfaces the full chain.
+    """
+    url = f"https://api.polygon.io/vX/reference/tickers/{ticker}/events"
+    payload = _polygon_get(session, url, {"types": "ticker_change"})
+    if not payload:
+        return []
+    # Polygon wraps the result in results.events; be defensive about both shapes.
+    results = payload.get("results") or {}
+    if isinstance(results, list):
+        return [r for r in results if isinstance(r, dict)]
+    events = results.get("events") if isinstance(results, dict) else None
+    if isinstance(events, list):
+        return [e for e in events if isinstance(e, dict)]
+    return []
+
+
+def phase_4_symbol_changes(
+    session: requests.Session,
+    current_universe: set[str],
+    underlyings: set[str],
+    ever_known: set[str],
+    bucket_map: dict[str, str | None],
+    underlying_map: dict[str, str | None],
+) -> tuple[list[CorporateEvent], dict[str, dict[str, str]]]:
+    """Per-ticker Polygon ticker_change sweep with on-disk caching.
+
+    Query budget: the free-tier Polygon cap (5/min) makes a full 480-ticker
+    sweep take ~100 min, which exceeds the GitHub Actions timeout if run every
+    6h.  We therefore:
+
+      1. prefer cached entries that are younger than
+         ``TICKER_EVENTS_CACHE_TTL_DAYS`` (default 14d) — these are free,
+      2. fetch the stalest/never-seen tickers first, and
+      3. hard-cap the network calls at ``SYMBOL_CHANGE_MAX_CALLS_PER_RUN``
+         (default 120) per invocation, so the initial backfill spreads over
+         a handful of daily runs but we never blow the timeout.
+
+    Returns ``(events, alias_map)``.  ``alias_map`` is the accumulated
+    ``{old: {"new":..., "effective_date":...}}`` persisted to
+    :data:`TICKER_ALIAS_MAP_PATH`.
+    """
+    cache = _load_ticker_events_cache()
+    now_iso = datetime.now(UTC).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=SYMBOL_CHANGE_LOOKBACK_DAYS)).date().isoformat()
+
+    # Query order: current universe first (most likely to be relevant to
+    # today's screener), then current underlyings (catches BITF→KEEL-style
+    # renames where the underlying is what rebranded, not the ETF), then
+    # anything else we've ever seen.  Within each tier, prefer the stalest.
+    tier_current = [t for t in sorted(current_universe) if t]
+    tier_underlyings = [t for t in sorted(underlyings) if t and t not in current_universe]
+    tier_historic = [t for t in sorted(ever_known) if t and t not in current_universe and t not in underlyings]
+    ordered_tickers = tier_current + tier_underlyings + tier_historic
+
+    def _staleness_key(t: str) -> tuple[int, str]:
+        ent = cache.get(t)
+        if not ent:
+            return (0, t)  # never seen → highest priority
+        return (1, str(ent.get("fetched_at") or ""))
+
+    ordered_tickers.sort(key=_staleness_key)
+
+    calls_made = 0
+    cache_hits = 0
+    new_events: list[CorporateEvent] = []
+    alias_map: dict[str, dict[str, str]] = {}
+    if TICKER_ALIAS_MAP_PATH.exists():
+        try:
+            alias_map = json.loads(TICKER_ALIAS_MAP_PATH.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            alias_map = {}
+
+    for t in ordered_tickers:
+        cached = cache.get(t)
+        if _cache_is_fresh(cached, TICKER_EVENTS_CACHE_TTL_DAYS):
+            events_raw = cached.get("events") or []
+            cache_hits += 1
+        else:
+            if calls_made >= SYMBOL_CHANGE_MAX_CALLS_PER_RUN:
+                # Out of call budget for this run; stale entries will refresh
+                # on the next invocation.  Still use them if we have them.
+                if cached:
+                    events_raw = cached.get("events") or []
+                else:
+                    continue
+            else:
+                events_raw = _fetch_ticker_events(session, t)
+                cache[t] = {"fetched_at": now_iso, "events": events_raw}
+                calls_made += 1
+
+        for ev in events_raw:
+            if (ev.get("type") or "").lower() != "ticker_change":
+                continue
+            change = ev.get("ticker_change") or {}
+            new_sym = _norm(change.get("ticker") or "")
+            # Polygon's event model: `ticker_change.ticker` is the NEW symbol
+            # after the rename; the queried ticker `t` is the OLD symbol when
+            # the event pre-dates the rename, or vice-versa if we queried by
+            # the new symbol.  Use composite_figi / date heuristics below to
+            # disambiguate; for now store both sides and let dedupe_events
+            # collapse duplicates when we eventually query the other side.
+            date = ev.get("date")
+            if not date or not new_sym:
+                continue
+            if str(date) < cutoff:
+                continue
+            old_sym = t if new_sym != t else _norm(ev.get("previous_ticker") or "")
+            if not old_sym or old_sym == new_sym:
+                continue
+
+            event_id = f"polygon_symchange:{old_sym}:{new_sym}:{date}"
+            headline = f"{old_sym} → {new_sym} effective {date}"
+            summary = (
+                f"Polygon ticker-change event: {old_sym} was renamed to {new_sym} "
+                f"on {date}.  Downstream trades, chart deep-links, and borrow lookups "
+                f"should be migrated to the new symbol."
+            )
+            new_events.append(
+                CorporateEvent(
+                    id=event_id,
+                    type="symbol_change",
+                    ticker=new_sym,
+                    execution_date=str(date),
+                    announcement_date=None,
+                    status="executed",
+                    source="polygon",
+                    source_url=f"https://polygon.io/stocks/{new_sym}",
+                    bucket=bucket_map.get(new_sym) or bucket_map.get(old_sym),
+                    underlying=underlying_map.get(new_sym) or underlying_map.get(old_sym),
+                    headline=headline,
+                    summary=summary,
+                    prior_ticker=old_sym,
+                )
+            )
+            # Accumulate alias: only overwrite if the new record is newer.
+            prev_alias = alias_map.get(old_sym) or {}
+            if str(date) > (prev_alias.get("effective_date") or ""):
+                alias_map[old_sym] = {"new": new_sym, "effective_date": str(date)}
+
+    _save_ticker_events_cache(cache)
+    TICKER_ALIAS_MAP_PATH.write_text(
+        json.dumps(alias_map, separators=(",", ":"), sort_keys=True, allow_nan=False),
+        encoding="utf-8",
+    )
+
+    LOGGER.info(
+        "symbol_changes: scanned=%d cache_hits=%d calls_made=%d new_events=%d (cap=%d)",
+        len(ordered_tickers),
+        cache_hits,
+        calls_made,
+        len(new_events),
+        SYMBOL_CHANGE_MAX_CALLS_PER_RUN,
+    )
+    return new_events, alias_map
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 - Google News RSS sweep (announced liquidations + renames)
+# ---------------------------------------------------------------------------
+
+# Queries to run against Google News RSS.  Each is mapped to a canonical event
+# type so we can synthesize pending CorporateEvents straight from Google News.
+GOOGLE_NEWS_QUERIES: list[tuple[str, str]] = [
+    ('"ETF" "plan of liquidation"', "delisting"),
+    ('"ETF" "to liquidate"', "delisting"),
+    ('"ETF" "cease trading"', "delisting"),
+    ('"ETF" "wind down"', "delisting"),
+    ('"ETF" "fund termination"', "delisting"),
+    ('"ETF" "fund closure"', "delisting"),
+    ('"ETF" "ticker change"', "symbol_change"),
+    ('"ETF" "symbol change"', "symbol_change"),
+    ('"ETF" "reverse split"', "reverse_split"),
+    ('"ETF" "stock split"', "forward_split"),
+]
+
+# Regex to extract ticker candidates from a news title or summary.  We bias
+# toward 3-5 uppercase letters with a word boundary to avoid matching generic
+# words like "ETF" itself (which would collide with a ticker of the same name).
+_TICKER_CANDIDATE_RE = re.compile(r"(?<![A-Z0-9])([A-Z]{2,5})(?![a-z])")
+
+# Words that look like tickers but are actually English/finance noise.  Not
+# exhaustive — the universe-intersection downstream does the heavy lifting.
+_TICKER_STOPWORDS = {
+    "ETF", "ETFS", "NAV", "AUM", "USD", "USA", "CEO", "CFO", "SEC", "IRS",
+    "API", "PDF", "CSV", "JSON", "RSS", "NYC", "NY", "LA", "FDIC", "SIPC",
+    "NYSE", "NASDAQ", "AMEX", "BATS", "ARCA", "IPO", "NAV", "OTC", "PR",
+    "LLC", "INC", "LTD", "CORP", "LP", "FUND", "TRUST", "PLAN", "NEW",
+    "OLD", "DAILY", "WEEKLY", "YEAR", "DAY", "END", "MAX", "MIN", "ALL",
+    "ANY", "THE", "AND", "FOR", "YET", "NOT", "ARE", "BUT", "HAS", "WAS",
+    "WILL", "WERE", "BEEN", "HAVE", "WITH", "THAT", "THIS", "THAN", "FROM",
+    "INTO", "OVER", "UNTO", "UPON", "SELL", "BUY", "LONG", "SHORT",
+}
+
+
+_EXECUTION_DATE_RE = re.compile(
+    r"(?:on|effective(?:\s+as\s+of)?|by)\s+"
+    r"(?P<month>January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"\s+(?P<day>\d{1,2}),?\s+(?P<year>20\d{2})",
+    re.IGNORECASE,
+)
+_MONTH_LOOKUP = {m.lower(): i for i, m in enumerate(
+    ["January","February","March","April","May","June","July","August","September","October","November","December"],
+    start=1,
+)}
+
+
+def _extract_execution_date(text: str) -> str | None:
+    m = _EXECUTION_DATE_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        mon = _MONTH_LOOKUP[m.group("month").lower()]
+        return f"{int(m.group('year')):04d}-{mon:02d}-{int(m.group('day')):02d}"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _extract_candidate_tickers(text: str) -> set[str]:
+    if not text:
+        return set()
+    cands = _TICKER_CANDIDATE_RE.findall(text)
+    return {c for c in cands if c not in _TICKER_STOPWORDS}
+
+
+def _fetch_google_news_rss(session: requests.Session, query: str) -> list[dict]:
+    """Return a list of ``{title, link, pub_date, description, source}`` dicts.
+
+    Uses the public RSS endpoint (no API key).  Google caches aggressively and
+    will often hand back 304/empty under heavy load; we treat all errors as a
+    soft miss (empty list) so the rest of the pipeline still runs.
+    """
+    import urllib.parse as _urlparse
+    import xml.etree.ElementTree as ET
+
+    url = "https://news.google.com/rss/search?" + _urlparse.urlencode({
+        "q": query,
+        "hl": "en-US",
+        "gl": "US",
+        "ceid": "US:en",
+    })
+    try:
+        resp = session.get(url, timeout=HTTP_TIMEOUT_SEC, headers={
+            "User-Agent": "etf-dashboard-corporate-actions/1.0 (+https://goldmandrew.github.io/etf-dashboard)",
+            "Accept": "application/rss+xml, application/xml, text/xml",
+        })
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("google-news RSS fetch failed (%s): %s", query, e)
+        return []
+    if resp.status_code != 200 or not resp.content:
+        LOGGER.warning("google-news RSS non-200 (%s): status=%s", query, resp.status_code)
+        return []
+    try:
+        root = ET.fromstring(resp.content)
+    except ET.ParseError as e:
+        LOGGER.warning("google-news RSS parse error (%s): %s", query, e)
+        return []
+
+    items: list[dict] = []
+    for item in root.iter("item"):
+        def _text(tag: str) -> str:
+            el = item.find(tag)
+            return (el.text or "").strip() if el is not None and el.text else ""
+
+        title = _text("title")
+        link = _text("link")
+        pub_date = _text("pubDate")
+        description = _text("description")
+        # Google News wraps the source in a <source> element with a "url" attr.
+        src_el = item.find("source")
+        source_name = (src_el.text or "").strip() if (src_el is not None and src_el.text) else ""
+
+        items.append({
+            "title": title,
+            "link": link,
+            "pub_date": pub_date,
+            "description": description,
+            "source": source_name,
+        })
+        if len(items) >= GOOGLE_NEWS_MAX_ARTICLES_PER_QUERY:
+            break
+    return items
+
+
+def _parse_rfc822(s: str) -> str | None:
+    """Convert RFC-822 (RSS pubDate) to ISO-8601 UTC; returns None on failure."""
+    if not s:
+        return None
+    from email.utils import parsedate_to_datetime
+    try:
+        dt = parsedate_to_datetime(s)
+    except Exception:  # noqa: BLE001
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).isoformat()
+
+
+def phase_5_google_news(
+    session: requests.Session,
+    universe: set[str],
+    ever_known: set[str],
+    alias_map: dict[str, dict[str, str]],
+    bucket_map: dict[str, str | None],
+    underlying_map: dict[str, str | None],
+) -> tuple[list[CorporateEvent], list[NewsItem]]:
+    """Fetch Google News RSS for forward-looking announcements.
+
+    Synthesized output:
+
+      * ``CorporateEvent`` rows with ``status="pending"`` and
+        ``source="google_news"`` whenever an article clearly announces an
+        upcoming liquidation / rename / split (execution_date parsed from the
+        article text; if no date is found the row is still emitted so the
+        pinned strip surfaces it, just without a date label).
+      * ``NewsItem`` rows for every article that hits (both dated and undated),
+        so the rolling headline feed includes press-release coverage that
+        Polygon's retail-news index often misses.
+
+    The ``alias_map`` input lets us resolve BITF → KEEL style chains when an
+    article mentions the old symbol.
+    """
+    if not ENABLE_GOOGLE_NEWS:
+        LOGGER.info("google-news phase: DISABLED via CORP_ACTIONS_ENABLE_GOOGLE_NEWS=0")
+        return [], []
+
+    match_universe = set(universe) | set(ever_known) | set(alias_map.keys())
+    cutoff_iso = (datetime.now(UTC) - timedelta(days=GOOGLE_NEWS_WINDOW_DAYS)).isoformat()
+
+    all_events: list[CorporateEvent] = []
+    all_news: list[NewsItem] = []
+    seen_article_ids: set[str] = set()
+    total_articles_scanned = 0
+    total_articles_kept = 0
+
+    for query, default_category in GOOGLE_NEWS_QUERIES:
+        LOGGER.info("google-news query: %r → default_category=%s", query, default_category)
+        articles = _fetch_google_news_rss(session, query)
+        total_articles_scanned += len(articles)
+        for art in articles:
+            title = art.get("title") or ""
+            description = art.get("description") or ""
+            text = f"{title}\n{description}"
+            pub_iso = _parse_rfc822(art.get("pub_date") or "")
+            if pub_iso and pub_iso < cutoff_iso:
+                continue
+
+            # 1) Extract candidate tickers from title+desc, resolve aliases.
+            candidates = _extract_candidate_tickers(text)
+            resolved: set[str] = set()
+            for c in candidates:
+                if c in match_universe:
+                    resolved.add(c)
+                # Alias chain: old ticker mentioned in article → map to new.
+                alias = alias_map.get(c)
+                if alias and alias.get("new"):
+                    resolved.add(alias["new"])
+            # Intersect with tickers we actually track (universe OR ever_known).
+            related = sorted({t for t in resolved if t in (universe | ever_known)})
+            if not related:
+                continue
+
+            # 2) Classify via the shared regex bank so we honour negative patterns
+            # (dividend/distribution/earnings drop) but fall back to the query's
+            # default category if the classifier doesn't fire.
+            cat, conf = classify_text(text)
+            if not cat:
+                cat = default_category
+                conf = 0.65  # lower confidence when inferred from query only
+            if cat not in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
+                continue
+
+            # 3) Stable id; skip near-duplicates from multiple queries.
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60] or "untitled"
+            art_id = f"gnews:{slug}:{(pub_iso or '')[:10]}:{related[0]}"
+            if art_id in seen_article_ids:
+                continue
+            seen_article_ids.add(art_id)
+
+            publisher = art.get("source") or None
+
+            # 4) Always emit a NewsItem so the article shows up in the feed.
+            all_news.append(
+                NewsItem(
+                    id=art_id,
+                    tickers=related,
+                    category=cat,
+                    confidence=round(conf, 3),
+                    published_utc=pub_iso,
+                    title=title or None,
+                    summary=description or None,
+                    url=art.get("link") or None,
+                    publisher=publisher,
+                    image_url=None,
+                    bucket=bucket_map.get(related[0]),
+                )
+            )
+
+            # 5) If the article announces a delisting / symbol_change / split,
+            # synthesize a pending CorporateEvent so the pinned strip shows it
+            # before Polygon catches up.
+            if cat in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
+                exec_date = _extract_execution_date(text)
+                primary = related[0]
+                event_id = (
+                    f"polygon_delisting:{primary}:{exec_date or 'unknown'}"
+                    if cat == "delisting"
+                    # Re-use Polygon's id format for delistings so that once Polygon
+                    # confirms the event, dedupe_events merges the two records.
+                    else f"gnews_{cat}:{primary}:{exec_date or (pub_iso or '')[:10]}"
+                )
+                all_events.append(
+                    CorporateEvent(
+                        id=event_id,
+                        type=cat,
+                        ticker=primary,
+                        execution_date=exec_date,
+                        announcement_date=(pub_iso or "")[:10] or None,
+                        status="pending",
+                        source="google_news",
+                        source_url=art.get("link") or None,
+                        bucket=bucket_map.get(primary),
+                        underlying=underlying_map.get(primary),
+                        headline=title or None,
+                        summary=description or None,
+                    )
+                )
+
+            total_articles_kept += 1
+
+    LOGGER.info(
+        "google-news: queries=%d scanned=%d kept=%d → events=%d news=%d",
+        len(GOOGLE_NEWS_QUERIES),
+        total_articles_scanned,
+        total_articles_kept,
+        len(all_events),
+        len(all_news),
+    )
+    return all_events, all_news
+
+
+# ---------------------------------------------------------------------------
 # Merge / dedupe
 # ---------------------------------------------------------------------------
 
+_STATUS_RANK = {"executed": 2, "pending": 1, "": 0, None: 0}
+
+
+def _merge_event_pair(prev: CorporateEvent, cand: CorporateEvent) -> CorporateEvent:
+    """Merge two events that share an ``id``, keeping the most authoritative fields.
+
+    Rules:
+      * Status: ``executed`` beats ``pending`` beats missing.  This is how a
+        Polygon-confirmed delisting promotes a press-release-derived pending row.
+      * Dates: a populated ``execution_date`` / ``announcement_date`` always beats
+        a blank one (regardless of which record is "winning" on status).
+      * ``prior_ticker``: preserved whenever either record has it populated
+        (symbol_change chains keep their source metadata even after Polygon
+        later confirms the rename).
+      * ``headline`` / ``summary`` / ``source_url``: keep the longer non-empty
+        value (press releases are usually richer than Polygon's stub text).
+    """
+    prev_rank = _STATUS_RANK.get(prev.status, 0)
+    cand_rank = _STATUS_RANK.get(cand.status, 0)
+    base = prev if prev_rank >= cand_rank else cand
+    other = cand if base is prev else prev
+    merged = CorporateEvent(**asdict(base))
+
+    if not merged.execution_date and other.execution_date:
+        merged.execution_date = other.execution_date
+    if not merged.announcement_date and other.announcement_date:
+        merged.announcement_date = other.announcement_date
+    if not merged.prior_ticker and other.prior_ticker:
+        merged.prior_ticker = other.prior_ticker
+    if not merged.underlying and other.underlying:
+        merged.underlying = other.underlying
+    if not merged.bucket and other.bucket:
+        merged.bucket = other.bucket
+    if not merged.ratio_label and other.ratio_label:
+        merged.ratio_label = other.ratio_label
+        merged.ratio_from = merged.ratio_from or other.ratio_from
+        merged.ratio_to = merged.ratio_to or other.ratio_to
+
+    for attr in ("headline", "summary", "source_url"):
+        new_val = getattr(other, attr) or ""
+        cur_val = getattr(merged, attr) or ""
+        if len(new_val) > len(cur_val):
+            setattr(merged, attr, new_val)
+
+    return merged
+
+
 def dedupe_events(events: list[CorporateEvent]) -> list[CorporateEvent]:
+    """Collapse by id.  When two records share an id, :func:`_merge_event_pair`
+    promotes ``pending`` → ``executed`` and back-fills missing fields from the
+    other record so the survivor is strictly richer than either input."""
     by_id: dict[str, CorporateEvent] = {}
     for ev in events:
         prev = by_id.get(ev.id)
         if prev is None:
             by_id[ev.id] = ev
             continue
-        # Prefer the record with a populated execution_date.
-        if not prev.execution_date and ev.execution_date:
-            by_id[ev.id] = ev
+        by_id[ev.id] = _merge_event_pair(prev, ev)
     out = list(by_id.values())
 
     def sort_key(ev: CorporateEvent) -> tuple[str, str]:
@@ -906,6 +1507,16 @@ def main() -> None:
         action="store_true",
         help="Skip the /v3/reference/tickers?active=false sweep.",
     )
+    parser.add_argument(
+        "--skip-symbol-changes",
+        action="store_true",
+        help="Skip the per-ticker /vX/reference/tickers/{t}/events sweep (Phase 4).",
+    )
+    parser.add_argument(
+        "--skip-google-news",
+        action="store_true",
+        help="Skip the Google News RSS forward-looking announcements sweep (Phase 5).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -938,7 +1549,19 @@ def main() -> None:
 
     split_events: list[CorporateEvent] = []
     delisting_events: list[CorporateEvent] = []
+    symbol_change_events: list[CorporateEvent] = []
     news: list[NewsItem] = []
+    gnews_events: list[CorporateEvent] = []
+    gnews_items: list[NewsItem] = []
+    alias_map: dict[str, dict[str, str]] = {}
+    # Precompute the ever-known universe once — Phase 2, Phase 4, and Phase 5
+    # all need it and it's cheap-enough (a single parquet read + prior events).
+    ever_known = load_ever_known_universe(set(tickers))
+    LOGGER.info(
+        "Ever-known universe: current=%d ever_known=%d (+%d historic/prior)",
+        len(tickers), len(ever_known), len(ever_known) - len(tickers),
+    )
+    underlyings_set = {u for u in underlying_map.values() if u}
     aborted_reason: str | None = None
 
     try:
@@ -952,15 +1575,6 @@ def main() -> None:
             LOGGER.info("Phase 2: delistings SKIPPED")
         else:
             LOGGER.info("Phase 2: delistings")
-            # Delistings phase MUST use the ever-known universe — delisted ETFs are
-            # dropped from etf_screened_today.csv on day one and would otherwise
-            # never match Polygon's inactive-tickers paginator (fix for blank
-            # Delisting tab).
-            ever_known = load_ever_known_universe(set(tickers))
-            LOGGER.info(
-                "  ever-known universe for delistings: current=%d ever_known=%d (+%d historic/prior)",
-                len(tickers), len(ever_known), len(ever_known) - len(tickers),
-            )
             delisting_events = phase_2_delistings(
                 session, ever_known, bucket_map, underlying_map
             )
@@ -970,6 +1584,40 @@ def main() -> None:
         else:
             LOGGER.info("Phase 3: news")
             news = phase_3_news(session, tickers, bucket_map)
+
+        if args.skip_symbol_changes:
+            LOGGER.info("Phase 4: symbol_changes SKIPPED")
+        else:
+            LOGGER.info(
+                "Phase 4: symbol_changes (per-ticker ticker_change events, cache_ttl=%dd, call_cap=%d)",
+                TICKER_EVENTS_CACHE_TTL_DAYS,
+                SYMBOL_CHANGE_MAX_CALLS_PER_RUN,
+            )
+            symbol_change_events, alias_map = phase_4_symbol_changes(
+                session,
+                set(tickers),
+                underlyings_set,
+                ever_known,
+                bucket_map,
+                underlying_map,
+            )
+
+        if args.skip_google_news or not ENABLE_GOOGLE_NEWS:
+            LOGGER.info("Phase 5: google_news SKIPPED")
+        else:
+            LOGGER.info(
+                "Phase 5: google_news (window=%dd, %d queries)",
+                GOOGLE_NEWS_WINDOW_DAYS,
+                len(GOOGLE_NEWS_QUERIES),
+            )
+            gnews_events, gnews_items = phase_5_google_news(
+                session,
+                set(tickers),
+                ever_known,
+                alias_map,
+                bucket_map,
+                underlying_map,
+            )
     except RateLimitExceeded as e:
         aborted_reason = str(e)
         LOGGER.error("Ingest aborted due to rate-limit wall: %s", e)
@@ -987,18 +1635,48 @@ def main() -> None:
         )
         delisting_events = list(delisting_events) + list(prior_delistings.values())
 
-    events = dedupe_events(split_events + delisting_events)
+    # Symbol-change events are also immutable — preserve prior ones across runs
+    # so that the per-ticker cache-TTL rollover doesn't accidentally drop a
+    # rename we detected weeks ago (Phase 4 only emits events for freshly-queried
+    # tickers within the lookback window, so cached tickers whose cache expires
+    # might temporarily produce fewer rows).
+    prior_symbol_changes = _load_prior_events_of_type("symbol_change")
+    if prior_symbol_changes and not args.skip_symbol_changes:
+        LOGGER.info(
+            "  merging %d prior symbol_change records",
+            len(prior_symbol_changes),
+        )
+        symbol_change_events = list(symbol_change_events) + list(prior_symbol_changes.values())
+
+    all_events = (
+        split_events
+        + delisting_events
+        + symbol_change_events
+        + gnews_events
+    )
+    events = dedupe_events(all_events)
     final_delisting_count = sum(1 for e in events if e.type == "delisting")
+    final_pending_delisting = sum(1 for e in events if e.type == "delisting" and e.status == "pending")
     final_split_count = sum(1 for e in events if e.type in {"reverse_split", "forward_split"})
+    final_symchange_count = sum(1 for e in events if e.type == "symbol_change")
     LOGGER.info(
-        "Events after dedupe: %d (splits=%d delistings=%d)",
-        len(events), final_split_count, final_delisting_count,
+        "Events after dedupe: %d (splits=%d delistings=%d [pending=%d] symbol_changes=%d)",
+        len(events),
+        final_split_count,
+        final_delisting_count,
+        final_pending_delisting,
+        final_symchange_count,
     )
 
+    # Merge Polygon-news + Google-news items into the headline feed.
+    news = list(news) + list(gnews_items)
     if news:
         news = dedupe_news(news)
         link_news_to_events(news, events)
-    LOGGER.info("News items after classify + dedupe: %d", len(news))
+    LOGGER.info(
+        "News items after classify + dedupe: %d (polygon + google-news merged)",
+        len(news),
+    )
 
     if args.skip_news and OUT_NEWS.exists() and not news:
         # Preserve the existing news file if the caller asked to skip news.

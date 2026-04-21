@@ -884,12 +884,32 @@
   }
   .pinned-card-foot {
     display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; flex-wrap: wrap;
     font-family: 'JetBrains Mono', monospace; font-size: 10px;
     color: var(--text-muted);
   }
   .pinned-card-foot .ratio {
     color: var(--cat-accent, var(--accent-blue));
     font-weight: 700; letter-spacing: 0.4px;
+  }
+  .pinned-card-foot .pinned-card-announced {
+    opacity: 0.75; font-size: 10px;
+  }
+  .pinned-card-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  /* Pending (announced but not executed) rows: dashed left accent + subtle
+     dim so they're visually distinct from Polygon-confirmed (executed) rows. */
+  .pinned-card-pending::before {
+    background: repeating-linear-gradient(
+      to bottom,
+      var(--cat-accent, var(--accent-amber)) 0 6px,
+      transparent 6px 10px
+    );
+  }
+  .pinned-card-pending .pinned-card-headline { color: var(--text-secondary); }
+  .ticker-chain-arrow {
+    display: inline-flex; align-items: center;
+    color: var(--text-muted); font-size: 12px; font-weight: 700;
+    padding: 0 2px; letter-spacing: -0.5px;
   }
 
   /* Category badges and accent colors (CSS var overrides) */
@@ -908,6 +928,9 @@
   .cat-symbol_change{ --cat-accent: var(--accent-purple); --cat-bg: rgba(139,92,246,0.12); --cat-border: rgba(139,92,246,0.35); }
   .cat-merger       { --cat-accent: var(--accent-cyan);   --cat-bg: rgba(6,182,212,0.12);  --cat-border: rgba(6,182,212,0.35); }
   .cat-other        { --cat-accent: var(--text-secondary);--cat-bg: rgba(136,150,174,0.12);--cat-border: rgba(136,150,174,0.35); }
+  /* "Announced" pill for Phase 5 press-release-derived events (status=pending).
+     Deliberately neutral/amber so it doesn't collide with the category accent. */
+  .cat-pending      { --cat-accent: var(--accent-amber);  --cat-bg: rgba(245,158,11,0.10); --cat-border: rgba(245,158,11,0.45); }
 
   /* News feed: headlines */
   .news-feed-title {
@@ -3131,20 +3154,40 @@ function NewsTickerChip({ symbol, bucketOf, onNavigate }) {
 
 function PinnedEventCard({ event, bucketOf, onNavigate }) {
   const cat = event.type || 'other';
-  const tickers = [event.ticker].filter(Boolean);
+  const isSymbolChange = cat === 'symbol_change';
   const isSplit = cat === 'reverse_split' || cat === 'forward_split';
+  const isPending = event.status === 'pending';
+  // For symbol_change events, show the full rename chain (old → new) so users
+  // immediately see the redirect (e.g. BITF → KEEL) without hunting for it in
+  // the headline text.  For everything else we just show the single ticker.
+  const tickers = isSymbolChange && event.prior_ticker
+    ? [event.prior_ticker, event.ticker].filter(Boolean)
+    : [event.ticker].filter(Boolean);
   return (
     <div
-      className={cls('pinned-card', `cat-${cat}`)}
+      className={cls('pinned-card', `cat-${cat}`, isPending && 'pinned-card-pending')}
       onClick={() => event.ticker && onNavigate?.(event.ticker)}
     >
       <div className="pinned-card-top">
         <div className="pinned-card-tickers">
-          {tickers.map(t => (
-            <NewsTickerChip key={t} symbol={t} bucketOf={bucketOf} onNavigate={onNavigate} />
+          {tickers.map((t, i) => (
+            <React.Fragment key={t}>
+              {i > 0 && <span className="ticker-chain-arrow">→</span>}
+              <NewsTickerChip symbol={t} bucketOf={bucketOf} onNavigate={onNavigate} />
+            </React.Fragment>
           ))}
         </div>
-        <span className={cls('cat-badge', `cat-${cat}`)}>{fmtCategoryLabel(cat)}</span>
+        <div className="pinned-card-badges">
+          {isPending && (
+            <span
+              className="cat-badge cat-pending"
+              title="Announced via press release / news — not yet confirmed by Polygon"
+            >
+              Announced
+            </span>
+          )}
+          <span className={cls('cat-badge', `cat-${cat}`)}>{fmtCategoryLabel(cat)}</span>
+        </div>
       </div>
       <div className="pinned-card-headline">
         {event.headline || `${event.ticker} · ${fmtCategoryLabel(cat)}`}
@@ -3153,7 +3196,16 @@ function PinnedEventCard({ event, bucketOf, onNavigate }) {
         <div className="pinned-card-summary">{event.summary}</div>
       )}
       <div className="pinned-card-foot">
-        <span>{fmtEventDate(event.execution_date)}</span>
+        <span>
+          {isPending && event.execution_date
+            ? `Effective ${fmtEventDate(event.execution_date)}`
+            : fmtEventDate(event.execution_date)}
+        </span>
+        {isPending && event.announcement_date && (
+          <span className="pinned-card-announced" title="Date the issuer announced the event">
+            Announced {fmtEventDate(event.announcement_date)}
+          </span>
+        )}
         {isSplit && event.ratio_label && (
           <span className="ratio">{event.ratio_label}</span>
         )}

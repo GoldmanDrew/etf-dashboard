@@ -47,6 +47,19 @@ jobs:
       CORP_ACTIONS_NEWS_MAX_PAGES: "25"
       CORP_ACTIONS_SPLITS_MAX_PAGES: "10"
       CORP_ACTIONS_DELISTINGS_MAX_PAGES: "10"
+      # Phase 4 (symbol changes) — per-ticker Polygon events with disk cache.
+      # The cache lives in data/polygon_ticker_events_cache.json (committed) so
+      # that the 120-call/run budget (see below) can backfill the ~480-ticker
+      # universe over a handful of daily runs on the free tier.  Bump the call
+      # budget to a few hundred on paid tiers to shorten the backfill.
+      CORP_ACTIONS_SYMBOL_CHANGE_LOOKBACK_DAYS: "540"
+      CORP_ACTIONS_TICKER_EVENTS_CACHE_TTL_DAYS: "14"
+      CORP_ACTIONS_SYMBOL_CHANGE_MAX_CALLS: "120"
+      # Phase 5 (Google News RSS) — no API key, no Polygon budget impact.  Set
+      # to "0" to skip (e.g. if GitHub Actions egress is throttled for Google).
+      CORP_ACTIONS_ENABLE_GOOGLE_NEWS: "1"
+      CORP_ACTIONS_GOOGLE_NEWS_WINDOW_DAYS: "45"
+      CORP_ACTIONS_GOOGLE_NEWS_MAX_PER_QUERY: "100"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -93,29 +106,67 @@ jobs:
               if "events" in payload:
                   evs = payload.get("events", [])
                   by_type = {}
+                  by_status = {}
                   for e in evs:
-                      by_type[e.get("type", "?")] = by_type.get(e.get("type", "?"), 0) + 1
-                  print(f"  {p.name}: events={len(evs)} by_type={by_type} build={payload.get('build_time')}")
+                      k = e.get("type", "?")
+                      by_type[k] = by_type.get(k, 0) + 1
+                      s = e.get("status", "?")
+                      by_status[s] = by_status.get(s, 0) + 1
+                  print(
+                      f"  {p.name}: events={len(evs)} by_type={by_type} "
+                      f"by_status={by_status} build={payload.get('build_time')}"
+                  )
               else:
                   items = payload.get("items", [])
                   by_cat = {}
+                  by_src = {}
                   for it in items:
                       by_cat[it.get("category", "?")] = by_cat.get(it.get("category", "?"), 0) + 1
-                  print(f"  {p.name}: items={len(items)} by_category={by_cat} build={payload.get('build_time')}")
+                      pub = it.get("publisher") or "unknown"
+                      by_src[pub] = by_src.get(pub, 0) + 1
+                  # Trim publisher breakdown to top-5 to keep the log tight.
+                  top_src = dict(sorted(by_src.items(), key=lambda kv: -kv[1])[:5])
+                  print(
+                      f"  {p.name}: items={len(items)} by_category={by_cat} "
+                      f"top_publishers={top_src} build={payload.get('build_time')}"
+                  )
+          for side in (Path("data/polygon_ticker_events_cache.json"), Path("data/ticker_alias_map.json")):
+              if not side.exists():
+                  print(f"  {side.name}: MISSING (first-run OK)")
+                  continue
+              try:
+                  payload = json.loads(side.read_text(encoding="utf-8"))
+                  print(f"  {side.name}: entries={len(payload) if isinstance(payload, dict) else 'n/a'}")
+              except Exception as e:
+                  print(f"  {side.name}: unreadable ({e})")
           PY
 
       - name: Commit corporate-actions artifacts
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/corporate_actions.json data/etf_news.json"
+          # Phase 4 + 5 additions: polygon_ticker_events_cache.json (per-ticker
+          # cache) + ticker_alias_map.json (derived alias map).  Both are
+          # produced on the first Phase 4 run and committed thereafter so the
+          # next run starts with a warm cache.  Missing files are tolerated
+          # (git add only picks up what exists).
+          FILES="data/corporate_actions.json data/etf_news.json data/polygon_ticker_events_cache.json data/ticker_alias_map.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${FILES}
+
+          existing_files=()
+          for f in ${FILES}; do
+            if [ -f "$f" ]; then existing_files+=("$f"); fi
+          done
+          if [ "${#existing_files[@]}" -eq 0 ]; then
+            echo "No corporate-actions artifacts on disk; nothing to commit"
+            exit 0
+          fi
+          git add "${existing_files[@]}"
           if git diff --staged --quiet; then
             echo "No corporate-actions changes to commit"
           else
             TMP_DIR="$(mktemp -d)"
-            for f in ${FILES}; do
+            for f in "${existing_files[@]}"; do
               mkdir -p "${TMP_DIR}/$(dirname "$f")"
               cp "$f" "${TMP_DIR}/$f"
             done
@@ -125,13 +176,17 @@ jobs:
               git reset --hard || true
               git clean -fd || true
               git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
-              for f in ${FILES}; do
+              present_now=()
+              for f in "${existing_files[@]}"; do
                 if [ -f "${TMP_DIR}/$f" ]; then
                   mkdir -p "$(dirname "$f")"
                   cp "${TMP_DIR}/$f" "$f"
+                  present_now+=("$f")
                 fi
               done
-              git add ${FILES}
+              if [ "${#present_now[@]}" -gt 0 ]; then
+                git add "${present_now[@]}"
+              fi
               if git diff --staged --quiet; then
                 echo "No corporate-actions changes against latest origin"
                 pushed=1
