@@ -1025,8 +1025,6 @@ let BORROW_HISTORY_CACHE = null;
 let BORROW_SPIKE_RISK_CACHE = null;
 let ETF_METRICS_CACHE = null;
 let ETF_DISTRIBUTIONS_CACHE = null;
-let CORPORATE_ACTIONS_CACHE = null;
-let ETF_NEWS_CACHE = null;
 
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
@@ -3016,6 +3014,14 @@ const fmtEventDate = (iso) => {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 };
 
+const corporateEventMs = (ev) => {
+  const dateStr = ev?.execution_date || ev?.announcement_date;
+  if (!dateStr) return 0;
+  const s = String(dateStr);
+  const t = new Date(s.length === 10 ? `${s}T00:00:00Z` : s).getTime();
+  return Number.isFinite(t) ? t : 0;
+};
+
 function NewsTickerChip({ symbol, bucketOf, onNavigate }) {
   const sym = (symbol || '').toUpperCase();
   const bucket = bucketOf ? bucketOf(sym) : null;
@@ -3130,11 +3136,13 @@ function NewsPage({
   const items = useMemo(() => newsPayload?.items || [], [newsPayload]);
 
   const [category, setCategory] = useState('all');
-  const [windowKey, setWindowKey] = useState('30');
+  // Default to full window: corporate-action headlines are sparse (especially on free-tier
+  // Polygon), and most split events are older than 30 days — a narrow default hid them all.
+  const [windowKey, setWindowKey] = useState('all');
   const [sortKey, setSortKey] = useState('published_desc');
   const [search, setSearch] = useState('');
 
-  const activeWindow = NEWS_TIME_WINDOWS.find(w => w.key === windowKey) || NEWS_TIME_WINDOWS[1];
+  const activeWindow = NEWS_TIME_WINDOWS.find(w => w.key === windowKey) || NEWS_TIME_WINDOWS[3];
   const cutoffMs = activeWindow.days == null ? -Infinity : Date.now() - activeWindow.days * 86400_000;
 
   const eventsById = useMemo(() => {
@@ -3143,27 +3151,17 @@ function NewsPage({
     return m;
   }, [events]);
 
-  // Upcoming / recent structured events get pinned.  We use execution_date when available,
-  // fall back to announcement_date, and include anything within the last 60 days (or future).
-  const pinnedEvents = useMemo(() => {
-    const now = Date.now();
-    const sixtyAgo = now - 60 * 86400_000;
-    const eligible = events.filter(ev => {
-      const dateStr = ev.execution_date || ev.announcement_date;
-      if (!dateStr) return false;
-      const t = new Date(dateStr + (dateStr.length === 10 ? 'T00:00:00Z' : '')).getTime();
-      if (!Number.isFinite(t)) return false;
-      return t >= sixtyAgo;
-    });
-    const filtered = eligible.filter(ev => category === 'all' ? true : ev.type === category);
-    filtered.sort((a, b) => {
-      const pa = (a.execution_date || a.announcement_date || '');
-      const pb = (b.execution_date || b.announcement_date || '');
-      if (pa === pb) return (a.ticker || '').localeCompare(b.ticker || '');
-      return pb.localeCompare(pa);
-    });
-    return filtered.slice(0, 12);
-  }, [events, category]);
+  // Structured events (splits, delistings, …) share the same category + time window as
+  // headlines so historical splits are visible when Window = All available.
+  const { structuredMatchCount, filteredStructuredEvents } = useMemo(() => {
+    let out = events.filter(ev => (category === 'all' ? true : ev.type === category));
+    if (activeWindow.days != null) {
+      out = out.filter(ev => corporateEventMs(ev) >= cutoffMs);
+    }
+    const matchCount = out.length;
+    out.sort((a, b) => corporateEventMs(b) - corporateEventMs(a));
+    return { structuredMatchCount: matchCount, filteredStructuredEvents: out.slice(0, 100) };
+  }, [events, category, windowKey, activeWindow.days, cutoffMs]);
 
   const filteredItems = useMemo(() => {
     const s = (search || '').trim().toLowerCase();
@@ -3279,14 +3277,17 @@ function NewsPage({
         </div>
       </div>
 
-      {/* Pinned structured events */}
-      {pinnedEvents.length > 0 && (
+      {/* Structured corporate actions (splits, delistings, …) */}
+      {filteredStructuredEvents.length > 0 && (
         <div className="pinned-section">
           <div className="pinned-section-title">
-            Pinned: confirmed corporate actions ({pinnedEvents.length})
+            Structured corporate actions · {filteredStructuredEvents.length}
+            {structuredMatchCount > filteredStructuredEvents.length
+              ? ` of ${structuredMatchCount} (newest 100)`
+              : ''}
           </div>
           <div className="pinned-grid">
-            {pinnedEvents.map(ev => (
+            {filteredStructuredEvents.map(ev => (
               <PinnedEventCard
                 key={ev.id}
                 event={ev}
@@ -3294,6 +3295,16 @@ function NewsPage({
                 onNavigate={onNavigateToChart}
               />
             ))}
+          </div>
+        </div>
+      )}
+      {filteredStructuredEvents.length === 0 && events.length > 0 && (
+        <div className="news-empty" style={{ marginBottom: 18, padding: '22px 18px' }}>
+          <div className="news-empty-title">{events.length} structured events loaded</div>
+          <div>
+            None match the current category + time window. Try <b>All</b> categories and set
+            Window to <b>All available</b> to see historical splits (most execution dates are
+            older than 30–60 days).
           </div>
         </div>
       )}
@@ -3358,19 +3369,15 @@ function App() {
       .catch(e => { setError(e.message); setLoading(false); });
   }, []);
 
-  // Load corporate actions + news feed exactly once.  Both artifacts are small (<1MB
-  // even with many events) so we eagerly fetch on mount; the News tab then renders
-  // instantly when the user clicks into it.  Module-level caches guard against
-  // re-fetch during the same session (e.g. hot reload).
+  // Corporate actions + news: refetch whenever the News tab opens so we never keep an
+  // empty first-load stuck in memory after GitHub Actions commits new JSON.  No
+  // module-level cache — each open uses a fresh cache-bust (GitHub Pages can be
+  // sticky on static assets otherwise).
   useEffect(() => {
+    if (!showNews) return undefined;
     let cancelled = false;
-    if (CORPORATE_ACTIONS_CACHE && ETF_NEWS_CACHE) {
-      setCorporateActions(CORPORATE_ACTIONS_CACHE);
-      setEtfNews(ETF_NEWS_CACHE);
-      return () => { cancelled = true; };
-    }
     setNewsError(null);
-    const cacheBust = `?t=${Math.floor(Date.now() / 300000)}`; // 5-minute bucket
+    const cacheBust = `?t=${Date.now()}`;
     const fetchJson = async (url) => {
       const res = await fetch(`${url}${cacheBust}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
@@ -3383,8 +3390,6 @@ function App() {
           fetchJson(ETF_NEWS_URL),
         ]);
         if (cancelled) return;
-        CORPORATE_ACTIONS_CACHE = ca;
-        ETF_NEWS_CACHE = nw;
         setCorporateActions(ca);
         setEtfNews(nw);
       } catch (e) {
@@ -3392,7 +3397,7 @@ function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [showNews]);
 
   // Hash-based routing for chart + news pages.
   useEffect(() => {
