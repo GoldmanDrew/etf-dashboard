@@ -10,8 +10,9 @@ Layered fetch strategy (per ticker, tried in order):
   6) REX Shares per-ticker HTML scrape (authoritative; covers T-REX / REX lineup)
   7) GraniteSharesProvider -- JSON from graniteshares.com /product/{id}/ (session + XHR; NAV/AUM;
      shares = AUM/NAV when not in payload)
-  8) YFinanceProvider (broad fallback via Yahoo Finance fast_info / info)
-  9) PolygonProvider (last-resort close + meta)
+  8) DefianceProvider -- defianceetfs.com/{ticker}/ HTML (Fund Details: Net Assets, NAV, Shares Outstanding)
+  9) YFinanceProvider (broad fallback via Yahoo Finance fast_info / info)
+  10) PolygonProvider (last-resort close + meta)
 
 Each provider returns a ProviderResult with:
   nav, aum, shares_outstanding, source_provider, source_url, status, stale, stale_age_bdays
@@ -82,6 +83,7 @@ PROVIDER_MERGE_PRIORITY: tuple[str, ...] = (
     "yieldmax",
     "rex_shares",
     "granite_shares",
+    "defiance",
     "yfinance",
     "polygon",
 )
@@ -1041,7 +1043,173 @@ class GraniteSharesProvider:
 
 
 # ---------------------------------------------------------------------------
-# 8) YFinance broad fallback
+# 8) Defiance ETFs (issuer HTML — Fund Details block)
+# ---------------------------------------------------------------------------
+
+class DefianceProvider:
+    """
+    Defiance ETFs publish NAV / Net Assets / Shares Outstanding in a **Fund Details** section
+    on each product page, e.g. https://defianceetfs.com/qbtz/
+
+    We strip HTML to text and parse the block between ``Fund Details`` and ``Top Holdings``.
+    """
+
+    name = "defiance"
+    BASE_HOST = "defianceetfs.com"
+
+    # Slugs on listing/marketing pages that are not single-ETF tickers.
+    _SLUG_BLOCKLIST = frozenset({
+        "etfs", "insights", "in-the-news", "privacy-policy", "prospectuses", "who-we-are",
+        "wp-content", "etf-insights", "author", "category", "tag", "page", "feed", "bu", "mpl",
+        "mst", "qsu",
+    })
+
+    def __init__(self, session: requests.Session | None = None):
+        self.session = session or _build_session()
+        self._catalog: set[str] | None = None
+        self._cache: dict[str, ProviderResult] = {}
+
+    def _load_catalog(self) -> None:
+        if self._catalog is not None:
+            return
+        self._catalog = set()
+        try:
+            r = _get(self.session, f"https://{self.BASE_HOST}/etfs/")
+            if r.status_code != 200 or not r.text:
+                LOGGER.warning("Defiance catalog fetch http=%s", r.status_code)
+                return
+            found = set(
+                re.findall(
+                    r"https://(?:www\.)?defianceetfs\.com/([a-z0-9]{2,6})/",
+                    r.text,
+                    re.I,
+                )
+            )
+            found |= set(re.findall(r'href="/([a-z0-9]{2,6})/"', r.text, re.I))
+            for s in found:
+                sl = s.lower()
+                if sl in self._SLUG_BLOCKLIST or "full-holdings" in sl:
+                    continue
+                if 2 <= len(sl) <= 6:
+                    self._catalog.add(sl.upper())
+            LOGGER.info("Defiance ETF catalog: %d symbols", len(self._catalog))
+        except Exception as e:
+            LOGGER.warning("Defiance catalog load failed: %s", e)
+
+    def supports_ticker(self, ticker: str, as_of: date) -> bool:
+        self._load_catalog()
+        return ticker.upper() in (self._catalog or set())
+
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        t = re.sub(r"<script[^>]*>[\s\S]*?</script>", " ", html, flags=re.I)
+        t = re.sub(r"<style[^>]*>[\s\S]*?</style>", " ", t, flags=re.I)
+        t = re.sub(r"<[^>]+>", " ", t)
+        return re.sub(r"\s+", " ", t).strip()
+
+    @staticmethod
+    def _parse_aum(num_s: str, suffix: str) -> float | None:
+        try:
+            val = float(str(num_s).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+        suf = (suffix or "").strip().upper()
+        mult = {"K": 1e3, "M": 1e6, "B": 1e9, "": 1.0}.get(suf, 1.0)
+        return float(val * mult)
+
+    @classmethod
+    def _parse_fund_details(cls, text: str) -> tuple[float | None, float | None, float | None]:
+        fd = re.search(r"Fund Details\s*(.*?)(?:Top Holdings|Distributions)", text, re.I | re.DOTALL)
+        block = fd.group(1) if fd else text
+        m = re.search(
+            r"Net Assets\s*\$?\s*([\d,.]+)\s*([KMB]?)\s*.*?NAV\s*\$?\s*([\d,.]+)\s*.*?Shares Outstanding\s*([\d,]+)",
+            block,
+            re.I | re.DOTALL,
+        )
+        if not m:
+            aum = nav = sh = None
+            m1 = re.search(r"Net Assets\s*\$?\s*([\d,.]+)\s*([KMB]?)", block, re.I)
+            m2 = re.search(r"NAV\s*\$?\s*([\d,.]+)", block, re.I)
+            m3 = re.search(r"Shares Outstanding\s*([\d,]+)", block, re.I)
+            if m1:
+                aum = cls._parse_aum(m1.group(1), m1.group(2) or "")
+            if m2:
+                try:
+                    nav = float(m2.group(1).replace(",", ""))
+                except (TypeError, ValueError):
+                    nav = None
+            if m3:
+                try:
+                    sh = float(m3.group(1).replace(",", ""))
+                except (TypeError, ValueError):
+                    sh = None
+            return nav, aum, sh
+        aum = cls._parse_aum(m.group(1), m.group(2) or "")
+        try:
+            nav = float(m.group(3).replace(",", ""))
+        except (TypeError, ValueError):
+            nav = None
+        try:
+            sh = float(m.group(4).replace(",", ""))
+        except (TypeError, ValueError):
+            sh = None
+        return nav, aum, sh
+
+    def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
+        t = ticker.upper()
+        slug = t.lower()
+        url = f"https://{self.BASE_HOST}/{slug}/"
+
+        if t in self._cache:
+            c = self._cache[t]
+            return ProviderResult(
+                date=as_of, ticker=t, nav=c.nav, aum=c.aum,
+                shares_outstanding=c.shares_outstanding,
+                source_provider=self.name, source_url=c.source_url,
+                status=c.status, stale=c.stale, stale_age_bdays=c.stale_age_bdays,
+            )
+
+        try:
+            r = _get(self.session, url, extra_headers={"Referer": f"https://{self.BASE_HOST}/etfs/"})
+            if r.status_code != 200 or not r.text:
+                res = ProviderResult(
+                    as_of, ticker, None, None, None, self.name,
+                    url + f"?status={r.status_code}", "missing",
+                )
+                self._cache[t] = res
+                return res
+            if "Fund Details" not in r.text and "Net Assets" not in r.text:
+                res = ProviderResult(as_of, ticker, None, None, None, self.name, url + "?err=no-fund-details", "missing")
+                self._cache[t] = res
+                return res
+
+            text = self._html_to_text(r.text)
+            nav_f, aum_f, sh_f = self._parse_fund_details(text)
+            if (aum_f is None or aum_f <= 0) and nav_f and sh_f and nav_f > 0:
+                aum_f = float(nav_f * sh_f)
+            if (sh_f is None or sh_f <= 0) and aum_f and nav_f and nav_f > 0:
+                sh_f = float(aum_f / nav_f)
+
+            status = _classify_status(nav_f, aum_f, sh_f)
+            res = ProviderResult(
+                date=as_of, ticker=t,
+                nav=nav_f, aum=aum_f, shares_outstanding=sh_f,
+                source_provider=self.name, source_url=url,
+                status=status, stale=False, stale_age_bdays=None,
+            )
+            self._cache[t] = res
+            return res
+        except Exception as e:
+            res = ProviderResult(
+                as_of, ticker, None, None, None, self.name,
+                url + f"?exc={type(e).__name__}", "missing",
+            )
+            self._cache[t] = res
+            return res
+
+
+# ---------------------------------------------------------------------------
+# 9) YFinance broad fallback
 # ---------------------------------------------------------------------------
 
 class YFinanceProvider:
@@ -1246,6 +1414,7 @@ def build_default_stack(session: requests.Session | None = None) -> list:
         YieldMaxProvider(s),
         REXSharesProvider(s),
         GraniteSharesProvider(),
+        DefianceProvider(s),
         YFinanceProvider(),
         PolygonProvider(s),
     ]

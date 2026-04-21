@@ -10,8 +10,9 @@ Provider stack (tried per ticker, in order):
   5) YieldMaxProvider    -- per-ticker HTML scrape of yieldmaxetfs.com (authoritative)
   6) REXSharesProvider   -- per-ticker HTML scrape of rexshares.com (authoritative; NAV=AUM/shares)
   7) GraniteSharesProvider -- graniteshares.com /product/{id}/ JSON (authoritative for Granite ETFs)
-  8) YFinanceProvider    -- Yahoo fast_info + info (broad fallback; JPMorgan JEPI/JEPQ, Global X, etc.)
-  9) PolygonProvider     -- Polygon v2/aggs + v3/reference (last resort; reliable for close price)
+  8) DefianceProvider     -- defianceetfs.com/{ticker}/ Fund Details scrape (Defiance daily/ thematic ETFs)
+  9) YFinanceProvider    -- Yahoo fast_info + info (broad fallback; JPMorgan JEPI/JEPQ, Global X, etc.)
+  10) PolygonProvider     -- Polygon v2/aggs + v3/reference (last resort; reliable for close price)
 
 Row statuses:
   'ok'      -> all of (nav, aum, shares) present and positive
@@ -421,6 +422,7 @@ def ingest(
         TradrAxsProvider, ProSharesProvider, DirexionProvider,
         RoundhillProvider, YieldMaxProvider, REXSharesProvider,
         GraniteSharesProvider,
+        DefianceProvider,
         YFinanceProvider, PolygonProvider,
     )
 
@@ -439,6 +441,7 @@ def ingest(
             ProSharesProvider, DirexionProvider,
             RoundhillProvider, YieldMaxProvider, REXSharesProvider,
             GraniteSharesProvider,
+            DefianceProvider,
             YFinanceProvider,
         )
 
@@ -657,6 +660,7 @@ def main() -> None:
         TradrAxsProvider, ProSharesProvider, DirexionProvider,
         RoundhillProvider, YieldMaxProvider, REXSharesProvider,
         GraniteSharesProvider,
+        DefianceProvider,
         YFinanceProvider, PolygonProvider,
     )
     providers = [
@@ -667,6 +671,7 @@ def main() -> None:
         YieldMaxProvider(session),
         REXSharesProvider(session),
         GraniteSharesProvider(),
+        DefianceProvider(session),
         YFinanceProvider(enable=not args.disable_yfinance),
         PolygonProvider(session),
     ]
