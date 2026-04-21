@@ -1,0 +1,142 @@
+name: Update Corporate Actions & News
+
+on:
+  schedule:
+    # Every 6 hours, offset 15 minutes after the top of the hour to avoid stacking
+    # with update-etf-metrics.yml (which runs at :00). Corporate actions move slowly
+    # so sub-hourly polling would add no value and eat Polygon quota.
+    - cron: "15 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Optional comma-separated subset (e.g. MSTY,CONY,APLZ,SPY)."
+        required: false
+        default: ""
+      skip_news:
+        description: "Skip the news phase (keep existing etf_news.json)."
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "corporate-actions-refresh"
+  cancel-in-progress: true
+
+jobs:
+  refresh-corporate-actions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
+      # Shared with other ingest scripts -- keep timeouts/retries conservative so one
+      # rate-limit hiccup on a single ticker doesn't abort the whole sweep.
+      ETF_METRICS_HTTP_TIMEOUT_SEC: "25"
+      ETF_METRICS_HTTP_RETRY_TOTAL: "3"
+      CORP_ACTIONS_SLEEP_SEC: "0.12"
+      CORP_ACTIONS_NEWS_WINDOW_DAYS: "60"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate Polygon key
+        run: |
+          if [ -z "${POLYGON_API_KEY}" ]; then
+            echo "POLYGON_API_KEY (or POLYGON_IO_API_KEY) is missing in repo secrets."
+            exit 1
+          fi
+
+      - name: Ingest corporate actions & news
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.symbols }}" ]; then
+            ARGS="$ARGS --symbols ${{ github.event.inputs.symbols }}"
+          fi
+          if [ "${{ github.event.inputs.skip_news }}" = "true" ]; then
+            ARGS="$ARGS --skip-news"
+          fi
+          python scripts/ingest_corporate_actions.py $ARGS
+
+      - name: Print summary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in (Path("data/corporate_actions.json"), Path("data/etf_news.json")):
+              if not p.exists():
+                  print(f"  {p} MISSING")
+                  continue
+              payload = json.loads(p.read_text(encoding="utf-8"))
+              if "events" in payload:
+                  evs = payload.get("events", [])
+                  by_type = {}
+                  for e in evs:
+                      by_type[e.get("type", "?")] = by_type.get(e.get("type", "?"), 0) + 1
+                  print(f"  {p.name}: events={len(evs)} by_type={by_type} build={payload.get('build_time')}")
+              else:
+                  items = payload.get("items", [])
+                  by_cat = {}
+                  for it in items:
+                      by_cat[it.get("category", "?")] = by_cat.get(it.get("category", "?"), 0) + 1
+                  print(f"  {p.name}: items={len(items)} by_category={by_cat} build={payload.get('build_time')}")
+          PY
+
+      - name: Commit corporate-actions artifacts
+        run: |
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          FILES="data/corporate_actions.json data/etf_news.json"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${FILES}
+          if git diff --staged --quiet; then
+            echo "No corporate-actions changes to commit"
+          else
+            TMP_DIR="$(mktemp -d)"
+            for f in ${FILES}; do
+              mkdir -p "${TMP_DIR}/$(dirname "$f")"
+              cp "$f" "${TMP_DIR}/$f"
+            done
+            pushed=0
+            for i in 1 2 3; do
+              git fetch origin "${BRANCH}"
+              git reset --hard || true
+              git clean -fd || true
+              git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
+              for f in ${FILES}; do
+                if [ -f "${TMP_DIR}/$f" ]; then
+                  mkdir -p "$(dirname "$f")"
+                  cp "${TMP_DIR}/$f" "$f"
+                fi
+              done
+              git add ${FILES}
+              if git diff --staged --quiet; then
+                echo "No corporate-actions changes against latest origin"
+                pushed=1
+                break
+              fi
+              git commit -m "chore: refresh corporate actions & news [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+              if git push origin "HEAD:${BRANCH}"; then
+                pushed=1
+                break
+              fi
+              git reset --hard "origin/${BRANCH}" || true
+              sleep $((i * 5))
+            done
+            rm -rf "${TMP_DIR}"
+            if [ "$pushed" -ne 1 ]; then
+              echo "Push failed after retries"
+              exit 1
+            fi
+          fi

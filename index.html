@@ -747,6 +747,256 @@
     .trade-grid { grid-template-columns: 1fr; }
     .trade-row, .trade-row.option { grid-template-columns: 1fr; }
   }
+
+  /* ── News Tab ────────────────────────────── */
+  .news-page { padding: 18px 24px 40px; }
+  .news-header {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px;
+    padding-bottom: 14px; margin-bottom: 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .news-title {
+    font-family: 'DM Sans', sans-serif; font-weight: 700; font-size: 22px;
+    letter-spacing: -0.4px; color: var(--text-primary);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .news-title-accent {
+    display: inline-block; width: 6px; height: 22px; border-radius: 3px;
+    background: linear-gradient(180deg, var(--accent-blue), var(--accent-purple));
+  }
+  .news-subtitle {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--text-muted); margin-top: 4px;
+  }
+  .news-meta {
+    display: flex; align-items: center; gap: 14px;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--text-muted);
+  }
+  .news-meta b { color: var(--text-secondary); font-weight: 600; }
+
+  /* Toolbar: chips + search + time-window + sort */
+  .news-toolbar {
+    display: flex; align-items: center; flex-wrap: wrap;
+    gap: 10px 14px; margin-bottom: 18px;
+    padding: 12px 14px; border-radius: 10px;
+    background: var(--bg-card); border: 1px solid var(--border);
+  }
+  .news-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .news-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 11px; border-radius: 999px;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.2px;
+    color: var(--text-secondary);
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    cursor: pointer; transition: all 0.12s ease;
+    user-select: none;
+  }
+  .news-chip:hover { color: var(--text-primary); border-color: var(--border-active); }
+  .news-chip.active {
+    color: #fff;
+    background: var(--accent-blue);
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 0 1px rgba(59,130,246,0.25);
+  }
+  .news-chip .count {
+    font-size: 10px; opacity: 0.7;
+    padding: 0 5px; border-radius: 999px;
+    background: rgba(255,255,255,0.08);
+  }
+  .news-chip.active .count { background: rgba(255,255,255,0.22); opacity: 1; }
+
+  .news-toolbar-divider {
+    width: 1px; height: 24px; background: var(--border); margin: 0 2px;
+  }
+  .news-toolbar-label {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .news-select, .news-search {
+    background: var(--bg-input); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; color: var(--text-primary);
+    font-family: 'DM Sans', sans-serif; font-size: 12px;
+    outline: none; transition: border-color 0.12s ease;
+  }
+  .news-select:focus, .news-search:focus { border-color: var(--border-active); }
+  .news-search { min-width: 220px; }
+  .news-toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+  /* Pinned structured events strip */
+  .pinned-section { margin-bottom: 26px; }
+  .pinned-section-title {
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px;
+    margin-bottom: 10px;
+  }
+  .pinned-section-title::before {
+    content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent-amber); box-shadow: 0 0 8px rgba(245,158,11,0.6);
+  }
+  .pinned-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 12px;
+  }
+  .pinned-card {
+    position: relative;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 14px 14px 18px;
+    cursor: pointer; transition: all 0.15s ease;
+    overflow: hidden;
+  }
+  .pinned-card::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+    background: var(--cat-accent, var(--accent-blue));
+  }
+  .pinned-card:hover {
+    border-color: var(--cat-accent, var(--accent-blue));
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+  }
+  .pinned-card-top {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-bottom: 8px;
+  }
+  .pinned-card-tickers { display: flex; flex-wrap: wrap; gap: 5px; }
+  .ticker-chip {
+    display: inline-flex; align-items: center;
+    padding: 2px 8px; border-radius: 4px;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700;
+    color: var(--accent-cyan); background: rgba(6,182,212,0.08);
+    border: 1px solid rgba(6,182,212,0.25);
+    cursor: pointer; transition: all 0.12s ease;
+    letter-spacing: 0.4px;
+  }
+  .ticker-chip:hover { background: rgba(6,182,212,0.18); color: #fff; }
+  .pinned-card-headline {
+    font-size: 14px; font-weight: 600; line-height: 1.4;
+    color: var(--text-primary); margin-bottom: 6px;
+  }
+  .pinned-card-summary {
+    font-size: 12px; color: var(--text-secondary); line-height: 1.5;
+    margin-bottom: 10px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .pinned-card-foot {
+    display: flex; align-items: center; justify-content: space-between;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--text-muted);
+  }
+  .pinned-card-foot .ratio {
+    color: var(--cat-accent, var(--accent-blue));
+    font-weight: 700; letter-spacing: 0.4px;
+  }
+
+  /* Category badges and accent colors (CSS var overrides) */
+  .cat-badge {
+    display: inline-flex; align-items: center;
+    padding: 2px 8px; border-radius: 999px;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.5px; text-transform: uppercase;
+    color: var(--cat-accent, var(--accent-blue));
+    background: var(--cat-bg, rgba(59,130,246,0.12));
+    border: 1px solid var(--cat-border, rgba(59,130,246,0.35));
+  }
+  .cat-delisting    { --cat-accent: var(--accent-red);    --cat-bg: rgba(239,68,68,0.12);  --cat-border: rgba(239,68,68,0.35); }
+  .cat-reverse_split{ --cat-accent: var(--accent-amber);  --cat-bg: rgba(245,158,11,0.12); --cat-border: rgba(245,158,11,0.35); }
+  .cat-forward_split{ --cat-accent: var(--accent-green);  --cat-bg: rgba(16,185,129,0.12); --cat-border: rgba(16,185,129,0.35); }
+  .cat-symbol_change{ --cat-accent: var(--accent-purple); --cat-bg: rgba(139,92,246,0.12); --cat-border: rgba(139,92,246,0.35); }
+  .cat-merger       { --cat-accent: var(--accent-cyan);   --cat-bg: rgba(6,182,212,0.12);  --cat-border: rgba(6,182,212,0.35); }
+  .cat-other        { --cat-accent: var(--text-secondary);--cat-bg: rgba(136,150,174,0.12);--cat-border: rgba(136,150,174,0.35); }
+
+  /* News feed: headlines */
+  .news-feed-title {
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px;
+    margin-bottom: 10px;
+  }
+  .news-feed-title::before {
+    content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent-blue); box-shadow: 0 0 8px rgba(59,130,246,0.6);
+  }
+  .news-feed { display: flex; flex-direction: column; gap: 10px; }
+  .news-card {
+    position: relative;
+    display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    gap: 14px; align-items: flex-start;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 13px 14px 13px 18px;
+    transition: all 0.15s ease;
+    overflow: hidden;
+  }
+  .news-card::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+    background: var(--cat-accent, var(--accent-blue));
+    opacity: 0.85;
+  }
+  .news-card:hover {
+    border-color: var(--cat-accent, var(--accent-blue));
+    background: var(--bg-card-hover);
+  }
+  .news-card-body { min-width: 0; }
+  .news-card-meta {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--text-muted); margin-bottom: 6px;
+  }
+  .news-card-meta .publisher { color: var(--text-secondary); font-weight: 600; }
+  .news-card-meta .dot-sep { opacity: 0.5; }
+  .news-card-title {
+    font-size: 14px; font-weight: 600; line-height: 1.4;
+    color: var(--text-primary); margin-bottom: 6px;
+    text-decoration: none;
+  }
+  .news-card-title:hover { color: var(--accent-blue); text-decoration: underline; }
+  .news-card-summary {
+    font-size: 12px; color: var(--text-secondary); line-height: 1.5;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .news-card-foot {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .news-card-linked {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 7px; border-radius: 4px;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600;
+    color: var(--accent-amber); background: rgba(245,158,11,0.10);
+    border: 1px solid rgba(245,158,11,0.3);
+  }
+  .news-card-image {
+    flex-shrink: 0; width: 120px; height: 80px;
+    border-radius: 6px; object-fit: cover; background: var(--bg-input);
+    border: 1px solid var(--border);
+  }
+
+  /* Empty / loading states */
+  .news-empty {
+    padding: 60px 20px; text-align: center;
+    color: var(--text-muted); font-size: 13px;
+    background: var(--bg-card); border: 1px dashed var(--border);
+    border-radius: 10px;
+  }
+  .news-empty-icon { font-size: 32px; margin-bottom: 10px; opacity: 0.6; }
+  .news-empty-title { font-size: 15px; color: var(--text-secondary); margin-bottom: 6px; }
+  .news-error-banner {
+    padding: 10px 14px; margin-bottom: 14px;
+    background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.3);
+    color: var(--accent-red); border-radius: 8px;
+    font-size: 12px; font-family: 'JetBrains Mono', monospace;
+  }
+
+  @media (max-width: 768px) {
+    .news-page { padding: 14px 12px 32px; }
+    .news-card { grid-template-columns: 1fr; }
+    .news-card-image { width: 100%; height: 140px; order: -1; }
+    .news-toolbar-right { margin-left: 0; width: 100%; }
+    .news-search { min-width: 0; width: 100%; }
+  }
 </style>
 </head>
 <body>
@@ -769,10 +1019,14 @@ const BORROW_SPIKE_RISK_URL = "data/borrow_spike_risk.json";
 const OPTIONS_CACHE_URL = "data/options_cache.json";
 const ETF_METRICS_DAILY_URL = "data/etf_metrics_daily.json";
 const ETF_DISTRIBUTIONS_URL = "data/etf_distributions.json";
+const CORPORATE_ACTIONS_URL = "data/corporate_actions.json";
+const ETF_NEWS_URL = "data/etf_news.json";
 let BORROW_HISTORY_CACHE = null;
 let BORROW_SPIKE_RISK_CACHE = null;
 let ETF_METRICS_CACHE = null;
 let ETF_DISTRIBUTIONS_CACHE = null;
+let CORPORATE_ACTIONS_CACHE = null;
+let ETF_NEWS_CACHE = null;
 
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
@@ -2709,6 +2963,376 @@ function InfoPage({ data }) {
   );
 }
 
+// ── News Tab ────────────────────────────────
+const NEWS_CATEGORIES = [
+  { key: 'all',            label: 'All',           priority: 0 },
+  { key: 'delisting',      label: 'Delisting',     priority: 100 },
+  { key: 'reverse_split',  label: 'Reverse Split', priority: 90 },
+  { key: 'forward_split',  label: 'Forward Split', priority: 50 },
+  { key: 'symbol_change',  label: 'Symbol Change', priority: 70 },
+  { key: 'merger',         label: 'Merger / Reorg',priority: 60 },
+];
+
+const NEWS_TIME_WINDOWS = [
+  { key: '7',   label: 'Last 7 days',  days: 7 },
+  { key: '30',  label: 'Last 30 days', days: 30 },
+  { key: '60',  label: 'Last 60 days', days: 60 },
+  { key: 'all', label: 'All available',days: null },
+];
+
+const NEWS_SORTS = [
+  { key: 'published_desc', label: 'Newest first' },
+  { key: 'published_asc',  label: 'Oldest first' },
+  { key: 'priority',       label: 'Severity' },
+  { key: 'ticker',         label: 'Ticker A→Z' },
+];
+
+const fmtCategoryLabel = (cat) => {
+  const hit = NEWS_CATEGORIES.find(c => c.key === cat);
+  return hit ? hit.label : (cat || 'Other').replace(/_/g, ' ');
+};
+
+const fmtRelativeTime = (iso) => {
+  if (!iso) return '—';
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return '—';
+  const now = Date.now();
+  const diffMs = now - then;
+  if (diffMs < 0) return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const min = Math.floor(diffMs / 60000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 14) return `${day}d ago`;
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+};
+
+const fmtEventDate = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso + (iso.length === 10 ? 'T00:00:00Z' : ''));
+  if (!Number.isFinite(d.getTime())) return iso;
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+};
+
+function NewsTickerChip({ symbol, bucketOf, onNavigate }) {
+  const sym = (symbol || '').toUpperCase();
+  const bucket = bucketOf ? bucketOf(sym) : null;
+  const navigable = typeof onNavigate === 'function';
+  return (
+    <span
+      className="ticker-chip"
+      title={bucket ? `${sym} · ${bucket.replace(/_/g, ' ')}` : sym}
+      onClick={e => {
+        e.stopPropagation();
+        if (navigable) onNavigate(sym);
+      }}
+      style={navigable ? {} : { cursor: 'default' }}
+    >
+      {sym}
+    </span>
+  );
+}
+
+function PinnedEventCard({ event, bucketOf, onNavigate }) {
+  const cat = event.type || 'other';
+  const tickers = [event.ticker].filter(Boolean);
+  const isSplit = cat === 'reverse_split' || cat === 'forward_split';
+  return (
+    <div
+      className={cls('pinned-card', `cat-${cat}`)}
+      onClick={() => event.ticker && onNavigate?.(event.ticker)}
+    >
+      <div className="pinned-card-top">
+        <div className="pinned-card-tickers">
+          {tickers.map(t => (
+            <NewsTickerChip key={t} symbol={t} bucketOf={bucketOf} onNavigate={onNavigate} />
+          ))}
+        </div>
+        <span className={cls('cat-badge', `cat-${cat}`)}>{fmtCategoryLabel(cat)}</span>
+      </div>
+      <div className="pinned-card-headline">
+        {event.headline || `${event.ticker} · ${fmtCategoryLabel(cat)}`}
+      </div>
+      {event.summary && (
+        <div className="pinned-card-summary">{event.summary}</div>
+      )}
+      <div className="pinned-card-foot">
+        <span>{fmtEventDate(event.execution_date)}</span>
+        {isSplit && event.ratio_label && (
+          <span className="ratio">{event.ratio_label}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function NewsCard({ item, bucketOf, onNavigate, eventsById }) {
+  const cat = item.category || 'other';
+  const linkedEv = item.linked_event_id ? eventsById?.[item.linked_event_id] : null;
+  return (
+    <div className={cls('news-card', `cat-${cat}`)}>
+      <div className="news-card-body">
+        <div className="news-card-meta">
+          <span className={cls('cat-badge', `cat-${cat}`)}>{fmtCategoryLabel(cat)}</span>
+          {item.publisher && <span className="publisher">{item.publisher}</span>}
+          <span className="dot-sep">·</span>
+          <span>{fmtRelativeTime(item.published_utc)}</span>
+          {Number.isFinite(item.confidence) && (
+            <>
+              <span className="dot-sep">·</span>
+              <span title="Classifier confidence">conf {Math.round(item.confidence * 100)}%</span>
+            </>
+          )}
+        </div>
+        <a
+          className="news-card-title"
+          href={item.url || '#'}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={e => { if (!item.url) e.preventDefault(); }}
+        >
+          {item.title || '(no title)'}
+        </a>
+        {item.summary && (
+          <div className="news-card-summary">{item.summary}</div>
+        )}
+        <div className="news-card-foot">
+          {(item.tickers || []).map(t => (
+            <NewsTickerChip key={t} symbol={t} bucketOf={bucketOf} onNavigate={onNavigate} />
+          ))}
+          {linkedEv && (
+            <span
+              className="news-card-linked"
+              title={`Linked to structured event ${linkedEv.id}`}
+            >
+              ↳ {fmtCategoryLabel(linkedEv.type)} · {fmtEventDate(linkedEv.execution_date)}
+            </span>
+          )}
+        </div>
+      </div>
+      {item.image_url && (
+        <img className="news-card-image" src={item.image_url} alt="" loading="lazy" />
+      )}
+    </div>
+  );
+}
+
+function NewsPage({
+  eventsPayload,
+  newsPayload,
+  loadError,
+  bucketOf,
+  onNavigateToChart,
+}) {
+  const events = useMemo(() => eventsPayload?.events || [], [eventsPayload]);
+  const items = useMemo(() => newsPayload?.items || [], [newsPayload]);
+
+  const [category, setCategory] = useState('all');
+  const [windowKey, setWindowKey] = useState('30');
+  const [sortKey, setSortKey] = useState('published_desc');
+  const [search, setSearch] = useState('');
+
+  const activeWindow = NEWS_TIME_WINDOWS.find(w => w.key === windowKey) || NEWS_TIME_WINDOWS[1];
+  const cutoffMs = activeWindow.days == null ? -Infinity : Date.now() - activeWindow.days * 86400_000;
+
+  const eventsById = useMemo(() => {
+    const m = {};
+    events.forEach(e => { if (e.id) m[e.id] = e; });
+    return m;
+  }, [events]);
+
+  // Upcoming / recent structured events get pinned.  We use execution_date when available,
+  // fall back to announcement_date, and include anything within the last 60 days (or future).
+  const pinnedEvents = useMemo(() => {
+    const now = Date.now();
+    const sixtyAgo = now - 60 * 86400_000;
+    const eligible = events.filter(ev => {
+      const dateStr = ev.execution_date || ev.announcement_date;
+      if (!dateStr) return false;
+      const t = new Date(dateStr + (dateStr.length === 10 ? 'T00:00:00Z' : '')).getTime();
+      if (!Number.isFinite(t)) return false;
+      return t >= sixtyAgo;
+    });
+    const filtered = eligible.filter(ev => category === 'all' ? true : ev.type === category);
+    filtered.sort((a, b) => {
+      const pa = (a.execution_date || a.announcement_date || '');
+      const pb = (b.execution_date || b.announcement_date || '');
+      if (pa === pb) return (a.ticker || '').localeCompare(b.ticker || '');
+      return pb.localeCompare(pa);
+    });
+    return filtered.slice(0, 12);
+  }, [events, category]);
+
+  const filteredItems = useMemo(() => {
+    const s = (search || '').trim().toLowerCase();
+    let out = items.filter(it => {
+      if (category !== 'all' && it.category !== category) return false;
+      if (activeWindow.days != null) {
+        const t = it.published_utc ? new Date(it.published_utc).getTime() : 0;
+        if (!Number.isFinite(t) || t < cutoffMs) return false;
+      }
+      if (s) {
+        const hay = `${it.title || ''} ${it.summary || ''} ${(it.tickers || []).join(' ')}`.toLowerCase();
+        if (!hay.includes(s)) return false;
+      }
+      return true;
+    });
+
+    const priorityOf = (c) => (NEWS_CATEGORIES.find(nc => nc.key === c)?.priority ?? 0);
+    const pubMs = (iso) => (iso ? new Date(iso).getTime() : 0);
+    out.sort((a, b) => {
+      switch (sortKey) {
+        case 'published_asc':  return pubMs(a.published_utc) - pubMs(b.published_utc);
+        case 'priority':
+          return (priorityOf(b.category) - priorityOf(a.category))
+              || (pubMs(b.published_utc) - pubMs(a.published_utc));
+        case 'ticker':
+          return ((a.tickers?.[0] || '').localeCompare(b.tickers?.[0] || ''))
+              || (pubMs(b.published_utc) - pubMs(a.published_utc));
+        case 'published_desc':
+        default:               return pubMs(b.published_utc) - pubMs(a.published_utc);
+      }
+    });
+    return out;
+  }, [items, category, windowKey, sortKey, search]);
+
+  const categoryCounts = useMemo(() => {
+    const c = { all: items.length };
+    items.forEach(it => { c[it.category] = (c[it.category] || 0) + 1; });
+    return c;
+  }, [items]);
+
+  const buildTime = eventsPayload?.build_time || newsPayload?.build_time;
+  const isSeed = !buildTime || buildTime.startsWith('1970');
+  const hasAnyData = (events.length + items.length) > 0;
+
+  return (
+    <div className="news-page">
+      <div className="news-header">
+        <div>
+          <div className="news-title">
+            <span className="news-title-accent" />
+            News & Corporate Actions
+          </div>
+          <div className="news-subtitle">
+            Splits · Reverse splits · Delistings · Symbol changes · Mergers — across all tracked ETFs
+          </div>
+        </div>
+        <div className="news-meta">
+          {buildTime && !isSeed && <span>Last refresh <b>{fmtRelativeTime(buildTime)}</b></span>}
+          <span>Events <b>{events.length}</b></span>
+          <span>Headlines <b>{items.length}</b></span>
+        </div>
+      </div>
+
+      {loadError && (
+        <div className="news-error-banner">
+          Failed to load news data: {loadError}. The scheduled workflow populates{' '}
+          <code>data/corporate_actions.json</code> and <code>data/etf_news.json</code> every 6 hours.
+        </div>
+      )}
+
+      {/* Toolbar */}
+      <div className="news-toolbar">
+        <div className="news-chips">
+          {NEWS_CATEGORIES.map(c => (
+            <div
+              key={c.key}
+              className={cls('news-chip', category === c.key && 'active', c.key !== 'all' && `cat-${c.key}`)}
+              onClick={() => setCategory(c.key)}
+            >
+              {c.label}
+              <span className="count">{categoryCounts[c.key] ?? 0}</span>
+            </div>
+          ))}
+        </div>
+        <div className="news-toolbar-divider" />
+        <span className="news-toolbar-label">Window</span>
+        <select
+          className="news-select"
+          value={windowKey}
+          onChange={e => setWindowKey(e.target.value)}
+        >
+          {NEWS_TIME_WINDOWS.map(w => (
+            <option key={w.key} value={w.key}>{w.label}</option>
+          ))}
+        </select>
+        <div className="news-toolbar-right">
+          <span className="news-toolbar-label">Sort</span>
+          <select
+            className="news-select"
+            value={sortKey}
+            onChange={e => setSortKey(e.target.value)}
+          >
+            {NEWS_SORTS.map(s => (
+              <option key={s.key} value={s.key}>{s.label}</option>
+            ))}
+          </select>
+          <input
+            className="news-search"
+            placeholder="Search title, summary, ticker…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {/* Pinned structured events */}
+      {pinnedEvents.length > 0 && (
+        <div className="pinned-section">
+          <div className="pinned-section-title">
+            Pinned: confirmed corporate actions ({pinnedEvents.length})
+          </div>
+          <div className="pinned-grid">
+            {pinnedEvents.map(ev => (
+              <PinnedEventCard
+                key={ev.id}
+                event={ev}
+                bucketOf={bucketOf}
+                onNavigate={onNavigateToChart}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* News feed */}
+      <div className="news-feed-title">
+        Headlines · {filteredItems.length} of {items.length}
+      </div>
+      {filteredItems.length === 0 ? (
+        <div className="news-empty">
+          <div className="news-empty-icon">◉</div>
+          <div className="news-empty-title">
+            {isSeed && !hasAnyData
+              ? 'No data yet — first scheduled refresh pending'
+              : 'No matching news in this window'}
+          </div>
+          <div>
+            {isSeed && !hasAnyData
+              ? 'The GitHub Actions workflow update-corporate-actions.yml runs every 6 hours and will populate this feed.'
+              : 'Try widening the time window, clearing the search, or switching to All categories.'}
+          </div>
+        </div>
+      ) : (
+        <div className="news-feed">
+          {filteredItems.map(it => (
+            <NewsCard
+              key={it.id}
+              item={it}
+              bucketOf={bucketOf}
+              onNavigate={onNavigateToChart}
+              eventsById={eventsById}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main App ────────────────────────────────
 function App() {
   const [data, setData] = useState(null);
@@ -2720,7 +3344,11 @@ function App() {
   const [sortDesc, setSortDesc] = useState(true);
   const [expandedSym, setExpandedSym] = useState(null);
   const [showInfo, setShowInfo] = useState(false);
+  const [showNews, setShowNews] = useState(false);
   const [chartRecord, setChartRecord] = useState(null);
+  const [corporateActions, setCorporateActions] = useState(null);
+  const [etfNews, setEtfNews] = useState(null);
+  const [newsError, setNewsError] = useState(null);
 
   useEffect(() => {
     const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
@@ -2730,7 +3358,43 @@ function App() {
       .catch(e => { setError(e.message); setLoading(false); });
   }, []);
 
-  // Hash-based routing for chart page
+  // Load corporate actions + news feed exactly once.  Both artifacts are small (<1MB
+  // even with many events) so we eagerly fetch on mount; the News tab then renders
+  // instantly when the user clicks into it.  Module-level caches guard against
+  // re-fetch during the same session (e.g. hot reload).
+  useEffect(() => {
+    let cancelled = false;
+    if (CORPORATE_ACTIONS_CACHE && ETF_NEWS_CACHE) {
+      setCorporateActions(CORPORATE_ACTIONS_CACHE);
+      setEtfNews(ETF_NEWS_CACHE);
+      return () => { cancelled = true; };
+    }
+    setNewsError(null);
+    const cacheBust = `?t=${Math.floor(Date.now() / 300000)}`; // 5-minute bucket
+    const fetchJson = async (url) => {
+      const res = await fetch(`${url}${cacheBust}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+      return res.json();
+    };
+    (async () => {
+      try {
+        const [ca, nw] = await Promise.all([
+          fetchJson(CORPORATE_ACTIONS_URL),
+          fetchJson(ETF_NEWS_URL),
+        ]);
+        if (cancelled) return;
+        CORPORATE_ACTIONS_CACHE = ca;
+        ETF_NEWS_CACHE = nw;
+        setCorporateActions(ca);
+        setEtfNews(nw);
+      } catch (e) {
+        if (!cancelled) setNewsError(e?.message || 'News data unavailable');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Hash-based routing for chart + news pages.
   useEffect(() => {
     const handleHash = () => {
       const hash = window.location.hash;
@@ -2740,23 +3404,46 @@ function App() {
         if (rec) {
           setChartRecord(rec);
           setShowInfo(false);
+          setShowNews(false);
           return;
         }
       }
+      if (hash === '#/news') {
+        setChartRecord(null);
+        setShowInfo(false);
+        setShowNews(true);
+        return;
+      }
       setChartRecord(null);
+      setShowNews(false);
     };
     handleHash();
     window.addEventListener('hashchange', handleHash);
     return () => window.removeEventListener('hashchange', handleHash);
   }, [data]);
 
-  const navigateToChart = useCallback((record) => {
-    window.location.hash = `/chart/${encodeURIComponent(record.symbol)}`;
+  const navigateToChart = useCallback((recordOrSymbol) => {
+    const sym = typeof recordOrSymbol === 'string'
+      ? recordOrSymbol
+      : (recordOrSymbol?.symbol || '');
+    if (!sym) return;
+    window.location.hash = `/chart/${encodeURIComponent(String(sym).toUpperCase())}`;
+  }, []);
+
+  const navigateToNews = useCallback(() => {
+    window.location.hash = '/news';
   }, []);
 
   const navigateBack = useCallback(() => {
     window.location.hash = '';
   }, []);
+
+  // Stable lookup: symbol -> bucket, for coloring ticker chips in the News tab.
+  const bucketOf = useCallback((sym) => {
+    if (!sym || !data?.records) return null;
+    const hit = data.records.find(r => r.symbol === sym.toUpperCase());
+    return hit?.bucket || null;
+  }, [data]);
 
   const records = data?.records || [];
   const summary = data?.summary || {};
@@ -2825,7 +3512,13 @@ function App() {
           </div>
         </div>
         <div className="topbar-right">
-          <button className={cls('topbar-btn', showInfo && !chartRecord && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
+          <button
+            className={cls('topbar-btn', showNews && !chartRecord && 'active')}
+            onClick={() => { if (showNews) navigateBack(); else navigateToNews(); }}
+          >
+            ▦ News
+          </button>
+          <button className={cls('topbar-btn', showInfo && !chartRecord && !showNews && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
             ◉ Info
           </button>
         </div>
@@ -2834,6 +3527,14 @@ function App() {
       {/* ── Chart Page ──────── */}
       {chartRecord ? (
         <ChartPage record={chartRecord} onBack={navigateBack} />
+      ) : showNews ? (
+        <NewsPage
+          eventsPayload={corporateActions}
+          newsPayload={etfNews}
+          loadError={newsError}
+          bucketOf={bucketOf}
+          onNavigateToChart={navigateToChart}
+        />
       ) : showInfo ? (
         <InfoPage data={data} />
       ) : (

@@ -55,6 +55,7 @@ The `build-and-deploy.yml` Action will run automatically on push, build the data
 - `refresh-borrow.yml` runs every 10 minutes for borrow + shares refresh only.
 - `refresh-options.yml` runs every 5 minutes (GitHub Actions minimum cadence) for a throttled options shard focused on Bucket 3 inverse ETFs.
 - `update-etf-metrics.yml` runs daily at **5:00 AM ET** to ingest NAV / AUM / shares outstanding panel data for the full ETF universe, plus the full per-ticker distribution history (`etf_distributions.json`) that the Stats tab uses to plot a distribution-adjusted ("Total-Return") NAV series beside the raw NAV line.
+- `update-corporate-actions.yml` runs **every 6 hours** to ingest structured corporate-action events (splits, reverse splits, delistings, symbol changes, mergers) into `corporate_actions.json` and a filtered news feed into `etf_news.json`. Both artifacts power the top-level **News** tab (`#/news`). Dividends/distributions are explicitly excluded from the news feed because the Stats tab already visualizes them via the Total-Return NAV series.
 - Refresh workflows commit JSON only; GitHub Pages deployment is handled by `build-and-deploy.yml` to avoid queue contention.
 
 ## Running Locally
@@ -81,13 +82,17 @@ etf-dashboard/
 │   ├── etf_metrics_daily.csv           # Human-readable mirror
 │   ├── etf_metrics_daily.json          # Frontend-consumable metrics rows
 │   ├── etf_metrics_latest.json         # Latest snapshot by symbol
-│   └── etf_distributions.json          # Per-ticker dividend/distribution history (powers the Total-Return NAV chart)
+│   ├── etf_distributions.json          # Per-ticker dividend/distribution history (powers the Total-Return NAV chart)
+│   ├── corporate_actions.json          # Structured corporate-action events (splits, delistings, etc.) -- News tab "pinned" strip
+│   └── etf_news.json                   # Classified news headlines for the News-tab rolling feed (dividends excluded)
 ├── scripts/
 │   └── build_data.py                   # Fetches data, computes analytics, writes JSON
 │   └── ingest_etf_metrics.py           # Ingests NAV/AUM/shares history
 │   └── ingest_distributions.py         # Pulls per-ticker distribution history from Yahoo
+│   └── ingest_corporate_actions.py     # Polygon-backed corporate actions + classified news headlines
 ├── .github/workflows/
 │   └── build-and-deploy.yml            # Scheduled Action: build + deploy Pages
+│   └── update-corporate-actions.yml    # 6-hourly refresh for corporate_actions.json + etf_news.json
 ├── requirements.txt
 └── README.md
 ```
