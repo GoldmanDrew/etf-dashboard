@@ -1272,12 +1272,27 @@ function MonteCarloPlot({ result, mode = 'short' }) {
   );
 }
 
-function SimpleSeriesPlot({ series, valueKey, color, label, formatValue, zeroLabel = '0' }) {
+function SimpleSeriesPlot({
+  series,
+  valueKey,
+  color,
+  label,
+  formatValue,
+  zeroLabel = '0',
+  overlayValueKey,
+  overlayColor,
+  overlayLabel,
+}) {
   if (!Array.isArray(series) || !series.length) {
     return <div className="scenario-warning">No data available.</div>;
   }
-  const vals = series.map(p => Number(p?.[valueKey])).filter(Number.isFinite);
-  if (!vals.length) return <div className="scenario-warning">No finite values available.</div>;
+  const primaryVals = series.map(p => Number(p?.[valueKey])).filter(Number.isFinite);
+  const overlayVals = overlayValueKey
+    ? series.map(p => Number(p?.[overlayValueKey])).filter(Number.isFinite)
+    : [];
+  if (!primaryVals.length && !overlayVals.length) {
+    return <div className="scenario-warning">No finite values available.</div>;
+  }
 
   const W = 980;
   const H = 300;
@@ -1288,8 +1303,9 @@ function SimpleSeriesPlot({ series, valueKey, color, label, formatValue, zeroLab
   const PW = W - L - R;
   const PH = H - T - B;
 
-  const yMinRaw = Math.min(...vals);
-  const yMaxRaw = Math.max(...vals);
+  const allVals = [...primaryVals, ...overlayVals];
+  const yMinRaw = Math.min(...allVals);
+  const yMaxRaw = Math.max(...allVals);
   // Always include zero in axis range so the zero-reference line is explicit.
   const baseMin = Math.min(yMinRaw, 0);
   const baseMax = Math.max(yMaxRaw, 0);
@@ -1299,18 +1315,23 @@ function SimpleSeriesPlot({ series, valueKey, color, label, formatValue, zeroLab
   const x = (i) => L + (i / Math.max(1, series.length - 1)) * PW;
   const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, yMax - yMin))) * PH;
 
-  const lineVals = series.map(p => Number(p?.[valueKey]));
-  const linePath = lineVals
+  const buildPath = (vals) => vals
     .map((v, i) => (Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : ''))
     .filter(Boolean)
     .join(' ');
-  let latestIdx = -1;
-  for (let i = lineVals.length - 1; i >= 0; i -= 1) {
-    if (Number.isFinite(lineVals[i])) {
-      latestIdx = i;
-      break;
+
+  const lineVals = series.map(p => Number(p?.[valueKey]));
+  const linePath = buildPath(lineVals);
+  const overlayLineVals = overlayValueKey ? series.map(p => Number(p?.[overlayValueKey])) : [];
+  const overlayPath = overlayValueKey ? buildPath(overlayLineVals) : '';
+
+  const findLatestIdx = (vals) => {
+    for (let i = vals.length - 1; i >= 0; i -= 1) {
+      if (Number.isFinite(vals[i])) return i;
     }
-  }
+    return -1;
+  };
+  const latestIdx = findLatestIdx(lineVals);
   const latestVal = latestIdx >= 0 ? lineVals[latestIdx] : NaN;
   const latestLabel = Number.isFinite(latestVal)
     ? `Current: ${formatValue ? formatValue(latestVal) : String(latestVal)}`
@@ -1318,6 +1339,13 @@ function SimpleSeriesPlot({ series, valueKey, color, label, formatValue, zeroLab
   const latestLabelY = Number.isFinite(latestVal)
     ? clampNum(y(latestVal) - 7, T + 11, H - B - 4)
     : 0;
+
+  const overlayLatestIdx = overlayValueKey ? findLatestIdx(overlayLineVals) : -1;
+  const overlayLatestVal = overlayLatestIdx >= 0 ? overlayLineVals[overlayLatestIdx] : NaN;
+  const overlayLatestLabel = Number.isFinite(overlayLatestVal)
+    ? `${overlayLabel ? `${overlayLabel}: ` : ''}${formatValue ? formatValue(overlayLatestVal) : String(overlayLatestVal)}`
+    : '';
+
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(q => yMin + (yMax - yMin) * q).reverse();
   const yZero = y(0);
   const dateForIdx = (idx) => {
@@ -1329,6 +1357,9 @@ function SimpleSeriesPlot({ series, valueKey, color, label, formatValue, zeroLab
   };
   const xTickIdx = [0, Math.floor((series.length - 1) / 2), Math.max(0, series.length - 1)];
   const xTickIdxUnique = Array.from(new Set(xTickIdx));
+
+  const primaryColor = color || "rgba(6,182,212,0.95)";
+  const ovColor = overlayColor || "rgba(234,179,8,0.95)";
 
   return (
     <div className="mc-plot" style={{ height: 300, marginBottom: 0 }}>
@@ -1354,10 +1385,13 @@ function SimpleSeriesPlot({ series, valueKey, color, label, formatValue, zeroLab
         <text x={W - R - 4} y={yZero - 5} textAnchor="end" fontSize="11" fill="rgba(255,255,255,0.72)" fontFamily="DM Sans">
           {zeroLabel}
         </text>
-        <path d={linePath} fill="none" stroke={color || "rgba(6,182,212,0.95)"} strokeWidth="2" />
+        {overlayPath && (
+          <path d={overlayPath} fill="none" stroke={ovColor} strokeWidth="1.6" strokeDasharray="5 4" />
+        )}
+        <path d={linePath} fill="none" stroke={primaryColor} strokeWidth="2" />
         {Number.isFinite(latestVal) && (
           <>
-            <circle cx={x(latestIdx)} cy={y(latestVal)} r="3.2" fill={color || "rgba(6,182,212,0.95)"} />
+            <circle cx={x(latestIdx)} cy={y(latestVal)} r="3.2" fill={primaryColor} />
             <text
               x={W - R - 6}
               y={latestLabelY}
@@ -1370,7 +1404,28 @@ function SimpleSeriesPlot({ series, valueKey, color, label, formatValue, zeroLab
             </text>
           </>
         )}
+        {Number.isFinite(overlayLatestVal) && (
+          <>
+            <circle cx={x(overlayLatestIdx)} cy={y(overlayLatestVal)} r="2.8" fill={ovColor} />
+            <text
+              x={W - R - 6}
+              y={clampNum(y(overlayLatestVal) + 14, T + 22, H - B - 4)}
+              textAnchor="end"
+              fontSize="11"
+              fill={ovColor}
+              fontFamily="DM Sans"
+            >
+              {overlayLatestLabel}
+            </text>
+          </>
+        )}
         <text x="14" y={T + 14} fontSize="12" fill="#c9d7ef" fontFamily="DM Sans">{label}</text>
+        {overlayPath && overlayLabel && (
+          <g>
+            <line x1={L + 14} y1={T + 30} x2={L + 34} y2={T + 30} stroke={ovColor} strokeWidth="1.6" strokeDasharray="5 4" />
+            <text x={L + 40} y={T + 34} fontSize="11" fill={ovColor} fontFamily="DM Sans">{overlayLabel}</text>
+          </g>
+        )}
         {xTickIdxUnique.map((idx, i) => (
           <g key={`x-${i}`}>
             <line x1={x(idx)} y1={H - B + 1} x2={x(idx)} y2={H - B + 6} stroke="rgba(120,138,168,0.7)" strokeWidth="1" />
@@ -2363,6 +2418,25 @@ function ChartPage({ record, onBack }) {
               <div className="cs-sub">{latestEtfMetric?.date || '—'}</div>
             </div>
             <div className="chart-stat">
+              <div className="cs-label">Close vs. NAV</div>
+              <div className="cs-value">
+                {(() => {
+                  const nav = Number(latestEtfMetric?.nav);
+                  const close = Number(latestEtfMetric?.close_price);
+                  if (!Number.isFinite(nav) || !Number.isFinite(close) || nav <= 0) return '—';
+                  const pct = ((close - nav) / nav) * 100;
+                  const sign = pct >= 0 ? '+' : '';
+                  return `${sign}${pct.toFixed(2)}%`;
+                })()}
+              </div>
+              <div className="cs-sub">
+                {(() => {
+                  const close = Number(latestEtfMetric?.close_price);
+                  return Number.isFinite(close) ? `close ${fmtUsd(close)}` : 'close —';
+                })()}
+              </div>
+            </div>
+            <div className="chart-stat">
               <div className="cs-label">AUM / TNA</div>
               <div className="cs-value">{latestEtfMetric ? fmtMoney(Number(latestEtfMetric.aum)) : '—'}</div>
               <div className="cs-sub">{latestEtfMetric?.date || '—'}</div>
@@ -2399,9 +2473,12 @@ function ChartPage({ record, onBack }) {
                   series={etfMetricsSeries}
                   valueKey="nav"
                   color="rgba(59,130,246,0.95)"
-                  label={`${etfSym} NAV`}
+                  label={`${etfSym} NAV vs. Close (premium/discount visible as gap)`}
                   formatValue={(v) => fmtUsd(v)}
                   zeroLabel="$0"
+                  overlayValueKey="close_price"
+                  overlayColor="rgba(234,179,8,0.95)"
+                  overlayLabel="Market Close"
                 />
                 <SimpleSeriesPlot
                   series={etfMetricsSeries}
@@ -2434,6 +2511,8 @@ function ChartPage({ record, onBack }) {
                     <tr>
                       <th>Date</th>
                       <th>NAV</th>
+                      <th>Close</th>
+                      <th>Prem/Disc</th>
                       <th>TR NAV</th>
                       <th>AUM / TNA</th>
                       <th>Shares Outstanding</th>
@@ -2441,16 +2520,25 @@ function ChartPage({ record, onBack }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {[...etfMetricsSeries].slice(-15).reverse().map((m, idx) => (
-                      <tr key={`${m.date}-${idx}`}>
-                        <td>{m.date || '—'}</td>
-                        <td>{fmtUsd(Number(m.nav))}</td>
-                        <td>{Number.isFinite(Number(m.nav_total_return)) ? fmtUsd(Number(m.nav_total_return)) : '—'}</td>
-                        <td>{fmtMoney(Number(m.aum))}</td>
-                        <td>{fmtNum(Number(m.shares_outstanding))}</td>
-                        <td>{m.status || '—'}</td>
-                      </tr>
-                    ))}
+                    {[...etfMetricsSeries].slice(-15).reverse().map((m, idx) => {
+                      const nav = Number(m.nav);
+                      const close = Number(m.close_price);
+                      const premPct = (Number.isFinite(nav) && nav > 0 && Number.isFinite(close))
+                        ? ((close - nav) / nav) * 100
+                        : null;
+                      return (
+                        <tr key={`${m.date}-${idx}`}>
+                          <td>{m.date || '—'}</td>
+                          <td>{fmtUsd(nav)}</td>
+                          <td>{Number.isFinite(close) ? fmtUsd(close) : '—'}</td>
+                          <td>{premPct == null ? '—' : `${premPct >= 0 ? '+' : ''}${premPct.toFixed(2)}%`}</td>
+                          <td>{Number.isFinite(Number(m.nav_total_return)) ? fmtUsd(Number(m.nav_total_return)) : '—'}</td>
+                          <td>{fmtMoney(Number(m.aum))}</td>
+                          <td>{fmtNum(Number(m.shares_outstanding))}</td>
+                          <td>{m.status || '—'}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -3196,11 +3284,23 @@ function NewsPage({
     return out;
   }, [items, category, windowKey, sortKey, search]);
 
+  // Chip counts reflect everything the page actually renders for that category:
+  // structured corporate-action events + classified news headlines.  The old
+  // version counted only `items`, so e.g. "Reverse Split 1" was shown while the
+  // page simultaneously listed 87 structured reverse-split events below the
+  // chip — a confusing "count doesn't match what I see" discrepancy.
   const categoryCounts = useMemo(() => {
-    const c = { all: items.length };
-    items.forEach(it => { c[it.category] = (c[it.category] || 0) + 1; });
+    const c = { all: events.length + items.length };
+    events.forEach(ev => {
+      const k = ev.type || 'other';
+      c[k] = (c[k] || 0) + 1;
+    });
+    items.forEach(it => {
+      const k = it.category || 'other';
+      c[k] = (c[k] || 0) + 1;
+    });
     return c;
-  }, [items]);
+  }, [events, items]);
 
   const buildTime = eventsPayload?.build_time || newsPayload?.build_time;
   const isSeed = !buildTime || buildTime.startsWith('1970');

@@ -96,6 +96,14 @@ jobs:
       - name: Ingest ETF metrics
         run: python scripts/ingest_etf_metrics.py --lookback-days 10 --polygon-lookback-days 5
 
+      - name: Backfill historical close prices
+        # One yfinance batch call fills close_price for every (date,ticker) row
+        # that predates the column. Uses --only-missing (default) so re-runs are
+        # no-ops once the store is caught up. Tolerates yfinance outages --
+        # failures are logged but non-fatal for the rest of the workflow.
+        continue-on-error: true
+        run: python scripts/backfill_close_prices.py --chunk 50
+
       - name: Ingest ETF distribution history
         # Used by the frontend to render a distribution-adjusted ("total return") NAV
         # series alongside raw NAV on the Stats tab -- critical for YieldMax-class
@@ -132,7 +140,7 @@ jobs:
       - name: Commit metrics artifacts
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json data/etf_metrics_health.json data/etf_distributions.json"
+          FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json data/etf_metrics_health.json data/etf_distributions.json data/etf_holdings_daily.parquet data/etf_holdings_daily.csv data/etf_holdings_latest.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ${FILES}

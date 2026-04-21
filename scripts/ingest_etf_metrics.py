@@ -49,6 +49,11 @@ from etf_providers import (
     build_default_stack,
     merge_provider_attempts,
 )
+from etf_holdings_providers import (
+    HOLDINGS_COLUMNS,
+    build_default_holdings_stack,
+    fetch_all_holdings,
+)
 
 
 LOGGER = logging.getLogger("etf_metrics_ingest")
@@ -61,6 +66,9 @@ CSV_PATH = DATA_DIR / "etf_metrics_daily.csv"
 JSON_PATH = DATA_DIR / "etf_metrics_daily.json"
 LATEST_JSON_PATH = DATA_DIR / "etf_metrics_latest.json"
 HEALTH_JSON_PATH = DATA_DIR / "etf_metrics_health.json"
+HOLDINGS_PARQUET_PATH = DATA_DIR / "etf_holdings_daily.parquet"
+HOLDINGS_CSV_PATH = DATA_DIR / "etf_holdings_daily.csv"
+HOLDINGS_LATEST_JSON_PATH = DATA_DIR / "etf_holdings_latest.json"
 
 REQUIRED_COLUMNS = [
     "date",
@@ -68,6 +76,7 @@ REQUIRED_COLUMNS = [
     "nav",
     "aum",
     "shares_outstanding",
+    "close_price",
     "stale",
     "stale_age_bdays",
     "source_provider",
@@ -110,6 +119,7 @@ def _records_to_df(records: list[ProviderResult], ingested_at: datetime) -> pd.D
             "nav": r.nav,
             "aum": r.aum,
             "shares_outstanding": r.shares_outstanding,
+            "close_price": None,
             "stale": bool(r.stale),
             "stale_age_bdays": r.stale_age_bdays,
             "source_provider": r.source_provider,
@@ -179,10 +189,17 @@ def validate_df(df: pd.DataFrame) -> None:
 
 def load_existing(parquet_path: Path = PARQUET_PATH) -> pd.DataFrame:
     if parquet_path.exists():
-        return pd.read_parquet(parquet_path)
-    if CSV_PATH.exists():
-        return pd.read_csv(CSV_PATH)
-    return pd.DataFrame(columns=REQUIRED_COLUMNS)
+        df = pd.read_parquet(parquet_path)
+    elif CSV_PATH.exists():
+        df = pd.read_csv(CSV_PATH)
+    else:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+    # Back-fill newly added columns on historical rows so the canonical frame
+    # always matches REQUIRED_COLUMNS regardless of the file's generation.
+    for c in REQUIRED_COLUMNS:
+        if c not in df.columns:
+            df[c] = None
+    return df
 
 
 def _metric_triple_equal(a, b) -> bool:
@@ -300,10 +317,227 @@ def _sanitize_json_df(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     d["date"] = pd.to_datetime(d["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     d["ingested_at_utc"] = pd.to_datetime(d["ingested_at_utc"], errors="coerce", utc=True).astype(str)
-    for col in ("nav", "aum", "shares_outstanding", "stale_age_bdays"):
+    for col in ("nav", "aum", "shares_outstanding", "close_price", "stale_age_bdays"):
         if col in d.columns:
             d[col] = pd.to_numeric(d[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
     return d.astype(object).where(pd.notna(d), None)
+
+
+# ---------------------------------------------------------------------------
+# Close-price fetch (yfinance bulk) + holdings persistence
+# ---------------------------------------------------------------------------
+
+def fetch_close_prices_batch(
+    tickers: list[str],
+    start: date,
+    end: date,
+) -> pd.DataFrame:
+    """Return long-form DataFrame (date, ticker, close_price) from yfinance.
+
+    Uses ``yf.download`` with a ticker list; that issues a single multi-symbol
+    request rather than one GET per ticker, which is ~20x faster and stays
+    well under Yahoo's rate ceiling for cloud IPs.
+
+    An empty DataFrame is returned on any failure so the caller can proceed
+    without close-prices rather than blow up the whole ingest.
+    """
+    cols = ["date", "ticker", "close_price"]
+    if not tickers:
+        return pd.DataFrame(columns=cols)
+    if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
+        LOGGER.info("close-price fetch disabled (ETF_METRICS_DISABLE_YFINANCE)")
+        return pd.DataFrame(columns=cols)
+
+    try:
+        import yfinance as yf
+    except Exception as e:  # pragma: no cover
+        LOGGER.warning("yfinance unavailable for close-price fetch: %s", e)
+        return pd.DataFrame(columns=cols)
+
+    # yfinance end-date is exclusive; pad by one day.
+    start_s = start.isoformat()
+    end_s = (end + timedelta(days=1)).isoformat()
+    try:
+        # group_by='ticker' yields a wide DataFrame with MultiIndex columns.
+        raw = yf.download(
+            tickers=list(tickers),
+            start=start_s,
+            end=end_s,
+            interval="1d",
+            auto_adjust=False,
+            actions=False,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+        )
+    except Exception as e:
+        LOGGER.warning("yfinance batch close fetch failed: %s", e)
+        return pd.DataFrame(columns=cols)
+
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=cols)
+
+    records: list[dict] = []
+    if isinstance(raw.columns, pd.MultiIndex):
+        # Structure: raw[ticker]['Close']
+        for t in tickers:
+            up = t.upper()
+            if t not in raw.columns.get_level_values(0):
+                continue
+            try:
+                sub = raw[t]
+            except KeyError:
+                continue
+            if "Close" not in sub.columns:
+                continue
+            close = sub["Close"].dropna()
+            for idx, v in close.items():
+                try:
+                    c = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if c > 0:
+                    records.append({
+                        "date": idx.date() if hasattr(idx, "date") else idx,
+                        "ticker": up,
+                        "close_price": c,
+                    })
+    else:
+        # Single-ticker fall-through: raw has a flat columns index.
+        if "Close" in raw.columns and len(tickers) == 1:
+            up = tickers[0].upper()
+            for idx, v in raw["Close"].dropna().items():
+                try:
+                    c = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if c > 0:
+                    records.append({
+                        "date": idx.date() if hasattr(idx, "date") else idx,
+                        "ticker": up,
+                        "close_price": c,
+                    })
+
+    if not records:
+        return pd.DataFrame(columns=cols)
+    out = pd.DataFrame.from_records(records)
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out = out.dropna(subset=["date", "ticker"])
+    return out.drop_duplicates(subset=["date", "ticker"], keep="last")
+
+
+def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame:
+    """Left-join close prices onto the metrics frame on (date, ticker)."""
+    if close_df.empty:
+        if "close_price" not in df.columns:
+            df = df.copy()
+            df["close_price"] = None
+        return df
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    merged = out.merge(
+        close_df.rename(columns={"close_price": "_close_new"}),
+        on=["date", "ticker"],
+        how="left",
+    )
+    if "close_price" not in merged.columns:
+        merged["close_price"] = None
+    # Prefer the freshly fetched value; keep the existing one when yfinance is silent.
+    merged["close_price"] = pd.to_numeric(merged["_close_new"], errors="coerce").combine_first(
+        pd.to_numeric(merged["close_price"], errors="coerce")
+    )
+    merged = merged.drop(columns=["_close_new"])
+    return merged
+
+
+def save_holdings_outputs(
+    new_rows: pd.DataFrame,
+    parquet_path: Path | None = None,
+    csv_path: Path | None = None,
+    latest_json_path: Path | None = None,
+) -> None:
+    # Resolve lazily so module-level monkeypatching in tests is honored.
+    parquet_path = parquet_path or HOLDINGS_PARQUET_PATH
+    csv_path = csv_path or HOLDINGS_CSV_PATH
+    latest_json_path = latest_json_path or HOLDINGS_LATEST_JSON_PATH
+    """Append new holdings rows into the canonical parquet/CSV store and
+    refresh the latest-per-ticker JSON snapshot consumed by the dashboard UI.
+
+    Duplicate positions (same etf, same as_of_date, same position_ticker+cusip
+    combination, same market value) are dropped so reruns don't bloat history.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    incoming = new_rows.copy()
+    if incoming.empty:
+        LOGGER.info("holdings: incoming frame empty, nothing to persist")
+        # Ensure the latest JSON file stays in sync (empty run still writes meta).
+        payload = {"build_time": datetime.now(UTC).isoformat(), "rows": [], "by_symbol": {}}
+        with open(latest_json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, separators=(",", ":"), allow_nan=False)
+        return
+
+    for c in HOLDINGS_COLUMNS:
+        if c not in incoming.columns:
+            incoming[c] = None
+    incoming = incoming[HOLDINGS_COLUMNS]
+    incoming["as_of_date"] = pd.to_datetime(incoming["as_of_date"], errors="coerce").dt.date
+    incoming["etf_ticker"] = incoming["etf_ticker"].astype(str).str.upper()
+
+    if parquet_path.exists():
+        try:
+            hist = pd.read_parquet(parquet_path)
+            for c in HOLDINGS_COLUMNS:
+                if c not in hist.columns:
+                    hist[c] = None
+            hist = hist[HOLDINGS_COLUMNS]
+            hist["as_of_date"] = pd.to_datetime(hist["as_of_date"], errors="coerce").dt.date
+            hist["etf_ticker"] = hist["etf_ticker"].astype(str).str.upper()
+            combo = pd.concat([hist, incoming], ignore_index=True)
+        except Exception as e:
+            LOGGER.warning("holdings: failed to read existing parquet, starting fresh: %s", e)
+            combo = incoming
+    else:
+        combo = incoming
+
+    dedup_keys = [
+        "as_of_date", "etf_ticker", "position_ticker", "cusip",
+        "shares", "market_value", "weight_pct",
+    ]
+    combo = combo.drop_duplicates(subset=dedup_keys, keep="last")
+    combo = combo.sort_values(["as_of_date", "etf_ticker", "weight_pct"], ascending=[True, True, False])
+    combo = combo.reset_index(drop=True)
+
+    combo.to_parquet(parquet_path, index=False)
+    combo.to_csv(csv_path, index=False)
+    LOGGER.info(
+        "holdings: saved %d total rows (%d new) across %d ETFs, latest date=%s",
+        len(combo), len(incoming),
+        combo["etf_ticker"].nunique(),
+        combo["as_of_date"].max(),
+    )
+
+    # Latest snapshot: keep only the newest as_of_date per ETF — that's what the UI renders.
+    latest = combo.sort_values(["etf_ticker", "as_of_date"])
+    latest = latest.groupby("etf_ticker", group_keys=False).apply(
+        lambda g: g[g["as_of_date"] == g["as_of_date"].max()]
+    )
+    latest_json = latest.copy()
+    latest_json["as_of_date"] = pd.to_datetime(latest_json["as_of_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    for c in ("shares", "price", "market_value", "weight_pct"):
+        latest_json[c] = pd.to_numeric(latest_json[c], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    latest_json = latest_json.astype(object).where(pd.notna(latest_json), None)
+    by_symbol: dict[str, list[dict]] = {}
+    for sym, g in latest_json.groupby("etf_ticker"):
+        by_symbol[str(sym).upper()] = g.drop(columns=["etf_ticker"]).to_dict("records")
+    payload = {
+        "build_time": datetime.now(UTC).isoformat(),
+        "latest_date": str(combo["as_of_date"].max()) if not combo.empty else None,
+        "symbols": sorted(by_symbol.keys()),
+        "by_symbol": by_symbol,
+    }
+    with open(latest_json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, separators=(",", ":"), allow_nan=False)
 
 
 def save_outputs(df: pd.DataFrame) -> None:
@@ -686,6 +920,21 @@ def main() -> None:
     )
     LOGGER.info("Incoming summary: %s", get_summary(incoming))
 
+    # Close-price overlay: one yfinance batch call covering the run's date window.
+    # This powers the NAV-vs-close premium/discount chart in the UI. If the batch
+    # fails we still ship NAV data — close_price stays null for those rows.
+    close_df = fetch_close_prices_batch(
+        tickers, start=resolved_start_date, end=resolved_end_date,
+    )
+    if not close_df.empty:
+        incoming = merge_close_prices(incoming, close_df)
+        got = pd.to_numeric(incoming["close_price"], errors="coerce").notna().sum()
+        LOGGER.info("close_price attached to %d/%d rows", int(got), len(incoming))
+    else:
+        if "close_price" not in incoming.columns:
+            incoming["close_price"] = None
+        LOGGER.info("close_price fetch returned no rows")
+
     max_stale_business_days = int(os.getenv("ETF_METRICS_MAX_STALE_BUSINESS_DAYS", "3"))
     incoming = apply_stale_carry_forward(
         existing=existing,
@@ -700,6 +949,28 @@ def main() -> None:
     validate_df(merged)
     save_outputs(merged)
     LOGGER.info("Saved merged summary: %s", get_summary(merged))
+
+    # Holdings phase — runs after NAV/close are persisted so a failure here
+    # never takes down the primary metrics output.
+    if os.getenv("ETF_METRICS_SKIP_HOLDINGS", "").lower() not in ("1", "true", "yes"):
+        try:
+            holdings_stack = build_default_holdings_stack(session)
+            holdings_df = fetch_all_holdings(
+                tickers, as_of=resolved_end_date, stack=holdings_stack,
+            )
+            cov = holdings_df.attrs.get("coverage", {})
+            by_source: dict[str, int] = {}
+            for src in cov.values():
+                by_source[src] = by_source.get(src, 0) + 1
+            LOGGER.info(
+                "holdings coverage: %d/%d tickers with holdings, by source=%s",
+                sum(1 for v in cov.values() if v != "missing"), len(cov), by_source,
+            )
+            save_holdings_outputs(holdings_df)
+        except Exception as e:
+            LOGGER.warning("holdings phase failed (continuing): %s", e)
+    else:
+        LOGGER.info("holdings phase skipped (ETF_METRICS_SKIP_HOLDINGS)")
 
 
 if __name__ == "__main__":

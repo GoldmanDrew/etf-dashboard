@@ -57,6 +57,12 @@ LOGGER = logging.getLogger("corporate_actions_ingest")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
 UNIVERSE_CSV = DATA_DIR / "etf_screened_today.csv"
+# Historic metrics: every ticker we've ever tracked (NAV/AUM/shares).  Used to
+# build an "ever-known" universe for delistings, since a delisted ETF drops out
+# of `etf_screened_today.csv` before the next corp-actions sweep and would
+# otherwise be filtered out of the Polygon intersection.
+METRICS_PARQUET = DATA_DIR / "etf_metrics_daily.parquet"
+METRICS_CSV = DATA_DIR / "etf_metrics_daily.csv"
 OUT_EVENTS = DATA_DIR / "corporate_actions.json"
 OUT_NEWS = DATA_DIR / "etf_news.json"
 
@@ -181,6 +187,85 @@ def load_universe() -> pd.DataFrame:
     })
     out = out.dropna(subset=["ticker"]).drop_duplicates(subset=["ticker"])
     return out.sort_values("ticker").reset_index(drop=True)
+
+
+def load_ever_known_universe(current_universe: set[str]) -> set[str]:
+    """Return the union of every ticker we've ever tracked.
+
+    Delistings-only helper: a delisted ETF is dropped from
+    ``etf_screened_today.csv`` the day after it stops trading, so the current
+    universe is structurally incapable of matching a Polygon delisting record
+    for that ticker.  We widen the match set using:
+
+      * the current screener (``current_universe``),
+      * every ticker that has ever been written into
+        ``data/etf_metrics_daily.parquet`` (historic NAV/AUM/shares),
+      * every ticker already recorded as a delisting or split in the prior
+        ``data/corporate_actions.json`` (so once we detect a delisting, it
+        stays pinned even if Polygon later stops returning it in the
+        ``active=false`` paginator).
+
+    All sources are optional; missing files are skipped silently.  This is a
+    pure superset — splits/news phases continue to use the narrow current
+    universe so we don't accidentally surface noise for tickers we no longer
+    track.
+    """
+    out: set[str] = {t for t in current_universe if t}
+
+    parquet_path = METRICS_PARQUET
+    try:
+        if parquet_path.exists():
+            df = pd.read_parquet(parquet_path)
+            if "ticker" in df.columns:
+                out.update({_norm(t) for t in df["ticker"].dropna().unique() if t})
+    except Exception as e:  # noqa: BLE001 - parquet read is best-effort
+        LOGGER.warning("ever-known universe: parquet load failed (%s); trying CSV fallback", e)
+        try:
+            if METRICS_CSV.exists():
+                df = pd.read_csv(METRICS_CSV, usecols=["ticker"])
+                out.update({_norm(t) for t in df["ticker"].dropna().unique() if t})
+        except Exception as e2:  # noqa: BLE001
+            LOGGER.warning("ever-known universe: CSV fallback also failed (%s)", e2)
+
+    if OUT_EVENTS.exists():
+        try:
+            prior = json.loads(OUT_EVENTS.read_text(encoding="utf-8"))
+            for ev in prior.get("events") or []:
+                t = _norm(ev.get("ticker") or "")
+                if t:
+                    out.add(t)
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning("ever-known universe: could not read prior events (%s)", e)
+
+    return out
+
+
+def load_prior_delistings() -> dict[str, CorporateEvent]:
+    """Return ``{event_id: CorporateEvent}`` for every delisting already recorded.
+
+    Delistings are immutable once confirmed: a fund that wound down last month
+    should not vanish from the feed just because Polygon's paginated
+    ``active=false`` sweep rotated it out of the top 10 pages.  We merge these
+    into every run's output so the delistings grow monotonically.
+    """
+    out: dict[str, CorporateEvent] = {}
+    if not OUT_EVENTS.exists():
+        return out
+    try:
+        payload = json.loads(OUT_EVENTS.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("prior delistings: could not read %s (%s)", OUT_EVENTS, e)
+        return out
+    for raw in payload.get("events") or []:
+        if raw.get("type") != "delisting":
+            continue
+        try:
+            ev = CorporateEvent(**{k: raw.get(k) for k in CorporateEvent.__dataclass_fields__.keys()})
+        except Exception:  # noqa: BLE001
+            continue
+        if ev.id:
+            out[ev.id] = ev
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -435,12 +520,24 @@ def phase_2_delistings(
     bucket_map: dict[str, str | None],
     underlying_map: dict[str, str | None],
 ) -> list[CorporateEvent]:
-    """Pull inactive ETFs from Polygon and intersect with our universe."""
+    """Pull inactive tickers from Polygon and intersect with our ever-known universe.
+
+    ``universe`` MUST be the broadened "ever-known" set (see
+    :func:`load_ever_known_universe`) rather than just the current screener —
+    delisted ETFs are dropped from the screener on day one, so the narrow
+    current universe has a near-zero match rate for inactive tickers.
+
+    We intentionally omit the ``type=ETF`` filter on Polygon's
+    ``/v3/reference/tickers?active=false`` sweep because Polygon occasionally
+    reclassifies a fund's type post-delisting (e.g. back to equity or to ``CS``
+    when the CUSIP/SEDOL is retired).  The universe-intersection downstream
+    guarantees we only keep tickers we actually tracked, so this broadening
+    cannot introduce off-topic rows.
+    """
     raw = _bulk_paginate(
         session,
         "https://api.polygon.io/v3/reference/tickers",
         {
-            "type": "ETF",
             "market": "stocks",
             "active": "false",
             "order": "desc",
@@ -452,9 +549,11 @@ def phase_2_delistings(
     )
 
     events: list[CorporateEvent] = []
+    skipped_off_universe = 0
     for r in raw:
         sym = _norm(r.get("ticker") or "")
         if sym not in universe:
+            skipped_off_universe += 1
             continue
         delisted = r.get("delisted_utc") or r.get("last_updated_utc")
         date_str = None
@@ -486,8 +585,9 @@ def phase_2_delistings(
             )
         )
     LOGGER.info(
-        "delistings: kept=%d (of %d inactive ETFs returned by Polygon)",
+        "delistings: kept=%d off_universe=%d (of %d inactive tickers returned by Polygon)",
         len(events),
+        skipped_off_universe,
         len(raw),
     )
     return events
@@ -852,8 +952,17 @@ def main() -> None:
             LOGGER.info("Phase 2: delistings SKIPPED")
         else:
             LOGGER.info("Phase 2: delistings")
+            # Delistings phase MUST use the ever-known universe — delisted ETFs are
+            # dropped from etf_screened_today.csv on day one and would otherwise
+            # never match Polygon's inactive-tickers paginator (fix for blank
+            # Delisting tab).
+            ever_known = load_ever_known_universe(set(tickers))
+            LOGGER.info(
+                "  ever-known universe for delistings: current=%d ever_known=%d (+%d historic/prior)",
+                len(tickers), len(ever_known), len(ever_known) - len(tickers),
+            )
             delisting_events = phase_2_delistings(
-                session, set(tickers), bucket_map, underlying_map
+                session, ever_known, bucket_map, underlying_map
             )
 
         if args.skip_news:
@@ -865,10 +974,25 @@ def main() -> None:
         aborted_reason = str(e)
         LOGGER.error("Ingest aborted due to rate-limit wall: %s", e)
 
+    # Delistings are immutable once confirmed — always merge in prior records so
+    # that a ticker which fell out of Polygon's top-page `active=false` window
+    # does not vanish from the News tab.  dedupe_events() preserves the record
+    # with a populated execution_date, so a previously-detected delisting keeps
+    # its original date even if the new run finds only a stale stub.
+    prior_delistings = load_prior_delistings()
+    if prior_delistings and not args.skip_delistings:
+        LOGGER.info(
+            "  merging %d prior delisting records (immutable pin)",
+            len(prior_delistings),
+        )
+        delisting_events = list(delisting_events) + list(prior_delistings.values())
+
     events = dedupe_events(split_events + delisting_events)
+    final_delisting_count = sum(1 for e in events if e.type == "delisting")
+    final_split_count = sum(1 for e in events if e.type in {"reverse_split", "forward_split"})
     LOGGER.info(
         "Events after dedupe: %d (splits=%d delistings=%d)",
-        len(events), len(split_events), len(delisting_events),
+        len(events), final_split_count, final_delisting_count,
     )
 
     if news:
