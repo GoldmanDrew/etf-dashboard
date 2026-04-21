@@ -27,15 +27,26 @@ concurrency:
 jobs:
   refresh-corporate-actions:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 30 min ceiling is plenty: the ingest uses bulk Polygon endpoints and even on the
+    # free tier (5 req/min) a full sweep is <30 calls = ~6 min. Bump only if NEWS_MAX_PAGES
+    # is raised substantially.
+    timeout-minutes: 30
     env:
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
-      # Shared with other ingest scripts -- keep timeouts/retries conservative so one
-      # rate-limit hiccup on a single ticker doesn't abort the whole sweep.
-      ETF_METRICS_HTTP_TIMEOUT_SEC: "25"
-      ETF_METRICS_HTTP_RETRY_TOTAL: "3"
-      CORP_ACTIONS_SLEEP_SEC: "0.12"
+      ETF_METRICS_HTTP_TIMEOUT_SEC: "30"
+      ETF_METRICS_HTTP_RETRY_TOTAL: "4"
       CORP_ACTIONS_NEWS_WINDOW_DAYS: "60"
+      # Polygon plan rate limit (requests/minute).  Basic/free = 5, Starter = 100,
+      # Developer/Advanced = effectively unlimited.  The ingest uses BULK endpoints
+      # (no per-ticker loops) so the full sweep is dominated by pagination (~30 calls
+      # total) rather than ticker count.
+      CORP_ACTIONS_POLYGON_REQS_PER_MIN: "5"
+      CORP_ACTIONS_MAX_CONSEC_429: "15"
+      # Bulk pagination caps.  Defaults chosen for ~25 news calls + ~3 splits + ~1 delistings
+      # = ~30 calls total, which costs 6 min on the free tier and seconds on paid tiers.
+      CORP_ACTIONS_NEWS_MAX_PAGES: "25"
+      CORP_ACTIONS_SPLITS_MAX_PAGES: "10"
+      CORP_ACTIONS_DELISTINGS_MAX_PAGES: "10"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

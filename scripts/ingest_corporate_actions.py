@@ -12,10 +12,18 @@ Writes two artifacts, both consumed by the frontend's "News" tab:
                                       filtered to corporate-action categories only
                                       (dividends/distributions explicitly excluded).
 
+Design choice: every phase uses a **bulk** Polygon endpoint (no per-ticker loop) and
+filters to our universe client-side.  This collapses a free-tier 5-req/min budget
+from ~900 ticker-by-ticker calls to ~15-30 paginated bulk calls, which comfortably
+fits the GitHub Actions timeout.
+
 Pipeline phases:
-    phase_1_splits       -- Polygon v3 splits for every ticker (forward + reverse)
-    phase_2_delistings   -- Polygon v3 inactive tickers intersected with our universe
-    phase_3_news         -- Polygon v2 news per ticker, regex-classified
+    phase_1_splits       -- Polygon /v3/reference/splits bulk sweep (date-windowed),
+                            filtered to our universe client-side
+    phase_2_delistings   -- Polygon /v3/reference/tickers?active=false bulk sweep
+    phase_3_news         -- Polygon /v2/reference/news bulk sweep (date-windowed),
+                            capped by page budget; each article's tickers[] array is
+                            intersected with our universe and regex-classified
     merge / dedupe       -- attach linked_event_id, collapse duplicate headlines
     persist              -- write both JSON files
 
@@ -35,6 +43,7 @@ import logging
 import os
 import re
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -52,11 +61,33 @@ OUT_EVENTS = DATA_DIR / "corporate_actions.json"
 OUT_NEWS = DATA_DIR / "etf_news.json"
 
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY") or os.getenv("POLYGON_IO_API_KEY") or ""
-HTTP_TIMEOUT_SEC = int(os.getenv("ETF_METRICS_HTTP_TIMEOUT_SEC", "20"))
-HTTP_RETRY_TOTAL = int(os.getenv("ETF_METRICS_HTTP_RETRY_TOTAL", "2"))
-SLEEP_BETWEEN_CALLS = float(os.getenv("CORP_ACTIONS_SLEEP_SEC", "0.12"))
+HTTP_TIMEOUT_SEC = int(os.getenv("ETF_METRICS_HTTP_TIMEOUT_SEC", "30"))
+HTTP_RETRY_TOTAL = int(os.getenv("ETF_METRICS_HTTP_RETRY_TOTAL", "4"))
 NEWS_WINDOW_DAYS = int(os.getenv("CORP_ACTIONS_NEWS_WINDOW_DAYS", "60"))
-NEWS_PAGE_LIMIT = int(os.getenv("CORP_ACTIONS_NEWS_PAGE_LIMIT", "50"))
+SPLITS_LOOKBACK_DAYS = int(os.getenv("CORP_ACTIONS_SPLITS_LOOKBACK_DAYS", "365"))
+NEWS_PAGE_LIMIT = int(os.getenv("CORP_ACTIONS_NEWS_PAGE_LIMIT", "1000"))
+# How many pages of bulk news to fetch before stopping.  At 1000 articles/page, 25
+# pages covers ~25k articles which is typically more than 60 days of market news.
+NEWS_MAX_PAGES = int(os.getenv("CORP_ACTIONS_NEWS_MAX_PAGES", "25"))
+SPLITS_MAX_PAGES = int(os.getenv("CORP_ACTIONS_SPLITS_MAX_PAGES", "10"))
+DELISTINGS_MAX_PAGES = int(os.getenv("CORP_ACTIONS_DELISTINGS_MAX_PAGES", "10"))
+# Polygon tier rate limit (req/min). Defaults to the free-tier cap of 5 so the
+# script is safe on basic plans out-of-the-box. Bump via env for paid tiers:
+#   Starter=100, Developer/Advanced=600+.
+POLYGON_MAX_REQUESTS_PER_MINUTE = int(os.getenv("CORP_ACTIONS_POLYGON_REQS_PER_MIN", "5"))
+# Hard cap on consecutive 429s before we bail out (prevents spending hours in a
+# rate-limit wall).  Reset on any successful call.
+MAX_CONSECUTIVE_RATE_LIMITS = int(os.getenv("CORP_ACTIONS_MAX_CONSEC_429", "15"))
+
+
+class RateLimitExceeded(RuntimeError):
+    """Raised when Polygon persistently 429s and we decide to abort the run."""
+
+
+# Sliding-window of recent request timestamps (monotonic seconds) for rate limiting.
+_REQUEST_TIMESTAMPS: deque[float] = deque()
+# Global counter so we can short-circuit if Polygon is hard-rate-limiting us.
+_CONSECUTIVE_429_STATE = {"count": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -165,54 +196,153 @@ def build_session() -> requests.Session:
     return s
 
 
+def _rate_limit_polygon() -> None:
+    """Token-bucket style gate: blocks until we're under POLYGON_MAX_REQUESTS_PER_MINUTE."""
+    if POLYGON_MAX_REQUESTS_PER_MINUTE <= 0:
+        return
+    now = time.monotonic()
+    while _REQUEST_TIMESTAMPS and (now - _REQUEST_TIMESTAMPS[0]) >= 60.0:
+        _REQUEST_TIMESTAMPS.popleft()
+    if len(_REQUEST_TIMESTAMPS) < POLYGON_MAX_REQUESTS_PER_MINUTE:
+        return
+    wait_s = max(0.05, 60.0 - (now - _REQUEST_TIMESTAMPS[0]) + 0.05)
+    time.sleep(wait_s)
+
+
 def _polygon_get(session: requests.Session, url: str, params: dict | None = None) -> dict | None:
-    """GET with retry/backoff.  Returns parsed JSON or None on unrecoverable failure."""
+    """GET with client-side rate limiting + Retry-After-aware 429 handling.
+
+    Returns parsed JSON on success, or ``None`` on unrecoverable failure.  Raises
+    :class:`RateLimitExceeded` if Polygon 429s us more than
+    ``MAX_CONSECUTIVE_RATE_LIMITS`` calls in a row -- this is the signal to bail out
+    rather than spend another hour spinning.
+    """
     if not POLYGON_API_KEY:
         LOGGER.error("POLYGON_API_KEY is not set; corporate-actions ingest cannot run.")
         return None
     p = dict(params or {})
     p.setdefault("apiKey", POLYGON_API_KEY)
-    last_err: Exception | None = None
-    for attempt in range(HTTP_RETRY_TOTAL + 1):
+
+    last_status: int | None = None
+    last_body_snippet: str | None = None
+    last_exc: Exception | None = None
+
+    for attempt in range(max(1, HTTP_RETRY_TOTAL + 1)):
+        _rate_limit_polygon()
         try:
             resp = session.get(url, params=p, timeout=HTTP_TIMEOUT_SEC)
-            if resp.status_code == 429:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            resp.raise_for_status()
+        except Exception as e:  # noqa: BLE001 - network-level, logged below
+            last_exc = e
+            time.sleep(0.4 * (attempt + 1))
+            continue
+
+        _REQUEST_TIMESTAMPS.append(time.monotonic())
+        last_status = resp.status_code
+
+        if resp.status_code == 429:
+            _CONSECUTIVE_429_STATE["count"] += 1
+            if _CONSECUTIVE_429_STATE["count"] > MAX_CONSECUTIVE_RATE_LIMITS:
+                raise RateLimitExceeded(
+                    f"Aborting: {MAX_CONSECUTIVE_RATE_LIMITS} consecutive HTTP 429s from Polygon. "
+                    f"Your plan's rate limit is lower than CORP_ACTIONS_POLYGON_REQS_PER_MIN="
+                    f"{POLYGON_MAX_REQUESTS_PER_MINUTE}. Lower that env var (free tier = 5) "
+                    f"and re-run."
+                )
+            retry_after_hdr = resp.headers.get("Retry-After", "").strip()
+            try:
+                wait_s = float(retry_after_hdr) if retry_after_hdr else 2.0 * (attempt + 1)
+            except ValueError:
+                wait_s = 2.0 * (attempt + 1)
+            wait_s = min(max(wait_s, 0.5), 20.0)
+            LOGGER.debug("polygon 429 on %s; sleeping %.1fs (attempt %d/%d, consec_429=%d)",
+                         url, wait_s, attempt + 1, HTTP_RETRY_TOTAL + 1,
+                         _CONSECUTIVE_429_STATE["count"])
+            time.sleep(wait_s)
+            continue
+
+        # Any other non-2xx gets logged and retried once, then we give up.
+        if resp.status_code >= 400:
+            _CONSECUTIVE_429_STATE["count"] = 0
+            try:
+                last_body_snippet = resp.text[:200]
+            except Exception:  # noqa: BLE001
+                last_body_snippet = None
+            time.sleep(0.4 * (attempt + 1))
+            continue
+
+        # Success.
+        _CONSECUTIVE_429_STATE["count"] = 0
+        try:
             return resp.json()
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            time.sleep(0.5 * (attempt + 1))
-    LOGGER.warning("polygon GET failed: url=%s err=%s", url, last_err)
+        except Exception as e:  # noqa: BLE001 - bad JSON, treat as failure
+            last_exc = e
+            last_body_snippet = resp.text[:200] if hasattr(resp, "text") else None
+            break
+
+    LOGGER.warning(
+        "polygon GET failed: url=%s status=%s exc=%s body=%s",
+        url,
+        last_status,
+        repr(last_exc) if last_exc else None,
+        (last_body_snippet or "")[:120],
+    )
     return None
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 - splits (forward + reverse)
+# Shared: bulk paginator for Polygon reference endpoints
 # ---------------------------------------------------------------------------
 
-def fetch_splits_for_ticker(
+def _bulk_paginate(
     session: requests.Session,
-    ticker: str,
+    initial_url: str,
+    initial_params: dict,
     *,
-    lookback_years: int = 5,
+    max_pages: int,
+    phase_label: str,
 ) -> list[dict]:
-    """Polygon v3 splits for a single ticker, newest first.  Returns raw records."""
-    url = "https://api.polygon.io/v3/reference/splits"
-    cutoff = (datetime.now(UTC) - timedelta(days=365 * lookback_years)).date().isoformat()
-    params = {
-        "ticker": ticker,
-        "execution_date.gte": cutoff,
-        "order": "desc",
-        "limit": 1000,
-        "sort": "execution_date",
-    }
-    payload = _polygon_get(session, url, params)
-    if not payload:
-        return []
-    return payload.get("results") or []
+    """Walk Polygon's `next_url` pagination up to ``max_pages`` and return all results."""
+    out: list[dict] = []
+    url: str | None = initial_url
+    params: dict | None = dict(initial_params)
+    for page_idx in range(1, max_pages + 1):
+        if url is None:
+            break
+        payload = _polygon_get(session, url, params)
+        if not payload:
+            break
+        results = payload.get("results") or []
+        out.extend(results)
+        next_url = payload.get("next_url")
+        LOGGER.info(
+            "  %s page %d/%d: +%d results (total=%d) next=%s",
+            phase_label,
+            page_idx,
+            max_pages,
+            len(results),
+            len(out),
+            "yes" if next_url else "no",
+        )
+        if not next_url:
+            break
+        # Polygon's next_url already embeds query params; re-attach apiKey.
+        if "apiKey=" not in next_url:
+            sep = "&" if "?" in next_url else "?"
+            next_url = f"{next_url}{sep}apiKey={POLYGON_API_KEY}"
+        url = next_url
+        params = None
+    else:
+        LOGGER.warning(
+            "%s: hit max_pages=%d; additional results may exist but were skipped.",
+            phase_label,
+            max_pages,
+        )
+    return out
 
+
+# ---------------------------------------------------------------------------
+# Phase 1 - splits (forward + reverse), bulk
+# ---------------------------------------------------------------------------
 
 def phase_1_splits(
     session: requests.Session,
@@ -220,31 +350,52 @@ def phase_1_splits(
     bucket_map: dict[str, str | None],
     underlying_map: dict[str, str | None],
 ) -> list[CorporateEvent]:
+    """Fetch the market-wide split history over our lookback window in one sweep,
+    then filter client-side to our universe.  On a 5-req/min plan this costs ~1-3
+    calls vs ~440 calls for the per-ticker variant."""
+    universe = set(tickers)
+    cutoff = (datetime.now(UTC) - timedelta(days=SPLITS_LOOKBACK_DAYS)).date().isoformat()
+    raw = _bulk_paginate(
+        session,
+        "https://api.polygon.io/v3/reference/splits",
+        {
+            "execution_date.gte": cutoff,
+            "order": "desc",
+            "limit": 1000,
+            "sort": "execution_date",
+        },
+        max_pages=SPLITS_MAX_PAGES,
+        phase_label="splits",
+    )
+
     events: list[CorporateEvent] = []
-    for i, sym in enumerate(tickers, start=1):
-        raw = fetch_splits_for_ticker(session, sym)
-        for r in raw:
-            try:
-                split_from = float(r.get("split_from") or 0)
-                split_to = float(r.get("split_to") or 0)
-            except (TypeError, ValueError):
-                continue
-            if split_from <= 0 or split_to <= 0:
-                continue
-            execution_date = r.get("execution_date")
-            if not execution_date:
-                continue
-            is_reverse = split_from > split_to
-            category = "reverse_split" if is_reverse else "forward_split"
-            if is_reverse:
-                # Represent as 1-for-N where N = split_from / split_to.
-                ratio_n = split_from / split_to
-                ratio_label = f"1-for-{ratio_n:g}"
-            else:
-                ratio_n = split_to / split_from
-                ratio_label = f"{ratio_n:g}-for-1"
-            headline = f"{sym} {ratio_label} {'reverse split' if is_reverse else 'stock split'} effective {execution_date}"
-            ev = CorporateEvent(
+    skipped_off_universe = 0
+    for r in raw:
+        sym = _norm(r.get("ticker"))
+        if not sym or sym not in universe:
+            skipped_off_universe += 1
+            continue
+        try:
+            split_from = float(r.get("split_from") or 0)
+            split_to = float(r.get("split_to") or 0)
+        except (TypeError, ValueError):
+            continue
+        if split_from <= 0 or split_to <= 0:
+            continue
+        execution_date = r.get("execution_date")
+        if not execution_date:
+            continue
+        is_reverse = split_from > split_to
+        category = "reverse_split" if is_reverse else "forward_split"
+        if is_reverse:
+            ratio_n = split_from / split_to
+            ratio_label = f"1-for-{ratio_n:g}"
+        else:
+            ratio_n = split_to / split_from
+            ratio_label = f"{ratio_n:g}-for-1"
+        headline = f"{sym} {ratio_label} {'reverse split' if is_reverse else 'stock split'} effective {execution_date}"
+        events.append(
+            CorporateEvent(
                 id=f"polygon_split:{sym}:{execution_date}",
                 type=category,
                 ticker=sym,
@@ -264,11 +415,13 @@ def phase_1_splits(
                     f"for {sym} with execution date {execution_date}."
                 ),
             )
-            events.append(ev)
-        if i % 50 == 0 or i == len(tickers):
-            LOGGER.info("  splits progress: %d/%d (events_so_far=%d)", i, len(tickers), len(events))
-        if SLEEP_BETWEEN_CALLS > 0 and i < len(tickers):
-            time.sleep(SLEEP_BETWEEN_CALLS)
+        )
+    LOGGER.info(
+        "splits: kept=%d off_universe=%d (of %d raw splits across the market)",
+        len(events),
+        skipped_off_universe,
+        len(raw),
+    )
     return events
 
 
@@ -283,34 +436,35 @@ def phase_2_delistings(
     underlying_map: dict[str, str | None],
 ) -> list[CorporateEvent]:
     """Pull inactive ETFs from Polygon and intersect with our universe."""
-    url = "https://api.polygon.io/v3/reference/tickers"
-    params = {
-        "type": "ETF",
-        "market": "stocks",
-        "active": "false",
-        "order": "desc",
-        "sort": "last_updated_utc",
-        "limit": 1000,
-    }
+    raw = _bulk_paginate(
+        session,
+        "https://api.polygon.io/v3/reference/tickers",
+        {
+            "type": "ETF",
+            "market": "stocks",
+            "active": "false",
+            "order": "desc",
+            "sort": "last_updated_utc",
+            "limit": 1000,
+        },
+        max_pages=DELISTINGS_MAX_PAGES,
+        phase_label="delistings",
+    )
+
     events: list[CorporateEvent] = []
-    pages_fetched = 0
-    while True:
-        payload = _polygon_get(session, url, params if pages_fetched == 0 else None)
-        if not payload:
-            break
-        results = payload.get("results") or []
-        for r in results:
-            sym = _norm(r.get("ticker") or "")
-            if sym not in universe:
-                continue
-            delisted = r.get("delisted_utc") or r.get("last_updated_utc")
-            date_str = None
-            if delisted:
-                try:
-                    date_str = datetime.fromisoformat(str(delisted).replace("Z", "+00:00")).date().isoformat()
-                except ValueError:
-                    date_str = None
-            ev = CorporateEvent(
+    for r in raw:
+        sym = _norm(r.get("ticker") or "")
+        if sym not in universe:
+            continue
+        delisted = r.get("delisted_utc") or r.get("last_updated_utc")
+        date_str = None
+        if delisted:
+            try:
+                date_str = datetime.fromisoformat(str(delisted).replace("Z", "+00:00")).date().isoformat()
+            except ValueError:
+                date_str = None
+        events.append(
+            CorporateEvent(
                 id=f"polygon_delisting:{sym}:{date_str or 'unknown'}",
                 type="delisting",
                 ticker=sym,
@@ -330,22 +484,12 @@ def phase_2_delistings(
                     "Verify against issuer and SEC filings before acting."
                 ),
             )
-            events.append(ev)
-
-        # pagination
-        next_url = payload.get("next_url")
-        if not next_url:
-            break
-        # Polygon's next_url already embeds query params; re-attach apiKey.
-        if "apiKey=" not in next_url:
-            sep = "&" if "?" in next_url else "?"
-            next_url = f"{next_url}{sep}apiKey={POLYGON_API_KEY}"
-        url = next_url
-        params = None
-        pages_fetched += 1
-        if pages_fetched > 10:
-            LOGGER.warning("delisting pagination exceeded 10 pages; stopping")
-            break
+        )
+    LOGGER.info(
+        "delistings: kept=%d (of %d inactive ETFs returned by Polygon)",
+        len(events),
+        len(raw),
+    )
     return events
 
 
@@ -457,49 +601,52 @@ def classify_text(text: str) -> tuple[str | None, float]:
     return cat, round(confidence, 3)
 
 
-def fetch_news_for_ticker(session: requests.Session, ticker: str) -> list[dict]:
-    url = "https://api.polygon.io/v2/reference/news"
-    since_utc = (datetime.now(UTC) - timedelta(days=NEWS_WINDOW_DAYS)).date().isoformat()
-    params = {
-        "ticker": ticker,
-        "published_utc.gte": since_utc,
-        "order": "desc",
-        "limit": NEWS_PAGE_LIMIT,
-        "sort": "published_utc",
-    }
-    payload = _polygon_get(session, url, params)
-    if not payload:
-        return []
-    return payload.get("results") or []
-
-
 def phase_3_news(
     session: requests.Session,
     tickers: list[str],
     bucket_map: dict[str, str | None],
 ) -> list[NewsItem]:
+    """Bulk-fetch market-wide news over the lookback window, classify, and keep only
+    articles mentioning a ticker in our universe that classify as a corporate action.
+
+    Polygon's /v2/reference/news accepts an optional ``ticker`` filter -- we OMIT it
+    so the endpoint returns all market news, and paginate up to ``NEWS_MAX_PAGES``
+    newest-first.  Each article carries a ``tickers`` list we intersect with our
+    universe client-side.  This drops the free-tier budget from ~440 calls to <=25.
+    """
+    universe = set(bucket_map.keys())
+    since_utc = (datetime.now(UTC) - timedelta(days=NEWS_WINDOW_DAYS)).date().isoformat()
+    raw = _bulk_paginate(
+        session,
+        "https://api.polygon.io/v2/reference/news",
+        {
+            "published_utc.gte": since_utc,
+            "order": "desc",
+            "limit": NEWS_PAGE_LIMIT,
+            "sort": "published_utc",
+        },
+        max_pages=NEWS_MAX_PAGES,
+        phase_label="news",
+    )
+
     items: list[NewsItem] = []
-    for i, sym in enumerate(tickers, start=1):
-        raw = fetch_news_for_ticker(session, sym)
-        for r in raw:
-            title = (r.get("title") or "").strip()
-            description = (r.get("description") or "").strip()
-            text = f"{title}\n{description}"
-            category, confidence = classify_text(text)
-            if not category:
-                continue
-            art_id = r.get("id") or r.get("article_url") or f"{sym}:{r.get('published_utc')}"
-            pub = r.get("publisher") or {}
-            # Polygon tags each article with its set of related tickers; keep only
-            # those we care about.
-            raw_tickers = r.get("tickers") or [sym]
-            related = sorted({
-                _norm(t) for t in raw_tickers
-                if _norm(t) in bucket_map
-            })
-            if not related:
-                related = [sym]
-            item = NewsItem(
+    scanned_on_universe = 0
+    for r in raw:
+        raw_tickers = r.get("tickers") or []
+        related = sorted({_norm(t) for t in raw_tickers if _norm(t) in universe})
+        if not related:
+            continue
+        scanned_on_universe += 1
+        title = (r.get("title") or "").strip()
+        description = (r.get("description") or "").strip()
+        text = f"{title}\n{description}"
+        category, confidence = classify_text(text)
+        if not category:
+            continue
+        art_id = r.get("id") or r.get("article_url") or f"{related[0]}:{r.get('published_utc')}"
+        pub = r.get("publisher") or {}
+        items.append(
+            NewsItem(
                 id=f"polygon_news:{art_id}",
                 tickers=related,
                 category=category,
@@ -510,13 +657,15 @@ def phase_3_news(
                 url=r.get("article_url"),
                 publisher=(pub.get("name") if isinstance(pub, dict) else None),
                 image_url=r.get("image_url"),
-                bucket=bucket_map.get(sym),
+                bucket=bucket_map.get(related[0]),
             )
-            items.append(item)
-        if i % 50 == 0 or i == len(tickers):
-            LOGGER.info("  news progress: %d/%d (items_so_far=%d)", i, len(tickers), len(items))
-        if SLEEP_BETWEEN_CALLS > 0 and i < len(tickers):
-            time.sleep(SLEEP_BETWEEN_CALLS)
+        )
+    LOGGER.info(
+        "news: raw_articles=%d on_universe=%d classified_corporate_actions=%d",
+        len(raw),
+        scanned_on_universe,
+        len(items),
+    )
     return items
 
 
@@ -677,40 +826,57 @@ def main() -> None:
     bucket_map = dict(zip(uni["ticker"], uni["bucket"]))
     underlying_map = dict(zip(uni["ticker"], uni["underlying"]))
     LOGGER.info(
-        "Starting corporate-actions ingest: tickers=%d news_window=%dd",
+        "Starting corporate-actions ingest: tickers=%d news_window=%dd splits_lookback=%dd "
+        "rate_limit=%d/min (bulk endpoints; ~30 calls expected total)",
         len(tickers),
         NEWS_WINDOW_DAYS,
+        SPLITS_LOOKBACK_DAYS,
+        POLYGON_MAX_REQUESTS_PER_MINUTE,
     )
 
     session = build_session()
 
-    LOGGER.info("Phase 1: splits")
-    split_events = phase_1_splits(session, tickers, bucket_map, underlying_map)
+    split_events: list[CorporateEvent] = []
+    delisting_events: list[CorporateEvent] = []
+    news: list[NewsItem] = []
+    aborted_reason: str | None = None
 
-    if args.skip_delistings:
-        LOGGER.info("Phase 2: delistings SKIPPED")
-        delisting_events: list[CorporateEvent] = []
-    else:
-        LOGGER.info("Phase 2: delistings")
-        delisting_events = phase_2_delistings(
-            session, set(tickers), bucket_map, underlying_map
+    try:
+        LOGGER.info(
+            "Phase 1: splits (rate_limit=%d req/min)",
+            POLYGON_MAX_REQUESTS_PER_MINUTE,
         )
+        split_events = phase_1_splits(session, tickers, bucket_map, underlying_map)
+
+        if args.skip_delistings:
+            LOGGER.info("Phase 2: delistings SKIPPED")
+        else:
+            LOGGER.info("Phase 2: delistings")
+            delisting_events = phase_2_delistings(
+                session, set(tickers), bucket_map, underlying_map
+            )
+
+        if args.skip_news:
+            LOGGER.info("Phase 3: news SKIPPED")
+        else:
+            LOGGER.info("Phase 3: news")
+            news = phase_3_news(session, tickers, bucket_map)
+    except RateLimitExceeded as e:
+        aborted_reason = str(e)
+        LOGGER.error("Ingest aborted due to rate-limit wall: %s", e)
 
     events = dedupe_events(split_events + delisting_events)
-    LOGGER.info("Events after dedupe: %d (splits=%d delistings=%d)",
-                len(events), len(split_events), len(delisting_events))
+    LOGGER.info(
+        "Events after dedupe: %d (splits=%d delistings=%d)",
+        len(events), len(split_events), len(delisting_events),
+    )
 
-    if args.skip_news:
-        LOGGER.info("Phase 3: news SKIPPED")
-        news: list[NewsItem] = []
-    else:
-        LOGGER.info("Phase 3: news")
-        news = phase_3_news(session, tickers, bucket_map)
+    if news:
         news = dedupe_news(news)
         link_news_to_events(news, events)
-        LOGGER.info("News items after classify + dedupe: %d", len(news))
+    LOGGER.info("News items after classify + dedupe: %d", len(news))
 
-    if args.skip_news and OUT_NEWS.exists():
+    if args.skip_news and OUT_NEWS.exists() and not news:
         # Preserve the existing news file if the caller asked to skip news.
         existing = json.loads(OUT_NEWS.read_text(encoding="utf-8"))
         existing_items = existing.get("items") or []
@@ -725,6 +891,13 @@ def main() -> None:
         OUT_NEWS,
         len(news),
     )
+    if aborted_reason:
+        LOGGER.error(
+            "Run partially persisted but aborted early; set CORP_ACTIONS_POLYGON_REQS_PER_MIN "
+            "to match your Polygon plan (free=5, Starter=100, Developer/Advanced=unlimited -> "
+            "e.g. 600) and re-run."
+        )
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":
