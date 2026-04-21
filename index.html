@@ -768,9 +768,11 @@ const BORROW_HISTORY_URL = "data/borrow_history.json";
 const BORROW_SPIKE_RISK_URL = "data/borrow_spike_risk.json";
 const OPTIONS_CACHE_URL = "data/options_cache.json";
 const ETF_METRICS_DAILY_URL = "data/etf_metrics_daily.json";
+const ETF_DISTRIBUTIONS_URL = "data/etf_distributions.json";
 let BORROW_HISTORY_CACHE = null;
 let BORROW_SPIKE_RISK_CACHE = null;
 let ETF_METRICS_CACHE = null;
+let ETF_DISTRIBUTIONS_CACHE = null;
 
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
@@ -1371,6 +1373,8 @@ function ChartPage({ record, onBack }) {
   const [etfMetricsMap, setEtfMetricsMap] = useState({});
   const [etfMetricsLoading, setEtfMetricsLoading] = useState(false);
   const [etfMetricsError, setEtfMetricsError] = useState(null);
+  const [etfDistributionsMap, setEtfDistributionsMap] = useState({});
+  const [etfDistributionsError, setEtfDistributionsError] = useState(null);
   const [tradeUseScenarioAssumptions, setTradeUseScenarioAssumptions] = useState(true);
   const [tradeBaseLegs, setTradeBaseLegs] = useState([]);
   const [tradeOptionLegs, setTradeOptionLegs] = useState([]);
@@ -1517,6 +1521,42 @@ function ChartPage({ record, onBack }) {
     run();
     return () => { cancelled = true; };
   }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (ETF_DISTRIBUTIONS_CACHE?.bySymbol) {
+        if (!cancelled) setEtfDistributionsMap(ETF_DISTRIBUTIONS_CACHE.bySymbol);
+        return;
+      }
+      setEtfDistributionsError(null);
+      try {
+        const cacheBust = `?t=${Math.floor(Date.now() / 3600000)}`;
+        const res = await fetch(`${ETF_DISTRIBUTIONS_URL}${cacheBust}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`etf distributions HTTP ${res.status}`);
+        const payload = await res.json();
+        const raw = payload?.by_symbol || {};
+        const bySymbol = {};
+        Object.keys(raw).forEach((sym) => {
+          const key = String(sym).toUpperCase();
+          const arr = Array.isArray(raw[sym]) ? raw[sym] : [];
+          // Sort by ex_date ascending and coerce amount to a finite number.
+          bySymbol[key] = arr
+            .map((d) => ({
+              ex_date: String(d?.ex_date || ''),
+              amount: Number(d?.amount),
+            }))
+            .filter((d) => d.ex_date && Number.isFinite(d.amount) && d.amount > 0)
+            .sort((a, b) => a.ex_date.localeCompare(b.ex_date));
+        });
+        ETF_DISTRIBUTIONS_CACHE = { bySymbol };
+        if (!cancelled) setEtfDistributionsMap(bySymbol);
+      } catch (e) {
+        if (!cancelled) setEtfDistributionsError(e?.message || 'ETF distributions unavailable');
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, []);
 
   const volWindowKey = VOL_TF_KEY_BY_RANGE[activeTf.range] || '6M';
   const volPoint = r?.realized_vol?.[volWindowKey] || null;
@@ -1556,14 +1596,53 @@ function ChartPage({ record, onBack }) {
     : NaN;
   const scenarioLeverage = Number.isFinite(Number(r.beta)) ? Number(r.beta) : 1;
   const etfBorrowSeries = Array.isArray(borrowHistoryMap?.[etfSym]) ? borrowHistoryMap[etfSym] : [];
+  const etfDistributionsSeries = useMemo(() => (
+    Array.isArray(etfDistributionsMap?.[etfSym]) ? etfDistributionsMap[etfSym] : []
+  ), [etfDistributionsMap, etfSym]);
   const etfMetricsSeries = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
-    return raw.filter((x) => String(x?.status || '').toLowerCase() === 'ok');
-  }, [etfMetricsMap, etfSym]);
+    const ok = raw.filter((x) => String(x?.status || '').toLowerCase() === 'ok');
+    if (!ok.length) return ok;
+
+    // Build a distribution-adjusted ("total return") NAV series. On each ex-date in our
+    // observation window we reinvest the distribution at that day's NAV, so
+    //   reinv_factor *= (nav_ex + amount) / nav_ex
+    // and nav_total_return[t] = nav[t] * reinv_factor_t. By construction tr NAV equals raw
+    // NAV on the first in-window day, then diverges upward by the cumulative cash returned
+    // to shareholders. For option-income ETFs like MSTY/ULTY this flattens the NAV-erosion
+    // graph into an honest total-return path.
+    const dists = etfDistributionsSeries || [];
+    let reinvFactor = 1;
+    let dIdx = 0;
+    const seriesStart = String(ok[0]?.date || '');
+    // Skip any distributions on-or-before the window start. We cannot credibly reinvest
+    // them because we have no pre-ex-date NAV for that window, and applying them would
+    // mystery-inflate TR NAV on day zero.
+    while (dIdx < dists.length && String(dists[dIdx].ex_date) <= seriesStart) dIdx += 1;
+    return ok.map((row) => {
+      const dateStr = String(row?.date || '');
+      const nav = Number(row?.nav);
+      if (dateStr && Number.isFinite(nav) && nav > 0) {
+        while (dIdx < dists.length && String(dists[dIdx].ex_date) <= dateStr) {
+          const amt = Number(dists[dIdx].amount);
+          if (Number.isFinite(amt) && amt > 0) {
+            reinvFactor *= (nav + amt) / nav;
+          }
+          dIdx += 1;
+        }
+      }
+      const tr = Number.isFinite(nav) && nav > 0 ? nav * reinvFactor : null;
+      return { ...row, nav_total_return: tr, tr_reinvestment_factor: reinvFactor };
+    });
+  }, [etfMetricsMap, etfSym, etfDistributionsSeries]);
   const latestEtfMetric = useMemo(
     () => (etfMetricsSeries.length ? etfMetricsSeries[etfMetricsSeries.length - 1] : null),
     [etfMetricsSeries],
   );
+  const etfDistributionCount = etfDistributionsSeries.length;
+  const etfLatestDistribution = etfDistributionCount
+    ? etfDistributionsSeries[etfDistributionCount - 1]
+    : null;
   const avgBorrowFromHistory = (() => {
     const vals = etfBorrowSeries.map(x => Number(x?.borrow_current)).filter(Number.isFinite);
     if (!vals.length) return null;
@@ -2041,10 +2120,19 @@ function ChartPage({ record, onBack }) {
               <div className="cs-value">{latestEtfMetric ? fmtNum(Number(latestEtfMetric.shares_outstanding)) : '—'}</div>
               <div className="cs-sub">{latestEtfMetric?.date || '—'}</div>
             </div>
+            <div className="chart-stat">
+              <div className="cs-label">Total-Return NAV</div>
+              <div className="cs-value">{latestEtfMetric && Number.isFinite(Number(latestEtfMetric.nav_total_return)) ? fmtUsd(Number(latestEtfMetric.nav_total_return)) : '—'}</div>
+              <div className="cs-sub">
+                {etfDistributionCount
+                  ? `${etfDistributionCount} distrib. — last ${etfLatestDistribution?.ex_date || '—'}`
+                  : 'no distributions on file'}
+              </div>
+            </div>
           </div>
 
           <div className="chart-note">
-            Statistics are synchronized to the active lookback selection. ETF metrics (NAV/AUM/shares outstanding) refresh daily on a scheduled job.
+            Statistics are synchronized to the active lookback selection. ETF metrics (NAV/AUM/shares outstanding) refresh daily on a scheduled job. Total-return NAV reinvests every distribution at that day's NAV so the line is flat when the fund is fully covering its payouts and slopes down when payouts erode principal.
           </div>
           {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics panel…</div>}
           {etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
@@ -2060,6 +2148,14 @@ function ChartPage({ record, onBack }) {
                   valueKey="nav"
                   color="rgba(59,130,246,0.95)"
                   label={`${etfSym} NAV`}
+                  formatValue={(v) => fmtUsd(v)}
+                  zeroLabel="$0"
+                />
+                <SimpleSeriesPlot
+                  series={etfMetricsSeries}
+                  valueKey="nav_total_return"
+                  color="rgba(139,92,246,0.95)"
+                  label={`${etfSym} Total-Return NAV (distributions reinvested)`}
                   formatValue={(v) => fmtUsd(v)}
                   zeroLabel="$0"
                 />
@@ -2086,6 +2182,7 @@ function ChartPage({ record, onBack }) {
                     <tr>
                       <th>Date</th>
                       <th>NAV</th>
+                      <th>TR NAV</th>
                       <th>AUM / TNA</th>
                       <th>Shares Outstanding</th>
                       <th>Status</th>
@@ -2096,6 +2193,7 @@ function ChartPage({ record, onBack }) {
                       <tr key={`${m.date}-${idx}`}>
                         <td>{m.date || '—'}</td>
                         <td>{fmtUsd(Number(m.nav))}</td>
+                        <td>{Number.isFinite(Number(m.nav_total_return)) ? fmtUsd(Number(m.nav_total_return)) : '—'}</td>
                         <td>{fmtMoney(Number(m.aum))}</td>
                         <td>{fmtNum(Number(m.shares_outstanding))}</td>
                         <td>{m.status || '—'}</td>

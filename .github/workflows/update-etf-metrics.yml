@@ -96,6 +96,12 @@ jobs:
       - name: Ingest ETF metrics
         run: python scripts/ingest_etf_metrics.py --lookback-days 10 --polygon-lookback-days 5
 
+      - name: Ingest ETF distribution history
+        # Used by the frontend to render a distribution-adjusted ("total return") NAV
+        # series alongside raw NAV on the Stats tab -- critical for YieldMax-class
+        # option-income ETFs where raw NAV drops on every ex-date.
+        run: python scripts/ingest_distributions.py --sleep 0.1
+
       - name: Print latest metrics status
         run: |
           python - <<'PY'
@@ -126,7 +132,7 @@ jobs:
       - name: Commit metrics artifacts
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json data/etf_metrics_health.json"
+          FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json data/etf_metrics_health.json data/etf_distributions.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ${FILES}
