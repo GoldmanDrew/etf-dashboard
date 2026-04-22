@@ -85,6 +85,52 @@
   }
   .topbar-btn:hover { border-color: var(--accent-blue); color: var(--text-primary); }
   .topbar-btn.active { background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }
+  .topbar-user {
+    font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
+    max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* ── Investor login (optional; see data/investors.json) ── */
+  .login-wrap {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 24px; background: var(--bg-primary);
+  }
+  .login-card {
+    width: 100%; max-width: 380px; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 28px 26px; box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+  }
+  .login-title {
+    font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 700;
+    margin-bottom: 6px; color: var(--text-primary);
+  }
+  .login-sub {
+    font-size: 12px; color: var(--text-muted); margin-bottom: 22px; line-height: 1.45;
+  }
+  .login-field { margin-bottom: 14px; }
+  .login-field label {
+    display: block; font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 5px;
+  }
+  .login-field input {
+    width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg-input); color: var(--text-primary); font-size: 14px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .login-field input:focus {
+    outline: none; border-color: var(--accent-blue);
+  }
+  .login-btn {
+    width: 100%; margin-top: 8px; padding: 11px; border-radius: 6px; border: none;
+    background: var(--accent-blue); color: #fff; font-weight: 700; font-size: 13px;
+    cursor: pointer; font-family: 'DM Sans', sans-serif;
+  }
+  .login-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .login-error {
+    margin-top: 12px; font-size: 12px; color: var(--accent-red);
+  }
+  .login-foot {
+    margin-top: 18px; font-size: 11px; color: var(--text-muted); line-height: 1.4;
+  }
 
   /* ── Summary ─────────────── */
   .summary-strip {
@@ -1037,6 +1083,9 @@
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 const DATA_URL = "data/dashboard_data.json";
+const INVESTORS_URL = "data/investors.json";
+const AUTH_STORAGE_KEY = "etf_dash_session_v1";
+const AUTH_SESSION_MS = 7 * 86400000;
 const BORROW_HISTORY_URL = "data/borrow_history.json";
 const BORROW_SPIKE_RISK_URL = "data/borrow_spike_risk.json";
 const OPTIONS_CACHE_URL = "data/options_cache.json";
@@ -1109,6 +1158,219 @@ const getFreshness = (data) => {
 };
 
 const HIGH_BETA_THRESHOLD = 1.5;
+
+function timingSafeEqualBytes(a, b) {
+  if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array) || a.length !== b.length) return false;
+  let x = 0;
+  for (let i = 0; i < a.length; i++) x |= a[i] ^ b[i];
+  return x === 0;
+}
+
+function readAuthSession(validUserIds) {
+  try {
+    const raw = sessionStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    if (!s || typeof s.uid !== 'string' || typeof s.exp !== 'number') return null;
+    if (Date.now() > s.exp) {
+      sessionStorage.removeItem(AUTH_STORAGE_KEY);
+      return null;
+    }
+    const uid = s.uid.toLowerCase();
+    if (!validUserIds.has(uid)) {
+      sessionStorage.removeItem(AUTH_STORAGE_KEY);
+      return null;
+    }
+    return uid;
+  } catch {
+    return null;
+  }
+}
+
+function writeAuthSession(uid) {
+  sessionStorage.setItem(
+    AUTH_STORAGE_KEY,
+    JSON.stringify({ uid: uid.toLowerCase(), exp: Date.now() + AUTH_SESSION_MS }),
+  );
+}
+
+function clearAuthSession() {
+  sessionStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
+async function verifyInvestorPassword(userId, password, users) {
+  const uid = userId.trim().toLowerCase();
+  const u = users.find(x => String(x.id || '').toLowerCase() === uid);
+  if (!u || !u.salt_b64 || !u.hash_b64) return false;
+  const iterations = Number(u.iterations) > 0 ? Number(u.iterations) : 250000;
+  let salt;
+  let expected;
+  try {
+    salt = Uint8Array.from(atob(String(u.salt_b64)), c => c.charCodeAt(0));
+    expected = Uint8Array.from(atob(String(u.hash_b64)), c => c.charCodeAt(0));
+  } catch {
+    return false;
+  }
+  if (expected.length !== 32) return false;
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits'],
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+    keyMaterial,
+    256,
+  );
+  const out = new Uint8Array(bits);
+  return timingSafeEqualBytes(out, expected);
+}
+
+function LoginScreen({ users, onSuccess }) {
+  const [userId, setUserId] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr('');
+    if (!userId.trim()) {
+      setErr('Enter your login id.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const ok = await verifyInvestorPassword(userId, password, users);
+      if (!ok) {
+        setErr('Unknown login or wrong password.');
+        return;
+      }
+      const row = users.find(x => String(x.id || '').toLowerCase() === userId.trim().toLowerCase());
+      onSuccess(String(row.id).toLowerCase());
+    } catch {
+      setErr('Login failed (crypto not available in this browser?).');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="login-wrap">
+      <div className="login-card">
+        <div className="login-title">ETF Borrow Dashboard</div>
+        <div className="login-sub">
+          Sign in to continue. Access is optional: if <code style={{ color: 'var(--accent-cyan)' }}>data/investors.json</code> has
+          no users, the site stays public.
+        </div>
+        <form onSubmit={submit}>
+          <div className="login-field">
+            <label htmlFor="inv-user">Login id</label>
+            <input
+              id="inv-user"
+              autoComplete="username"
+              value={userId}
+              onChange={e => setUserId(e.target.value)}
+              placeholder="e.g. jordan"
+            />
+          </div>
+          <div className="login-field">
+            <label htmlFor="inv-pass">Password</label>
+            <input
+              id="inv-pass"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+            />
+          </div>
+          <button type="submit" className="login-btn" disabled={busy}>
+            {busy ? 'Checking…' : 'Sign in'}
+          </button>
+        </form>
+        {err ? <div className="login-error">{err}</div> : null}
+        <div className="login-foot">
+          Sessions last about a week in this browser. Adding investors: run{' '}
+          <code style={{ color: 'var(--text-secondary)' }}>python scripts/hash_investor_password.py --help</code> locally,
+          commit the updated <code>data/investors.json</code> (passwords are never stored).
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DashboardRoot() {
+  const [gate, setGate] = useState('loading');
+  const [users, setUsers] = useState([]);
+  const [sessionUid, setSessionUid] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const bust = `?t=${Date.now()}`;
+      let list = [];
+      try {
+        const res = await fetch(INVESTORS_URL + bust, { cache: 'no-store' });
+        if (res.ok) {
+          const doc = await res.json();
+          if (Array.isArray(doc.users)) list = doc.users.filter(u => u && u.id && u.salt_b64 && u.hash_b64);
+        }
+      } catch {
+        list = [];
+      }
+      if (cancelled) return;
+      setUsers(list);
+      if (!list.length) {
+        setSessionUid(null);
+        setGate('open');
+        return;
+      }
+      const ids = new Set(list.map(u => String(u.id).toLowerCase()));
+      const existing = readAuthSession(ids);
+      if (existing) {
+        setSessionUid(existing);
+        setGate('open');
+      } else {
+        setGate('locked');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (gate === 'loading') {
+    return (
+      <div className="app">
+        <div className="loading"><div className="spinner"/>Checking access…</div>
+      </div>
+    );
+  }
+  if (gate === 'locked') {
+    return (
+      <LoginScreen
+        users={users}
+        onSuccess={(uid) => {
+          writeAuthSession(uid);
+          setSessionUid(uid);
+          setGate('open');
+        }}
+      />
+    );
+  }
+  const authEnabled = users.length > 0;
+  return (
+    <App
+      authUser={sessionUid}
+      authEnabled={authEnabled}
+      onLogout={authEnabled ? () => {
+        clearAuthSession();
+        setSessionUid(null);
+        setGate('locked');
+      } : null}
+    />
+  );
+}
 
 const borrowCls = v => {
   if (v == null) return 'val-muted';
@@ -3497,7 +3759,7 @@ function NewsPage({
 }
 
 // ── Main App ────────────────────────────────
-function App() {
+function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -3669,6 +3931,14 @@ function App() {
           </div>
         </div>
         <div className="topbar-right">
+          {authEnabled && authUser && (
+            <>
+              <span className="topbar-user" title={authUser}>{authUser}</span>
+              <button type="button" className="topbar-btn" onClick={() => { onLogout && onLogout(); }}>
+                Log out
+              </button>
+            </>
+          )}
           <button
             className={cls('topbar-btn', showNews && !chartRecord && 'active')}
             onClick={() => { if (showNews) navigateBack(); else navigateToNews(); }}
@@ -3831,7 +4101,7 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+ReactDOM.createRoot(document.getElementById('root')).render(<DashboardRoot />);
 </script>
 </body>
 </html>
