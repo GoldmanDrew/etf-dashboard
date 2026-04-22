@@ -1339,26 +1339,8 @@ def _extract_execution_date(text: str) -> str | None:
         return None
 
 
-def _extract_candidate_tickers(text: str) -> set[str]:
-    """Extract every plausible ticker symbol from a blob of article text.
-
-    Uses four complementary patterns in priority order -- high-signal ones
-    (parenthesized, exchange-prefixed, ticker-labelled) strongly outweigh the
-    loose bare-uppercase fallback when it comes to disambiguation against
-    stopwords:
-
-      1. Parenthesized:     "Strategy ETF (JEPY)"               -> JEPY
-      2. Exchange-prefixed: "Cboe BZX Exchange, Inc: XRPK"      -> XRPK
-      3. Ticker-labelled:   "Ticker: SOLX"                      -> SOLX
-      4. Dollar-prefixed:   "$XRPK"                             -> XRPK
-      5. Bare uppercase:    "XRPK liquidates today"             -> XRPK
-
-    Stopword filter is applied uniformly so that generic words like "ETF",
-    "NAV" or "NYSE" never survive, no matter which pattern matched.
-
-    The caller is responsible for intersecting the returned set with the
-    known universe; this function intentionally casts a wide net.
-    """
+def _extract_high_signal_tickers(text: str) -> set[str]:
+    """Ticker-like tokens from issuer-style patterns (parens, exchange prefix, …)."""
     if not text:
         return set()
     out: set[str] = set()
@@ -1367,13 +1349,42 @@ def _extract_candidate_tickers(text: str) -> set[str]:
         _EXCHANGE_PREFIX_TICKER_RE,
         _TICKER_LABEL_RE,
         _DOLLAR_TICKER_RE,
-        _TICKER_CANDIDATE_RE,
     ):
         for match in regex.findall(text):
             sym = (match if isinstance(match, str) else match[0]).upper()
             if sym and sym not in _TICKER_STOPWORDS:
                 out.add(sym)
     return out
+
+
+def _extract_bare_tickers(text: str) -> set[str]:
+    """Loose ``WORD`` caps matches — very noisy in Google News HTML descriptions."""
+    if not text:
+        return set()
+    out: set[str] = set()
+    for match in _TICKER_CANDIDATE_RE.findall(text):
+        sym = (match if isinstance(match, str) else match[0]).upper()
+        if sym and sym not in _TICKER_STOPWORDS:
+            out.add(sym)
+    return out
+
+
+def _extract_candidate_tickers(text: str) -> set[str]:
+    """Union of high-signal + bare patterns (Polygon news paths, tests, etc.)."""
+    return _extract_high_signal_tickers(text) | _extract_bare_tickers(text)
+
+
+def _strip_html_to_plain(s: str | None, *, max_len: int = 2000) -> str | None:
+    """Drop HTML tags from RSS snippets so the dashboard does not show raw ``<a>``."""
+    if not s:
+        return None
+    t = re.sub(r"<[^>]+>", " ", str(s))
+    t = re.sub(r"\s+", " ", t).strip()
+    if not t:
+        return None
+    if len(t) > max_len:
+        t = t[: max_len - 3].rstrip() + "..."
+    return t
 
 
 def _fetch_google_news_rss(session: requests.Session, query: str) -> list[dict]:
@@ -1570,6 +1581,12 @@ def phase_5_google_news(
     screener ``Underlying`` symbol so headlines that only name the stock (KEEL)
     still intersect our tracked set (``ever_known`` is built from ETF ``ticker``
     rows in metrics parquet, not from the Underlying column).
+
+    News rows and synthesized events only attach tickers that map to **current
+    screener ETFs**: bare-word matches are taken from the **headline** (not RSS
+    HTML descriptions) and underlyings expand to ETFs only when the match is
+    high-signal or the bare token is long enough (>=3 chars) to avoid ``AI`` /
+    ``TOP`` style noise.
     """
     if not ENABLE_GOOGLE_NEWS:
         LOGGER.info("google-news phase: DISABLED via CORP_ACTIONS_ENABLE_GOOGLE_NEWS=0")
@@ -1580,6 +1597,7 @@ def phase_5_google_news(
         n = _norm(v.get("new") or "")
         if n:
             alias_new.add(n)
+    underlyings = _underlying_symbols_as_set(underlyings)
     tracked: set[str] = (
         {_norm(t) for t in universe if t}
         | {_norm(t) for t in ever_known if t}
@@ -1587,8 +1605,17 @@ def phase_5_google_news(
         | {_norm(t) for t in (alias_map or {}) if t}
         | alias_new
     )
-    match_universe = tracked
     cutoff_iso = (datetime.now(UTC) - timedelta(days=GOOGLE_NEWS_WINDOW_DAYS)).isoformat()
+
+    etf_universe: set[str] = {_norm(t) for t in universe if t}
+    underlying_to_etfs: dict[str, set[str]] = {}
+    for etf_raw, und in underlying_map.items():
+        if und is None or (pd.api.types.is_scalar(und) and pd.isna(und)):
+            continue
+        u = _norm(str(und))
+        if not u:
+            continue
+        underlying_to_etfs.setdefault(u, set()).add(_norm(str(etf_raw)))
 
     all_events: list[CorporateEvent] = []
     all_news: list[NewsItem] = []
@@ -1599,18 +1626,36 @@ def phase_5_google_news(
     body_fetches_done = 0
     body_fetches_hit = 0  # resolved a ticker from body that wasn't in title
 
-    def _resolve_from_text(text: str) -> list[str]:
-        """Extract + resolve + intersect against tracked (ETFs + ever-known + underlyings + aliases)."""
-        candidates = _extract_candidate_tickers(text)
+    def _resolve_set(candidates: set[str]) -> set[str]:
+        """Intersect + alias-expand against the full tracked universe."""
         resolved: set[str] = set()
         for c in candidates:
             cn = _norm(c)
-            if cn in match_universe:
+            if cn in tracked:
                 resolved.add(cn)
             alias = alias_map.get(cn)
             if alias and alias.get("new"):
                 resolved.add(_norm(alias["new"]))
-        return sorted({t for t in resolved if t in tracked})
+        return {t for t in resolved if t in tracked}
+
+    def _emit_screener_etfs(high_syms: set[str], bare_syms: set[str]) -> list[str]:
+        """Map matched symbols → **current screener ETF** tickers only.
+
+        Underlying-only hits (e.g. ``TOP`` for unrelated wires) must not badge a
+        fund unless the match was **high-signal** (issuer-style parens / exchange
+        prefix / …) **or** the bare match is long enough (>=3 chars) to avoid
+        English noise like ``AI`` in "AI Boom" expanding to AIYY.
+        """
+        emit: set[str] = set()
+        for s in high_syms | bare_syms:
+            if s in etf_universe:
+                emit.add(s)
+        for s in high_syms:
+            emit.update(underlying_to_etfs.get(s, ()))
+        for s in bare_syms:
+            if len(s) >= 3:
+                emit.update(underlying_to_etfs.get(s, ()))
+        return sorted(emit)
 
     for query, default_category in GOOGLE_NEWS_QUERIES:
         LOGGER.info("google-news query: %r → default_category=%s", query, default_category)
@@ -1619,38 +1664,29 @@ def phase_5_google_news(
         for art in articles:
             title = art.get("title") or ""
             description = art.get("description") or ""
-            text = f"{title}\n{description}"
+            full_text = f"{title}\n{description}"
+            bare_text = title
             pub_iso = _parse_rfc822(art.get("pub_date") or "")
             if pub_iso and pub_iso < cutoff_iso:
                 continue
 
-            # 1) Extract candidate tickers from title+desc, resolve aliases.
-            related = _resolve_from_text(text)
+            # 1) High-signal tickers from title+RSS description; bare ``WORD``
+            # matches **only** from the headline (plus any later body window) so
+            # Google News HTML sidebars do not fabricate unrelated underlyings
+            # like ``TOP`` for TOPW.
+            high_syms = _resolve_set(_extract_high_signal_tickers(full_text))
+            bare_syms = _resolve_set(_extract_bare_tickers(bare_text))
+            related_union = high_syms | bare_syms
 
-            # 1b) Title+desc resolution fallback: if the headline is a
-            # high-signal corporate-action announcement but no ticker was
-            # recovered from title/desc alone, fetch the article body and
-            # retry extraction.  This is the T-REX case: the Google News
-            # title says "T-REX 2X XRP Daily Target ETF to Liquidate" but
-            # the actual ETF ticker (XRPK) only appears once in the body as
-            # "(Cboe BZX Exchange, Inc: XRPK)".
-            #
-            # Critical detail: we ONLY extract tickers from a small window
-            # around the first trigger phrase (~1500 chars).  Press-release
-            # pages are wrapped in publisher chrome (nav, sidebar, "related
-            # articles") that mentions dozens of unrelated tickers -- scanning
-            # the whole body conflates them with the subject ticker and
-            # produces garbage events (e.g. "delisting: AI" from a Morningstar
-            # sidebar blurb about Microsoft AI on a T-REX liquidation page).
-            #
-            # Bounded at GOOGLE_NEWS_BODY_FETCH_BUDGET fetches per run.
+            # 1b) Body fetch when the headline is high-signal but tickers live in
+            # the article HTML (T-REX XRPK / SOLX pattern).
             url = art.get("link") or ""
             if (
-                not related
+                not related_union
                 and url
                 and url not in seen_body_urls
                 and body_fetches_done < GOOGLE_NEWS_BODY_FETCH_BUDGET
-                and _BODY_FETCH_TRIGGER_RE.search(text)
+                and _BODY_FETCH_TRIGGER_RE.search(full_text)
             ):
                 seen_body_urls.add(url)
                 body = _fetch_article_body(session, url)
@@ -1658,24 +1694,29 @@ def phase_5_google_news(
                 if body:
                     window = _body_window_around_trigger(body)
                     if window:
-                        related = _resolve_from_text(f"{text}\n{window}")
-                        if related:
+                        full_text = f"{title}\n{description}\n{window}"
+                        bare_text = f"{title}\n{window}"
+                        high_syms = _resolve_set(_extract_high_signal_tickers(full_text))
+                        bare_syms = _resolve_set(_extract_bare_tickers(bare_text))
+                        related_union = high_syms | bare_syms
+                        if related_union:
                             body_fetches_hit += 1
-                            # Use the enriched window for downstream classify
-                            # so category reflects body phrasing too.
-                            text = f"{text}\n{window}"
-                            # Include a body-derived summary so the event /
-                            # news row surfaces the additional context.
                             if not description:
                                 description = window[:400]
 
-            if not related:
+            if not related_union:
                 continue
+
+            emit_syms = _emit_screener_etfs(high_syms, bare_syms)
+            if not emit_syms:
+                continue
+
+            classify_text_src = full_text
 
             # 2) Classify via the shared regex bank so we honour negative patterns
             # (dividend/distribution/earnings drop) but fall back to the query's
             # default category if the classifier doesn't fire.
-            cat, conf = classify_text(text)
+            cat, conf = classify_text(classify_text_src)
             if not cat:
                 cat = default_category
                 conf = 0.65  # lower confidence when inferred from query only
@@ -1684,27 +1725,28 @@ def phase_5_google_news(
 
             # 3) Stable id; skip near-duplicates from multiple queries.
             slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60] or "untitled"
-            art_id = f"gnews:{slug}:{(pub_iso or '')[:10]}:{related[0]}"
+            art_id = f"gnews:{slug}:{(pub_iso or '')[:10]}:{emit_syms[0]}"
             if art_id in seen_article_ids:
                 continue
             seen_article_ids.add(art_id)
 
             publisher = art.get("source") or None
+            summary_plain = _strip_html_to_plain(description)
 
             # 4) Always emit a NewsItem so the article shows up in the feed.
             all_news.append(
                 NewsItem(
                     id=art_id,
-                    tickers=related,
+                    tickers=emit_syms,
                     category=cat,
                     confidence=round(conf, 3),
                     published_utc=pub_iso,
                     title=title or None,
-                    summary=description or None,
+                    summary=summary_plain,
                     url=art.get("link") or None,
                     publisher=publisher,
                     image_url=None,
-                    bucket=bucket_map.get(related[0]),
+                    bucket=bucket_map.get(emit_syms[0]),
                 )
             )
 
@@ -1718,8 +1760,8 @@ def phase_5_google_news(
             # Event IDs match the Polygon-side format so dedupe_events merges
             # once Polygon confirms the rename / delisting.
             if cat in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
-                exec_date = _extract_execution_date(text)
-                for sym in related:
+                exec_date = _extract_execution_date(classify_text_src)
+                for sym in emit_syms:
                     event_id = (
                         f"polygon_delisting:{sym}"
                         if cat == "delisting"
@@ -1738,7 +1780,7 @@ def phase_5_google_news(
                             bucket=bucket_map.get(sym),
                             underlying=underlying_map.get(sym),
                             headline=title or None,
-                            summary=description or None,
+                            summary=summary_plain,
                         )
                     )
 
