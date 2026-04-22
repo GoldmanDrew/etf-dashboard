@@ -140,15 +140,38 @@ jobs:
       - name: Commit metrics artifacts
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json data/etf_metrics_health.json data/etf_distributions.json data/etf_holdings_daily.parquet data/etf_holdings_daily.csv data/etf_holdings_latest.json"
+          # Full list of artifacts this workflow *may* produce.  Any individual
+          # file can legitimately be missing on a given run (e.g. holdings
+          # ingestion fails transiently and etf_holdings_latest.json isn't
+          # written).  We filter to only the files that actually exist before
+          # calling `git add`, because `git add` on a missing pathspec aborts
+          # the whole step and previously dropped committed close_price data
+          # with it.
+          ALL_FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json data/etf_metrics_health.json data/etf_distributions.json data/etf_holdings_daily.parquet data/etf_holdings_daily.csv data/etf_holdings_latest.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${FILES}
+          EXISTING_FILES=""
+          MISSING_FILES=""
+          for f in ${ALL_FILES}; do
+            if [ -f "$f" ]; then
+              EXISTING_FILES="${EXISTING_FILES} $f"
+            else
+              MISSING_FILES="${MISSING_FILES} $f"
+            fi
+          done
+          if [ -n "${MISSING_FILES}" ]; then
+            echo "::warning::Skipping absent artifacts from commit:${MISSING_FILES}"
+          fi
+          if [ -z "${EXISTING_FILES# }" ]; then
+            echo "No ETF metrics artifacts present on disk; nothing to commit."
+            exit 0
+          fi
+          git add ${EXISTING_FILES}
           if git diff --staged --quiet; then
             echo "No ETF metrics changes to commit"
           else
             TMP_DIR="$(mktemp -d)"
-            for f in ${FILES}; do
+            for f in ${EXISTING_FILES}; do
               mkdir -p "${TMP_DIR}/$(dirname "$f")"
               cp "$f" "${TMP_DIR}/$f"
             done
@@ -158,13 +181,20 @@ jobs:
               git reset --hard || true
               git clean -fd || true
               git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
-              for f in ${FILES}; do
+              ROUND_FILES=""
+              for f in ${EXISTING_FILES}; do
                 if [ -f "${TMP_DIR}/$f" ]; then
                   mkdir -p "$(dirname "$f")"
                   cp "${TMP_DIR}/$f" "$f"
+                  ROUND_FILES="${ROUND_FILES} $f"
                 fi
               done
-              git add ${FILES}
+              if [ -z "${ROUND_FILES# }" ]; then
+                echo "No files to stage after rebase"
+                pushed=1
+                break
+              fi
+              git add ${ROUND_FILES}
               if git diff --staged --quiet; then
                 echo "No ETF metrics changes against latest origin"
                 pushed=1

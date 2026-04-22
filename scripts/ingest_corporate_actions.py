@@ -228,6 +228,69 @@ def _canonical_bucket(raw: object) -> str | None:
     return mapping.get(s, s)
 
 
+def _load_current_universe() -> set[str]:
+    """Fast helper: return the set of tickers currently in the active screener.
+
+    Unlike :func:`load_universe` this does not enforce schema and never raises;
+    missing file returns an empty set so delisting filtering degrades softly.
+    """
+    if not UNIVERSE_CSV.exists():
+        return set()
+    try:
+        df = pd.read_csv(UNIVERSE_CSV)
+    except Exception:
+        return set()
+    col = "ETF" if "ETF" in df.columns else ("ticker" if "ticker" in df.columns else None)
+    if col is None:
+        return set()
+    return {_norm(x) for x in df[col].dropna().tolist()}
+
+
+# Fund-name tokens that let us accept a Polygon inactive record whose ``type``
+# is no longer ``ETF``.  ETFs occasionally get reclassified to ``CS`` / ``FUND``
+# / blank after delisting, but their ``name`` almost always still contains one
+# of these tokens.  Securities that *don't* match any of these are almost
+# certainly ticker-reuse collisions (preferreds, warrants, "when-issued"
+# stubs, old common stock) and must not be surfaced as ETF delistings.
+_FUND_NAME_TOKENS = re.compile(
+    r"\b(ETF|ETN|ETP|ETC|FUND|TRUST|SHARES|PORTFOLIO|INDEX|BULL|BEAR|"
+    r"ULTRA|ULTRASHORT|ULTRAPRO|DAILY|INVERSE|LEVERED|LEVERAGED|"
+    r"\dX|2X|3X|-?1X|WEEKLYPAY|YIELDMAX|DIREXION|PROSHARES|ROUNDHILL|"
+    r"TRADR|DEFIANCE|KURV|REX|GRANITESHARES|T-REX)\b",
+    re.I,
+)
+# Polygon ``type`` codes we accept as fund-like even without a name match.
+_FUND_POLYGON_TYPES = {"ETF", "ETV", "ETN", "FUND", "CEF"}
+
+
+def _polygon_ticker_looks_like_fund(rec: dict) -> bool:
+    """Heuristic: does this Polygon reference record describe an ETF/fund?
+
+    We need this because
+    :func:`phase_2_delistings` intentionally drops the ``type=ETF`` filter on
+    the Polygon inactive-tickers endpoint (to catch reclassified funds).  Without
+    a safety net, that admits unrelated securities that happen to share a symbol
+    with one of our tracked ETFs — see AAPW ("ADVANCE AUTO PARTS INC WI"),
+    UNHW ("UNITEDHEALTH GROUP INCORPORATED W.I."), MSTP ("MBNK CP TST ... PF"),
+    etc.
+
+    A record passes if **either**
+
+      * ``type`` is in :data:`_FUND_POLYGON_TYPES`, **or**
+      * ``name`` contains an obvious fund-name token.
+
+    When ``name`` / ``type`` are both absent we default to ``False`` — better to
+    miss a rare reclassified fund than to surface a confidently wrong delisting.
+    """
+    t = str(rec.get("type") or "").strip().upper()
+    if t in _FUND_POLYGON_TYPES:
+        return True
+    name = str(rec.get("name") or "").strip()
+    if not name:
+        return False
+    return bool(_FUND_NAME_TOKENS.search(name))
+
+
 def load_universe() -> pd.DataFrame:
     """Return a DataFrame with columns [ticker, underlying, bucket]."""
     if not UNIVERSE_CSV.exists():
@@ -323,8 +386,17 @@ def _load_prior_events_of_type(event_type: str) -> dict[str, CorporateEvent]:
             ev = CorporateEvent(**kwargs)
         except Exception:  # noqa: BLE001
             continue
-        if ev.id:
-            out[ev.id] = ev
+        if not ev.id:
+            continue
+        # Legacy delisting ids embed the date (polygon_delisting:SYM:YYYY-MM-DD).
+        # Normalize to the ticker-only form so a new run's emission (which uses
+        # the new id) merges with any previously-stored record for the same
+        # ticker rather than accumulating one card per observed date.
+        if event_type == "delisting" and ev.id.startswith("polygon_delisting:"):
+            parts = ev.id.split(":")
+            if len(parts) >= 2:
+                ev.id = f"polygon_delisting:{parts[1]}"
+        out[ev.id] = ev
     return out
 
 
@@ -613,12 +685,35 @@ def phase_2_delistings(
         phase_label="delistings",
     )
 
+    # Current-live set: tickers that are in today's screener.  If a symbol is
+    # still trading as an ETF for us, we cannot credibly flag it as delisted --
+    # any Polygon inactive record for that symbol is almost certainly a
+    # historical ticker-reuse (e.g. an old "Advance Auto Parts WI" stub sharing
+    # the AAPW symbol with today's AAPL weekly-pay ETF).  We skip those
+    # collisions unconditionally rather than emit a misleading delisting card.
+    current_live = _load_current_universe() if UNIVERSE_CSV.exists() else set()
+
     events: list[CorporateEvent] = []
     skipped_off_universe = 0
+    skipped_live = 0
+    skipped_not_fund = 0
     for r in raw:
         sym = _norm(r.get("ticker") or "")
         if sym not in universe:
             skipped_off_universe += 1
+            continue
+        if sym in current_live:
+            # Still in today's active screener -- Polygon is reporting an old
+            # same-ticker security (ticker reuse), not our ETF.  Drop it.
+            skipped_live += 1
+            continue
+        if not _polygon_ticker_looks_like_fund(r):
+            # Dropping the type=ETF filter on the bulk sweep admits all manner
+            # of non-fund inactive securities (warrants, preferreds, old CSs,
+            # "when-issued" stubs) that happen to share a symbol with a current
+            # ETF in our ever-known set.  Require a fund-ish name or type so
+            # those collisions don't surface as bogus delistings.
+            skipped_not_fund += 1
             continue
         delisted = r.get("delisted_utc") or r.get("last_updated_utc")
         date_str = None
@@ -629,7 +724,12 @@ def phase_2_delistings(
                 date_str = None
         events.append(
             CorporateEvent(
-                id=f"polygon_delisting:{sym}:{date_str or 'unknown'}",
+                # id is ticker-only so repeat runs (Polygon sometimes nudges
+                # last_updated_utc day-to-day) collapse to a single card.
+                # _merge_event_pair's delisting-specific rule prefers the
+                # earliest execution_date, which reflects the actual delisting
+                # day rather than Polygon's metadata-touched day.
+                id=f"polygon_delisting:{sym}",
                 type="delisting",
                 ticker=sym,
                 execution_date=date_str,
@@ -650,9 +750,11 @@ def phase_2_delistings(
             )
         )
     LOGGER.info(
-        "delistings: kept=%d off_universe=%d (of %d inactive tickers returned by Polygon)",
+        "delistings: kept=%d off_universe=%d skipped_live=%d skipped_not_fund=%d (of %d inactive tickers returned by Polygon)",
         len(events),
         skipped_off_universe,
+        skipped_live,
+        skipped_not_fund,
         len(raw),
     )
     return events
@@ -1351,6 +1453,17 @@ def _merge_event_pair(prev: CorporateEvent, cand: CorporateEvent) -> CorporateEv
 
     if not merged.execution_date and other.execution_date:
         merged.execution_date = other.execution_date
+    elif (
+        merged.type == "delisting"
+        and merged.execution_date
+        and other.execution_date
+        and other.execution_date < merged.execution_date
+    ):
+        # For delistings, Polygon sometimes reports ``last_updated_utc`` on
+        # consecutive days as it finalizes metadata.  Prefer the EARLIEST
+        # execution_date so the card reflects the actual last-traded day
+        # rather than a later metadata touch.
+        merged.execution_date = other.execution_date
     if not merged.announcement_date and other.announcement_date:
         merged.announcement_date = other.announcement_date
     if not merged.prior_ticker and other.prior_ticker:
@@ -1629,6 +1742,25 @@ def main() -> None:
     # its original date even if the new run finds only a stale stub.
     prior_delistings = load_prior_delistings()
     if prior_delistings and not args.skip_delistings:
+        # Evict prior delistings whose ticker is back in today's active
+        # screener.  Those were almost always ticker-reuse false-positives from
+        # Polygon's inactive-tickers feed (e.g. an old "Advance Auto Parts WI"
+        # stub sharing AAPW with today's live AAPL weekly-pay ETF).  Without
+        # this cleanup they'd persist forever via the prior-record merge.
+        current_live_for_prune = _load_current_universe()
+        before_prune = len(prior_delistings)
+        pruned = {
+            eid: ev
+            for eid, ev in prior_delistings.items()
+            if ev.ticker not in current_live_for_prune
+        }
+        dropped = before_prune - len(pruned)
+        if dropped:
+            LOGGER.info(
+                "  evicted %d prior delisting records for tickers now active in screener (false-positives)",
+                dropped,
+            )
+        prior_delistings = pruned
         LOGGER.info(
             "  merging %d prior delisting records (immutable pin)",
             len(prior_delistings),
