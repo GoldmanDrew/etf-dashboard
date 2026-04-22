@@ -1151,23 +1151,37 @@ def phase_4_symbol_changes(
                 cache[t] = {"fetched_at": now_iso, "events": events_raw}
                 calls_made += 1
 
-        for ev in events_raw:
-            if (ev.get("type") or "").lower() != "ticker_change":
-                continue
+        # Polygon documents each event's ``ticker_change.ticker`` as the symbol
+        # **after** that event's effective date.  The prior symbol is usually NOT
+        # exposed as ``previous_ticker`` in the JSON (docs only show nested
+        # ``ticker``).  Infer ``old -> new`` by walking the timeline sorted oldest
+        # first: for event i>0, old is the prior row's post-rename ticker.
+        #
+        # Single-event fallback: when we queried a **pre-rename** id and Polygon
+        # returns one row whose ``ticker`` is already the new symbol, treat the
+        # query symbol as the old side (``new_sym != _norm(t)``).
+        tc_sorted = sorted(
+            (e for e in events_raw if (e.get("type") or "").lower() == "ticker_change"),
+            key=lambda e: (
+                str(e.get("date") or ""),
+                str(((e.get("ticker_change") or {}).get("ticker") or "")).upper(),
+            ),
+        )
+        for idx, ev in enumerate(tc_sorted):
             change = ev.get("ticker_change") or {}
             new_sym = _norm(change.get("ticker") or "")
-            # Polygon's event model: `ticker_change.ticker` is the NEW symbol
-            # after the rename; the queried ticker `t` is the OLD symbol when
-            # the event pre-dates the rename, or vice-versa if we queried by
-            # the new symbol.  Use composite_figi / date heuristics below to
-            # disambiguate; for now store both sides and let dedupe_events
-            # collapse duplicates when we eventually query the other side.
             date = ev.get("date")
             if not date or not new_sym:
                 continue
             if str(date) < cutoff:
                 continue
-            old_sym = t if new_sym != t else _norm(ev.get("previous_ticker") or "")
+
+            old_sym = _norm(ev.get("previous_ticker") or change.get("previous_ticker") or "")
+            if not old_sym and idx > 0:
+                prev_change = tc_sorted[idx - 1].get("ticker_change") or {}
+                old_sym = _norm(prev_change.get("ticker") or "")
+            if not old_sym and idx == 0 and new_sym != _norm(t):
+                old_sym = _norm(t)
             if not old_sym or old_sym == new_sym:
                 continue
 
