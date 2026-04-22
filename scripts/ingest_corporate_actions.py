@@ -130,6 +130,17 @@ SYMBOL_CHANGE_WALL_CLOCK_BUDGET_SEC = int(
 ENABLE_GOOGLE_NEWS = os.getenv("CORP_ACTIONS_ENABLE_GOOGLE_NEWS", "1") not in {"0", "false", "False", ""}
 GOOGLE_NEWS_MAX_ARTICLES_PER_QUERY = int(os.getenv("CORP_ACTIONS_GOOGLE_NEWS_MAX_PER_QUERY", "100"))
 GOOGLE_NEWS_WINDOW_DAYS = int(os.getenv("CORP_ACTIONS_GOOGLE_NEWS_WINDOW_DAYS", "45"))
+# Per-run cap on article-body fetches for ticker disambiguation.  The RSS
+# title alone often doesn't contain a ticker (e.g. "T-REX 2X XRP Daily Target
+# ETF to Liquidate" -- our actual ticker XRPK only appears in the body).  We
+# fall back to fetching the article page when a high-signal headline has no
+# resolved ticker.  Bounded at a conservative default to stay polite to
+# publishers and avoid burning the workflow budget on low-value pages.
+GOOGLE_NEWS_BODY_FETCH_BUDGET = int(os.getenv("CORP_ACTIONS_GOOGLE_NEWS_BODY_FETCH_BUDGET", "40"))
+# Cap characters of body we store in the classifier context.  Press releases
+# are typically ~3-8kb of actual prose; everything beyond is navigation /
+# footer and adds no signal.
+GOOGLE_NEWS_BODY_MAX_CHARS = int(os.getenv("CORP_ACTIONS_GOOGLE_NEWS_BODY_MAX_CHARS", "20000"))
 # Polygon tier rate limit (req/min). Defaults to the free-tier cap of 5 so the
 # script is safe on basic plans out-of-the-box. Bump via env for paid tiers:
 #   Starter=100, Developer/Advanced=600+.
@@ -1061,14 +1072,25 @@ def phase_4_symbol_changes(
     now_iso = datetime.now(UTC).isoformat()
     cutoff = (datetime.now(UTC) - timedelta(days=SYMBOL_CHANGE_LOOKBACK_DAYS)).date().isoformat()
 
-    # Query order: current universe first (most likely to be relevant to
-    # today's screener), then current underlyings (catches BITF→KEEL-style
-    # renames where the underlying is what rebranded, not the ETF), then
-    # anything else we've ever seen.  Within each tier, prefer the stalest.
-    tier_current = [t for t in sorted(current_universe) if t]
+    # Query order (by rename probability, not alphabetical):
+    #
+    #   1. Underlyings first -- common-stock rebrands (BITF -> KEEL, FB -> META,
+    #      FCEL -> PLUG, etc.) are where almost all real ticker_change events
+    #      fire.  Polygon's endpoint returns events keyed to the underlying's
+    #      FIGI, so querying the current symbol finds the full rename chain.
+    #   2. Current ETF universe -- leveraged/inverse ETFs occasionally rename
+    #      (MSTU -> MSTX, that sort of thing) but it's rare and Phase 2 already
+    #      catches the delisting / relisting side effects.
+    #   3. Historic / ever-known -- lowest priority; mostly a safety net so
+    #      tickers that silently dropped out of the screener still get swept.
+    #
+    # Within each tier the staleness sort (cache_hit? ascending, then ticker)
+    # ensures cold entries dominate the call budget instead of re-fetching
+    # already-known tickers on every run.
     tier_underlyings = [t for t in sorted(underlyings) if t and t not in current_universe]
+    tier_current = [t for t in sorted(current_universe) if t]
     tier_historic = [t for t in sorted(ever_known) if t and t not in current_universe and t not in underlyings]
-    ordered_tickers = tier_current + tier_underlyings + tier_historic
+    ordered_tickers = tier_underlyings + tier_current + tier_historic
 
     def _staleness_key(t: str) -> tuple[int, str]:
         ent = cache.get(t)
@@ -1207,6 +1229,24 @@ GOOGLE_NEWS_QUERIES: list[tuple[str, str]] = [
 # words like "ETF" itself (which would collide with a ticker of the same name).
 _TICKER_CANDIDATE_RE = re.compile(r"(?<![A-Z0-9])([A-Z]{2,5})(?![a-z])")
 
+# Parenthesized ticker, e.g. "...Income Strategy ETF (JEPY)".  This is how
+# issuer press releases nearly always disambiguate the fund.  Matches with or
+# without the "NASDAQ: "/"NYSE: "/"Cboe BZX Exchange, Inc: " prefix that some
+# press releases include inside the parens.
+_PARENTHESIZED_TICKER_RE = re.compile(
+    r"\(\s*(?:(?:NASDAQ|NYSE|NYSE\s*ARCA|ARCA|CBOE|CBOE\s*BZX|BZX|BATS|AMEX|OTC|NASDAQGM|NASDAQGS|NASDAQCM)"
+    r"(?:\s*Exchange)?(?:,\s*Inc\.?)?\s*:\s*)?([A-Z]{2,5})\s*\)"
+)
+# Exchange-prefixed ticker without parens, e.g. "Cboe BZX Exchange, Inc: XRPK".
+_EXCHANGE_PREFIX_TICKER_RE = re.compile(
+    r"\b(?:NASDAQ|NYSE|NYSE\s*ARCA|ARCA|CBOE|CBOE\s*BZX|BZX|BATS|AMEX|OTC)"
+    r"(?:\s*Exchange)?(?:,\s*Inc\.?)?\s*:\s*([A-Z]{2,5})\b"
+)
+# Twitter-style ticker, e.g. "$XRPK".
+_DOLLAR_TICKER_RE = re.compile(r"\$([A-Z]{2,5})\b")
+# "ticker: XRPK" / "symbol: XRPK" — common in issuer press releases.
+_TICKER_LABEL_RE = re.compile(r"\b(?:ticker|symbol)\s*[:\s]\s*([A-Z]{2,5})\b", re.IGNORECASE)
+
 # Words that look like tickers but are actually English/finance noise.  Not
 # exhaustive — the universe-intersection downstream does the heavy lifting.
 _TICKER_STOPWORDS = {
@@ -1245,10 +1285,40 @@ def _extract_execution_date(text: str) -> str | None:
 
 
 def _extract_candidate_tickers(text: str) -> set[str]:
+    """Extract every plausible ticker symbol from a blob of article text.
+
+    Uses four complementary patterns in priority order -- high-signal ones
+    (parenthesized, exchange-prefixed, ticker-labelled) strongly outweigh the
+    loose bare-uppercase fallback when it comes to disambiguation against
+    stopwords:
+
+      1. Parenthesized:     "Strategy ETF (JEPY)"               -> JEPY
+      2. Exchange-prefixed: "Cboe BZX Exchange, Inc: XRPK"      -> XRPK
+      3. Ticker-labelled:   "Ticker: SOLX"                      -> SOLX
+      4. Dollar-prefixed:   "$XRPK"                             -> XRPK
+      5. Bare uppercase:    "XRPK liquidates today"             -> XRPK
+
+    Stopword filter is applied uniformly so that generic words like "ETF",
+    "NAV" or "NYSE" never survive, no matter which pattern matched.
+
+    The caller is responsible for intersecting the returned set with the
+    known universe; this function intentionally casts a wide net.
+    """
     if not text:
         return set()
-    cands = _TICKER_CANDIDATE_RE.findall(text)
-    return {c for c in cands if c not in _TICKER_STOPWORDS}
+    out: set[str] = set()
+    for regex in (
+        _PARENTHESIZED_TICKER_RE,
+        _EXCHANGE_PREFIX_TICKER_RE,
+        _TICKER_LABEL_RE,
+        _DOLLAR_TICKER_RE,
+        _TICKER_CANDIDATE_RE,
+    ):
+        for match in regex.findall(text):
+            sym = (match if isinstance(match, str) else match[0]).upper()
+            if sym and sym not in _TICKER_STOPWORDS:
+                out.add(sym)
+    return out
 
 
 def _fetch_google_news_rss(session: requests.Session, query: str) -> list[dict]:
@@ -1310,6 +1380,89 @@ def _fetch_google_news_rss(session: requests.Session, query: str) -> list[dict]:
     return items
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HTML_WHITESPACE_RE = re.compile(r"\s+")
+# High-signal phrases that justify spending a body-fetch slot on an article
+# whose title alone failed to resolve any universe ticker.  Keep this tight:
+# pure "rally"/"downgrade" etc. articles don't get the expensive lookup.
+_BODY_FETCH_TRIGGER_RE = re.compile(
+    r"\b(?:to\s+liquidate|plan\s+of\s+liquidation|will\s+liquidate|"
+    r"wind\s+down|cease\s+trading|fund\s+(?:termination|closure)|"
+    r"ticker\s+change|symbol\s+change|reverse\s+stock\s+split|reverse\s+split|"
+    r"forward\s+stock\s+split|share\s+consolidation)\b",
+    re.IGNORECASE,
+)
+
+
+def _body_window_around_trigger(
+    body: str,
+    *,
+    chars_before: int = 500,
+    chars_after: int = 1500,
+) -> str:
+    """Return the slice of ``body`` centered on the first action-trigger phrase.
+
+    Press-release pages nearly always embed the corporate-action announcement
+    in the first few paragraphs; the bulk of the remaining bytes is
+    navigation / sidebar / "related news" content which references dozens of
+    unrelated tickers.  Limiting the ticker sweep to this tight window is
+    what prevents a Morningstar sidebar blurb about Microsoft AI from being
+    conflated with the T-REX liquidation that's actually on the page.
+
+    Falls back to the first ~2000 chars when no trigger is found (shouldn't
+    happen since we only invoke body fetch after a title/desc trigger hit,
+    but is defensive in case the trigger phrase is title-only).
+    """
+    if not body:
+        return ""
+    match = _BODY_FETCH_TRIGGER_RE.search(body)
+    if match is None:
+        return body[: chars_before + chars_after]
+    start = max(0, match.start() - chars_before)
+    end = min(len(body), match.end() + chars_after)
+    return body[start:end]
+
+
+def _fetch_article_body(session: requests.Session, url: str) -> str:
+    """Fetch an article page and return its cleaned plain-text body.
+
+    Soft-fail on any error (bad URL, timeout, 403 paywall, non-HTML content-
+    type) -- the caller just treats it as "no additional text" and moves on.
+    We intentionally don't follow JS redirects or run a headless browser; the
+    overwhelming majority of press releases are server-rendered, so a basic
+    requests.get() fetches the entire body.
+    """
+    if not url:
+        return ""
+    try:
+        resp = session.get(
+            url,
+            timeout=HTTP_TIMEOUT_SEC,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; etf-dashboard-corporate-actions/1.0; "
+                              "+https://goldmandrew.github.io/etf-dashboard)",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            allow_redirects=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        LOGGER.debug("article body fetch failed %s: %s", url, e)
+        return ""
+    if resp.status_code != 200 or not resp.text:
+        LOGGER.debug("article body non-200 %s: status=%s", url, resp.status_code)
+        return ""
+    # Bail early on clearly non-HTML (PDF press releases come back as
+    # application/pdf and the regex pass below would produce garbage).
+    ct = resp.headers.get("Content-Type", "")
+    if ct and "html" not in ct.lower():
+        return ""
+    text = _HTML_TAG_RE.sub(" ", resp.text)
+    text = _HTML_WHITESPACE_RE.sub(" ", text)
+    if len(text) > GOOGLE_NEWS_BODY_MAX_CHARS:
+        text = text[:GOOGLE_NEWS_BODY_MAX_CHARS]
+    return text
+
+
 def _parse_rfc822(s: str) -> str | None:
     """Convert RFC-822 (RSS pubDate) to ISO-8601 UTC; returns None on failure."""
     if not s:
@@ -1360,8 +1513,23 @@ def phase_5_google_news(
     all_events: list[CorporateEvent] = []
     all_news: list[NewsItem] = []
     seen_article_ids: set[str] = set()
+    seen_body_urls: set[str] = set()  # de-dupe body fetches across queries
     total_articles_scanned = 0
     total_articles_kept = 0
+    body_fetches_done = 0
+    body_fetches_hit = 0  # resolved a ticker from body that wasn't in title
+
+    def _resolve_from_text(text: str) -> list[str]:
+        """Extract + resolve + intersect against universe|ever_known."""
+        candidates = _extract_candidate_tickers(text)
+        resolved: set[str] = set()
+        for c in candidates:
+            if c in match_universe:
+                resolved.add(c)
+            alias = alias_map.get(c)
+            if alias and alias.get("new"):
+                resolved.add(alias["new"])
+        return sorted({t for t in resolved if t in (universe | ever_known)})
 
     for query, default_category in GOOGLE_NEWS_QUERIES:
         LOGGER.info("google-news query: %r → default_category=%s", query, default_category)
@@ -1376,17 +1544,50 @@ def phase_5_google_news(
                 continue
 
             # 1) Extract candidate tickers from title+desc, resolve aliases.
-            candidates = _extract_candidate_tickers(text)
-            resolved: set[str] = set()
-            for c in candidates:
-                if c in match_universe:
-                    resolved.add(c)
-                # Alias chain: old ticker mentioned in article → map to new.
-                alias = alias_map.get(c)
-                if alias and alias.get("new"):
-                    resolved.add(alias["new"])
-            # Intersect with tickers we actually track (universe OR ever_known).
-            related = sorted({t for t in resolved if t in (universe | ever_known)})
+            related = _resolve_from_text(text)
+
+            # 1b) Title+desc resolution fallback: if the headline is a
+            # high-signal corporate-action announcement but no ticker was
+            # recovered from title/desc alone, fetch the article body and
+            # retry extraction.  This is the T-REX case: the Google News
+            # title says "T-REX 2X XRP Daily Target ETF to Liquidate" but
+            # the actual ETF ticker (XRPK) only appears once in the body as
+            # "(Cboe BZX Exchange, Inc: XRPK)".
+            #
+            # Critical detail: we ONLY extract tickers from a small window
+            # around the first trigger phrase (~1500 chars).  Press-release
+            # pages are wrapped in publisher chrome (nav, sidebar, "related
+            # articles") that mentions dozens of unrelated tickers -- scanning
+            # the whole body conflates them with the subject ticker and
+            # produces garbage events (e.g. "delisting: AI" from a Morningstar
+            # sidebar blurb about Microsoft AI on a T-REX liquidation page).
+            #
+            # Bounded at GOOGLE_NEWS_BODY_FETCH_BUDGET fetches per run.
+            url = art.get("link") or ""
+            if (
+                not related
+                and url
+                and url not in seen_body_urls
+                and body_fetches_done < GOOGLE_NEWS_BODY_FETCH_BUDGET
+                and _BODY_FETCH_TRIGGER_RE.search(text)
+            ):
+                seen_body_urls.add(url)
+                body = _fetch_article_body(session, url)
+                body_fetches_done += 1
+                if body:
+                    window = _body_window_around_trigger(body)
+                    if window:
+                        related = _resolve_from_text(f"{text}\n{window}")
+                        if related:
+                            body_fetches_hit += 1
+                            # Use the enriched window for downstream classify
+                            # so category reflects body phrasing too.
+                            text = f"{text}\n{window}"
+                            # Include a body-derived summary so the event /
+                            # news row surfaces the additional context.
+                            if not description:
+                                description = window[:400]
+
             if not related:
                 continue
 
@@ -1429,40 +1630,47 @@ def phase_5_google_news(
             # 5) If the article announces a delisting / symbol_change / split,
             # synthesize a pending CorporateEvent so the pinned strip shows it
             # before Polygon catches up.
+            #
+            # Emit one event per resolved ticker: a single press release
+            # commonly announces a multi-fund liquidation (e.g. T-REX 2X XRP
+            # ETF AND T-REX 2X SOL ETF both liquidate on the same day).
+            # Event IDs match the Polygon-side format so dedupe_events merges
+            # once Polygon confirms the rename / delisting.
             if cat in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
                 exec_date = _extract_execution_date(text)
-                primary = related[0]
-                event_id = (
-                    f"polygon_delisting:{primary}:{exec_date or 'unknown'}"
-                    if cat == "delisting"
-                    # Re-use Polygon's id format for delistings so that once Polygon
-                    # confirms the event, dedupe_events merges the two records.
-                    else f"gnews_{cat}:{primary}:{exec_date or (pub_iso or '')[:10]}"
-                )
-                all_events.append(
-                    CorporateEvent(
-                        id=event_id,
-                        type=cat,
-                        ticker=primary,
-                        execution_date=exec_date,
-                        announcement_date=(pub_iso or "")[:10] or None,
-                        status="pending",
-                        source="google_news",
-                        source_url=art.get("link") or None,
-                        bucket=bucket_map.get(primary),
-                        underlying=underlying_map.get(primary),
-                        headline=title or None,
-                        summary=description or None,
+                for sym in related:
+                    event_id = (
+                        f"polygon_delisting:{sym}"
+                        if cat == "delisting"
+                        else f"gnews_{cat}:{sym}:{exec_date or (pub_iso or '')[:10]}"
                     )
-                )
+                    all_events.append(
+                        CorporateEvent(
+                            id=event_id,
+                            type=cat,
+                            ticker=sym,
+                            execution_date=exec_date,
+                            announcement_date=(pub_iso or "")[:10] or None,
+                            status="pending",
+                            source="google_news",
+                            source_url=art.get("link") or None,
+                            bucket=bucket_map.get(sym),
+                            underlying=underlying_map.get(sym),
+                            headline=title or None,
+                            summary=description or None,
+                        )
+                    )
 
             total_articles_kept += 1
 
     LOGGER.info(
-        "google-news: queries=%d scanned=%d kept=%d → events=%d news=%d",
+        "google-news: queries=%d scanned=%d kept=%d body_fetch=%d/%d (budget %d) → events=%d news=%d",
         len(GOOGLE_NEWS_QUERIES),
         total_articles_scanned,
         total_articles_kept,
+        body_fetches_hit,
+        body_fetches_done,
+        GOOGLE_NEWS_BODY_FETCH_BUDGET,
         len(all_events),
         len(all_news),
     )
