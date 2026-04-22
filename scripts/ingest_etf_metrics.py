@@ -67,7 +67,10 @@ JSON_PATH = DATA_DIR / "etf_metrics_daily.json"
 LATEST_JSON_PATH = DATA_DIR / "etf_metrics_latest.json"
 HEALTH_JSON_PATH = DATA_DIR / "etf_metrics_health.json"
 HOLDINGS_PARQUET_PATH = DATA_DIR / "etf_holdings_daily.parquet"
-HOLDINGS_CSV_PATH = DATA_DIR / "etf_holdings_daily.csv"
+# Human-readable **latest date only** (positions flat file).  Full history lives
+# in ``etf_holdings_daily.parquet`` — committing the multi-day CSV duplicated
+# storage and produced noisy diffs on every workflow run.
+HOLDINGS_LATEST_CSV_PATH = DATA_DIR / "etf_holdings_latest.csv"
 HOLDINGS_LATEST_JSON_PATH = DATA_DIR / "etf_holdings_latest.json"
 
 REQUIRED_COLUMNS = [
@@ -101,6 +104,22 @@ def load_universe_tickers(path: Path = UNIVERSE_CSV) -> list[str]:
     if "ETF" not in df.columns:
         raise ValueError(f"Universe CSV missing ETF column: {path}")
     return sorted({_normalize_symbol(x) for x in df["ETF"].dropna().tolist()})
+
+
+def load_universe_underlying_map(path: Path = UNIVERSE_CSV) -> dict[str, str]:
+    """Map ETF ticker -> underlying symbol from the screener CSV (Granite path)."""
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path)
+    if "ETF" not in df.columns or "Underlying" not in df.columns:
+        return {}
+    out: dict[str, str] = {}
+    for _, row in df.iterrows():
+        t = _normalize_symbol(row.get("ETF"))
+        u = row.get("Underlying")
+        if t and pd.notna(u) and str(u).strip():
+            out[t] = _normalize_symbol(u)
+    return out
 
 
 def _iter_dates(start_date: date, end_date: date) -> Iterable[date]:
@@ -454,15 +473,16 @@ def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame
 def save_holdings_outputs(
     new_rows: pd.DataFrame,
     parquet_path: Path | None = None,
-    csv_path: Path | None = None,
+    latest_csv_path: Path | None = None,
     latest_json_path: Path | None = None,
 ) -> None:
     # Resolve lazily so module-level monkeypatching in tests is honored.
     parquet_path = parquet_path or HOLDINGS_PARQUET_PATH
-    csv_path = csv_path or HOLDINGS_CSV_PATH
+    latest_csv_path = latest_csv_path or HOLDINGS_LATEST_CSV_PATH
     latest_json_path = latest_json_path or HOLDINGS_LATEST_JSON_PATH
-    """Append new holdings rows into the canonical parquet/CSV store and
-    refresh the latest-per-ticker JSON snapshot consumed by the dashboard UI.
+    """Append new holdings rows into the canonical parquet store, refresh the
+    latest-date CSV snapshot for humans browsing GitHub, and write the
+    latest-per-ticker JSON blob consumed by the dashboard UI.
 
     Duplicate positions (same etf, same as_of_date, same position_ticker+cusip
     combination, same market value) are dropped so reruns don't bloat history.
@@ -475,6 +495,7 @@ def save_holdings_outputs(
         payload = {"build_time": datetime.now(UTC).isoformat(), "rows": [], "by_symbol": {}}
         with open(latest_json_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, separators=(",", ":"), allow_nan=False)
+        pd.DataFrame(columns=HOLDINGS_COLUMNS).to_csv(latest_csv_path, index=False)
         return
 
     for c in HOLDINGS_COLUMNS:
@@ -509,7 +530,6 @@ def save_holdings_outputs(
     combo = combo.reset_index(drop=True)
 
     combo.to_parquet(parquet_path, index=False)
-    combo.to_csv(csv_path, index=False)
     LOGGER.info(
         "holdings: saved %d total rows (%d new) across %d ETFs, latest date=%s",
         len(combo), len(incoming),
@@ -522,6 +542,7 @@ def save_holdings_outputs(
     latest = latest.groupby("etf_ticker", group_keys=False).apply(
         lambda g: g[g["as_of_date"] == g["as_of_date"].max()]
     )
+    latest.to_csv(latest_csv_path, index=False)
     latest_json = latest.copy()
     latest_json["as_of_date"] = pd.to_datetime(latest_json["as_of_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     for c in ("shares", "price", "market_value", "weight_pct"):
@@ -954,7 +975,10 @@ def main() -> None:
     # never takes down the primary metrics output.
     if os.getenv("ETF_METRICS_SKIP_HOLDINGS", "").lower() not in ("1", "true", "yes"):
         try:
-            holdings_stack = build_default_holdings_stack(session)
+            underlying_map = load_universe_underlying_map()
+            holdings_stack = build_default_holdings_stack(
+                session, underlying_by_ticker=underlying_map,
+            )
             holdings_df = fetch_all_holdings(
                 tickers, as_of=resolved_end_date, stack=holdings_stack,
             )

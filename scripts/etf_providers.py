@@ -397,9 +397,11 @@ class DirexionProvider:
     # fetch_for_date still tries the URL even for unlisted tickers in case Direxion
     # adds a new fund.
     KNOWN_TICKERS = {
-        # Index 3X
-        "SPXL","SPXS","SPXU","TQQQ","SQQQ","QLD","QID","DDM","DXD","UDOW","SDOW","UMDD","MIDU",
-        "URTY","TNA","TZA","UWM","TWM","SOXL","SOXS","LABU","LABD","CURE","DRN","DRV","RETL","RETS","NAIL",
+        # Index 3X (Direxion only — ProShares tickers like TQQQ/SQQQ/QLD/QID/UDOW/SDOW
+        # were removed because direxion.com/holdings/{T}.csv is a 200 HTML shell for
+        # non-Direxion funds and produced empty holdings rows while burning quota).
+        "SPXL","SPXS","DDM","DXD","MIDU",
+        "URTY","TNA","TZA","SOXL","SOXS","LABU","LABD","CURE","DRN","DRV","RETL","RETS","NAIL",
         "FAS","FAZ","TECL","TECS","GUSH","ERX","DRIP","DUST","NUGT","JNUG","CWEB","HIBL","HIBS",
         "WEBL","WEBS","PILL","KORU","EDC","EDZ","YINN","YANG","DZK","DPK","INDL","BRZU","EURL","MEXX",
         # 3X Bonds
@@ -751,12 +753,22 @@ class REXSharesProvider:
     # Confirmed via probe + REX public lineup (T-REX 2x leveraged + income ETFs).
     # NOTE: QDTE / XDTE / RDTE are Roundhill funds, not REX -- they intentionally sit
     # in RoundhillProvider.KNOWN_TICKERS (via DailyNAV.csv).
+    # T-REX + REX-Osprey + income + thematic lineup.  Keep broad: new funds launch
+    # frequently and the holdings scraper keys off ``rexshares.com/{TICKER}/`` —
+    # a missing symbol here meant ``supports_ticker`` returned False even when
+    # the live site had full top-10 swap rows (e.g. XRPK / SOLX).
     KNOWN_TICKERS: set[str] = {
-        # T-REX 2x long/inverse single-stock
+        # T-REX 2x / -2x single names (subset; issuer page lists many more)
         "MSTU", "MSTZ", "NVDX", "NVDQ", "AAPX", "TSLT", "TSLZ", "AMZX", "AMZZ",
         "BITX", "BITZ", "BRKX", "BRKZ", "ETH2", "ETHZ", "CONG",
-        # Income / thematic
-        "FEPI", "AIPI", "BMAX", "SIXJ", "BKCH", "BITC", "BTCL", "BTCZ",
+        "DJTU", "RBLU", "GMEU", "SNOU", "SMUP", "SOLX", "EOSU", "APHU", "SNDU",
+        "BTCL", "CCUP", "CRWU", "CRCD", "CORD", "GOOX", "MSFX", "NFLU", "ROBN",
+        "ETU", "GLXU", "SBTU", "FGRU", "AFRU", "KTUP", "TTDU", "BMNU", "CIFU",
+        "XRPK", "RDWU", "PAAU", "XRPT", "XXRP", "UXRP", "XRPR", "DOJE", "SSK", "ESK",
+        # Income / thematic / other REX-listed
+        "FEPI", "AIPI", "CEPI", "BMAX", "SIXJ", "BKCH", "BITC", "BTCZ",
+        "COII", "MSII", "NVII", "TSII", "HOII", "PLTI", "CWII", "LLII", "WMTI", "GIF",
+        "ULTI", "DRNZ", "ATCL",
     }
 
     def __init__(self, session: requests.Session | None = None):
@@ -876,6 +888,9 @@ class GraniteSharesProvider:
         _ = session
         self._catalog: set[str] | None = None
         self._cache: dict[str, ProviderResult] = {}
+        # Raw ``/product/{id}/en-us/`` JSON cache — used by ``load_product_json`` for
+        # holdings ingestion without colliding with the NAV ``ProviderResult`` cache.
+        self._product_json_cache: dict[str, tuple[str, dict] | None] = {}
 
     def _load_catalog(self) -> None:
         if self._catalog is not None:
@@ -934,6 +949,57 @@ class GraniteSharesProvider:
             except Exception:
                 return None
         return None
+
+    def load_product_json(self, ticker: str) -> tuple[str, dict] | None:
+        """Fetch and return ``(api_url, payload)`` from the issuer JSON endpoint.
+
+        GraniteShares does not publish per-swap line items in this blob, but the
+        payload carries fund-level fee / swap aggregates that the holdings pipeline
+        can surface alongside a synthetic underlying row (see
+        ``GraniteSharesHoldingsProvider``).
+
+        Cached per ticker for the lifetime of this provider instance.
+        """
+        t = ticker.upper()
+        if t in self._product_json_cache:
+            cached = self._product_json_cache[t]
+            return cached
+        slug = self._slug_for_ticker(ticker)
+        page_url = f"{self.BASE}/etfs/{slug}/"
+        try:
+            sess = _build_session()
+            pr = _get(sess, page_url, extra_headers={"Referer": f"{self.BASE}/etfs/"})
+            if pr.status_code != 200 or not pr.text:
+                self._product_json_cache[t] = None
+                return None
+            product_id = self._product_id_from_page(pr.text, slug, t)
+            if not product_id:
+                self._product_json_cache[t] = None
+                return None
+            api_url = f"{self.BASE}/product/{product_id}/en-us/"
+            jr = sess.get(
+                api_url,
+                timeout=getattr(sess, "timeout_sec", 15),
+                headers={
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": page_url,
+                },
+            )
+            if jr.status_code != 200 or not jr.text or "application/json" not in jr.headers.get("content-type", ""):
+                self._product_json_cache[t] = None
+                return None
+            try:
+                payload = jr.json()
+            except ValueError:
+                self._product_json_cache[t] = None
+                return None
+            pair = (api_url, payload)
+            self._product_json_cache[t] = pair
+            return pair
+        except Exception:
+            self._product_json_cache[t] = None
+            return None
 
     def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
         t = ticker.upper()

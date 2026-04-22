@@ -17,9 +17,10 @@ Coverage (as of probe run):
   5) DefianceHoldingsProvider  -- per-ticker HTML scrape of the
                                   ``/{ticker}-full-holdings/`` page table.
 
-Roundhill, ProShares, and GraniteShares do not expose a public holdings file we
-could scrape cheaply; they're represented by ``UnsupportedHoldingsProvider``
-stubs so the orchestrator can report coverage without crashing.
+Roundhill still has no machine-readable public holdings file.  GraniteShares
+does not publish swap-level line items; we still emit a **synthetic** underlying
+row (from the screener ``Underlying`` column) plus fee / swap aggregates parsed
+from the issuer JSON so the dashboard has *something* to chart per Granite fund.
 
 All providers return ``list[HoldingRow]`` -- one row per position -- so the
 downstream persistence layer can simply concatenate rows across issuers and
@@ -29,9 +30,10 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import re
 from dataclasses import dataclass, asdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Iterable, Optional, Protocol
 
 import pandas as pd
@@ -386,25 +388,34 @@ class TradrAxsHoldingsProvider:
     def _load(self, as_of: date) -> pd.DataFrame | None:
         if as_of in self._df_cache:
             return self._df_cache[as_of]
-        url = self._url(as_of)
-        try:
-            r = _session_get(self.session, url)
-            if r.status_code != 200 or not r.text:
-                self._df_cache[as_of] = None
-                return None
-            df = pd.read_csv(io.StringIO(r.text))
-            df.columns = [c.strip() for c in df.columns]
-            if "ETF Ticker" not in df.columns:
-                self._df_cache[as_of] = None
-                return None
-            df["ETF Ticker"] = df["ETF Ticker"].astype(str).str.upper().str.strip()
-            self._df_cache[as_of] = df
-            self._ticker_index[as_of] = set(df["ETF Ticker"].unique().tolist())
-            return df
-        except Exception as e:
-            LOGGER.debug("TradrAxs holdings load failed for %s: %s", as_of, e)
-            self._df_cache[as_of] = None
-            return None
+        max_lookback = int(os.getenv("HOLDINGS_TRADR_CSV_LOOKBACK_DAYS", "10"))
+        for offset in range(0, max(1, max_lookback)):
+            cand = as_of - timedelta(days=offset)
+            url = self._url(cand)
+            try:
+                r = _session_get(self.session, url)
+                if r.status_code != 200 or not r.text:
+                    continue
+                df = pd.read_csv(io.StringIO(r.text))
+                df.columns = [c.strip() for c in df.columns]
+                if "ETF Ticker" not in df.columns:
+                    continue
+                df["ETF Ticker"] = df["ETF Ticker"].astype(str).str.upper().str.strip()
+                self._df_cache[as_of] = df
+                self._ticker_index[as_of] = set(df["ETF Ticker"].unique().tolist())
+                self._resolved_csv_url[as_of] = url
+                if offset:
+                    LOGGER.info(
+                        "TradrAxs holdings: requested %s CSV missing; using T-%d file %s",
+                        as_of.isoformat(), offset, url,
+                    )
+                return df
+            except Exception as e:
+                LOGGER.debug("TradrAxs holdings load failed for %s (cand=%s): %s", as_of, cand, e)
+                continue
+        self._df_cache[as_of] = None
+        self._ticker_index[as_of] = set()
+        return None
 
     def supports_ticker(self, ticker: str, as_of: date) -> bool:
         self._load(as_of)
@@ -418,7 +429,7 @@ class TradrAxsHoldingsProvider:
         sub = df[df["ETF Ticker"] == t]
         if sub.empty:
             return []
-        url = self._url(as_of)
+        url = self._resolved_csv_url.get(as_of, self._url(as_of))
         out: list[HoldingRow] = []
         for _, row in sub.iterrows():
             row_date = _parse_date(row.get("Date")) or as_of
@@ -856,16 +867,119 @@ class DefianceHoldingsProvider:
 
 
 # ---------------------------------------------------------------------------
+# 6) GraniteShares — issuer JSON + synthetic underlying row
+# ---------------------------------------------------------------------------
+
+class GraniteSharesHoldingsProvider:
+    """GraniteShares does not publish swap-level CSVs.
+
+    We still emit rows so Git history / parquet are not empty for ~60+ Granite
+    funds in the screener:
+
+      * One **synthetic** ``SYNTHETIC_UNDERLYING`` row keyed to the screener's
+        ``Underlying`` symbol (economic exposure the fund is built around).
+      * Optional **FUND_FEE_COMPONENT** rows parsed from the same JSON blob the
+        NAV stack already consumes (swap / management / licence fee dollars).
+
+    This is not a substitute for full ISDA swap disclosure — it is strictly
+    better than silently dropping Granite from the holdings table.
+    """
+
+    name = "granite_shares"
+
+    def __init__(
+        self,
+        session: requests.Session | None = None,
+        *,
+        underlying_by_ticker: dict[str, str] | None = None,
+    ):
+        _ = session  # Granite NAV stack ignores the shared session — match that.
+        from etf_providers import GraniteSharesProvider
+
+        self._granite = GraniteSharesProvider()
+        self._underlying = {k.upper(): v.upper() for k, v in (underlying_by_ticker or {}).items()}
+
+    def supports_ticker(self, ticker: str, as_of: date) -> bool:
+        return self._granite.supports_ticker(ticker, as_of)
+
+    def fetch_holdings(self, ticker: str, as_of: date) -> list[HoldingRow]:
+        t = ticker.upper()
+        pair = self._granite.load_product_json(ticker)
+        if not pair:
+            return []
+        api_url, payload = pair
+        from etf_providers import GraniteSharesProvider as _GSP
+
+        row_date = _GSP._parse_nav_date(payload.get("NavDate")) or as_of
+        pname = str(payload.get("ProductName") or "").strip() or None
+        rows: list[HoldingRow] = []
+
+        und = self._underlying.get(t)
+        if und:
+            aum = _parse_float(payload.get("AUM"))
+            rows.append(
+                HoldingRow(
+                    as_of_date=row_date,
+                    etf_ticker=t,
+                    position_ticker=und,
+                    security_name=(f"{pname} — economic exposure (synthetic row; issuer omits swap detail)" if pname else None),
+                    cusip=None,
+                    security_type="SYNTHETIC_UNDERLYING",
+                    shares=None,
+                    price=None,
+                    market_value=aum,
+                    weight_pct=100.0,
+                    source=self.name,
+                    source_url=api_url + "#synthetic=underlying",
+                )
+            )
+
+        fee_specs = (
+            ("SwapFees", payload.get("SwapFees")),
+            ("ManagementFees", payload.get("ManagementFees")),
+            ("LicenceFees", payload.get("LicenceFees")),
+            ("DistributionFees", payload.get("DistributionFees")),
+        )
+        for label, raw in fee_specs:
+            val = _parse_float(raw)
+            if val is None or val == 0.0:
+                continue
+            rows.append(
+                HoldingRow(
+                    as_of_date=row_date,
+                    etf_ticker=t,
+                    position_ticker=None,
+                    security_name=f"{label} (USD, fund-level)",
+                    cusip=None,
+                    security_type="FUND_FEE_COMPONENT",
+                    shares=None,
+                    price=None,
+                    market_value=val,
+                    weight_pct=None,
+                    source=self.name,
+                    source_url=api_url + f"#fee={label}",
+                )
+            )
+
+        return rows
+
+
+# ---------------------------------------------------------------------------
 # Stack / orchestrator
 # ---------------------------------------------------------------------------
 
-def build_default_holdings_stack(session: requests.Session | None = None) -> list[HoldingsProvider]:
+def build_default_holdings_stack(
+    session: requests.Session | None = None,
+    *,
+    underlying_by_ticker: dict[str, str] | None = None,
+) -> list[HoldingsProvider]:
     """Providers are tried in order; the first one that returns a non-empty row
     list wins for that ticker. TradrAxs sits first because its bulk CSV covers
     50+ tickers with a single HTTP request."""
     s = _get_or_default_session(session)
     return [
         TradrAxsHoldingsProvider(s),
+        GraniteSharesHoldingsProvider(s, underlying_by_ticker=underlying_by_ticker),
         DirexionHoldingsProvider(s),
         YieldMaxHoldingsProvider(s),
         REXHoldingsProvider(s),
@@ -907,6 +1021,7 @@ def fetch_all_holdings(
     as_of: date,
     stack: list[HoldingsProvider] | None = None,
     *,
+    underlying_by_ticker: dict[str, str] | None = None,
     progress_every: int = 25,
 ) -> pd.DataFrame:
     """Iterate tickers × providers; return a long-form DataFrame of all positions.
@@ -914,7 +1029,7 @@ def fetch_all_holdings(
     Provider order matters for coverage reporting: a ticker is considered "covered"
     by the first provider that returns any rows for it.
     """
-    stack = stack or build_default_holdings_stack()
+    stack = stack or build_default_holdings_stack(underlying_by_ticker=underlying_by_ticker)
     all_rows: list[HoldingRow] = []
     coverage: dict[str, str] = {}
 
@@ -952,6 +1067,7 @@ __all__ = [
     "HoldingRow",
     "HoldingsProvider",
     "TradrAxsHoldingsProvider",
+    "GraniteSharesHoldingsProvider",
     "DirexionHoldingsProvider",
     "YieldMaxHoldingsProvider",
     "REXHoldingsProvider",
