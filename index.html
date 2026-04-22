@@ -96,15 +96,8 @@
     padding: 24px; background: var(--bg-primary);
   }
   .login-card {
-    width: 100%; max-width: 380px; background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 12px; padding: 28px 26px; box-shadow: 0 20px 50px rgba(0,0,0,0.35);
-  }
-  .login-title {
-    font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 700;
-    margin-bottom: 6px; color: var(--text-primary);
-  }
-  .login-sub {
-    font-size: 12px; color: var(--text-muted); margin-bottom: 22px; line-height: 1.45;
+    width: 100%; max-width: 340px; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 28px 26px 26px; box-shadow: 0 20px 50px rgba(0,0,0,0.35);
   }
   .login-field { margin-bottom: 14px; }
   .login-field label {
@@ -126,10 +119,7 @@
   }
   .login-btn:disabled { opacity: 0.55; cursor: not-allowed; }
   .login-error {
-    margin-top: 12px; font-size: 12px; color: var(--accent-red);
-  }
-  .login-foot {
-    margin-top: 18px; font-size: 11px; color: var(--text-muted); line-height: 1.4;
+    margin-top: 14px; font-size: 12px; color: var(--accent-red);
   }
 
   /* ── Summary ─────────────── */
@@ -1238,20 +1228,20 @@ function LoginScreen({ users, onSuccess }) {
     e.preventDefault();
     setErr('');
     if (!userId.trim()) {
-      setErr('Enter your login id.');
+      setErr('Login id is required.');
       return;
     }
     setBusy(true);
     try {
       const ok = await verifyInvestorPassword(userId, password, users);
       if (!ok) {
-        setErr('Unknown login or wrong password.');
+        setErr('Invalid login id or password.');
         return;
       }
       const row = users.find(x => String(x.id || '').toLowerCase() === userId.trim().toLowerCase());
       onSuccess(String(row.id).toLowerCase());
     } catch {
-      setErr('Login failed (crypto not available in this browser?).');
+      setErr('Sign in failed. Try another browser or use HTTPS.');
     } finally {
       setBusy(false);
     }
@@ -1259,11 +1249,6 @@ function LoginScreen({ users, onSuccess }) {
   return (
     <div className="login-wrap">
       <div className="login-card">
-        <div className="login-title">ETF Borrow Dashboard</div>
-        <div className="login-sub">
-          Sign in to continue. Access is optional: if <code style={{ color: 'var(--accent-cyan)' }}>data/investors.json</code> has
-          no users, the site stays public.
-        </div>
         <form onSubmit={submit}>
           <div className="login-field">
             <label htmlFor="inv-user">Login id</label>
@@ -1272,7 +1257,6 @@ function LoginScreen({ users, onSuccess }) {
               autoComplete="username"
               value={userId}
               onChange={e => setUserId(e.target.value)}
-              placeholder="e.g. jordan"
             />
           </div>
           <div className="login-field">
@@ -1283,19 +1267,13 @@ function LoginScreen({ users, onSuccess }) {
               autoComplete="current-password"
               value={password}
               onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••"
             />
           </div>
           <button type="submit" className="login-btn" disabled={busy}>
-            {busy ? 'Checking…' : 'Sign in'}
+            {busy ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
         {err ? <div className="login-error">{err}</div> : null}
-        <div className="login-foot">
-          Sessions last about a week in this browser. Adding investors: run{' '}
-          <code style={{ color: 'var(--text-secondary)' }}>python scripts/hash_investor_password.py --help</code> locally,
-          commit the updated <code>data/investors.json</code> (passwords are never stored).
-        </div>
       </div>
     </div>
   );
@@ -1342,7 +1320,7 @@ function DashboardRoot() {
   if (gate === 'loading') {
     return (
       <div className="app">
-        <div className="loading"><div className="spinner"/>Checking access…</div>
+        <div className="loading"><div className="spinner"/>Loading…</div>
       </div>
     );
   }
