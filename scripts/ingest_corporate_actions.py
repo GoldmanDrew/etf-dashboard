@@ -1061,7 +1061,7 @@ def phase_4_symbol_changes(
          ``TICKER_EVENTS_CACHE_TTL_DAYS`` (default 14d) — these are free,
       2. fetch the stalest/never-seen tickers first, and
       3. hard-cap the network calls at ``SYMBOL_CHANGE_MAX_CALLS_PER_RUN``
-         (default 120) per invocation, so the initial backfill spreads over
+         (default 60) per invocation, so the initial backfill spreads over
          a handful of daily runs but we never blow the timeout.
 
     Returns ``(events, alias_map)``.  ``alias_map`` is the accumulated
@@ -1091,12 +1091,24 @@ def phase_4_symbol_changes(
     tier_current = [t for t in sorted(current_universe) if t]
     tier_historic = [t for t in sorted(ever_known) if t and t not in current_universe and t not in underlyings]
     ordered_tickers = tier_underlyings + tier_current + tier_historic
+    # ``tier_rank`` preserves the deliberate tier ordering (underlyings → ETFs →
+    # historic) *inside* the never-seen bucket.  A plain ``(0, ticker)`` sort key
+    # accidentally sorted **all** never-seen symbols alphabetically across tiers,
+    # so hundreds of ``A*`` ETF symbols starved out common-stock underlyings like
+    # ``KEEL`` (BITF→KEEL) until dozens of runs had passed.
+    tier_rank: dict[str, int] = {}
+    for i, tier in enumerate((tier_underlyings, tier_current, tier_historic)):
+        for sym in tier:
+            tier_rank[sym] = i
 
-    def _staleness_key(t: str) -> tuple[int, str]:
+    def _staleness_key(t: str) -> tuple:
         ent = cache.get(t)
+        tr = tier_rank.get(t, 99)
         if not ent:
-            return (0, t)  # never seen → highest priority
-        return (1, str(ent.get("fetched_at") or ""))
+            return (0, tr, t)  # never seen → tier first, then alpha
+        # Seen: refresh coldest cache first (ISO timestamps sort chronologically),
+        # still respecting tier when timestamps tie.
+        return (1, str(ent.get("fetched_at") or ""), tr, t)
 
     ordered_tickers.sort(key=_staleness_key)
 
@@ -1220,6 +1232,11 @@ GOOGLE_NEWS_QUERIES: list[tuple[str, str]] = [
     ('"ETF" "fund closure"', "delisting"),
     ('"ETF" "ticker change"', "symbol_change"),
     ('"ETF" "symbol change"', "symbol_change"),
+    # Common-stock / issuer renames (BITF→KEEL, etc.) rarely contain the token
+    # ``ETF`` in the Google News headline — dedicated queries recover them.
+    ('"changes its ticker"', "symbol_change"),
+    ('"will change" "ticker"', "symbol_change"),
+    ('"change its ticker to"', "symbol_change"),
     ('"ETF" "reverse split"', "reverse_split"),
     ('"ETF" "stock split"', "forward_split"),
 ]
@@ -1388,7 +1405,8 @@ _HTML_WHITESPACE_RE = re.compile(r"\s+")
 _BODY_FETCH_TRIGGER_RE = re.compile(
     r"\b(?:to\s+liquidate|plan\s+of\s+liquidation|will\s+liquidate|"
     r"wind\s+down|cease\s+trading|fund\s+(?:termination|closure)|"
-    r"ticker\s+change|symbol\s+change|reverse\s+stock\s+split|reverse\s+split|"
+    r"ticker\s+change|symbol\s+change|changes\s+its\s+ticker|will\s+change\s+its\s+ticker|"
+    r"change\s+its\s+ticker\s+to|reverse\s+stock\s+split|reverse\s+split|"
     r"forward\s+stock\s+split|share\s+consolidation)\b",
     re.IGNORECASE,
 )
@@ -1435,13 +1453,21 @@ def _fetch_article_body(session: requests.Session, url: str) -> str:
     if not url:
         return ""
     try:
+        # Many financial publishers (Morningstar, etc.) return ``202`` with an
+        # empty body or a bot-wall stub unless the request looks like a normal
+        # browser.  The minimal "compatible; …" UA worked for some hosts but
+        # consistently failed here in CI, which meant Phase 5 could never resolve
+        # tickers that only appear inside the article HTML (T-REX XRPK/SOLX).
         resp = session.get(
             url,
             timeout=HTTP_TIMEOUT_SEC,
             headers={
-                "User-Agent": "Mozilla/5.0 (compatible; etf-dashboard-corporate-actions/1.0; "
-                              "+https://goldmandrew.github.io/etf-dashboard)",
-                "Accept": "text/html,application/xhtml+xml",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/121.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
             },
             allow_redirects=True,
         )
