@@ -966,6 +966,16 @@ def main() -> None:
                 "holdings coverage: %d/%d tickers with holdings, by source=%s",
                 sum(1 for v in cov.values() if v != "missing"), len(cov), by_source,
             )
+            # Report per-security_type rollup so the workflow log makes it
+            # immediately obvious whether the run actually captured the
+            # swap/option/cash breakdowns we care about (rather than a flat
+            # list of "COMMON_STOCK" rows across the board).
+            if not holdings_df.empty and "security_type" in holdings_df.columns:
+                type_counts = (
+                    holdings_df["security_type"].fillna("UNKNOWN")
+                    .value_counts().astype(int).to_dict()
+                )
+                LOGGER.info("holdings by security_type: %s", type_counts)
             save_holdings_outputs(holdings_df)
         except Exception as e:
             LOGGER.warning("holdings phase failed (continuing): %s", e)
