@@ -1509,6 +1509,7 @@ def phase_5_google_news(
     session: requests.Session,
     universe: set[str],
     ever_known: set[str],
+    underlyings: set[str],
     alias_map: dict[str, dict[str, str]],
     bucket_map: dict[str, str | None],
     underlying_map: dict[str, str | None],
@@ -1527,13 +1528,28 @@ def phase_5_google_news(
         Polygon's retail-news index often misses.
 
     The ``alias_map`` input lets us resolve BITF → KEEL style chains when an
-    article mentions the old symbol.
+    article mentions the old symbol.  ``underlyings`` must include every
+    screener ``Underlying`` symbol so headlines that only name the stock (KEEL)
+    still intersect our tracked set (``ever_known`` is built from ETF ``ticker``
+    rows in metrics parquet, not from the Underlying column).
     """
     if not ENABLE_GOOGLE_NEWS:
         LOGGER.info("google-news phase: DISABLED via CORP_ACTIONS_ENABLE_GOOGLE_NEWS=0")
         return [], []
 
-    match_universe = set(universe) | set(ever_known) | set(alias_map.keys())
+    alias_new: set[str] = set()
+    for v in (alias_map or {}).values():
+        n = _norm(v.get("new") or "")
+        if n:
+            alias_new.add(n)
+    tracked: set[str] = (
+        {_norm(t) for t in universe if t}
+        | {_norm(t) for t in ever_known if t}
+        | {_norm(t) for t in underlyings if t}
+        | {_norm(t) for t in (alias_map or {}) if t}
+        | alias_new
+    )
+    match_universe = tracked
     cutoff_iso = (datetime.now(UTC) - timedelta(days=GOOGLE_NEWS_WINDOW_DAYS)).isoformat()
 
     all_events: list[CorporateEvent] = []
@@ -1546,16 +1562,17 @@ def phase_5_google_news(
     body_fetches_hit = 0  # resolved a ticker from body that wasn't in title
 
     def _resolve_from_text(text: str) -> list[str]:
-        """Extract + resolve + intersect against universe|ever_known."""
+        """Extract + resolve + intersect against tracked (ETFs + ever-known + underlyings + aliases)."""
         candidates = _extract_candidate_tickers(text)
         resolved: set[str] = set()
         for c in candidates:
-            if c in match_universe:
-                resolved.add(c)
-            alias = alias_map.get(c)
+            cn = _norm(c)
+            if cn in match_universe:
+                resolved.add(cn)
+            alias = alias_map.get(cn)
             if alias and alias.get("new"):
-                resolved.add(alias["new"])
-        return sorted({t for t in resolved if t in (universe | ever_known)})
+                resolved.add(_norm(alias["new"]))
+        return sorted({t for t in resolved if t in tracked})
 
     for query, default_category in GOOGLE_NEWS_QUERIES:
         LOGGER.info("google-news query: %r → default_category=%s", query, default_category)
@@ -2006,6 +2023,7 @@ def main() -> None:
                 session,
                 set(tickers),
                 ever_known,
+                underlyings_set,
                 alias_map,
                 bucket_map,
                 underlying_map,
