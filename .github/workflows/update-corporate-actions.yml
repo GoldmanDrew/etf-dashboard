@@ -49,12 +49,20 @@ jobs:
       CORP_ACTIONS_DELISTINGS_MAX_PAGES: "10"
       # Phase 4 (symbol changes) — per-ticker Polygon events with disk cache.
       # The cache lives in data/polygon_ticker_events_cache.json (committed) so
-      # that the 120-call/run budget (see below) can backfill the ~480-ticker
+      # that the call budget (see below) can backfill the ~480-ticker
       # universe over a handful of daily runs on the free tier.  Bump the call
       # budget to a few hundred on paid tiers to shorten the backfill.
+      #
+      # Budget math (free tier, 5 req/min = 12s/call):
+      #   60 calls × 12s = 12 min + ~6 min phases 1-3 = 18 min total.  Stays
+      #   comfortably under the 30-min job timeout and lets Phases 5 (Google
+      #   News RSS) + persistence finish cleanly.  The 4xx 404 responses no
+      #   longer loop internally (they return immediately), so 60 actually
+      #   means 60.  Wall-clock budget (15m) is a belt-and-suspenders.
       CORP_ACTIONS_SYMBOL_CHANGE_LOOKBACK_DAYS: "540"
       CORP_ACTIONS_TICKER_EVENTS_CACHE_TTL_DAYS: "14"
-      CORP_ACTIONS_SYMBOL_CHANGE_MAX_CALLS: "120"
+      CORP_ACTIONS_SYMBOL_CHANGE_MAX_CALLS: "60"
+      CORP_ACTIONS_SYMBOL_CHANGE_WALL_CLOCK_SEC: "900"
       # Phase 5 (Google News RSS) — no API key, no Polygon budget impact.  Set
       # to "0" to skip (e.g. if GitHub Actions egress is throttled for Google).
       CORP_ACTIONS_ENABLE_GOOGLE_NEWS: "1"

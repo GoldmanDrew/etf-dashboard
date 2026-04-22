@@ -51,7 +51,20 @@ jobs:
             exit 1
           fi
 
+      # build_data.py is Polygon / Tradier quota-sensitive and can transiently
+      # fail (rate-limit, API outages, upstream issuer feeds going 503 for an
+      # hour, etc.).  Previously that failure cascaded into the Pages deploy
+      # step and meant the live site stayed pinned to the last successful
+      # build, even though update-etf-metrics.yml and update-corporate-actions.yml
+      # had just committed fresh JSON to `data/`.  We now mark the heavy
+      # build + diagnostics as non-fatal: if they flake, we still publish
+      # whatever JSON is currently committed to `data/` on `main`.  The data
+      # itself is defended by the upstream workflows' own rate-limit / timeout
+      # logic, and by the `git diff --staged --quiet` check in "Commit data
+      # if changed" (which no-ops on a partial run).
       - name: Build dashboard data
+        id: build_data
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.LS_ALGO_TOKEN }}
           POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
@@ -92,9 +105,19 @@ jobs:
         run: python scripts/build_data.py
 
       - name: Print options coverage diagnostics (with hard gate)
+        # Same rationale as the build step: don't let a quota-limited options
+        # refresh block the Pages deploy.  The diagnostic warning is still
+        # visible in the workflow log for operator review.
+        continue-on-error: true
         run: python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero
 
+      # If build_data.py crashed (continue-on-error above), skip the commit
+      # step entirely.  Otherwise we'd risk staging a partially-written JSON
+      # into main.  We still proceed to the Pages deploy steps below, so the
+      # live site redeploys with whatever the upstream metrics / corporate-
+      # actions workflows have already committed to `data/` on main.
       - name: Commit data if changed
+        if: steps.build_data.outcome == 'success'
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
           FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/borrow_spike_risk.json data/options_cache.json"
@@ -141,6 +164,18 @@ jobs:
               exit 1
             fi
           fi
+
+      # If build_data.py crashed, the working tree may contain partially-
+      # written JSON.  Reset `data/` (and `index.html` just in case) to the
+      # current tip of origin/main before assembling the Pages artifact so
+      # the live site always reflects what is actually committed to the
+      # repository -- including fresh pushes from update-etf-metrics.yml /
+      # update-corporate-actions.yml that landed between checkout and now.
+      - name: Restore committed data/index.html before deploy
+        if: steps.build_data.outcome != 'success'
+        run: |
+          git fetch origin main
+          git checkout origin/main -- data index.html || true
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

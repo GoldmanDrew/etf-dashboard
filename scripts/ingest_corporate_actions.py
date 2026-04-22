@@ -113,7 +113,18 @@ TICKER_EVENTS_CACHE_TTL_DAYS = int(os.getenv("CORP_ACTIONS_TICKER_EVENTS_CACHE_T
 # Hard ceiling on per-ticker calls we'll make in one run.  On the free tier
 # (5/min) an unbounded initial sweep would take 100+ min and blow the workflow
 # timeout.  Cache rollover across multiple runs lets us backfill over a few days.
-SYMBOL_CHANGE_MAX_CALLS_PER_RUN = int(os.getenv("CORP_ACTIONS_SYMBOL_CHANGE_MAX_CALLS", "120"))
+#
+# Budget math (free tier, 5 req/min = 12s/call):
+#   60 calls × 12s = 12 min.  Plus ~6 min for phases 1-3 = 18 min.  Well
+#   below the 30-min workflow timeout.  Paid tiers can raise this via env
+#   (Starter 100/min -> 600 works in same time; Advanced -> no cap needed).
+SYMBOL_CHANGE_MAX_CALLS_PER_RUN = int(os.getenv("CORP_ACTIONS_SYMBOL_CHANGE_MAX_CALLS", "60"))
+# Wall-clock ceiling for Phase 4, independent of call count.  Guards against
+# pathological pagination / retry-After storms that would otherwise eat the
+# remainder of the workflow budget before the 404-fix above kicks in.
+SYMBOL_CHANGE_WALL_CLOCK_BUDGET_SEC = int(
+    os.getenv("CORP_ACTIONS_SYMBOL_CHANGE_WALL_CLOCK_SEC", "900")
+)
 # Phase 5 (Google News RSS) config.  Independent of Polygon rate limits.  Set
 # CORP_ACTIONS_ENABLE_GOOGLE_NEWS=0 to skip (e.g. if Google throttles a runner).
 ENABLE_GOOGLE_NEWS = os.getenv("CORP_ACTIONS_ENABLE_GOOGLE_NEWS", "1") not in {"0", "false", "False", ""}
@@ -482,8 +493,31 @@ def _polygon_get(session: requests.Session, url: str, params: dict | None = None
             time.sleep(wait_s)
             continue
 
-        # Any other non-2xx gets logged and retried once, then we give up.
-        if resp.status_code >= 400:
+        # 4xx other than 429 = deterministic client error (bad ticker,
+        # endpoint, params, auth).  Retrying just burns rate-limit slots
+        # without changing the answer.  Log once and bail.  This is the
+        # critical fix for Phase 4: Polygon returns 404 "no events found"
+        # for ~90% of tickers, and previously we retried each 404 five
+        # times through the 5 req/min gate (~60s per ticker), blowing the
+        # workflow timeout.  Now a 404 costs a single call slot.
+        if 400 <= resp.status_code < 500 and resp.status_code != 429:
+            _CONSECUTIVE_429_STATE["count"] = 0
+            try:
+                last_body_snippet = resp.text[:200]
+            except Exception:  # noqa: BLE001
+                last_body_snippet = None
+            # Don't spam INFO for expected "no events" responses on Phase 4.
+            if resp.status_code == 404:
+                LOGGER.debug("polygon 404 (no data) url=%s", url)
+            else:
+                LOGGER.warning(
+                    "polygon GET %s -> %d (no retry on 4xx): %s",
+                    url, resp.status_code, (last_body_snippet or "")[:120],
+                )
+            return None
+
+        # 5xx — retryable server-side issue.  Bounded backoff then retry.
+        if resp.status_code >= 500:
             _CONSECUTIVE_429_STATE["count"] = 0
             try:
                 last_body_snippet = resp.text[:200]
@@ -1046,6 +1080,8 @@ def phase_4_symbol_changes(
 
     calls_made = 0
     cache_hits = 0
+    wall_clock_deadline = time.monotonic() + SYMBOL_CHANGE_WALL_CLOCK_BUDGET_SEC
+    wall_clock_abort = False
     new_events: list[CorporateEvent] = []
     alias_map: dict[str, dict[str, str]] = {}
     if TICKER_ALIAS_MAP_PATH.exists():
@@ -1060,9 +1096,18 @@ def phase_4_symbol_changes(
             events_raw = cached.get("events") or []
             cache_hits += 1
         else:
-            if calls_made >= SYMBOL_CHANGE_MAX_CALLS_PER_RUN:
-                # Out of call budget for this run; stale entries will refresh
-                # on the next invocation.  Still use them if we have them.
+            if calls_made >= SYMBOL_CHANGE_MAX_CALLS_PER_RUN or time.monotonic() >= wall_clock_deadline:
+                # Out of call budget or wall-clock budget for this run; stale
+                # entries will refresh on the next invocation.  Still use them
+                # if we have them.
+                if time.monotonic() >= wall_clock_deadline and not wall_clock_abort:
+                    LOGGER.warning(
+                        "symbol_changes: wall-clock budget (%ds) exhausted after %d calls; "
+                        "deferring remaining tickers to next run",
+                        SYMBOL_CHANGE_WALL_CLOCK_BUDGET_SEC,
+                        calls_made,
+                    )
+                    wall_clock_abort = True
                 if cached:
                     events_raw = cached.get("events") or []
                 else:
