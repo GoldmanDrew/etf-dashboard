@@ -63,6 +63,7 @@ import os
 import re
 import time
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -234,6 +235,28 @@ class NewsItem:
 
 def _norm(sym: object) -> str:
     return str(sym).strip().upper().replace(".", "-")
+
+
+def _underlying_symbols_as_set(values: Iterable[object]) -> set[str]:
+    """Coerce screener ``Underlying`` values to a clean upper-case string set.
+
+    CSV / pandas can surface ``float('nan')`` (truthy!), ``pd.NA``, or the
+    literal ``\"nan\"`` string.  Those must never reach ``sorted()`` in Phase 4
+    where ``float`` vs ``str`` raises ``TypeError``.
+    """
+    out: set[str] = set()
+    for x in values:
+        if x is None:
+            continue
+        if pd.api.types.is_scalar(x) and pd.isna(x):
+            continue
+        s = str(x).strip()
+        if not s or s.lower() == "nan":
+            continue
+        n = _norm(s)
+        if n:
+            out.add(n)
+    return out
 
 
 def _canonical_bucket(raw: object) -> str | None:
@@ -1087,6 +1110,7 @@ def phase_4_symbol_changes(
     # Within each tier the staleness sort (cache_hit? ascending, then ticker)
     # ensures cold entries dominate the call budget instead of re-fetching
     # already-known tickers on every run.
+    underlyings = _underlying_symbols_as_set(underlyings)
     tier_underlyings = [t for t in sorted(underlyings) if t and t not in current_universe]
     tier_current = [t for t in sorted(current_universe) if t]
     tier_historic = [t for t in sorted(ever_known) if t and t not in current_universe and t not in underlyings]
@@ -1984,7 +2008,7 @@ def main() -> None:
         "Ever-known universe: current=%d ever_known=%d (+%d historic/prior)",
         len(tickers), len(ever_known), len(ever_known) - len(tickers),
     )
-    underlyings_set = {u for u in underlying_map.values() if u}
+    underlyings_set = _underlying_symbols_as_set(underlying_map.values())
     aborted_reason: str | None = None
 
     try:
