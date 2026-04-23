@@ -106,6 +106,14 @@ NEWS_PAGE_LIMIT = int(os.getenv("CORP_ACTIONS_NEWS_PAGE_LIMIT", "1000"))
 NEWS_MAX_PAGES = int(os.getenv("CORP_ACTIONS_NEWS_MAX_PAGES", "25"))
 SPLITS_MAX_PAGES = int(os.getenv("CORP_ACTIONS_SPLITS_MAX_PAGES", "10"))
 DELISTINGS_MAX_PAGES = int(os.getenv("CORP_ACTIONS_DELISTINGS_MAX_PAGES", "10"))
+# Fallback cap for phase-2 ticker-targeted checks when the bulk inactive sweep
+# misses a universe symbol (e.g. delisted ETF still present in today's screener).
+DELISTING_FALLBACK_MAX_CALLS = int(os.getenv("CORP_ACTIONS_DELISTING_FALLBACK_MAX_CALLS", "60"))
+DELISTING_FALLBACK_SYMBOLS = {
+    str(s).strip().upper().replace(".", "-")
+    for s in os.getenv("CORP_ACTIONS_DELISTING_FALLBACK_SYMBOLS", "").split(",")
+    if str(s).strip()
+}
 # Phase 4 (symbol changes) config.  Lookback is long (default 540d) so renames
 # that happened before the next refresh still surface during the initial
 # backfill period.  Cache TTL controls per-ticker re-query cadence.
@@ -138,6 +146,11 @@ GOOGLE_NEWS_WINDOW_DAYS = int(os.getenv("CORP_ACTIONS_GOOGLE_NEWS_WINDOW_DAYS", 
 # resolved ticker.  Bounded at a conservative default to stay polite to
 # publishers and avoid burning the workflow budget on low-value pages.
 GOOGLE_NEWS_BODY_FETCH_BUDGET = int(os.getenv("CORP_ACTIONS_GOOGLE_NEWS_BODY_FETCH_BUDGET", "40"))
+# Weak inferred (bare-token underlying expansion) matches are noisy.  Only
+# admit them when classification confidence is high enough.
+GOOGLE_NEWS_WEAK_INFERRED_MIN_CONF = float(
+    os.getenv("CORP_ACTIONS_GOOGLE_NEWS_WEAK_INFERRED_MIN_CONF", "0.85")
+)
 # Cap characters of body we store in the classifier context.  Press releases
 # are typically ~3-8kb of actual prose; everything beyond is navigation /
 # footer and adds no signal.
@@ -227,6 +240,13 @@ class NewsItem:
     image_url: str | None = None
     linked_event_id: str | None = None
     bucket: str | None = None
+    # Matching diagnostics:
+    #   explicit  - ETF ticker appears directly in article text
+    #   high      - issuer-style ticker signal mapped via underlying->ETF
+    #   inferred  - weak/bare token inferred mapping (high confidence only)
+    match_tier: str | None = None
+    source_count: int = 1
+    source_publishers: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -762,8 +782,10 @@ def phase_2_delistings(
     current_live = _load_current_universe() if UNIVERSE_CSV.exists() else set()
 
     events: list[CorporateEvent] = []
+    seen_delisted_syms: set[str] = set()
     skipped_off_universe = 0
     skipped_live = 0
+    skipped_live_symbols: set[str] = set()
     skipped_not_fund = 0
     for r in raw:
         sym = _norm(r.get("ticker") or "")
@@ -774,6 +796,7 @@ def phase_2_delistings(
             # Still in today's active screener -- Polygon is reporting an old
             # same-ticker security (ticker reuse), not our ETF.  Drop it.
             skipped_live += 1
+            skipped_live_symbols.add(sym)
             continue
         if not _polygon_ticker_looks_like_fund(r):
             # Dropping the type=ETF filter on the bulk sweep admits all manner
@@ -817,12 +840,83 @@ def phase_2_delistings(
                 ),
             )
         )
+        seen_delisted_syms.add(sym)
+
+    fallback_hits = 0
+    fallback_calls = 0
+    fallback_base = set(skipped_live_symbols) | set(DELISTING_FALLBACK_SYMBOLS)
+    pagination_likely_truncated = len(raw) >= (DELISTINGS_MAX_PAGES * 1000)
+    if pagination_likely_truncated:
+        # If the bulk scan is truncated at max_pages, proactively sample symbols
+        # still in today's screener so true delistings don't hide behind pager
+        # depth.  Call cap keeps this bounded.
+        fallback_base |= {t for t in universe if t in current_live}
+    fallback_candidates = sorted(
+        {
+            t
+            for t in fallback_base
+            if t and t in current_live and t in universe and t not in seen_delisted_syms
+        }
+    )
+    # Ticker-targeted fallback: if a symbol is still in today's screener but
+    # Polygon now reports it inactive at /v3/reference/tickers/{ticker}, keep
+    # it as a delisting.  This catches lag between screener refresh and
+    # reference-state changes (NNEX-like misses) without widening bulk pages.
+    for sym in fallback_candidates:
+        if fallback_calls >= DELISTING_FALLBACK_MAX_CALLS:
+            break
+        payload = _polygon_get(session, f"https://api.polygon.io/v3/reference/tickers/{sym}")
+        fallback_calls += 1
+        rec = (payload or {}).get("results") or {}
+        if not isinstance(rec, dict):
+            continue
+        is_active = rec.get("active")
+        if is_active is not False:
+            continue
+        if not _polygon_ticker_looks_like_fund(rec):
+            continue
+        delisted = rec.get("delisted_utc") or rec.get("last_updated_utc")
+        date_str = None
+        if delisted:
+            try:
+                date_str = datetime.fromisoformat(str(delisted).replace("Z", "+00:00")).date().isoformat()
+            except ValueError:
+                date_str = None
+        events.append(
+            CorporateEvent(
+                id=f"polygon_delisting:{sym}",
+                type="delisting",
+                ticker=sym,
+                execution_date=date_str,
+                status="executed",
+                source="polygon",
+                source_url=f"https://polygon.io/stocks/{sym}",
+                bucket=bucket_map.get(sym),
+                underlying=underlying_map.get(sym),
+                headline=(
+                    f"{sym} marked inactive by Polygon"
+                    + (f" as of {date_str}" if date_str else "")
+                ),
+                summary=(
+                    f"{rec.get('name') or sym} (primary exchange {rec.get('primary_exchange') or '—'}) "
+                    "is no longer listed as an active ETF in the Polygon reference feed. "
+                    "Verify against issuer and SEC filings before acting."
+                ),
+            )
+        )
+        fallback_hits += 1
+        seen_delisted_syms.add(sym)
+    missed_universe_tickers = max(0, fallback_calls - fallback_hits)
     LOGGER.info(
-        "delistings: kept=%d off_universe=%d skipped_live=%d skipped_not_fund=%d (of %d inactive tickers returned by Polygon)",
+        "delistings: kept=%d off_universe=%d skipped_live=%d skipped_not_fund=%d "
+        "fallback_hits=%d fallback_calls=%d missed_universe_tickers=%d (of %d inactive tickers returned by Polygon)",
         len(events),
         skipped_off_universe,
         skipped_live,
         skipped_not_fund,
+        fallback_hits,
+        fallback_calls,
+        missed_universe_tickers,
         len(raw),
     )
     return events
@@ -846,12 +940,17 @@ POSITIVE_PATTERNS: dict[str, list[re.Pattern]] = {
     ],
     "delisting": [
         re.compile(r"\bdelist", re.I),
+        re.compile(r"\bdelisted\b", re.I),
         re.compile(r"\bliquidat", re.I),
         re.compile(r"\bwind[-\s]down\b", re.I),
         re.compile(r"\bfund\s+closure\b", re.I),
         re.compile(r"\bterminat(e|es|ed|ion|ing)\b", re.I),
         re.compile(r"\bceas\w*\s+trading\b", re.I),
         re.compile(r"\bplan\s+of\s+liquidation\b", re.I),
+        re.compile(r"\bno\s+longer\s+listed\b", re.I),
+        re.compile(r"\bmarked\s+inactive\b", re.I),
+        re.compile(r"\bexchange\s+delisting\b", re.I),
+        re.compile(r"\bdelisting\s+notice\b", re.I),
     ],
     "symbol_change": [
         re.compile(r"\bticker\s+change\b", re.I),
@@ -1454,6 +1553,7 @@ _HTML_WHITESPACE_RE = re.compile(r"\s+")
 _BODY_FETCH_TRIGGER_RE = re.compile(
     r"\b(?:to\s+liquidate|plan\s+of\s+liquidation|will\s+liquidate|"
     r"wind\s+down|cease\s+trading|fund\s+(?:termination|closure)|"
+    r"delisted|delisting\s+notice|exchange\s+delisting|no\s+longer\s+listed|marked\s+inactive|"
     r"ticker\s+change|symbol\s+change|changes\s+its\s+ticker|will\s+change\s+its\s+ticker|"
     r"change\s+its\s+ticker\s+to|reverse\s+stock\s+split|reverse\s+split|"
     r"forward\s+stock\s+split|share\s+consolidation)\b",
@@ -1625,6 +1725,7 @@ def phase_5_google_news(
     total_articles_kept = 0
     body_fetches_done = 0
     body_fetches_hit = 0  # resolved a ticker from body that wasn't in title
+    dropped_low_confidence = 0
 
     def _resolve_set(candidates: set[str]) -> set[str]:
         """Intersect + alias-expand against the full tracked universe."""
@@ -1638,24 +1739,34 @@ def phase_5_google_news(
                 resolved.add(_norm(alias["new"]))
         return {t for t in resolved if t in tracked}
 
-    def _emit_screener_etfs(high_syms: set[str], bare_syms: set[str]) -> list[str]:
-        """Map matched symbols → **current screener ETF** tickers only.
-
-        Underlying-only hits (e.g. ``TOP`` for unrelated wires) must not badge a
-        fund unless the match was **high-signal** (issuer-style parens / exchange
-        prefix / …) **or** the bare match is long enough (>=3 chars) to avoid
-        English noise like ``AI`` in "AI Boom" expanding to AIYY.
-        """
-        emit: set[str] = set()
+    def _match_tiers(high_syms: set[str], bare_syms: set[str]) -> tuple[list[str], list[str], list[str]]:
+        """Return (explicit_etfs, high_signal_etfs, weak_inferred_etfs)."""
+        explicit: set[str] = set()
+        high: set[str] = set()
+        weak: set[str] = set()
         for s in high_syms | bare_syms:
             if s in etf_universe:
-                emit.add(s)
+                explicit.add(s)
         for s in high_syms:
-            emit.update(underlying_to_etfs.get(s, ()))
+            if s in explicit:
+                continue
+            high.update(underlying_to_etfs.get(s, ()))
+        # Alias-anchored bare tokens (BITF/KEEL-like rename chains) are treated
+        # as high-signal enough to preserve symbol-change recall.
+        alias_anchor = set(alias_map.keys()) | alias_new
         for s in bare_syms:
+            if s in explicit or s in high:
+                continue
+            if s in alias_anchor and len(s) >= 3:
+                high.update(underlying_to_etfs.get(s, ()))
+        # Weak inferred matches: bare uppercase tokens mapping to underlyings.
+        # Keep strict (len>=3) to avoid words like AI/TOP creating spam.
+        for s in bare_syms:
+            if s in explicit or s in high:
+                continue
             if len(s) >= 3:
-                emit.update(underlying_to_etfs.get(s, ()))
-        return sorted(emit)
+                weak.update(underlying_to_etfs.get(s, ()))
+        return sorted(explicit), sorted(high), sorted(weak)
 
     for query, default_category in GOOGLE_NEWS_QUERIES:
         LOGGER.info("google-news query: %r → default_category=%s", query, default_category)
@@ -1677,12 +1788,13 @@ def phase_5_google_news(
             high_syms = _resolve_set(_extract_high_signal_tickers(full_text))
             bare_syms = _resolve_set(_extract_bare_tickers(bare_text))
             related_union = high_syms | bare_syms
+            prelim_explicit, prelim_high, _prelim_weak = _match_tiers(high_syms, bare_syms)
 
             # 1b) Body fetch when the headline is high-signal but tickers live in
             # the article HTML (T-REX XRPK / SOLX pattern).
             url = art.get("link") or ""
             if (
-                not related_union
+                (not related_union or (not prelim_explicit and not prelim_high))
                 and url
                 and url not in seen_body_urls
                 and body_fetches_done < GOOGLE_NEWS_BODY_FETCH_BUDGET
@@ -1707,10 +1819,6 @@ def phase_5_google_news(
             if not related_union:
                 continue
 
-            emit_syms = _emit_screener_etfs(high_syms, bare_syms)
-            if not emit_syms:
-                continue
-
             classify_text_src = full_text
 
             # 2) Classify via the shared regex bank so we honour negative patterns
@@ -1721,6 +1829,24 @@ def phase_5_google_news(
                 cat = default_category
                 conf = 0.65  # lower confidence when inferred from query only
             if cat not in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
+                continue
+
+            # Strict tiering to prevent feed spam:
+            # explicit ETF ticker in article > high-signal issuer-form ticker
+            # > weak inferred (bare token -> underlying -> ETF, only high-conf).
+            explicit_syms, high_signal_syms, weak_syms = _match_tiers(high_syms, bare_syms)
+            match_tier = None
+            if explicit_syms:
+                emit_syms = explicit_syms
+                match_tier = "explicit"
+            elif high_signal_syms:
+                emit_syms = high_signal_syms
+                match_tier = "high"
+            elif weak_syms and conf >= GOOGLE_NEWS_WEAK_INFERRED_MIN_CONF:
+                emit_syms = weak_syms
+                match_tier = "inferred"
+            else:
+                dropped_low_confidence += 1
                 continue
 
             # 3) Stable id; skip near-duplicates from multiple queries.
@@ -1747,6 +1873,9 @@ def phase_5_google_news(
                     publisher=publisher,
                     image_url=None,
                     bucket=bucket_map.get(emit_syms[0]),
+                    match_tier=match_tier,
+                    source_count=1,
+                    source_publishers=[publisher] if publisher else [],
                 )
             )
 
@@ -1787,13 +1916,14 @@ def phase_5_google_news(
             total_articles_kept += 1
 
     LOGGER.info(
-        "google-news: queries=%d scanned=%d kept=%d body_fetch=%d/%d (budget %d) → events=%d news=%d",
+        "google-news: queries=%d scanned=%d kept=%d body_fetch=%d/%d (budget %d) dropped_low_confidence=%d → events=%d news=%d",
         len(GOOGLE_NEWS_QUERIES),
         total_articles_scanned,
         total_articles_kept,
         body_fetches_hit,
         body_fetches_done,
         GOOGLE_NEWS_BODY_FETCH_BUDGET,
+        dropped_low_confidence,
         len(all_events),
         len(all_news),
     )
@@ -1897,19 +2027,108 @@ def dedupe_news(items: list[NewsItem]) -> list[NewsItem]:
         key = (norm_title(item.title), day, ",".join(sorted(item.tickers)))
         prev = seen.get(key)
         if prev is None:
+            if not item.source_count:
+                item.source_count = 1
+            if item.publisher and not item.source_publishers:
+                item.source_publishers = [item.publisher]
             seen[key] = item
             continue
-        # Keep the earliest publication; extend ticker coverage.
+        # Keep the earliest publication; extend ticker coverage and source stats.
         merged_tickers = sorted(set(prev.tickers) | set(item.tickers))
+        pubs = sorted(
+            {
+                *(prev.source_publishers or []),
+                *(item.source_publishers or []),
+                *( [prev.publisher] if prev.publisher else [] ),
+                *( [item.publisher] if item.publisher else [] ),
+            }
+        )
+        source_count = int(prev.source_count or 1) + int(item.source_count or 1)
         if (item.published_utc or "") < (prev.published_utc or ""):
             item.tickers = merged_tickers
+            item.source_publishers = pubs
+            item.source_count = source_count
             seen[key] = item
         else:
             prev.tickers = merged_tickers
+            prev.source_publishers = pubs
+            prev.source_count = source_count
 
     out = list(seen.values())
     out.sort(key=lambda x: (x.published_utc or ""), reverse=True)
     return out
+
+
+_MATCH_TIER_RANK = {"explicit": 3, "high": 2, "inferred": 1, None: 0, "": 0}
+
+
+def collapse_news_by_ticker_category(items: list[NewsItem]) -> tuple[list[NewsItem], int]:
+    """Collapse delisting/symbol_change feed spam to one row per (category,ticker).
+
+    Keeps the strongest representative (match-tier, confidence, recency), while
+    preserving source_count/source_publishers and appending merged-source count
+    to the summary text.
+    """
+    collapse_cats = {"delisting", "symbol_change"}
+    grouped: dict[tuple[str, str], list[NewsItem]] = {}
+    passthrough: list[NewsItem] = []
+    for it in items:
+        ticks = sorted({t for t in (it.tickers or []) if t})
+        if not ticks or it.category not in collapse_cats:
+            passthrough.append(it)
+            continue
+        for t in ticks:
+            key = (it.category, t)
+            grouped.setdefault(key, []).append(it)
+
+    collapsed: list[NewsItem] = []
+    collapsed_rows = 0
+    for (cat, ticker), rows in grouped.items():
+        if len(rows) == 1:
+            only = NewsItem(**asdict(rows[0]))
+            only.tickers = [ticker]
+            collapsed.append(only)
+            continue
+        rows.sort(
+            key=lambda it: (
+                _MATCH_TIER_RANK.get(it.match_tier, 0),
+                float(it.confidence or 0.0),
+                (it.published_utc or ""),
+            ),
+            reverse=True,
+        )
+        keep = NewsItem(**asdict(rows[0]))
+        keep.tickers = [ticker]
+        dropped = rows[1:]
+        collapsed_rows += len(dropped)
+        pubs = sorted(
+            {
+                *(keep.source_publishers or []),
+                *( [keep.publisher] if keep.publisher else [] ),
+                *[
+                    p
+                    for d in dropped
+                    for p in (
+                        (d.source_publishers or [])
+                        + ([d.publisher] if d.publisher else [])
+                    )
+                ],
+            }
+        )
+        total_sources = int(keep.source_count or 1) + sum(int(d.source_count or 1) for d in dropped)
+        keep.source_count = total_sources
+        keep.source_publishers = pubs
+        if len(rows) > 1:
+            extra = len(rows) - 1
+            if keep.summary:
+                keep.summary = f"{keep.summary} (+{extra} related sources)"
+            else:
+                keep.summary = f"+{extra} related sources"
+        collapsed.append(keep)
+
+    out = passthrough + collapsed
+    out.sort(key=lambda x: (x.published_utc or ""), reverse=True)
+    return out, collapsed_rows
 
 
 def link_news_to_events(news: list[NewsItem], events: list[CorporateEvent]) -> None:
@@ -2179,12 +2398,15 @@ def main() -> None:
 
     # Merge Polygon-news + Google-news items into the headline feed.
     news = list(news) + list(gnews_items)
+    collapsed_duplicates_by_ticker = 0
     if news:
         news = dedupe_news(news)
         link_news_to_events(news, events)
+        news, collapsed_duplicates_by_ticker = collapse_news_by_ticker_category(news)
     LOGGER.info(
-        "News items after classify + dedupe: %d (polygon + google-news merged)",
+        "News items after classify + dedupe: %d (polygon + google-news merged, collapsed_duplicates_by_ticker=%d)",
         len(news),
+        collapsed_duplicates_by_ticker,
     )
 
     if args.skip_news and OUT_NEWS.exists() and not news:

@@ -1006,6 +1006,21 @@
   }
   .news-card-meta .publisher { color: var(--text-secondary); font-weight: 600; }
   .news-card-meta .dot-sep { opacity: 0.5; }
+  .tier-badge {
+    padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border);
+    font-size: 10px; letter-spacing: 0.3px; text-transform: uppercase;
+    color: var(--text-secondary); background: rgba(136,150,174,0.08);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .tier-badge.tier-explicit {
+    color: var(--accent-green); border-color: rgba(16,185,129,0.45); background: rgba(16,185,129,0.10);
+  }
+  .tier-badge.tier-high {
+    color: var(--accent-blue); border-color: rgba(59,130,246,0.45); background: rgba(59,130,246,0.10);
+  }
+  .tier-badge.tier-inferred {
+    color: var(--accent-amber); border-color: rgba(245,158,11,0.45); background: rgba(245,158,11,0.10);
+  }
   .news-card-title {
     font-size: 14px; font-weight: 600; line-height: 1.4;
     color: var(--text-primary); margin-bottom: 6px;
@@ -1032,6 +1047,52 @@
     border-radius: 6px; object-fit: cover; background: var(--bg-input);
     border: 1px solid var(--border);
   }
+  .news-toggles {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .news-toggle {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 9px; border-radius: 999px; border: 1px solid var(--border);
+    font-size: 11px; color: var(--text-secondary); cursor: pointer;
+    user-select: none; font-family: 'JetBrains Mono', monospace;
+    background: var(--bg-card);
+  }
+  .news-toggle.active {
+    border-color: var(--accent-blue); color: var(--text-primary);
+    background: rgba(59,130,246,0.12);
+  }
+  .news-group-list { display: flex; flex-direction: column; gap: 10px; }
+  .news-group {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden;
+  }
+  .news-group-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 12px 14px 12px 16px; cursor: pointer;
+  }
+  .news-group-main { min-width: 0; }
+  .news-group-title {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px;
+  }
+  .news-group-meta {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted);
+    display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  }
+  .news-group-count {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px;
+  }
+  .news-group-links {
+    border-top: 1px solid var(--border);
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+    background: rgba(255,255,255,0.01);
+  }
+  .news-group-link {
+    font-size: 12px; color: var(--text-secondary); text-decoration: none;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .news-group-link:hover { color: var(--text-primary); text-decoration: underline; }
 
   /* Empty / loading states */
   .news-empty {
@@ -3457,14 +3518,26 @@ function PinnedEventCard({ event, bucketOf, onNavigate }) {
 function NewsCard({ item, bucketOf, onNavigate, eventsById }) {
   const cat = item.category || 'other';
   const linkedEv = item.linked_event_id ? eventsById?.[item.linked_event_id] : null;
+  const tier = item.match_tier || null;
   return (
     <div className={cls('news-card', `cat-${cat}`)}>
       <div className="news-card-body">
         <div className="news-card-meta">
           <span className={cls('cat-badge', `cat-${cat}`)}>{fmtCategoryLabel(cat)}</span>
+          {tier && (
+            <span className={cls('tier-badge', `tier-${tier}`)} title="Ticker match tier">
+              {tier}
+            </span>
+          )}
           {item.publisher && <span className="publisher">{item.publisher}</span>}
           <span className="dot-sep">·</span>
           <span>{fmtRelativeTime(item.published_utc)}</span>
+          {Number(item.source_count || 0) > 1 && (
+            <>
+              <span className="dot-sep">·</span>
+              <span title={(item.source_publishers || []).join(", ")}>{item.source_count} sources</span>
+            </>
+          )}
           {Number.isFinite(item.confidence) && (
             <>
               <span className="dot-sep">·</span>
@@ -3521,6 +3594,10 @@ function NewsPage({
   const [windowKey, setWindowKey] = useState('all');
   const [sortKey, setSortKey] = useState('published_desc');
   const [search, setSearch] = useState('');
+  const [onlyHighConfidence, setOnlyHighConfidence] = useState(true);
+  const [hideInferredOnly, setHideInferredOnly] = useState(true);
+  const [groupByTickerCategory, setGroupByTickerCategory] = useState(true);
+  const [expandedGroups, setExpandedGroups] = useState({});
 
   const activeWindow = NEWS_TIME_WINDOWS.find(w => w.key === windowKey) || NEWS_TIME_WINDOWS[3];
   const cutoffMs = activeWindow.days == null ? -Infinity : Date.now() - activeWindow.days * 86400_000;
@@ -3555,6 +3632,8 @@ function NewsPage({
         const hay = `${it.title || ''} ${it.summary || ''} ${(it.tickers || []).join(' ')}`.toLowerCase();
         if (!hay.includes(s)) return false;
       }
+      if (onlyHighConfidence && Number.isFinite(it.confidence) && Number(it.confidence) < 0.8) return false;
+      if (hideInferredOnly && (it.match_tier || '') === 'inferred') return false;
       return true;
     });
 
@@ -3574,7 +3653,33 @@ function NewsPage({
       }
     });
     return out;
-  }, [items, category, windowKey, sortKey, search]);
+  }, [items, category, windowKey, sortKey, search, onlyHighConfidence, hideInferredOnly]);
+
+  const groupedHeadlines = useMemo(() => {
+    const groups = {};
+    for (const it of filteredItems) {
+      const ticker = (it.tickers?.[0] || '').toUpperCase();
+      const cat = it.category || 'other';
+      const key = `${cat}::${ticker || 'UNKNOWN'}`;
+      if (!groups[key]) groups[key] = { key, category: cat, ticker, items: [] };
+      groups[key].items.push(it);
+    }
+    const rankTier = (t) => ({ explicit: 3, high: 2, inferred: 1 }[t] || 0);
+    const pubMs = (iso) => (iso ? new Date(iso).getTime() : 0);
+    const out = Object.values(groups).map(g => {
+      g.items.sort((a, b) => pubMs(b.published_utc) - pubMs(a.published_utc));
+      g.primary = [...g.items].sort((a, b) => (
+        (rankTier(b.match_tier) - rankTier(a.match_tier))
+        || ((Number(b.confidence) || 0) - (Number(a.confidence) || 0))
+        || (pubMs(b.published_utc) - pubMs(a.published_utc))
+      ))[0] || g.items[0];
+      g.sourceCount = g.items.reduce((acc, it) => acc + (Number(it.source_count) > 0 ? Number(it.source_count) : 1), 0);
+      g.publishers = Array.from(new Set(g.items.flatMap(it => it.source_publishers || (it.publisher ? [it.publisher] : []))));
+      return g;
+    });
+    out.sort((a, b) => pubMs(b.primary?.published_utc) - pubMs(a.primary?.published_utc));
+    return out;
+  }, [filteredItems]);
 
   // Chip counts reflect everything the page actually renders for that category:
   // structured corporate-action events + classified news headlines.  The old
@@ -3668,6 +3773,26 @@ function NewsPage({
           />
         </div>
       </div>
+      <div className="news-toggles">
+        <div
+          className={cls('news-toggle', onlyHighConfidence && 'active')}
+          onClick={() => setOnlyHighConfidence(v => !v)}
+        >
+          {onlyHighConfidence ? '[x]' : '[ ]'} Only high confidence
+        </div>
+        <div
+          className={cls('news-toggle', hideInferredOnly && 'active')}
+          onClick={() => setHideInferredOnly(v => !v)}
+        >
+          {hideInferredOnly ? '[x]' : '[ ]'} Hide inferred-only
+        </div>
+        <div
+          className={cls('news-toggle', groupByTickerCategory && 'active')}
+          onClick={() => setGroupByTickerCategory(v => !v)}
+        >
+          {groupByTickerCategory ? '[x]' : '[ ]'} One row per ticker/category
+        </div>
+      </div>
 
       {/* Structured corporate actions (splits, delistings, …) */}
       {filteredStructuredEvents.length > 0 && (
@@ -3703,9 +3828,9 @@ function NewsPage({
 
       {/* News feed */}
       <div className="news-feed-title">
-        Headlines · {filteredItems.length} of {items.length}
+        Related Headlines · {groupByTickerCategory ? groupedHeadlines.length : filteredItems.length} of {items.length}
       </div>
-      {filteredItems.length === 0 ? (
+      {(groupByTickerCategory ? groupedHeadlines.length === 0 : filteredItems.length === 0) ? (
         <div className="news-empty">
           <div className="news-empty-icon">◉</div>
           <div className="news-empty-title">
@@ -3720,17 +3845,69 @@ function NewsPage({
           </div>
         </div>
       ) : (
-        <div className="news-feed">
-          {filteredItems.map(it => (
-            <NewsCard
-              key={it.id}
-              item={it}
-              bucketOf={bucketOf}
-              onNavigate={onNavigateToChart}
-              eventsById={eventsById}
-            />
-          ))}
-        </div>
+        groupByTickerCategory ? (
+          <div className="news-group-list">
+            {groupedHeadlines.map(g => {
+              const primary = g.primary || g.items[0];
+              const exp = !!expandedGroups[g.key];
+              return (
+                <div key={g.key} className="news-group">
+                  <div
+                    className="news-group-head"
+                    onClick={() => setExpandedGroups(prev => ({ ...prev, [g.key]: !prev[g.key] }))}
+                  >
+                    <div className="news-group-main">
+                      <div className="news-group-title">
+                        <span className={cls('cat-badge', `cat-${g.category || 'other'}`)}>{fmtCategoryLabel(g.category)}</span>
+                        {g.ticker && <NewsTickerChip symbol={g.ticker} bucketOf={bucketOf} onNavigate={onNavigateToChart} />}
+                        {primary?.match_tier && (
+                          <span className={cls('tier-badge', `tier-${primary.match_tier}`)} style={{ display: 'inline-flex' }}>
+                            {primary.match_tier}
+                          </span>
+                        )}
+                      </div>
+                      <div className="news-group-meta">
+                        <span>{fmtRelativeTime(primary?.published_utc)}</span>
+                        <span>conf {Math.round((Number(primary?.confidence) || 0) * 100)}%</span>
+                        <span title={(g.publishers || []).join(', ')}>{g.sourceCount} sources</span>
+                      </div>
+                    </div>
+                    <div className="news-group-count">{g.items.length} article{g.items.length === 1 ? '' : 's'} {exp ? 'v' : '>'}</div>
+                  </div>
+                  {exp && (
+                    <div className="news-group-links">
+                      {g.items.map(it => (
+                        <a
+                          key={it.id}
+                          className="news-group-link"
+                          href={it.url || '#'}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={e => { if (!it.url) e.preventDefault(); }}
+                        >
+                          <span>{it.title || '(no title)'}</span>
+                          <span>{fmtRelativeTime(it.published_utc)}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="news-feed">
+            {filteredItems.map(it => (
+              <NewsCard
+                key={it.id}
+                item={it}
+                bucketOf={bucketOf}
+                onNavigate={onNavigateToChart}
+                eventsById={eventsById}
+              />
+            ))}
+          </div>
+        )
       )}
     </div>
   );
