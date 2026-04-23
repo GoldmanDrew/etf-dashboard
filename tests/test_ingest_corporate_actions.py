@@ -347,3 +347,33 @@ def test_title_anchor_prefers_parens_bmax_in_universe(monkeypatch):
     assert news
     assert news[0].tickers == ["BMAX"]
     assert "BMAX" in [e.ticker for e in ev if e.type == "delisting"]
+
+
+def test_gnews_structured_event_id_symbol_change_ticker_only(monkeypatch):
+    """Pinned strip ids must be stable per fund so the UI does not duplicate cards."""
+    bucket_map, underlying_map = _maps()
+    monkeypatch.setattr(mod, "GOOGLE_NEWS_QUERIES", [('"changes its ticker"', "symbol_change")])
+    monkeypatch.setattr(
+        mod,
+        "_fetch_google_news_rss",
+        lambda _s, _q: [
+            {
+                "title": "Keel Infrastructure Corp. will Change its Ticker to KEEL from BITF - marketscreener.com",
+                "description": "",
+                "link": "https://example.com/keel2",
+                "pub_date": "Mon, 06 Apr 2026 07:00:00 GMT",
+                "source": "marketscreener.com",
+            }
+        ],
+    )
+    ev, _news = mod.phase_5_google_news(
+        requests.Session(),
+        universe={"BTFL"},
+        ever_known={"BTFL"},
+        underlyings={"KEEL"},
+        alias_map={"BITF": {"new": "KEEL", "effective_date": "2026-04-06"}},
+        bucket_map=bucket_map,
+        underlying_map=underlying_map,
+    )
+    sc = [e for e in ev if e.type == "symbol_change"]
+    assert sc and all(e.id == "gnews_symbol_change:BTFL" for e in sc)

@@ -1378,6 +1378,10 @@ def phase_4_symbol_changes(
 GOOGLE_NEWS_QUERIES: list[tuple[str, str]] = [
     ('"ETF" "plan of liquidation"', "delisting"),
     ('"ETF" "to liquidate"', "delisting"),
+    # Titles often say "T-REX" without repeating the "ETF" token both times;
+    # this recovers 2X crypto product liquidations (XRPK / SOLX) missed by
+    # generic "ETF … liquidate" matches.
+    ('"T-REX" "liquidate"', "delisting"),
     ('"ETF" "cease trading"', "delisting"),
     ('"ETF" "wind down"', "delisting"),
     ('"ETF" "fund termination"', "delisting"),
@@ -1977,39 +1981,47 @@ def phase_5_google_news(
                 )
             )
 
-            # 5) If the article announces a delisting / symbol_change / split,
-            # synthesize a pending CorporateEvent so the pinned strip shows it
-            # before Polygon catches up.
+            # 5) Optionally synthesize pending CorporateEvents for the pinned strip.
             #
-            # Emit one event per resolved ticker: a single press release
-            # commonly announces a multi-fund liquidation (e.g. T-REX 2X XRP
-            # ETF AND T-REX 2X SOL ETF both liquidate on the same day).
-            # Event IDs match the Polygon-side format so dedupe_events merges
-            # once Polygon confirms the rename / delisting.
+            # The rolling ``etf_news.json`` feed still includes lower-tier matches
+            # for research, but we **only** surface Google News as a structured
+            # (pinned) event when the ticker resolution is ``explicit`` or
+            # ``high``.  ``inferred`` matches were almost always wrong in
+            # production (e.g. underlying ``TOP`` → TOPW on unrelated
+            # marketscreener syndication).  Issuer renames like BITF→KEEL and
+            # body-resolved T-REX tickers land in ``high``.
+            #
+            # Delistings already use ``polygon_delisting:{sym}`` ids so multiple
+            # press pick-ups merge; symbol_change uses a **ticker-only** id so
+            # we do not stack duplicate cards for the same fund.
             if cat in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
-                exec_date = _extract_execution_date(classify_text_src)
-                for sym in emit_syms:
-                    event_id = (
-                        f"polygon_delisting:{sym}"
-                        if cat == "delisting"
-                        else f"gnews_{cat}:{sym}:{exec_date or (pub_iso or '')[:10]}"
-                    )
-                    all_events.append(
-                        CorporateEvent(
-                            id=event_id,
-                            type=cat,
-                            ticker=sym,
-                            execution_date=exec_date,
-                            announcement_date=(pub_iso or "")[:10] or None,
-                            status="pending",
-                            source="google_news",
-                            source_url=art.get("link") or None,
-                            bucket=bucket_map.get(sym),
-                            underlying=underlying_map.get(sym),
-                            headline=title or None,
-                            summary=summary_plain,
+                if match_tier in {"explicit", "high"}:
+                    exec_date = _extract_execution_date(classify_text_src)
+                    for sym in emit_syms:
+                        if cat == "delisting":
+                            event_id = f"polygon_delisting:{sym}"
+                        elif cat == "symbol_change":
+                            event_id = f"gnews_symbol_change:{sym}"
+                        else:
+                            event_id = (
+                                f"gnews_{cat}:{sym}:{exec_date or (pub_iso or '')[:10]}"
+                            )
+                        all_events.append(
+                            CorporateEvent(
+                                id=event_id,
+                                type=cat,
+                                ticker=sym,
+                                execution_date=exec_date,
+                                announcement_date=(pub_iso or "")[:10] or None,
+                                status="pending",
+                                source="google_news",
+                                source_url=art.get("link") or None,
+                                bucket=bucket_map.get(sym),
+                                underlying=underlying_map.get(sym),
+                                headline=title or None,
+                                summary=summary_plain,
+                            )
                         )
-                    )
 
             total_articles_kept += 1
 
@@ -2473,11 +2485,30 @@ def main() -> None:
     # might temporarily produce fewer rows).
     prior_symbol_changes = _load_prior_events_of_type("symbol_change")
     if prior_symbol_changes and not args.skip_symbol_changes:
-        LOGGER.info(
-            "  merging %d prior symbol_change records",
-            len(prior_symbol_changes),
+        # Re-load fresh Google News symbol-change events every run; including
+        # them from the prior file caused hundreds of spurious ``TOPW``-style
+        # pending rows to persist after we tightened Phase 5.  Polygon-issued
+        # renames (source=polygon) stay pinned across runs; Google News renames
+        # are only emitted for explicit/high ``match_tier`` and will re-appear
+        # while the headline is still in the RSS lookback.
+        gnews_dropped = sum(
+            1 for e in prior_symbol_changes.values() if (e.source or "") == "google_news"
         )
-        symbol_change_events = list(symbol_change_events) + list(prior_symbol_changes.values())
+        prior_only_polygon = {
+            eid: ev
+            for eid, ev in prior_symbol_changes.items()
+            if (ev.source or "") == "polygon"
+        }
+        if gnews_dropped:
+            LOGGER.info(
+                "  dropping %d prior symbol_change records from Google News (re-emit in Phase 5 if qualified)",
+                gnews_dropped,
+            )
+        LOGGER.info(
+            "  merging %d prior polygon symbol_change records",
+            len(prior_only_polygon),
+        )
+        symbol_change_events = list(symbol_change_events) + list(prior_only_polygon.values())
 
     all_events = (
         split_events
