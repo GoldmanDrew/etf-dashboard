@@ -39,6 +39,34 @@ class ETFRecord(BaseModel):
     decay_6m: Optional[float] = None
     decay_12m: Optional[float] = None
 
+    # ls-algo screener schema v2 (optional; from etf_screened_today.csv)
+    asof_date: Optional[str] = None
+    product_class: Optional[str] = None
+    gross_edge_definition: Optional[str] = None
+    primary_edge_annual: Optional[float] = None
+    gross_for_primary_annual: Optional[float] = None
+    borrow_for_net_annual: Optional[float] = None
+    borrow_median_60d: Optional[float] = None
+    net_edge_p05_annual: Optional[float] = None
+    net_edge_p50_annual: Optional[float] = None
+    net_edge_p95_annual: Optional[float] = None
+    net_edge_fan_label: Optional[str] = None
+    block_len: Optional[float] = None
+    B_reps: Optional[float] = None
+    annualization_key: Optional[str] = None
+    hac_lag: Optional[float] = None
+    sigma_b_annual: Optional[float] = None
+    stress_borrow_rho: Optional[float] = None
+    borrow_dispersion_type: Optional[str] = None
+    high_intraday_risk: Optional[bool] = None
+    regime_autocorr_und_21d_proxy: Optional[float] = None
+    regime_warning: Optional[str] = None
+    decomposition_note: Optional[str] = None
+    copula_note: Optional[str] = None
+    copula_type: Optional[str] = None
+    schema_v: Optional[int] = None
+    edge_sign_convention: Optional[str] = None
+
     # Algo flags from screener
     include_for_algo: bool = False
     protected: bool = False

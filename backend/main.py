@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import yaml
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -190,6 +191,25 @@ def _build_records_from_csv():
         if not sym:
             continue
 
+        bnet = (
+            float(row["borrow_current"]) if not _isnan(row.get("borrow_current"))
+            else (float(row["borrow_fee_annual"]) if not _isnan(row.get("borrow_fee_annual"))
+                  else (float(row["borrow_net_annual"]) if not _isnan(row.get("borrow_net_annual")) else None))
+        )
+        gdec = _v2f(row, "gross_decay_annual")
+        spread0 = None
+        if gdec is not None and bnet is not None:
+            spread0 = round(float(gdec) - float(bnet), 6)
+
+        ne5, ne50, ne95 = _v2f(row, "net_edge_p05_annual"), _v2f(row, "net_edge_p50_annual"), _v2f(row, "net_edge_p95_annual")
+        nfan = None
+        if ne5 is not None and ne50 is not None and ne95 is not None:
+            nfan = f"[p5 {ne5*100:.1f}%, p50 {ne50*100:.1f}%, p95 {ne95*100:.1f}%] (annual, short-favourable +)"
+        try:
+            scv = int(float(row.get("schema_v", 2)))
+        except (TypeError, ValueError):
+            scv = 2
+
         rec = ETFRecord(
             symbol=sym,
             underlying=str(row.get("underlying", "")),
@@ -200,11 +220,7 @@ def _build_records_from_csv():
             bucket=str(row.get("bucket", Bucket.LOW_BETA.value)),
             borrow_fee_annual=float(row["borrow_fee_annual"]) if not _isnan(row.get("borrow_fee_annual")) else None,
             borrow_rebate_annual=float(row["borrow_rebate_annual"]) if not _isnan(row.get("borrow_rebate_annual")) else None,
-            borrow_net_annual=(
-                float(row["borrow_current"]) if not _isnan(row.get("borrow_current"))
-                else (float(row["borrow_fee_annual"]) if not _isnan(row.get("borrow_fee_annual"))
-                      else (float(row["borrow_net_annual"]) if not _isnan(row.get("borrow_net_annual")) else None))
-            ),
+            borrow_net_annual=bnet,
             shares_available=int(row["shares_available"]) if not _isnan(row.get("shares_available")) else None,
             borrow_current=(
                 float(row["borrow_current"]) if not _isnan(row.get("borrow_current"))
@@ -213,11 +229,39 @@ def _build_records_from_csv():
             ),
             borrow_spiking=bool(row.get("borrow_spiking", False)),
             borrow_missing=bool(row.get("borrow_missing_from_ftp", False)),
+            gross_decay_annual=gdec,
+            spread=spread0,
             include_for_algo=bool(row.get("include_for_algo", False)),
             protected=bool(row.get("protected", False)),
             cagr_positive=bool(row.get("cagr_positive")) if not _isnan(row.get("cagr_positive")) else None,
             last_updated=dt.datetime.utcnow(),
             is_stale=False,
+            asof_date=_v2s(row, "asof_date"),
+            product_class=_v2s(row, "product_class"),
+            gross_edge_definition=_v2s(row, "gross_edge_definition"),
+            primary_edge_annual=_v2f(row, "primary_edge_annual"),
+            gross_for_primary_annual=_v2f(row, "gross_for_primary_annual"),
+            borrow_for_net_annual=_v2f(row, "borrow_for_net_annual"),
+            borrow_median_60d=_v2f(row, "borrow_median_60d"),
+            net_edge_p05_annual=ne5,
+            net_edge_p50_annual=ne50,
+            net_edge_p95_annual=ne95,
+            net_edge_fan_label=nfan,
+            block_len=_v2f(row, "block_len"),
+            B_reps=_v2f(row, "B_reps"),
+            annualization_key=_v2s(row, "annualization_key"),
+            hac_lag=_v2f(row, "hac_lag"),
+            sigma_b_annual=_v2f(row, "sigma_b_annual"),
+            stress_borrow_rho=_v2f(row, "stress_borrow_rho"),
+            borrow_dispersion_type=_v2s(row, "borrow_dispersion_type"),
+            high_intraday_risk=bool(row.get("high_intraday_risk")) if "high_intraday_risk" in row and pd.notna(row.get("high_intraday_risk")) else None,
+            regime_autocorr_und_21d_proxy=_v2f(row, "regime_autocorr_und_21d_proxy"),
+            regime_warning=_v2s(row, "regime_warning"),
+            decomposition_note=_v2s(row, "decomposition_note"),
+            copula_note=_v2s(row, "copula_note"),
+            copula_type=_v2s(row, "copula_type"),
+            schema_v=scv,
+            edge_sign_convention=_v2s(row, "edge_sign_convention") or "short_favorable_positive",
         )
         RECORDS[sym] = rec
 
@@ -229,6 +273,27 @@ def _isnan(v) -> bool:
         return np.isnan(float(v))
     except (TypeError, ValueError):
         return False
+
+
+def _v2f(row, key) -> float | None:
+    """Optional float from universe row (schema v2 + decay columns)."""
+    v = row.get(key) if hasattr(row, "get") else None
+    if v is None:
+        return None
+    if isinstance(v, (float, np.floating)) and (np.isnan(v) or not np.isfinite(v)):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _v2s(row, key) -> str | None:
+    v = row.get(key) if hasattr(row, "get") else None
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    s = str(v).strip()
+    return s or None
 
 
 # ──────────────────────────────────────────────
@@ -303,13 +368,22 @@ def refresh_decay():
             borrow_map[sym] = rec.borrow_net_annual
 
     default_borrow = CONFIG.get("analytics", {}).get("default_borrow_annual", 0.05)
+    prefer_csv = CONFIG.get("analytics", {}).get("prefer_screener_gross_from_csv", True)
     DECAY_DATA = compute_mock_decay_for_universe(UNIVERSE_DF, borrow_map, default_borrow)
 
     # Update records
     for sym, rec in RECORDS.items():
+        if prefer_csv and UNIVERSE_DF is not None and "gross_decay_annual" in UNIVERSE_DF.columns:
+            m = UNIVERSE_DF["symbol"].astype(str) == sym
+            if m.any():
+                g = UNIVERSE_DF.loc[m, "gross_decay_annual"]
+                g = g.iloc[0] if len(g) else None
+                if g is not None and not (isinstance(g, float) and np.isnan(g)):
+                    rec.gross_decay_annual = float(g)
         if sym in DECAY_DATA:
             d = DECAY_DATA[sym]
-            rec.gross_decay_annual = d.get("gross_decay_annual")
+            if not (prefer_csv and rec.gross_decay_annual is not None):
+                rec.gross_decay_annual = d.get("gross_decay_annual")
             rec.decay_3m = d.get("decay_3m")
             rec.decay_6m = d.get("decay_6m")
             rec.decay_12m = d.get("decay_12m")

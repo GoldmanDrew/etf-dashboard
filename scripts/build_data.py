@@ -135,6 +135,13 @@ def _safe_float(row, key):
         return None
 
 
+def _int_schema_v(v, default: int = 2) -> int:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
 def fetch_csv_from_github() -> pd.DataFrame:
     """Download etf_screened_today.csv from the ls-algo repo."""
     url = f"https://raw.githubusercontent.com/{UNIVERSE_REPO}/{UNIVERSE_BRANCH}/{UNIVERSE_PATH}"
@@ -2458,9 +2465,29 @@ def build():
         borrow_history_symbols[sym] = hist_rows
         hist_borrows = [float(x["borrow_current"]) for x in hist_rows if x.get("borrow_current") is not None]
         borrow_avg_annual = round(float(np.mean(hist_borrows)), 6) if hist_borrows else None
+        last60 = hist_borrows[-60:] if len(hist_borrows) > 0 else []
+        borrow_median_60d = round(float(np.median(last60)), 6) if last60 else None
+        sigma_b_annual = None
+        borrow_dispersion_type = "none"
+        if len(last60) >= 5:
+            q = np.subtract(*np.percentile(last60, [75, 25]))
+            if q > 0 and np.isfinite(q):
+                sigma_b_annual = round(float(q / 1.35), 6)
+                borrow_dispersion_type = "iqr_over_1_35"
 
         if gross_decay is not None:
             decay_count += 1
+
+        rdict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        ne5 = _safe_float(rdict, "net_edge_p05_annual")
+        ne50 = _safe_float(rdict, "net_edge_p50_annual")
+        ne95 = _safe_float(rdict, "net_edge_p95_annual")
+        net_edge_fan_label = None
+        if ne5 is not None and ne50 is not None and ne95 is not None:
+            net_edge_fan_label = (
+                f"[p5 {ne5*100:.1f}%, p50 {ne50*100:.1f}%, p95 {ne95*100:.1f}%] "
+                f"(annual, short-favourable +)"
+            )
 
         rec = {
             "symbol": sym,
@@ -2486,6 +2513,32 @@ def build():
             "protected": bool(row.get("protected", False)),
             "cagr_positive": bool(row.get("cagr_positive")) if pd.notna(row.get("cagr_positive")) else None,
             "borrow_source": borrow_source,
+            # Screener schema v2 (optional; from ls-algo daily_screener export)
+            "asof_date": (str(rdict["asof_date"]) if rdict.get("asof_date") and str(rdict.get("asof_date") or "").strip() not in ("", "nan", "None") else None),
+            "product_class": (str(rdict["product_class"]).strip() if rdict.get("product_class") and str(rdict.get("product_class") or "").strip() not in ("", "nan") else None),
+            "gross_edge_definition": (str(rdict["gross_edge_definition"]).strip() if rdict.get("gross_edge_definition") and str(rdict.get("gross_edge_definition") or "").strip() not in ("", "nan") else None),
+            "primary_edge_annual": _safe_float(rdict, "primary_edge_annual"),
+            "gross_for_primary_annual": _safe_float(rdict, "gross_for_primary_annual"),
+            "borrow_for_net_annual": _safe_float(rdict, "borrow_for_net_annual"),
+            "borrow_median_60d": borrow_median_60d,
+            "net_edge_p05_annual": ne5,
+            "net_edge_p50_annual": ne50,
+            "net_edge_p95_annual": ne95,
+            "net_edge_fan_label": net_edge_fan_label,
+            "block_len": _safe_float(rdict, "block_len"),
+            "B_reps": _safe_float(rdict, "B_reps"),
+            "annualization_key": (str(rdict["annualization_key"]).strip() if rdict.get("annualization_key") else None),
+            "hac_lag": _safe_float(rdict, "hac_lag"),
+            "sigma_b_annual": (_safe_float(rdict, "sigma_b_annual") if _safe_float(rdict, "sigma_b_annual") is not None else sigma_b_annual),
+            "stress_borrow_rho": _safe_float(rdict, "stress_borrow_rho"),
+            "regime_autocorr_und_21d_proxy": _safe_float(rdict, "regime_autocorr_und_21d_proxy"),
+            "regime_warning": (str(rdict["regime_warning"]).strip() if rdict.get("regime_warning") and str(rdict.get("regime_warning") or "").strip() not in ("", "nan") else None),
+            "decomposition_note": (str(rdict["decomposition_note"]).strip() if rdict.get("decomposition_note") and str(rdict.get("decomposition_note") or "").strip() not in ("", "nan") else None),
+            "copula_note": (str(rdict["copula_note"]).strip() if rdict.get("copula_note") and str(rdict.get("copula_note") or "").strip() not in ("", "nan") else None),
+            "copula_type": (str(rdict["copula_type"]).strip() if rdict.get("copula_type") and str(rdict.get("copula_type") or "").strip() not in ("", "nan") else None),
+            "borrow_dispersion_type": (str(rdict.get("borrow_dispersion_type") or borrow_dispersion_type or "none") or "none"),
+            "schema_v": _int_schema_v(rdict.get("schema_v", 2)),
+            "edge_sign_convention": (str(rdict.get("edge_sign_convention", "short_favorable_positive"))),
         }
         records.append(rec)
 
@@ -2501,6 +2554,11 @@ def build():
 
     output = {
         "build_time": build_time,
+        "schema_v": 2,
+        "edge_sign_convention": "short_favorable_positive",
+        "uncertainty_footnote": (
+            "p5/p95 are sampling/stress-copula assumptions, not a full model of tail risk."
+        ),
         "source_repo": UNIVERSE_REPO,
         "source_branch": UNIVERSE_BRANCH,
         "last_commit": commit_info,

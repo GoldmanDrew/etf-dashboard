@@ -398,10 +398,14 @@ const COLUMNS = [
   { key: 'underlying', label: 'Underlying', w: 90 },
   { key: 'beta', label: 'Beta', w: 70, numeric: true },
   { key: 'leverage', label: 'Lev', w: 55, numeric: true },
-  { key: 'borrow_net_annual', label: 'Borrow Rate', w: 100, numeric: true },
+  { key: 'borrow_net_annual', label: 'Borrow', w: 88, numeric: true },
+  { key: 'borrow_median_60d', label: 'Borrow 60d med', w: 100, numeric: true },
   { key: 'shares_available', label: 'Shares Avail', w: 100, numeric: true },
   { key: 'gross_decay_annual', label: 'Gross Decay', w: 100, numeric: true },
+  { key: 'net_edge_p50_annual', label: 'Net edge p50', w: 100, numeric: true },
+  { key: 'net_edge_p05_annual', label: 'Net p5/p95', w: 100, numeric: true },
   { key: 'spread', label: 'Spread', w: 90, numeric: true },
+  { key: 'regime_warning', label: 'Regime', w: 80, numeric: false },
   { key: 'decay_3m', label: '3M Decay', w: 85, numeric: true },
   { key: 'decay_6m', label: '6M Decay', w: 85, numeric: true },
   { key: 'last_updated', label: 'Updated', w: 90 },
@@ -540,10 +544,22 @@ function TableRow({ record, expanded, onToggle, history }) {
         <td className={borrowClass(record.borrow_net_annual)}>
           {fmt(record.borrow_net_annual)} {borrowBadge(record.borrow_net_annual)}
         </td>
+        <td>
+          {record.borrow_median_60d != null && record.borrow_median_60d !== undefined ? fmt(record.borrow_median_60d) : '—'}
+        </td>
         <td>{fmtNum(record.shares_available)}</td>
         <td>{fmt(record.gross_decay_annual)}</td>
+        <td className={spreadClass(record.net_edge_p50_annual)}>{record.net_edge_p50_annual != null ? fmt(record.net_edge_p50_annual) : '—'}</td>
+        <td style={{ fontSize: 11, color: 'var(--text-muted)' }} title={record.net_edge_fan_label || ''}>
+          {record.net_edge_p05_annual != null && record.net_edge_p95_annual != null
+            ? `${fmt(record.net_edge_p05_annual)} / ${fmt(record.net_edge_p95_annual)}`
+            : (record.net_edge_fan_label || '—')}
+        </td>
         <td className={spreadClass(record.spread)}>
           {fmt(record.spread)}
+        </td>
+        <td style={{ textAlign: 'center', fontSize: 10 }}>
+          {record.regime_warning && record.regime_warning !== 'none' ? '⚠' : ''}
         </td>
         <td>{fmt(record.decay_3m)}</td>
         <td>{fmt(record.decay_6m)}</td>
