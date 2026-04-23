@@ -1418,7 +1418,12 @@ _EXCHANGE_PREFIX_TICKER_RE = re.compile(
 # Twitter-style ticker, e.g. "$XRPK".
 _DOLLAR_TICKER_RE = re.compile(r"\$([A-Z]{2,5})\b")
 # "ticker: XRPK" / "symbol: XRPK" — common in issuer press releases.
-_TICKER_LABEL_RE = re.compile(r"\b(?:ticker|symbol)\s*[:\s]\s*([A-Z]{2,5})\b", re.IGNORECASE)
+# Require a real ``ticker: XYZ`` / ``symbol:`` label, not the phrase
+# "Change its Ticker to KEEL" (that produced false *label* matches).
+_TICKER_LABEL_RE = re.compile(
+    r"\b(?:ticker|symbol)\s*:\s*([A-Z]{2,5})\b",
+    re.IGNORECASE,
+)
 
 # Underlying symbols that are also common English / headline tokens.  We still
 # allow *explicit* or *high-signal* (paren/exchange) matches, but the weak
@@ -1539,6 +1544,45 @@ def _extract_title_disclosed_etf_syms(
             if n2 in etf_universe:
                 out.add(n2)
     return out
+
+
+def _raw_ticker_disclosures_in_title(title: str) -> set[str]:
+    """(BMAX), (NYSE: Z), $Z — from the headline only, *not* restricted to the screener.
+
+    When non-empty, any ETF resolved **only** from a fetched page body (sidebar
+    "related" tickers) is treated as spurious if it does not appear in the
+    title text — a pattern we saw for ``(BMAX)`` liquidate pieces that pulled
+    unrelated symbols from syndicated HTML.
+    """
+    if not title:
+        return set()
+    out: set[str] = set()
+    for regex in (
+        _PARENTHESIZED_TICKER_RE,
+        _EXCHANGE_PREFIX_TICKER_RE,
+        _DOLLAR_TICKER_RE,
+        _TICKER_LABEL_RE,
+    ):
+        for match in regex.findall(title):
+            sym = (match if isinstance(match, str) else match[0]).upper()
+            if sym and sym not in _TICKER_STOPWORDS:
+                out.add(sym)
+    return out
+
+
+def _symbol_appears_in_title_text(title: str, sym: str) -> bool:
+    """True if ``sym`` is visibly tied to the headline (word token or paren)."""
+    if not title or not sym:
+        return False
+    s = _norm(str(sym).strip().upper())
+    t = str(title)
+    if not s:
+        return False
+    if f"({s})" in t or f"({s.upper()})" in t or f"({s.lower()})" in t:
+        return True
+    if re.search(rf"(?<![A-Za-z0-9.]){re.escape(s)}(?![A-Za-z0-9])", t, re.IGNORECASE):
+        return True
+    return False
 
 
 def _extract_candidate_tickers(text: str) -> set[str]:
@@ -1944,6 +1988,22 @@ def phase_5_google_news(
                 else:
                     emit_syms = sorted(t_discl)
                     match_tier = "explicit"
+
+            # Headline paren / $ disclosure anchors the *subject*; article bodies
+            # and syndicated sidebars can mention dozens of unrelated fund tickers
+            # (BMAX liquidations picking up random crypto ETF codes from HTML).
+            title_line_discl = _raw_ticker_disclosures_in_title(title)
+            if title_line_discl:
+                emit_syms = sorted(
+                    {
+                        s
+                        for s in emit_syms
+                        if s in t_discl
+                        or _symbol_appears_in_title_text(title, s)
+                    }
+                )
+                if not emit_syms:
+                    continue
 
             # Stable id; skip near-duplicates from multiple queries.
             slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60] or "untitled"

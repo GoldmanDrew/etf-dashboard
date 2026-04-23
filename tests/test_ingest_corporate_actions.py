@@ -349,6 +349,43 @@ def test_title_anchor_prefers_parens_bmax_in_universe(monkeypatch):
     assert "BMAX" in [e.ticker for e in ev if e.type == "delisting"]
 
 
+def test_gnews_bmax_paren_drops_body_only_tickers(monkeypatch):
+    """(BMAX) in title but BMAX not in screener; body must not tag XYZ* from HTML."""
+    bucket_map, underlying_map = _maps()
+    monkeypatch.setattr(mod, "GOOGLE_NEWS_QUERIES", [('"to liquidate"', "delisting")])
+    monkeypatch.setattr(
+        mod,
+        "_fetch_google_news_rss",
+        lambda _s, _q: [
+            {
+                "title": "REX Bitcoin Corporate Treasury Convertible Bond ETF (BMAX) to Liquidate - test",
+                "description": "",
+                "link": "https://example.com/bmax-paren",
+                "pub_date": "Tue, 1 Apr 2026 07:00:00 GMT",
+                "source": "wire",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        mod,
+        "_fetch_article_body",
+        lambda _s, _u: (
+            "Press release body with unrelated tickers "
+            "XYZG XYZY SQ in a sidebar for testing."
+        ),
+    )
+    _ev, news = mod.phase_5_google_news(
+        requests.Session(),
+        universe={"XYZG", "XYZY", "TOPW", "BTFL", "XRPK", "SOLX", "NNEX"},
+        ever_known=set(),
+        underlyings=set(),
+        alias_map={},
+        bucket_map=bucket_map,
+        underlying_map=underlying_map,
+    )
+    assert news == []
+
+
 def test_gnews_structured_event_id_symbol_change_ticker_only(monkeypatch):
     """Pinned strip ids must be stable per fund so the UI does not duplicate cards."""
     bucket_map, underlying_map = _maps()
