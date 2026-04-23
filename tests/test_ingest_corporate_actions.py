@@ -247,3 +247,103 @@ def test_collapse_news_projects_multi_ticker_rows_per_ticker():
     assert len(topw_rows) == 1
     assert len(xyzg_rows) == 1
     assert topw_rows[0].source_count == 2
+
+
+def test_classify_drops_motley_dimon_breaking_down_episode():
+    cat, conf = mod.classify_text(
+        "Breaking Down Jamie Dimon's Investing Letter — and whether to buy JEPQ on the dip. "
+        "Mention of a Universal Music acquisition and merger talk."
+    )
+    assert cat is None
+    assert conf == 0.0
+
+
+def test_dedupe_news_merges_identical_title_across_ticker_mismatches():
+    same_title = "REX Bitcoin Corporate Treasury Convertible Bond ETF (BMAX) to Liquidate - wire"
+    a = mod.NewsItem(
+        id="a",
+        tickers=["WRONG1"],
+        category="delisting",
+        confidence=0.78,
+        published_utc="2026-03-31T07:00:00+00:00",
+        title=same_title,
+        publisher="A",
+        match_tier="inferred",
+    )
+    b = mod.NewsItem(
+        id="b",
+        tickers=["WRONG2"],
+        category="delisting",
+        confidence=0.78,
+        # Same calendar day as `a` so dedupe key (title, day, category) matches.
+        published_utc="2026-03-31T12:00:00+00:00",
+        title=same_title,
+        publisher="B",
+        match_tier="inferred",
+    )
+    out = mod.dedupe_news([a, b])
+    assert len(out) == 1
+    assert out[0].source_count == 2
+    # Same tier+confidence: both tickers are unioned; publisher list merged.
+    assert "WRONG1" in out[0].tickers and "WRONG2" in out[0].tickers
+
+
+def test_gnews_opinion_drops_cramer_ticker_suggestion(monkeypatch):
+    bucket_map, underlying_map = _maps()
+    monkeypatch.setattr(mod, "GOOGLE_NEWS_QUERIES", [('"ETF" "ticker change"', "symbol_change")])
+    monkeypatch.setattr(
+        mod,
+        "_fetch_google_news_rss",
+        lambda _s, _q: [
+            {
+                "title": "Block (XYZ) Shares Up Since Jim Cramer Said It Should Change Its Ticker To 'SELL' - Yahoo",
+                "description": "<b>not</b> a filing",
+                "link": "https://example.com/op",
+                "pub_date": "Mon, 31 Mar 2026 07:00:00 GMT",
+                "source": "Yahoo",
+            }
+        ],
+    )
+    _events, news = mod.phase_5_google_news(
+        requests.Session(),
+        universe={"TOPW", "BTFL", "XYZG", "XYZY", "XRPK", "SOLX"},
+        ever_known=set(),
+        underlyings={"TOP", "KEEL", "XRP", "SOL"},
+        alias_map={},
+        bucket_map=bucket_map,
+        underlying_map=underlying_map,
+    )
+    assert news == []
+
+
+def test_title_anchor_prefers_parens_bmax_in_universe(monkeypatch):
+    """Headline (BMAX) in universe should emit BMAX, not a weak sidebar guess."""
+    bucket_map, underlying_map = _maps()
+    bmap = {**dict(bucket_map), "BMAX": "bucket_1_high_beta", "BTFL": "bucket_1_high_beta"}
+    umap = {**dict(underlying_map), "BMAX": "BMXX"}
+    monkeypatch.setattr(mod, "GOOGLE_NEWS_QUERIES", [('"to liquidate"', "delisting")])
+    monkeypatch.setattr(
+        mod,
+        "_fetch_google_news_rss",
+        lambda _s, _q: [
+            {
+                "title": "REX (BMAX) to Liquidate — placeholder",
+                "description": "",
+                "link": "https://example.com/bmax1",
+                "pub_date": "Tue, 1 Apr 2026 07:00:00 GMT",
+                "source": "wire",
+            }
+        ],
+    )
+    ev, news = mod.phase_5_google_news(
+        requests.Session(),
+        universe={"BMAX", "BTFL", "TOPW", "XRPK", "SOLX", "NNEX"},
+        ever_known=set(),
+        underlyings=set(),
+        alias_map={},
+        bucket_map=bmap,
+        underlying_map=umap,
+    )
+    assert news
+    assert news[0].tickers == ["BMAX"]
+    assert "BMAX" in [e.ticker for e in ev if e.type == "delisting"]

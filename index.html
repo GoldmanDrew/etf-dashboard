@@ -3718,7 +3718,12 @@ function NewsPage({
         <div className="news-meta">
           {buildTime && !isSeed && <span>Last refresh <b>{fmtRelativeTime(buildTime)}</b></span>}
           <span>Events <b>{events.length}</b></span>
-          <span>Headlines <b>{items.length}</b></span>
+          <span>
+            Headlines <b>{filteredItems.length}</b> shown
+            {filteredItems.length !== items.length && (
+              <span> · {items.length} loaded</span>
+            )}
+          </span>
         </div>
       </div>
 

@@ -979,6 +979,16 @@ NEGATIVE_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bunusual\s+option", re.I),
 ]
 
+# Titles that are clearly editorial / opinion, not an issuer press release, even
+# if they match ``symbol change``-shaped phrasing in the text.
+_GNEWS_OPINION_SYMBOL_CHANGE = re.compile(
+    r"Jim Cramer|Shares Up Since|"
+    r"should change (its|their) ticker|"
+    r"change (its|their) ticker to\s+['\u2018\u2019]SELL|"
+    r"Change Its Ticker To 'SELL'",
+    re.IGNORECASE,
+)
+
 
 # Fund-context anchors: a positive split match is only accepted if one of these
 # tokens appears within the same headline+summary (prevents generic "MSTR splits
@@ -996,6 +1006,11 @@ FUND_CONTEXT_PATTERNS = [
 def classify_text(text: str) -> tuple[str | None, float]:
     """Return (category, confidence) or (None, 0.0) if no corporate-action classification."""
     if not text:
+        return None, 0.0
+    # Hard-reject titles/summaries that are clearly commentary or podcasts but may
+    # spuriously hit ``acquire`` / ``merger`` in their body (e.g. a Motley Fool
+    # episode "Breaking down Jamie Dimon's letter" while also mentioning JEPQ).
+    if re.search(r"\bBreaking Down Jamie\b", text, re.I):
         return None, 0.0
 
     # Reject if any negative pattern hits and no positive (positive may win below).
@@ -1401,6 +1416,19 @@ _DOLLAR_TICKER_RE = re.compile(r"\$([A-Z]{2,5})\b")
 # "ticker: XRPK" / "symbol: XRPK" — common in issuer press releases.
 _TICKER_LABEL_RE = re.compile(r"\b(?:ticker|symbol)\s*[:\s]\s*([A-Z]{2,5})\b", re.IGNORECASE)
 
+# Underlying symbols that are also common English / headline tokens.  We still
+# allow *explicit* or *high-signal* (paren/exchange) matches, but the weak
+# (bare-word → underlying → ETF) path would otherwise turn ``TOP`` into TOPW
+# (Leveraged Oil & Gas) on unrelated stories that mention the word in prose.
+_AMBIGUOUS_BARE_ENV = {
+    s.strip().upper()
+    for s in os.getenv("CORP_ACTIONS_AMBIGUOUS_BARE", "TOP,AI").split(",")
+    if s.strip()
+}
+AMBIGUOUS_BARE_FOR_WEAK_INFER: frozenset[str] = frozenset(
+    _AMBIGUOUS_BARE_ENV if _AMBIGUOUS_BARE_ENV else {"TOP", "AI"}
+)
+
 # Words that look like tickers but are actually English/finance noise.  Not
 # exhaustive — the universe-intersection downstream does the heavy lifting.
 _TICKER_STOPWORDS = {
@@ -1465,6 +1493,47 @@ def _extract_bare_tickers(text: str) -> set[str]:
         sym = (match if isinstance(match, str) else match[0]).upper()
         if sym and sym not in _TICKER_STOPWORDS:
             out.add(sym)
+    return out
+
+
+def _extract_title_disclosed_etf_syms(
+    title: str,
+    etf_universe: set[str],
+    alias_map: dict[str, dict[str, str]],
+) -> set[str]:
+    """Tickers the **headline** discloses (paren/exchange) that map to current screener ETFs.
+
+    Strips the Google News **RSS description** from the signal path — it embeds
+    related-ticker sidebars and once caused ``(TOPW)`` in HTML to crowd out
+    *actual* fund tickers in the real headline.  We also follow ``alias_map``
+    when the title names a pre-rename stock symbol (e.g. BITF → KEEL).
+    """
+    if not title:
+        return set()
+    out: set[str] = set()
+    raw: set[str] = set()
+    for regex in (
+        _PARENTHESIZED_TICKER_RE,
+        _EXCHANGE_PREFIX_TICKER_RE,
+        _TICKER_LABEL_RE,
+        _DOLLAR_TICKER_RE,
+    ):
+        for match in regex.findall(title):
+            sym = (match if isinstance(match, str) else match[0]).upper()
+            if sym and sym not in _TICKER_STOPWORDS:
+                raw.add(sym)
+    for match in _TICKER_CANDIDATE_RE.findall(title):
+        sym = (match if isinstance(match, str) else match[0]).upper()
+        if sym not in _TICKER_STOPWORDS:
+            raw.add(sym)
+    for sym in raw:
+        n = _norm(sym)
+        if n in etf_universe:
+            out.add(n)
+        elif alias_map and n in alias_map and alias_map[n].get("new"):
+            n2 = _norm(alias_map[n]["new"])
+            if n2 in etf_universe:
+                out.add(n2)
     return out
 
 
@@ -1720,6 +1789,7 @@ def phase_5_google_news(
     all_events: list[CorporateEvent] = []
     all_news: list[NewsItem] = []
     seen_article_ids: set[str] = set()
+    seen_gnews_urls: set[str] = set()  # de-dupe same link across multiple queries
     seen_body_urls: set[str] = set()  # de-dupe body fetches across queries
     total_articles_scanned = 0
     total_articles_kept = 0
@@ -1760,9 +1830,12 @@ def phase_5_google_news(
             if s in alias_anchor and len(s) >= 3:
                 high.update(underlying_to_etfs.get(s, ()))
         # Weak inferred matches: bare uppercase tokens mapping to underlyings.
-        # Keep strict (len>=3) to avoid words like AI/TOP creating spam.
+        # Keep strict (len>=3) to avoid words like AI/TOP creating spam, and
+        # suppress ambiguous English tokens (``TOP`` → oil ETF, etc.).
         for s in bare_syms:
             if s in explicit or s in high:
+                continue
+            if s in AMBIGUOUS_BARE_FOR_WEAK_INFER:
                 continue
             if len(s) >= 3:
                 weak.update(underlying_to_etfs.get(s, ()))
@@ -1774,31 +1847,37 @@ def phase_5_google_news(
         total_articles_scanned += len(articles)
         for art in articles:
             title = art.get("title") or ""
+            url = (art.get("link") or "").strip()
+            if url and url in seen_gnews_urls:
+                continue
+
             description = art.get("description") or ""
-            full_text = f"{title}\n{description}"
-            bare_text = title
+            desc_plain = _strip_html_to_plain(description) or ""
+            # Never extract tickers from raw RSS HTML: sidebars were attaching
+            # ``TOPW``-style false positives.  Ticker resolution uses the headline
+            # and (if fetched) a tight body window only.
             pub_iso = _parse_rfc822(art.get("pub_date") or "")
             if pub_iso and pub_iso < cutoff_iso:
                 continue
 
-            # 1) High-signal tickers from title+RSS description; bare ``WORD``
-            # matches **only** from the headline (plus any later body window) so
-            # Google News HTML sidebars do not fabricate unrelated underlyings
-            # like ``TOP`` for TOPW.
-            high_syms = _resolve_set(_extract_high_signal_tickers(full_text))
-            bare_syms = _resolve_set(_extract_bare_tickers(bare_text))
+            if _GNEWS_OPINION_SYMBOL_CHANGE.search(f"{title}\n{desc_plain}"):
+                continue
+
+            text_for_tick = title
+            high_syms = _resolve_set(_extract_high_signal_tickers(text_for_tick))
+            bare_syms = _resolve_set(_extract_bare_tickers(text_for_tick))
             related_union = high_syms | bare_syms
             prelim_explicit, prelim_high, _prelim_weak = _match_tiers(high_syms, bare_syms)
-
-            # 1b) Body fetch when the headline is high-signal but tickers live in
-            # the article HTML (T-REX XRPK / SOLX pattern).
-            url = art.get("link") or ""
+            full_for_trigger = f"{title}\n{desc_plain}"
+            body_window: str | None = None
+            # Body fetch when the headline is high-signal but fund tickers live
+            # in the article HTML (T-REX XRPK / SOLX pattern).
             if (
                 (not related_union or (not prelim_explicit and not prelim_high))
                 and url
                 and url not in seen_body_urls
                 and body_fetches_done < GOOGLE_NEWS_BODY_FETCH_BUDGET
-                and _BODY_FETCH_TRIGGER_RE.search(full_text)
+                and _BODY_FETCH_TRIGGER_RE.search(full_for_trigger)
             ):
                 seen_body_urls.add(url)
                 body = _fetch_article_body(session, url)
@@ -1806,20 +1885,20 @@ def phase_5_google_news(
                 if body:
                     window = _body_window_around_trigger(body)
                     if window:
-                        full_text = f"{title}\n{description}\n{window}"
-                        bare_text = f"{title}\n{window}"
-                        high_syms = _resolve_set(_extract_high_signal_tickers(full_text))
-                        bare_syms = _resolve_set(_extract_bare_tickers(bare_text))
+                        body_window = window
+                        text_for_tick = f"{title}\n{window}"
+                        high_syms = _resolve_set(_extract_high_signal_tickers(text_for_tick))
+                        bare_syms = _resolve_set(_extract_bare_tickers(text_for_tick))
                         related_union = high_syms | bare_syms
                         if related_union:
                             body_fetches_hit += 1
-                            if not description:
-                                description = window[:400]
 
             if not related_union:
                 continue
 
-            classify_text_src = full_text
+            classify_text_src = f"{title}\n{desc_plain}"
+            if body_window:
+                classify_text_src = f"{classify_text_src}\n{body_window}"
 
             # 2) Classify via the shared regex bank so we honour negative patterns
             # (dividend/distribution/earnings drop) but fall back to the query's
@@ -1849,15 +1928,34 @@ def phase_5_google_news(
                 dropped_low_confidence += 1
                 continue
 
-            # 3) Stable id; skip near-duplicates from multiple queries.
+            # If the headline discloses a specific screener ETF, prefer that over
+            # unrelated tickers that crawled in from a syndicator's page chrome.
+            t_discl = _extract_title_disclosed_etf_syms(title, etf_universe, alias_map or {})
+            if t_discl:
+                inter = [x for x in emit_syms if x in t_discl]
+                if inter:
+                    emit_syms = sorted(inter)
+                    if set(emit_syms) <= t_discl:
+                        match_tier = "explicit"
+                else:
+                    emit_syms = sorted(t_discl)
+                    match_tier = "explicit"
+
+            # Stable id; skip near-duplicates from multiple queries.
             slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60] or "untitled"
             art_id = f"gnews:{slug}:{(pub_iso or '')[:10]}:{emit_syms[0]}"
             if art_id in seen_article_ids:
                 continue
             seen_article_ids.add(art_id)
+            if url:
+                seen_gnews_urls.add(url)
 
             publisher = art.get("source") or None
             summary_plain = _strip_html_to_plain(description)
+            if not summary_plain and body_window:
+                bw = re.sub(r"\s+", " ", (body_window or "")).strip()
+                if bw:
+                    summary_plain = bw[:400] + ("..." if len(bw) > 400 else "")
 
             # 4) Always emit a NewsItem so the article shows up in the feed.
             all_news.append(
@@ -2012,8 +2110,11 @@ def dedupe_events(events: list[CorporateEvent]) -> list[CorporateEvent]:
     return out
 
 
+_MATCH_TIER_RANK = {"explicit": 3, "high": 2, "inferred": 1, None: 0, "": 0}
+
+
 def dedupe_news(items: list[NewsItem]) -> list[NewsItem]:
-    """Collapse near-duplicate headlines (same normalized title + day + ticker set)."""
+    """Collapse near-duplicate headlines (same normalized title + day + category)."""
 
     def norm_title(t: str | None) -> str:
         s = (t or "").lower()
@@ -2021,10 +2122,19 @@ def dedupe_news(items: list[NewsItem]) -> list[NewsItem]:
         s = re.sub(r"[^a-z0-9 ]", "", s)
         return s[:120]
 
-    seen: dict[tuple[str, str, str], NewsItem] = {}
+    def _better(a: NewsItem, b: NewsItem) -> bool:
+        ra = _MATCH_TIER_RANK.get(a.match_tier, 0)
+        rb = _MATCH_TIER_RANK.get(b.match_tier, 0)
+        if ra != rb:
+            return ra > rb
+        if float(a.confidence or 0) != float(b.confidence or 0):
+            return float(a.confidence or 0) > float(b.confidence or 0)
+        return (a.published_utc or "") >= (b.published_utc or "")
+
+    seen: dict[tuple[str, str, str | None], NewsItem] = {}
     for item in items:
         day = (item.published_utc or "")[:10]
-        key = (norm_title(item.title), day, ",".join(sorted(item.tickers)))
+        key = (norm_title(item.title), day, item.category)
         prev = seen.get(key)
         if prev is None:
             if not item.source_count:
@@ -2033,33 +2143,26 @@ def dedupe_news(items: list[NewsItem]) -> list[NewsItem]:
                 item.source_publishers = [item.publisher]
             seen[key] = item
             continue
-        # Keep the earliest publication; extend ticker coverage and source stats.
-        merged_tickers = sorted(set(prev.tickers) | set(item.tickers))
-        pubs = sorted(
+        a, b = (item, prev) if _better(item, prev) else (prev, item)
+        merged = NewsItem(**asdict(a))
+        if _MATCH_TIER_RANK.get(a.match_tier) != _MATCH_TIER_RANK.get(b.match_tier) and a.tickers:
+            merged.tickers = sorted({*(a.tickers or [])})
+        else:
+            merged.tickers = sorted({*(a.tickers or []), *(b.tickers or [])})
+        merged.source_count = int(a.source_count or 1) + int(b.source_count or 1)
+        merged.source_publishers = sorted(
             {
-                *(prev.source_publishers or []),
-                *(item.source_publishers or []),
-                *( [prev.publisher] if prev.publisher else [] ),
-                *( [item.publisher] if item.publisher else [] ),
+                *(a.source_publishers or []),
+                *(b.source_publishers or []),
+                *([a.publisher] if a.publisher else []),
+                *([b.publisher] if b.publisher else []),
             }
         )
-        source_count = int(prev.source_count or 1) + int(item.source_count or 1)
-        if (item.published_utc or "") < (prev.published_utc or ""):
-            item.tickers = merged_tickers
-            item.source_publishers = pubs
-            item.source_count = source_count
-            seen[key] = item
-        else:
-            prev.tickers = merged_tickers
-            prev.source_publishers = pubs
-            prev.source_count = source_count
+        seen[key] = merged
 
     out = list(seen.values())
     out.sort(key=lambda x: (x.published_utc or ""), reverse=True)
     return out
-
-
-_MATCH_TIER_RANK = {"explicit": 3, "high": 2, "inferred": 1, None: 0, "": 0}
 
 
 def collapse_news_by_ticker_category(items: list[NewsItem]) -> tuple[list[NewsItem], int]:
