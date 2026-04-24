@@ -569,40 +569,16 @@ function NetEdgeMergedCell({ record }) {
 }
 
 function EdgeFactsStrip({ record }) {
-  const gR = Number(record.gross_decay_annual);
-  const gE = Number(record.expected_gross_decay_annual);
-  const net = Number(record.net_decay);
-  const p5 = Number(record.net_edge_p05_annual);
-  const p95 = Number(record.net_edge_p95_annual);
-  const realizedAbove = Number.isFinite(gR) && Number.isFinite(gE) && gR > gE;
-  const netPos = Number.isFinite(net) && net > 0;
-  let bandWide = false;
-  if (Number.isFinite(p5) && Number.isFinite(p95)) {
-    bandWide = p95 - p5 > 0.32;
-  }
   const mode = (record.borrow_resample_mode || '').trim();
   const borrowLabel = mode === 'weighted_empirical'
     ? 'Borrow: weighted history'
     : mode === 'point_in_time'
       ? 'Borrow: point-in-time'
       : null;
+  if (!borrowLabel) return null;
   return (
-    <div className="edge-facts-strip" aria-label="Row fact checks">
-      <span className={cls('edge-fact', Number.isFinite(gR) && Number.isFinite(gE) ? (realizedAbove ? 'on' : 'off') : 'neutral')}
-        title={Number.isFinite(gR) && Number.isFinite(gE) ? `Realized ${fmt(gR)} vs model ${fmt(gE)}` : ''}>
-        Realized gross &gt; model {Number.isFinite(gR) && Number.isFinite(gE) ? (realizedAbove ? '✓' : '·') : '—'}
-      </span>
-      <span className={cls('edge-fact', Number.isFinite(net) ? (netPos ? 'on' : 'off') : 'neutral')}
-        title={Number.isFinite(net) ? `Net carry ${fmt(net)}` : ''}>
-        Net carry &gt; 0 {Number.isFinite(net) ? (netPos ? '✓' : '·') : '—'}
-      </span>
-      <span className={cls('edge-fact', Number.isFinite(p5) && Number.isFinite(p95) ? (bandWide ? 'on' : 'off') : 'neutral')}
-        title={Number.isFinite(p5) && Number.isFinite(p95) ? `p95−p5 = ${fmt(p95 - p5)} (wide if &gt; 32pp)` : ''}>
-        Wide uncertainty band {Number.isFinite(p5) && Number.isFinite(p95) ? (bandWide ? '✓' : '·') : '—'}
-      </span>
-      {borrowLabel ? (
-        <span className="edge-fact neutral" title="How borrow entered the net-edge bootstrap">{borrowLabel}</span>
-      ) : null}
+    <div className="edge-facts-strip" aria-label="Borrow in net-edge bootstrap">
+      <span className="edge-fact neutral" title="How borrow entered the net-edge bootstrap">{borrowLabel}</span>
     </div>
   );
 }

@@ -344,6 +344,7 @@
   }
   .net-edge-mini-hist .bar {
     flex: 1; min-width: 2px; background: rgba(59,130,246,0.55); border-radius: 1px 1px 0 0;
+    cursor: help;
   }
 
   /* ── Info Page ────────────── */
@@ -2057,11 +2058,19 @@ function NetEdgeBootstrapViz({ r }) {
   let bars = null;
   if (hist && Array.isArray(hist.c) && hist.c.length) {
     const mx = Math.max(...hist.c.map(Number), 1);
+    const edges = Array.isArray(hist.e) ? hist.e : [];
     bars = (
-      <div className="net-edge-mini-hist" title="Bootstrap net edge (annual) histogram">
-        {hist.c.map((c, i) => (
-          <div key={i} className="bar" style={{ height: `${(Number(c) / mx) * 100}%` }} />
-        ))}
+      <div className="net-edge-mini-hist" aria-label="Bootstrap net edge (annual) histogram">
+        {hist.c.map((c, i) => {
+          const eLo = edges[i] != null ? Number(edges[i]) : NaN;
+          const eHi = edges[i + 1] != null ? Number(edges[i + 1]) : NaN;
+          const barTitle = Number.isFinite(eLo) && Number.isFinite(eHi)
+            ? `${fmt(eLo)} – ${fmt(eHi)} (bin range, annual net edge)`
+            : 'Bin range unavailable';
+          return (
+            <div key={i} className="bar" title={barTitle} style={{ height: `${(Number(c) / mx) * 100}%` }} />
+          );
+        })}
       </div>
     );
   }
@@ -2138,40 +2147,16 @@ function NetEdgeMergedCell({ r }) {
 }
 
 function EdgeFactsStrip({ r }) {
-  const gR = Number(r.gross_decay_annual);
-  const gE = Number(r.expected_gross_decay_annual);
-  const net = Number(r.net_decay);
-  const p5 = Number(r.net_edge_p05_annual);
-  const p95 = Number(r.net_edge_p95_annual);
-  const realizedAbove = Number.isFinite(gR) && Number.isFinite(gE) && gR > gE;
-  const netPos = Number.isFinite(net) && net > 0;
-  let bandWide = false;
-  if (Number.isFinite(p5) && Number.isFinite(p95)) {
-    bandWide = p95 - p5 > 0.32;
-  }
   const mode = (r.borrow_resample_mode || '').trim();
   const borrowLabel = mode === 'weighted_empirical'
     ? 'Borrow: weighted history'
     : mode === 'point_in_time'
       ? 'Borrow: point-in-time'
       : null;
+  if (!borrowLabel) return null;
   return (
-    <div className="edge-facts-strip" aria-label="Row fact checks">
-      <span className={cls('edge-fact', Number.isFinite(gR) && Number.isFinite(gE) ? (realizedAbove ? 'on' : 'off') : 'neutral')}
-        title={Number.isFinite(gR) && Number.isFinite(gE) ? `Realized ${fmt(gR)} vs model ${fmt(gE)}` : ''}>
-        Realized gross &gt; model {Number.isFinite(gR) && Number.isFinite(gE) ? (realizedAbove ? '✓' : '·') : '—'}
-      </span>
-      <span className={cls('edge-fact', Number.isFinite(net) ? (netPos ? 'on' : 'off') : 'neutral')}
-        title={Number.isFinite(net) ? `Net carry ${fmt(net)}` : ''}>
-        Net carry &gt; 0 {Number.isFinite(net) ? (netPos ? '✓' : '·') : '—'}
-      </span>
-      <span className={cls('edge-fact', Number.isFinite(p5) && Number.isFinite(p95) ? (bandWide ? 'on' : 'off') : 'neutral')}
-        title={Number.isFinite(p5) && Number.isFinite(p95) ? `p95−p5 = ${fmt(p95 - p5)} (wide if &gt; 32pp)` : ''}>
-        Wide uncertainty band {Number.isFinite(p5) && Number.isFinite(p95) ? (bandWide ? '✓' : '·') : '—'}
-      </span>
-      {borrowLabel ? (
-        <span className="edge-fact neutral" title="How borrow entered the net-edge bootstrap">{borrowLabel}</span>
-      ) : null}
+    <div className="edge-facts-strip" aria-label="Borrow in net-edge bootstrap">
+      <span className="edge-fact neutral" title="How borrow entered the net-edge bootstrap">{borrowLabel}</span>
     </div>
   );
 }
@@ -4539,7 +4524,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
             <strong style={{ color: 'var(--text-secondary)' }}>Decay / edge —</strong>{' '}
             <em>Gross (realized)</em> and <em>net (gross−borrow)</em> are screener points. <em>Exp. (Itô)</em> is the mechanical expectation.{' '}
-            <strong>Net edge</strong> column = <em>median</em> (large) + <em>fan</em> (same glyph everywhere: gray whisker, cyan IQR, blue p50). Hover the fan for exact p5–p25–p50–p75–p95; expand row for facts + table + charts.
+            <strong>Net edge</strong> column = <em>median</em> (large) + <em>fan</em> (same glyph everywhere: gray whisker, cyan IQR, blue p50). Hover the fan for exact p5–p25–p50–p75–p95; expand row for borrow mode, quantile table, and charts.
             {data?.uncertainty_footnote && (
               <span> {data.uncertainty_footnote}</span>
             )}
@@ -4582,7 +4567,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                 <div className="dm-title">Net edge — bootstrap (formulas)</div>
                 Block-bootstrap the <strong>mean daily d<sub>t</sub></strong> to get a distribution of annualized <strong>gross</strong> drag, then form <strong>net</strong>
                 draws by subtracting borrow (weighted resample from full borrow history when the screener was run with that file; otherwise point-in-time borrow).
-                The table merges <strong>median + fan</strong> in one column; expand row adds <strong>fact checks</strong>, a <strong>quantile table</strong>, and a histogram when <code>net_edge_hist_json</code> is present. Not a full tail-risk model.
+                The table merges <strong>median + fan</strong> in one column; expand row shows <strong>borrow resample mode</strong>, a <strong>quantile table</strong>, and a histogram when <code>net_edge_hist_json</code> is present (hover each histogram bar for its bin range). Not a full tail-risk model.
               </div>
             </div>
           </details>
