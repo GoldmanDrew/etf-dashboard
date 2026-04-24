@@ -1538,6 +1538,38 @@ const spreadCls = v => {
   if (v > 0) return 'val-warning';
   return 'val-negative';
 };
+/** More negative modeled ETF return → better for a structural short (Scenarios-style). */
+const scenShortFavCls = v => {
+  if (v == null || !Number.isFinite(v)) return 'val-muted';
+  if (v <= -0.03) return 'val-positive';
+  if (v < 0) return 'val-warning';
+  return 'val-negative';
+};
+
+const SCENARIO_ETF_1M_FLAT_SORT_KEY = 'scenario_etf_1m_0und_1y_sigma';
+
+/** Same `estimateEtfReturn` path as Scenarios table: flat underlying, σ = 12M realized underlying annual vol, borrow/carry = 0. */
+function computeScenarioEtf1mFlatUnd1yRealized(r) {
+  const SR = typeof window !== 'undefined' ? window.ScenarioReturns : null;
+  if (!SR || typeof SR.horizonToYears !== 'function' || typeof SR.estimateEtfReturn !== 'function') return null;
+  const horizonYears = SR.horizonToYears('1M');
+  const lev = Number(r?.beta);
+  if (!Number.isFinite(horizonYears) || horizonYears <= 0 || !Number.isFinite(lev)) return null;
+  const rv12 = r?.realized_vol?.['12M'];
+  const sigma = Number(rv12?.underlying);
+  const nUnd = Number(rv12?.n_returns_underlying);
+  if (!Number.isFinite(sigma) || sigma <= 0) return null;
+  if (Number.isFinite(nUnd) && nUnd < 10) return null;
+  const res = SR.estimateEtfReturn({
+    leverage: lev,
+    underlyingReturn: 0,
+    sigmaAnnual: sigma,
+    horizonYears,
+    annualCarryDrag: 0,
+    minReturn: -0.9999,
+  });
+  return res.ok ? res.value : null;
+}
 const borrowBadge = v => {
   if (v == null) return null;
   if (v > 0.15) return <span className="badge badge-bad">HIGH</span>;
@@ -1887,7 +1919,14 @@ const COLS = [
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, hint: 'Realized gross: mean daily log-hedge-drag × 252 (see Decay math)' },
   { key: 'expected_gross_decay_annual', label: 'Exp. (Itô)', w: 95, hint: 'Theoretical gross: Itô vol-drag + fee + financing (+ mgr borrow if β<0)' },
-  { key: 'net_decay', label: 'Net (gross−borrow)', w: 100, hint: 'Point: realized gross − current ETF borrow (your short carry)' },
+  {
+    key: SCENARIO_ETF_1M_FLAT_SORT_KEY,
+    label: 'Scen. 1M ETF',
+    sublabel: '0% und · 12M σ',
+    w: 112,
+    numeric: true,
+    hint: 'Modeled ETF total return over ~1 month if underlying is flat (0%), using 12M realized historical underlying volatility as σ — same estimateEtfReturn mapping as the Scenarios tab (borrow/carry excluded).',
+  },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
@@ -4248,7 +4287,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('all');
   const [search, setSearch] = useState('');
-  const [sortKey, setSortKey] = useState('net_decay');
+  const [sortKey, setSortKey] = useState('net_edge_p50_annual');
   const [sortDesc, setSortDesc] = useState(true);
   const [expandedSym, setExpandedSym] = useState(null);
   const [showInfo, setShowInfo] = useState(false);
@@ -4367,7 +4406,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       d = d.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
     }
     d.sort((a, b) => {
-      let av = a[sortKey], bv = b[sortKey];
+      let av = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY ? computeScenarioEtf1mFlatUnd1yRealized(a) : a[sortKey];
+      let bv = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY ? computeScenarioEtf1mFlatUnd1yRealized(b) : b[sortKey];
       if (av == null) av = sortDesc ? -Infinity : Infinity;
       if (bv == null) bv = sortDesc ? -Infinity : Infinity;
       if (typeof av === 'string') return sortDesc ? bv.localeCompare(av) : av.localeCompare(bv);
@@ -4523,8 +4563,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
           <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
             <strong style={{ color: 'var(--text-secondary)' }}>Decay / edge —</strong>{' '}
-            <em>Gross (realized)</em> and <em>net (gross−borrow)</em> are screener points. <em>Exp. (Itô)</em> is the mechanical expectation.{' '}
-            <strong>Net edge</strong> column = <em>median</em> (large) + <em>fan</em> (same glyph everywhere: gray whisker, cyan IQR, blue p50). Hover the fan for exact p5–p25–p50–p75–p95; expand row for borrow mode, quantile table, and charts.
+            <em>Gross (realized)</em> is a screener point; <em>Exp. (Itô)</em> is the mechanical expectation.{' '}
+            <strong>Scen. 1M ETF</strong> matches the Scenarios tab math: ~1 month horizon, underlying flat (0%), σ = <strong>12M realized</strong> underlying vol (borrow excluded).{' '}
+            <strong>Net edge</strong> = <em>median</em> (large) + <em>fan</em> (gray whisker, cyan IQR, blue p50). Hover the fan for p5–p25–p50–p75–p95; expand row for borrow mode, quantile table, charts, and <em>net (gross−borrow)</em> point estimate.
             {data?.uncertainty_footnote && (
               <span> {data.uncertainty_footnote}</span>
             )}
@@ -4558,10 +4599,15 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                 where <em>f</em> is the fund expense ratio (decimal), <em>r</em> the risk-free rate used at run time, λ̄_mgr the underlying borrow input when available.
               </div>
               <div className="dm-block">
-                <div className="dm-title">Net (gross−borrow) — point estimate after <em>your</em> ETF borrow</div>
-                Subtracts the <strong>current</strong> annualized ETF borrow (short stock rate) from <strong>realized gross</strong>:
+                <div className="dm-title">Scen. 1M ETF (0% und · 12M σ) — same core mapping as Scenarios tab</div>
+                Uses <code className="dm-formula">ScenarioReturns.estimateEtfReturn</code> with horizon <strong>1M</strong>, <strong>underlyingReturn = 0</strong>,
+                <strong>σ = realized_vol[&quot;12M&quot;].underlying</strong> (annualized), <strong>leverage = β</strong>, and <strong>annualCarryDrag = 0</strong> (scenario grid excludes borrow/carry).
+                This is a <strong>conditional</strong> one-month ETF return path, not the screener's annualized realized drag.
+              </div>
+              <div className="dm-block">
+                <div className="dm-title">Net (gross−borrow) — point estimate (detail row)</div>
+                Still computed in data as realized gross minus current borrow; shown in the <strong>expanded</strong> row, not the main table:
                 <code className="dm-formula">net_decay ≈ gross_decay_annual − borrow_current</code>
-                (Same sign convention as gross: higher is better for a structural short on decay, before trading costs.)
               </div>
               <div className="dm-block">
                 <div className="dm-title">Net edge — bootstrap (formulas)</div>
@@ -4596,6 +4642,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               <tbody>
                 {filtered.map(r => {
                   const expanded = expandedSym === r.symbol;
+                  const scen1mFlat = computeScenarioEtf1mFlatUnd1yRealized(r);
                   return (
                     <React.Fragment key={r.symbol}>
                       <tr onClick={() => setExpandedSym(expanded ? null : r.symbol)}>
@@ -4615,7 +4662,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         <td>{fmtNum(r.shares_available)}</td>
                         <td>{fmt(r.gross_decay_annual)}</td>
                         <td>{fmt(r.expected_gross_decay_annual)}</td>
-                        <td className={spreadCls(r.net_decay)}>{fmt(r.net_decay)}</td>
+                        <td className={scenShortFavCls(scen1mFlat)} title="Modeled ETF return over ~1 month if underlying is flat (0%), using 12M realized underlying σ; same estimateEtfReturn as Scenarios (borrow excluded).">
+                          {scen1mFlat != null && Number.isFinite(scen1mFlat) ? fmt(scen1mFlat) : '—'}
+                        </td>
                         <td style={{ verticalAlign: 'middle' }}>
                           <NetEdgeMergedCell r={r} />
                         </td>
