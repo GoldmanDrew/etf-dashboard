@@ -124,6 +124,33 @@ def norm_sym(s: str) -> str:
     return str(s).strip().upper().replace(".", "-")
 
 
+def _borrow_history_point_for_avg(row: dict) -> bool:
+    """Include in borrow mean/median iff borrow is present and not a no-shares placeholder.
+
+    Drops ~0%% annual borrow when ``shares_available`` is known and <= 0 (matches
+    ls-algo weighted borrow resample). Legacy rows without ``shares_available`` stay in.
+    """
+    bc = row.get("borrow_current")
+    if bc is None or (isinstance(bc, float) and np.isnan(bc)):
+        return False
+    try:
+        v = float(bc)
+    except (TypeError, ValueError):
+        return False
+    if not np.isfinite(v):
+        return False
+    if abs(v) > 1e-12:
+        return True
+    sh = row.get("shares_available")
+    if sh is None:
+        return True
+    try:
+        si = int(float(sh))
+    except (TypeError, ValueError):
+        return True
+    return si > 0
+
+
 def _safe_float(row, key):
     """Read a float from a row, returning None if missing."""
     v = row.get(key)
@@ -2463,7 +2490,11 @@ def build():
             }
         hist_rows = sorted(by_day.values(), key=lambda x: x["date"])
         borrow_history_symbols[sym] = hist_rows
-        hist_borrows = [float(x["borrow_current"]) for x in hist_rows if x.get("borrow_current") is not None]
+        hist_borrows = [
+            float(x["borrow_current"])
+            for x in hist_rows
+            if _borrow_history_point_for_avg(x)
+        ]
         borrow_avg_annual = round(float(np.mean(hist_borrows)), 6) if hist_borrows else None
         last60 = hist_borrows[-60:] if len(hist_borrows) > 0 else []
         borrow_median_60d = round(float(np.median(last60)), 6) if last60 else None
