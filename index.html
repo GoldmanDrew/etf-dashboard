@@ -1548,16 +1548,32 @@ const scenShortFavCls = v => {
 
 const SCENARIO_ETF_1M_FLAT_SORT_KEY = 'scenario_etf_1m_0und_1y_sigma';
 
-/** Same `estimateEtfReturn` path as Scenarios table: flat underlying, σ = 12M realized underlying annual vol, borrow/carry = 0. */
-function computeScenarioEtf1mFlatUnd1yRealized(r) {
+/**
+ * Vol block for the **chart lookback** (`chartVolLookbackRange` = TIMEFRAMES[].range), same key as ChartPage `volPoint`.
+ * No cross-window fallback — matches Scenarios when that window is missing or invalid (cell shows —).
+ */
+function realizedVolPointForScenarioColumn(r, chartVolLookbackRange) {
+  const raw = chartVolLookbackRange != null && String(chartVolLookbackRange).trim() !== ''
+    ? String(chartVolLookbackRange)
+    : '6M';
+  const volWindowKey = VOL_TF_KEY_BY_RANGE[raw] || '6M';
+  return r?.realized_vol?.[volWindowKey] || null;
+}
+
+/**
+ * Same cell as Scenarios grid: horizon **1M**, underlying shock **0%**, σ = **1.0 × underlying EWMA**
+ * from `realized_vol[chart lookback]`, `annualCarryDrag = 0`.
+ * `chartVolLookbackRange` is persisted from chart timeframe buttons (default **6M**).
+ */
+function computeScenarioEtf1mFlatUnd1yRealized(r, chartVolLookbackRange) {
   const SR = typeof window !== 'undefined' ? window.ScenarioReturns : null;
   if (!SR || typeof SR.horizonToYears !== 'function' || typeof SR.estimateEtfReturn !== 'function') return null;
   const horizonYears = SR.horizonToYears('1M');
   const lev = Number(r?.beta);
   if (!Number.isFinite(horizonYears) || horizonYears <= 0 || !Number.isFinite(lev)) return null;
-  const rv12 = r?.realized_vol?.['12M'];
-  const sigma = Number(rv12?.underlying);
-  const nUnd = Number(rv12?.n_returns_underlying);
+  const vp = realizedVolPointForScenarioColumn(r, chartVolLookbackRange);
+  const sigma = Number(vp?.underlying_ewma) || Number(vp?.underlying);
+  const nUnd = Number(vp?.n_returns_underlying);
   if (!Number.isFinite(sigma) || sigma <= 0) return null;
   if (Number.isFinite(nUnd) && nUnd < 10) return null;
   const res = SR.estimateEtfReturn({
@@ -1920,19 +1936,19 @@ const COLS = [
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, hint: 'Realized gross: mean daily log-hedge-drag × 252 (see Decay math)' },
   { key: 'expected_gross_decay_annual', label: 'Exp. (Itô)', w: 95, hint: 'Theoretical gross: Itô vol-drag + fee + financing (+ mgr borrow if β<0)' },
   {
-    key: SCENARIO_ETF_1M_FLAT_SORT_KEY,
-    label: 'Scen. 1M ETF',
-    sublabel: '0% und · 12M σ',
-    w: 112,
-    numeric: true,
-    hint: 'Modeled ETF total return over ~1 month if underlying is flat (0%), using 12M realized historical underlying volatility as σ — same estimateEtfReturn mapping as the Scenarios tab (borrow/carry excluded).',
-  },
-  {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
     sublabel: 'median · fan',
     w: 130,
     hint: 'Bootstrap net structural edge (annual, short-favourable +). Large number = median (net_edge_p50_annual). Fan = same geometry everywhere: gray whisker p5–p95, cyan IQR p25–p75, blue dot p50. Hover fan for all quantiles. Sort uses median.',
+  },
+  {
+    key: SCENARIO_ETF_1M_FLAT_SORT_KEY,
+    label: 'Scen. 1M ETF',
+    sublabel: '0% und · EWMA σ',
+    w: 112,
+    numeric: true,
+    hint: 'Same as Scenarios table: ~1M horizon, underlying return 0%, σ = underlying EWMA for the chart lookback (persisted from the chart page; default 6M). Uses that row’s realized_vol[window] only — no silent fallback to another window. 1.0× vol column equivalent; borrow/carry excluded.',
   },
   { key: 'vol_underlying_annual', label: 'Vol Und', w: 80 },
   { key: 'vol_etf_annual', label: 'Vol ETF', w: 80 },
@@ -2334,10 +2350,13 @@ function buildWidgetHtml(symbol, compareSymbol, range, interval) {
 </body></html>`;
 }
 
-function ChartPage({ record, onBack }) {
-  const [activeTf, setActiveTf] = useState(TIMEFRAMES[2]); // 6M
+function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange }) {
+  const activeTf = useMemo(
+    () => TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2],
+    [chartVolLookbackRange],
+  );
   const [activePanel, setActivePanel] = useState('chart');
-  const [scenarioHorizon, setScenarioHorizon] = useState('1Y');
+  const [scenarioHorizon, setScenarioHorizon] = useState('1M');
   const [mcPathCount, setMcPathCount] = useState(500);
   const [mcSeed, setMcSeed] = useState(42);
   const [mcRuinThresholdPct, setMcRuinThresholdPct] = useState(-80);
@@ -2980,7 +2999,7 @@ function ChartPage({ record, onBack }) {
           {TIMEFRAMES.map(tf => (
             <button key={tf.range}
               className={cls('tf-btn', activeTf.range === tf.range && 'tf-active')}
-              onClick={() => setActiveTf(tf)}>
+              onClick={() => setChartVolLookbackRange(tf.range)}>
               {tf.label}
             </button>
           ))}
@@ -4293,6 +4312,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [showInfo, setShowInfo] = useState(false);
   const [showNews, setShowNews] = useState(false);
   const [chartRecord, setChartRecord] = useState(null);
+  /** Persisted chart timeframe (TIMEFRAMES[].range); drives TradingView embed, Scenarios σ, and main-table Scen. 1M ETF. */
+  const [chartVolLookbackRange, setChartVolLookbackRange] = useState(TIMEFRAMES[2].range);
   const [corporateActions, setCorporateActions] = useState(null);
   const [etfNews, setEtfNews] = useState(null);
   const [newsError, setNewsError] = useState(null);
@@ -4386,6 +4407,11 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
     return hit?.bucket || null;
   }, [data]);
 
+  const chartVolTfLabel = useMemo(
+    () => (TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2]).label,
+    [chartVolLookbackRange],
+  );
+
   const records = data?.records || [];
   const summary = data?.summary || {};
   const freshness = useMemo(() => getFreshness(data), [data]);
@@ -4406,8 +4432,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       d = d.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
     }
     d.sort((a, b) => {
-      let av = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY ? computeScenarioEtf1mFlatUnd1yRealized(a) : a[sortKey];
-      let bv = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY ? computeScenarioEtf1mFlatUnd1yRealized(b) : b[sortKey];
+      let av = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY ? computeScenarioEtf1mFlatUnd1yRealized(a, chartVolLookbackRange) : a[sortKey];
+      let bv = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY ? computeScenarioEtf1mFlatUnd1yRealized(b, chartVolLookbackRange) : b[sortKey];
       if (av == null) av = sortDesc ? -Infinity : Infinity;
       if (bv == null) bv = sortDesc ? -Infinity : Infinity;
       if (typeof av === 'string') return sortDesc ? bv.localeCompare(av) : av.localeCompare(bv);
@@ -4415,7 +4441,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       return sortDesc ? bv - av : av - bv;
     });
     return d;
-  }, [records, activeTab, search, sortKey, sortDesc]);
+  }, [records, activeTab, search, sortKey, sortDesc, chartVolLookbackRange]);
 
   const tabCounts = useMemo(() => {
     const c = { all: records.length, bucket_1: 0, bucket_2: 0, bucket_3: 0 };
@@ -4564,8 +4590,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
             <strong style={{ color: 'var(--text-secondary)' }}>Decay / edge —</strong>{' '}
             <em>Gross (realized)</em> is a screener point; <em>Exp. (Itô)</em> is the mechanical expectation.{' '}
-            <strong>Scen. 1M ETF</strong> matches the Scenarios tab math: ~1 month horizon, underlying flat (0%), σ = <strong>12M realized</strong> underlying vol (borrow excluded).{' '}
-            <strong>Net edge</strong> = <em>median</em> (large) + <em>fan</em> (gray whisker, cyan IQR, blue p50). Hover the fan for p5–p25–p50–p75–p95; expand row for borrow mode, quantile table, charts, and <em>net (gross−borrow)</em> point estimate.
+            <strong>Net edge</strong> = <em>median</em> (large) + <em>fan</em> (gray whisker, cyan IQR, blue p50). Hover the fan for p5–p25–p50–p75–p95; expand row for borrow mode, quantile table, charts, and <em>net (gross−borrow)</em> point estimate.{' '}
+            <strong>Scen. 1M ETF</strong> matches the Scenarios grid: <strong>1M</strong> horizon, <strong>0%</strong> underlying move, σ = underlying <strong>EWMA</strong> for the <strong>{chartVolTfLabel}</strong> chart lookback (saved when you change timeframes on the chart; default 6M), same <code>estimateEtfReturn</code> path as the center vol column (borrow excluded).
             {data?.uncertainty_footnote && (
               <span> {data.uncertainty_footnote}</span>
             )}
@@ -4599,9 +4625,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                 where <em>f</em> is the fund expense ratio (decimal), <em>r</em> the risk-free rate used at run time, λ̄_mgr the underlying borrow input when available.
               </div>
               <div className="dm-block">
-                <div className="dm-title">Scen. 1M ETF (0% und · 12M σ) — same core mapping as Scenarios tab</div>
+                <div className="dm-title">Scen. 1M ETF (0% und · EWMA σ) — same cell as Scenarios grid</div>
                 Uses <code className="dm-formula">ScenarioReturns.estimateEtfReturn</code> with horizon <strong>1M</strong>, <strong>underlyingReturn = 0</strong>,
-                <strong>σ = realized_vol[&quot;12M&quot;].underlying</strong> (annualized), <strong>leverage = β</strong>, and <strong>annualCarryDrag = 0</strong> (scenario grid excludes borrow/carry).
+                <strong>σ</strong> = <code>{'realized_vol[<lookback>].underlying_ewma'}</code> (fallback: that window&apos;s realized σ only), <strong>leverage = β</strong>, and <strong>annualCarryDrag = 0</strong> — matching <code>buildScenarioGrid</code> with <strong>bestVolAnnual = EWMA</strong> and the <strong>1.0×</strong> vol column for the same lookback the chart uses (currently <strong>{chartVolTfLabel}</strong> in this session). Scenario tab default horizon is <strong>1M</strong>.
                 This is a <strong>conditional</strong> one-month ETF return path, not the screener's annualized realized drag.
               </div>
               <div className="dm-block">
@@ -4642,7 +4668,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               <tbody>
                 {filtered.map(r => {
                   const expanded = expandedSym === r.symbol;
-                  const scen1mFlat = computeScenarioEtf1mFlatUnd1yRealized(r);
+                  const scen1mFlat = computeScenarioEtf1mFlatUnd1yRealized(r, chartVolLookbackRange);
                   return (
                     <React.Fragment key={r.symbol}>
                       <tr onClick={() => setExpandedSym(expanded ? null : r.symbol)}>
@@ -4662,11 +4688,11 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         <td>{fmtNum(r.shares_available)}</td>
                         <td>{fmt(r.gross_decay_annual)}</td>
                         <td>{fmt(r.expected_gross_decay_annual)}</td>
-                        <td className={scenShortFavCls(scen1mFlat)} title="Modeled ETF return over ~1 month if underlying is flat (0%), using 12M realized underlying σ; same estimateEtfReturn as Scenarios (borrow excluded).">
-                          {scen1mFlat != null && Number.isFinite(scen1mFlat) ? fmt(scen1mFlat) : '—'}
-                        </td>
                         <td style={{ verticalAlign: 'middle' }}>
                           <NetEdgeMergedCell r={r} />
+                        </td>
+                        <td className={scenShortFavCls(scen1mFlat)} title="Modeled ETF return over ~1 month if underlying is flat (0%); σ = underlying EWMA for the chart lookback; same estimateEtfReturn as Scenarios (borrow excluded).">
+                          {scen1mFlat != null && Number.isFinite(scen1mFlat) ? fmt(scen1mFlat) : '—'}
                         </td>
                         <td>{fmt(r.vol_underlying_annual)}</td>
                         <td>{fmt(r.vol_etf_annual)}</td>
