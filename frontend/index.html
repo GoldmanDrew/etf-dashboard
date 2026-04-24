@@ -396,15 +396,16 @@ function SummaryCard({ label, value, sub, color }) {
 const COLUMNS = [
   { key: 'symbol', label: 'Symbol', w: 90 },
   { key: 'underlying', label: 'Underlying', w: 90 },
-  { key: 'beta', label: 'Beta', w: 70, numeric: true },
+  { key: 'beta', label: 'Beta', w: 70, numeric: true, hint: 'OLS beta (ETF vs underlying total return)' },
   { key: 'leverage', label: 'Lev', w: 55, numeric: true },
   { key: 'borrow_net_annual', label: 'Borrow', w: 88, numeric: true },
-  { key: 'borrow_median_60d', label: 'Borrow 60d med', w: 100, numeric: true },
+  { key: 'borrow_median_60d', label: 'Borrow 60d med', w: 100, numeric: true, hint: 'Median of last up to 60 daily borrow points (fee-only, annualized)' },
   { key: 'shares_available', label: 'Shares Avail', w: 100, numeric: true },
-  { key: 'gross_decay_annual', label: 'Gross Decay', w: 100, numeric: true },
-  { key: 'net_edge_p50_annual', label: 'Net edge p50', w: 100, numeric: true },
-  { key: 'net_edge_p05_annual', label: 'Net p5/p95', w: 100, numeric: true },
-  { key: 'spread', label: 'Spread', w: 90, numeric: true },
+  { key: 'gross_decay_annual', label: 'Gross (realized)', w: 108, numeric: true, hint: 'Screener point estimate: daily log-drag (or primary gross definition), annualized' },
+  { key: 'expected_gross_decay_annual', label: 'Expected (Itô)', w: 108, numeric: true, hint: '0.5×|β|×|β−1|×σ² — mechanical expectation from screener (point)' },
+  { key: 'net_edge_p50_annual', label: 'Net edge p50', w: 100, numeric: true, hint: 'Block-bootstrap median of net structural edge (gross drag − borrow at run), annualized' },
+  { key: 'net_edge_p05_annual', label: 'Net p5 / p95', w: 100, numeric: true, hint: 'Bootstrap 5% / 95% of net edge; not a full tail-risk model' },
+  { key: 'spread', label: 'Spread', w: 90, numeric: true, hint: 'Gross realized − current borrow' },
   { key: 'regime_warning', label: 'Regime', w: 80, numeric: false },
   { key: 'decay_3m', label: '3M Decay', w: 85, numeric: true },
   { key: 'decay_6m', label: '6M Decay', w: 85, numeric: true },
@@ -422,6 +423,7 @@ function TableHeader({ sortKey, sortDesc, onSort }) {
             style={{ width: col.w }}
             className={sortKey === col.key ? 'sorted' : ''}
             onClick={() => onSort(col.key)}
+            title={col.hint || col.label}
           >
             {col.label}
             {sortKey === col.key && (
@@ -549,6 +551,7 @@ function TableRow({ record, expanded, onToggle, history }) {
         </td>
         <td>{fmtNum(record.shares_available)}</td>
         <td>{fmt(record.gross_decay_annual)}</td>
+        <td>{fmt(record.expected_gross_decay_annual)}</td>
         <td className={spreadClass(record.net_edge_p50_annual)}>{record.net_edge_p50_annual != null ? fmt(record.net_edge_p50_annual) : '—'}</td>
         <td style={{ fontSize: 11, color: 'var(--text-muted)' }} title={record.net_edge_fan_label || ''}>
           {record.net_edge_p05_annual != null && record.net_edge_p95_annual != null
@@ -951,6 +954,14 @@ function App() {
               {filtered.length} results
             </span>
           </div>
+
+          <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
+            <strong style={{ color: 'var(--text-secondary) }}>Decay columns —</strong>{' '}
+            <em>Gross (realized)</em> is the screener&rsquo;s point estimate (daily log-drag or blended/primary).{' '}
+            <em>Expected (Itô)</em> is the mechanical 0.5|β||β−1|σ² from the same run.{' '}
+            <em>Net edge p50 / p5–p95</em> use block resampling of daily log-drag (uncertainty on net edge, not a full tail model).{' '}
+            All buckets: β &lt; 0 and curated inverse list → <strong>Bucket 3 (inverse)</strong>.
+          </p>
 
           {/* ── Table ─────────────── */}
           <div className="table-container">

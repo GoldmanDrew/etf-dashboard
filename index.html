@@ -1767,11 +1767,14 @@ function SimpleSeriesPlot({
 const COLS = [
   { key: 'symbol', label: 'Symbol', w: 90 },
   { key: 'underlying', label: 'Underlying', w: 85 },
-  { key: 'beta', label: 'Beta', w: 65 },
+  { key: 'beta', label: 'Beta', w: 65, hint: 'OLS beta (ETF vs underlying)' },
   { key: 'borrow_current', label: 'Borrow Rate', w: 105 },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
-  { key: 'gross_decay_annual', label: 'Gross Decay', w: 100 },
-  { key: 'net_decay', label: 'Net Decay', w: 100 },
+  { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, hint: 'Screener point: daily log-drag / primary gross' },
+  { key: 'expected_gross_decay_annual', label: 'Exp. (Itô)', w: 95, hint: 'Mechanical 0.5|β||β−1|σ² from screener' },
+  { key: 'net_decay', label: 'Net (gross−borrow)', w: 100, hint: 'Point: realized gross − current borrow' },
+  { key: 'net_edge_p50_annual', label: 'Net edge p50', w: 100, hint: 'Block-bootstrap median, net of borrow' },
+  { key: 'net_edge_p05_annual', label: 'Net p5/p95', w: 100, hint: 'Bootstrap percentiles; not a full tail model' },
   { key: 'vol_underlying_annual', label: 'Vol Und', w: 80 },
   { key: 'vol_etf_annual', label: 'Vol ETF', w: 80 },
 ];
@@ -2020,6 +2023,11 @@ function ChartPage({ record, onBack }) {
   const etfSym = r.symbol;
   const undSym = r.underlying;
   const tradeFns = window.TradeLab || {};
+
+  const hideScenarios = r.bucket === 'bucket_2_low_beta';
+  useEffect(() => {
+    if (hideScenarios && activePanel === 'scenarios') setActivePanel('chart');
+  }, [hideScenarios, activePanel]);
 
   const bucketLabel = r.bucket === 'bucket_1_high_beta' ? 'Bucket 1 — High β'
     : r.bucket === 'bucket_2_low_beta' ? 'Bucket 2 — Low β'
@@ -2613,7 +2621,9 @@ function ChartPage({ record, onBack }) {
         <div className="chart-view-switch">
           <button className={cls('chart-view-btn', activePanel === 'chart' && 'active')} onClick={() => setActivePanel('chart')}>Chart</button>
           <button className={cls('chart-view-btn', activePanel === 'stats' && 'active')} onClick={() => setActivePanel('stats')}>Stats</button>
-          <button className={cls('chart-view-btn', activePanel === 'scenarios' && 'active')} onClick={() => setActivePanel('scenarios')}>Scenarios</button>
+          {!hideScenarios && (
+            <button className={cls('chart-view-btn', activePanel === 'scenarios' && 'active')} onClick={() => setActivePanel('scenarios')}>Scenarios</button>
+          )}
           <button className={cls('chart-view-btn', activePanel === 'trade' && 'active')} onClick={() => setActivePanel('trade')}>Trade Lab</button>
           <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => setActivePanel('borrow')}>Borrow</button>
         </div>
@@ -2692,9 +2702,14 @@ function ChartPage({ record, onBack }) {
               <div className="cs-sub">{fmtNum(r.beta_n_obs)} obs</div>
             </div>
             <div className="chart-stat">
-              <div className="cs-label">Gross Decay</div>
+              <div className="cs-label">Gross (realized)</div>
               <div className="cs-value" style={{ color: 'var(--positive)' }}>{fmt(r.gross_decay_annual)}</div>
-              <div className="cs-sub">annual (linear)</div>
+              <div className="cs-sub">screener point, annual</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">Expected gross (Itô)</div>
+              <div className="cs-value">{fmt(r.expected_gross_decay_annual)}</div>
+              <div className="cs-sub">mechanical, from screener</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">Borrow Rate</div>
@@ -4198,6 +4213,16 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             </span>
           </div>
 
+          <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
+            <strong style={{ color: 'var(--text-secondary)' }}>Decay / edge —</strong>{' '}
+            <em>Gross (realized)</em> and <em>net (gross−borrow)</em> are screener points. <em>Exp. (Itô)</em> is the mechanical expectation.{' '}
+            <em>Net edge p50 / p5–p95</em> = block bootstrap on daily log-drag (sampling uncertainty on net edge).{' '}
+            β &lt; 0 → <strong>Bucket 3 (inverse)</strong> (no separate bucket 4).
+            {data?.uncertainty_footnote && (
+              <span> {data.uncertainty_footnote}</span>
+            )}
+          </p>
+
           {/* ── Table ─────────── */}
           <div className="table-container">
             <table className="etf-table">
@@ -4207,7 +4232,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                   {COLS.map(col => (
                     <th key={col.key} style={{ width: col.w }}
                       className={sortKey === col.key ? 'sorted' : ''}
-                      onClick={() => handleSort(col.key)}>
+                      onClick={() => handleSort(col.key)}
+                      title={col.hint || col.label}
+                    >
                       {col.label}
                       {sortKey === col.key && <span className="sort-arrow">{sortDesc ? '▼' : '▲'}</span>}
                     </th>
@@ -4235,7 +4262,14 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         </td>
                         <td>{fmtNum(r.shares_available)}</td>
                         <td>{fmt(r.gross_decay_annual)}</td>
+                        <td>{fmt(r.expected_gross_decay_annual)}</td>
                         <td className={spreadCls(r.net_decay)}>{fmt(r.net_decay)}</td>
+                        <td className={spreadCls(r.net_edge_p50_annual)}>{r.net_edge_p50_annual != null ? fmt(r.net_edge_p50_annual) : '—'}</td>
+                        <td style={{ fontSize: 11, color: 'var(--text-muted)' }} title={r.net_edge_fan_label || ''}>
+                          {r.net_edge_p05_annual != null && r.net_edge_p95_annual != null
+                            ? `${fmt(r.net_edge_p05_annual)} / ${fmt(r.net_edge_p95_annual)}`
+                            : (r.net_edge_fan_label || '—')}
+                        </td>
                         <td>{fmt(r.vol_underlying_annual)}</td>
                         <td>{fmt(r.vol_etf_annual)}</td>
                       </tr>

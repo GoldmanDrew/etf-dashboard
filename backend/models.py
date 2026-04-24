@@ -34,6 +34,7 @@ class ETFRecord(BaseModel):
 
     # Decay / analytics
     gross_decay_annual: Optional[float] = None
+    expected_gross_decay_annual: Optional[float] = None
     spread: Optional[float] = None  # gross_decay - borrow_net
     decay_3m: Optional[float] = None
     decay_6m: Optional[float] = None

@@ -69,6 +69,19 @@ class TestBucketAssignment:
         assert sso["bucket"] == Bucket.LOW_BETA.value
         assert qld["bucket"] == Bucket.LOW_BETA.value
 
+    def test_negative_beta_not_in_inverse_list_goes_to_bucket_3(self, inverse_set):
+        """Inverse single-names (β<0) are bucket 3; no separate bucket_4."""
+        df = pd.DataFrame({
+            "ETF": ["NVDQ"],
+            "Underlying": ["NVDA"],
+            "Leverage": [-2.0],
+            "Beta": [-1.9],
+            "symbol": ["NVDQ"],
+            "underlying": ["NVDA"],
+        })
+        out = assign_buckets(df, inverse_set, high_beta_threshold=1.5)
+        assert out.iloc[0]["bucket"] == Bucket.INVERSE.value
+
     def test_inverse_overrides_beta(self, sample_universe, inverse_set):
         """Even if an inverse ETF has high absolute beta, it goes to Bucket 3."""
         df = assign_buckets(sample_universe, inverse_set, high_beta_threshold=1.5)

@@ -2504,6 +2504,7 @@ def build():
             "borrow_spiking": bool(row.get("borrow_spiking", False)),
             "borrow_missing": bool(row.get("borrow_missing_from_ftp", False)),
             "gross_decay_annual": gross_decay,
+            "expected_gross_decay_annual": _safe_float(rdict, "expected_gross_decay_annual"),
             "net_decay": net_decay,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,

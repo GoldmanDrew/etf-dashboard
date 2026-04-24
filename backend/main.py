@@ -210,6 +210,9 @@ def _build_records_from_csv():
         except (TypeError, ValueError):
             scv = 2
 
+        bkt = str(row.get("bucket", Bucket.LOW_BETA.value))
+        if bkt == "bucket_4_edge" or bkt == "bucket_4":
+            bkt = Bucket.INVERSE.value
         rec = ETFRecord(
             symbol=sym,
             underlying=str(row.get("underlying", "")),
@@ -217,7 +220,7 @@ def _build_records_from_csv():
             expected_leverage=float(row["ExpectedLeverage"]) if "ExpectedLeverage" in row and not _isnan(row.get("ExpectedLeverage")) else None,
             beta=float(row["Beta"]) if not _isnan(row.get("Beta")) else None,
             beta_n_obs=int(row["Beta_n_obs"]) if not _isnan(row.get("Beta_n_obs")) else None,
-            bucket=str(row.get("bucket", Bucket.LOW_BETA.value)),
+            bucket=bkt,
             borrow_fee_annual=float(row["borrow_fee_annual"]) if not _isnan(row.get("borrow_fee_annual")) else None,
             borrow_rebate_annual=float(row["borrow_rebate_annual"]) if not _isnan(row.get("borrow_rebate_annual")) else None,
             borrow_net_annual=bnet,
@@ -230,6 +233,7 @@ def _build_records_from_csv():
             borrow_spiking=bool(row.get("borrow_spiking", False)),
             borrow_missing=bool(row.get("borrow_missing_from_ftp", False)),
             gross_decay_annual=gdec,
+            expected_gross_decay_annual=_v2f(row, "expected_gross_decay_annual"),
             spread=spread0,
             include_for_algo=bool(row.get("include_for_algo", False)),
             protected=bool(row.get("protected", False)),
@@ -380,6 +384,13 @@ def refresh_decay():
                 g = g.iloc[0] if len(g) else None
                 if g is not None and not (isinstance(g, float) and np.isnan(g)):
                     rec.gross_decay_annual = float(g)
+        if prefer_csv and UNIVERSE_DF is not None and "expected_gross_decay_annual" in UNIVERSE_DF.columns:
+            m = UNIVERSE_DF["symbol"].astype(str) == sym
+            if m.any():
+                ex = UNIVERSE_DF.loc[m, "expected_gross_decay_annual"]
+                ex = ex.iloc[0] if len(ex) else None
+                if ex is not None and not (isinstance(ex, float) and np.isnan(ex)):
+                    rec.expected_gross_decay_annual = float(ex)
         if sym in DECAY_DATA:
             d = DECAY_DATA[sym]
             if not (prefer_csv and rec.gross_decay_annual is not None):
