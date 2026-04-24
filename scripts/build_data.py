@@ -2537,6 +2537,14 @@ def build():
             "decomposition_note": (str(rdict["decomposition_note"]).strip() if rdict.get("decomposition_note") and str(rdict.get("decomposition_note") or "").strip() not in ("", "nan") else None),
             "copula_note": (str(rdict["copula_note"]).strip() if rdict.get("copula_note") and str(rdict.get("copula_note") or "").strip() not in ("", "nan") else None),
             "copula_type": (str(rdict["copula_type"]).strip() if rdict.get("copula_type") and str(rdict.get("copula_type") or "").strip() not in ("", "nan") else None),
+            "borrow_weight_halflife_days": _safe_float(rdict, "borrow_weight_halflife_days"),
+            "borrow_history_points_used": _safe_float(rdict, "borrow_history_points_used"),
+            "borrow_resample_mode": (
+                str(rdict["borrow_resample_mode"]).strip()
+                if rdict.get("borrow_resample_mode")
+                and str(rdict.get("borrow_resample_mode") or "").strip() not in ("", "nan")
+                else None
+            ),
             "borrow_dispersion_type": (str(rdict.get("borrow_dispersion_type") or borrow_dispersion_type or "none") or "none"),
             "schema_v": _int_schema_v(rdict.get("schema_v", 2)),
             "edge_sign_convention": (str(rdict.get("edge_sign_convention", "short_favorable_positive"))),

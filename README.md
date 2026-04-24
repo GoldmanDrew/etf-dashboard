@@ -9,7 +9,9 @@ Real-time IBKR short stock borrow rate monitoring with decay-vs-borrow spread an
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  GoldmanDrew/ls-algo  (daily GitHub Action)                  │
-│    etf_screener.py → data/etf_screened_today.csv → git push  │
+│    daily_screener.py → data/etf_screened_today.csv → git push │
+│    Optional: --borrow-history-path → this repo’s              │
+│    data/borrow_history.json for weighted net_edge_*          │
 └────────────────────────────┬─────────────────────────────────┘
                              │  raw.githubusercontent.com
 ┌────────────────────────────▼─────────────────────────────────┐
@@ -108,6 +110,15 @@ etf-dashboard/
 ## Data Sources
 
 - **Universe**: `GoldmanDrew/ls-algo` → `data/etf_screened_today.csv`
+
+### Borrow history and ls-algo `net_edge_*`
+
+`scripts/build_data.py` maintains **`data/borrow_history.json`** (append-only daily `borrow_current` per symbol). To have ls-algo’s schema v2 **`net_edge_p05_annual` / `p50` / `p95`** use **weighted resampling** over that full history (recent-heavy half-life, default 90 calendar days), run the daily screener with either:
+
+- `python daily_screener.py --borrow-history-path ../etf-dashboard/data/borrow_history.json`, or  
+- `BORROW_HISTORY_PATH` set to the same file before `daily_screener.py`.
+
+Without that path, ls-algo keeps the legacy **point-in-time** borrow subtraction. New CSV columns (`borrow_resample_mode`, `borrow_weight_halflife_days`, `borrow_history_points_used`) describe which path was used.
 - **Borrow rates**: IBKR public FTP (`ftp2.interactivebrokers.com/usa.txt`) — dashboard uses fee-only borrow (not net of rebate), with shares available
 - **Spot + options**: Tradier REST (spot primary) + Polygon REST (options snapshots/contracts, spot fallback)
 - **Decay**: Volatility drag model estimate (plug in real Stahl metrics when price data is available)

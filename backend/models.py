@@ -65,6 +65,9 @@ class ETFRecord(BaseModel):
     decomposition_note: Optional[str] = None
     copula_note: Optional[str] = None
     copula_type: Optional[str] = None
+    borrow_weight_halflife_days: Optional[float] = None
+    borrow_history_points_used: Optional[float] = None
+    borrow_resample_mode: Optional[str] = None
     schema_v: Optional[int] = None
     edge_sign_convention: Optional[str] = None
 

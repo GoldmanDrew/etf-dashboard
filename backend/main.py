@@ -264,6 +264,9 @@ def _build_records_from_csv():
             decomposition_note=_v2s(row, "decomposition_note"),
             copula_note=_v2s(row, "copula_note"),
             copula_type=_v2s(row, "copula_type"),
+            borrow_weight_halflife_days=_v2f(row, "borrow_weight_halflife_days"),
+            borrow_history_points_used=_v2f(row, "borrow_history_points_used"),
+            borrow_resample_mode=_v2s(row, "borrow_resample_mode"),
             schema_v=scv,
             edge_sign_convention=_v2s(row, "edge_sign_convention") or "short_favorable_positive",
         )
