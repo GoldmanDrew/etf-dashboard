@@ -404,7 +404,7 @@ const COLUMNS = [
   { key: 'gross_decay_annual', label: 'Gross (realized)', w: 108, numeric: true, hint: 'Screener point estimate: daily log-drag (or primary gross definition), annualized' },
   { key: 'expected_gross_decay_annual', label: 'Expected (Itô)', w: 108, numeric: true, hint: '0.5×|β|×|β−1|×σ² — mechanical expectation from screener (point)' },
   { key: 'net_edge_p50_annual', label: 'Net edge p50', w: 100, numeric: true, hint: 'Block-bootstrap median of net structural edge (gross drag − borrow at run), annualized' },
-  { key: 'net_edge_p05_annual', label: 'Net p5 / p95', w: 100, numeric: true, hint: 'Bootstrap 5% / 95% of net edge; not a full tail-risk model' },
+  { key: 'net_edge_p05_annual', label: 'Net edge (band)', w: 115, numeric: true, hint: 'Bootstrap fan — hover for p5–p95 and IQR; not a full tail-risk model' },
   { key: 'spread', label: 'Spread', w: 90, numeric: true, hint: 'Gross realized − current borrow' },
   { key: 'regime_warning', label: 'Regime', w: 80, numeric: false },
   { key: 'decay_3m', label: '3M Decay', w: 85, numeric: true },
@@ -456,6 +456,44 @@ function borrowBadge(v) {
   return null;
 }
 
+function NetEdgeFanTableCell({ record }) {
+  const p5 = Number(record.net_edge_p05_annual);
+  const p25 = Number(record.net_edge_p25_annual);
+  const p50 = Number(record.net_edge_p50_annual);
+  const p75 = Number(record.net_edge_p75_annual);
+  const p95 = Number(record.net_edge_p95_annual);
+  const hasWhisk = Number.isFinite(p5) && Number.isFinite(p95) && Number.isFinite(p50);
+  if (!hasWhisk) return <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>;
+  const hasIqr = Number.isFinite(p25) && Number.isFinite(p75);
+  const lo = p5;
+  const hi = p95;
+  const span = hi > lo ? hi - lo : 1e-8;
+  const W = 52;
+  const x = v => ((v - lo) / span) * W + 3;
+  const ymid = 10;
+  const tip = [
+    `p5 ${fmt(p5)}`,
+    hasIqr ? `p25 ${fmt(p25)}` : null,
+    `p50 ${fmt(p50)}`,
+    hasIqr ? `p75 ${fmt(p75)}` : null,
+    `p95 ${fmt(p95)}`,
+  ].filter(Boolean).join(' · ');
+  return (
+    <span title={tip} style={{ display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle' }} onClick={e => e.stopPropagation()}>
+      <svg width="58" height="18" viewBox="0 0 58 18" style={{ display: 'block' }} aria-hidden="true">
+        <line x1={x(p5)} y1={ymid} x2={x(p95)} y2={ymid} stroke="rgba(130,150,185,0.95)" strokeWidth="2" strokeLinecap="round" />
+        {hasIqr ? (
+          <rect
+            x={x(p25)} y={3} width={Math.max(x(p75) - x(p25), 1)} height={14} rx="1"
+            fill="rgba(59,130,246,0.38)" stroke="rgba(59,130,246,0.75)" strokeWidth="1"
+          />
+        ) : null}
+        <circle cx={x(p50)} cy={ymid} r={hasIqr ? 2.2 : 3} fill="var(--accent-blue)" />
+      </svg>
+    </span>
+  );
+}
+
 // ── Detail Expand Row ────────────────────────
 function DetailRow({ record, history }) {
   const histVals = useMemo(() => {
@@ -470,10 +508,6 @@ function DetailRow({ record, history }) {
           <div className="detail-item">
             <div className="dlabel">Borrow Fee (Gross)</div>
             <div className="dval">{fmt(record.borrow_fee_annual)}</div>
-          </div>
-          <div className="detail-item">
-            <div className="dlabel">Rebate</div>
-            <div className="dval">{fmt(record.borrow_rebate_annual)}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Net Borrow</div>
@@ -503,22 +537,6 @@ function DetailRow({ record, history }) {
             <div className="dlabel">Borrow History</div>
             <div className="dval">
               <Sparkline data={histVals} width={120} height={28} color="#3b82f6" />
-            </div>
-          </div>
-          <div className="detail-item">
-            <div className="dlabel">Spiking</div>
-            <div className="dval">
-              {record.borrow_spiking
-                ? <span className="badge badge-bad">YES</span>
-                : <span className="badge badge-good">NO</span>}
-            </div>
-          </div>
-          <div className="detail-item">
-            <div className="dlabel">CAGR Positive</div>
-            <div className="dval">
-              {record.cagr_positive === true ? <span className="badge badge-good">YES</span>
-               : record.cagr_positive === false ? <span className="badge badge-bad">NO</span>
-               : '—'}
             </div>
           </div>
         </div>
@@ -553,10 +571,8 @@ function TableRow({ record, expanded, onToggle, history }) {
         <td>{fmt(record.gross_decay_annual)}</td>
         <td>{fmt(record.expected_gross_decay_annual)}</td>
         <td className={spreadClass(record.net_edge_p50_annual)}>{record.net_edge_p50_annual != null ? fmt(record.net_edge_p50_annual) : '—'}</td>
-        <td style={{ fontSize: 11, color: 'var(--text-muted)' }} title={record.net_edge_fan_label || ''}>
-          {record.net_edge_p05_annual != null && record.net_edge_p95_annual != null
-            ? `${fmt(record.net_edge_p05_annual)} / ${fmt(record.net_edge_p95_annual)}`
-            : (record.net_edge_fan_label || '—')}
+        <td style={{ verticalAlign: 'middle' }}>
+          <NetEdgeFanTableCell record={record} />
         </td>
         <td className={spreadClass(record.spread)}>
           {fmt(record.spread)}
@@ -959,8 +975,7 @@ function App() {
             <strong style={{ color: 'var(--text-secondary) }}>Decay columns —</strong>{' '}
             <em>Gross (realized)</em> is the screener&rsquo;s point estimate (daily log-drag or blended/primary).{' '}
             <em>Expected (Itô)</em> is the mechanical 0.5|β||β−1|σ² from the same run.{' '}
-            <em>Net edge p50 / p5–p95</em> use block resampling of daily log-drag (uncertainty on net edge, not a full tail model).{' '}
-            All buckets: β &lt; 0 and curated inverse list → <strong>Bucket 3 (inverse)</strong>.
+            <em>Net edge p50 / p5–p95</em> use block resampling of daily log-drag (uncertainty on net edge, not a full tail model).
           </p>
 
           {/* ── Table ─────────────── */}

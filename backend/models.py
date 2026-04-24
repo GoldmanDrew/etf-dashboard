@@ -35,6 +35,7 @@ class ETFRecord(BaseModel):
     # Decay / analytics
     gross_decay_annual: Optional[float] = None
     expected_gross_decay_annual: Optional[float] = None
+    blended_gross_decay: Optional[float] = None
     spread: Optional[float] = None  # gross_decay - borrow_net
     decay_3m: Optional[float] = None
     decay_6m: Optional[float] = None
@@ -49,8 +50,11 @@ class ETFRecord(BaseModel):
     borrow_for_net_annual: Optional[float] = None
     borrow_median_60d: Optional[float] = None
     net_edge_p05_annual: Optional[float] = None
+    net_edge_p25_annual: Optional[float] = None
     net_edge_p50_annual: Optional[float] = None
+    net_edge_p75_annual: Optional[float] = None
     net_edge_p95_annual: Optional[float] = None
+    net_edge_hist_json: Optional[str] = None
     net_edge_fan_label: Optional[str] = None
     block_len: Optional[float] = None
     B_reps: Optional[float] = None

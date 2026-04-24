@@ -118,7 +118,7 @@ etf-dashboard/
 - `python daily_screener.py --borrow-history-path ../etf-dashboard/data/borrow_history.json`, or  
 - `BORROW_HISTORY_PATH` set to the same file before `daily_screener.py`.
 
-Without that path, ls-algo keeps the legacy **point-in-time** borrow subtraction. New CSV columns (`borrow_resample_mode`, `borrow_weight_halflife_days`, `borrow_history_points_used`) describe which path was used.
+Without that file, ls-algo still **auto-detects** a sibling `../etf-dashboard/data/borrow_history.json` or `ls-algo/data/borrow_history.json` (the ls-algo GitHub Action curls the public dashboard JSON into `data/` before the screener). New CSV columns include `borrow_resample_mode`, `borrow_weight_halflife_days`, `borrow_history_points_used`, **`net_edge_p25_annual` / `net_edge_p75_annual`**, and **`net_edge_hist_json`** (compact histogram of bootstrap net draws for the dashboard).
 - **Borrow rates**: IBKR public FTP (`ftp2.interactivebrokers.com/usa.txt`) — dashboard uses fee-only borrow (not net of rebate), with shares available
 - **Spot + options**: Tradier REST (spot primary) + Polygon REST (options snapshots/contracts, spot fallback)
 - **Decay**: Volatility drag model estimate (plug in real Stahl metrics when price data is available)

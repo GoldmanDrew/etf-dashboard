@@ -2505,6 +2505,7 @@ def build():
             "borrow_missing": bool(row.get("borrow_missing_from_ftp", False)),
             "gross_decay_annual": gross_decay,
             "expected_gross_decay_annual": _safe_float(rdict, "expected_gross_decay_annual"),
+            "blended_gross_decay": _safe_float(rdict, "blended_gross_decay"),
             "net_decay": net_decay,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
@@ -2523,8 +2524,15 @@ def build():
             "borrow_for_net_annual": _safe_float(rdict, "borrow_for_net_annual"),
             "borrow_median_60d": borrow_median_60d,
             "net_edge_p05_annual": ne5,
+            "net_edge_p25_annual": _safe_float(rdict, "net_edge_p25_annual"),
             "net_edge_p50_annual": ne50,
+            "net_edge_p75_annual": _safe_float(rdict, "net_edge_p75_annual"),
             "net_edge_p95_annual": ne95,
+            "net_edge_hist_json": (
+                str(rdict["net_edge_hist_json"]).strip()
+                if rdict.get("net_edge_hist_json") and str(rdict.get("net_edge_hist_json") or "").strip() not in ("", "nan", "None")
+                else None
+            ),
             "net_edge_fan_label": net_edge_fan_label,
             "block_len": _safe_float(rdict, "block_len"),
             "B_reps": _safe_float(rdict, "B_reps"),

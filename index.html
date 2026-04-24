@@ -260,6 +260,47 @@
   }
   .detail-item .dval { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 600; }
 
+  .detail-visuals {
+    display: flex; flex-direction: column; gap: 14px;
+    margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--border);
+  }
+  .dv-block { max-width: 720px; }
+  .dv-title {
+    font-size: 11px; font-weight: 700; color: var(--text-secondary);
+    margin-bottom: 6px; letter-spacing: 0.3px;
+  }
+  .gross-dumbbell {
+    position: relative; height: 32px; margin: 6px 0 4px;
+    font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-muted);
+  }
+  .gross-dumbbell-track {
+    position: absolute; left: 0; right: 0; top: 50%; height: 4px; margin-top: -2px;
+    background: rgba(100,120,160,0.25); border-radius: 3px;
+  }
+  .gross-dumbbell-tick {
+    position: absolute; top: 2px; width: 3px; height: 22px; margin-left: -1.5px; border-radius: 2px;
+  }
+  .gross-dumbbell-tick.realized { background: var(--accent-blue); }
+  .gross-dumbbell-tick.expected { background: var(--accent-purple); }
+  .gross-dumbbell-tick.blended { background: #94a3b8; }
+  .gross-dumbbell-tick.net { background: var(--positive); width: 4px; margin-left: -2px; }
+  .gross-dumbbell-legend {
+    display: flex; flex-wrap: wrap; gap: 10px 14px; margin-top: 22px; font-size: 10px; color: var(--text-muted);
+  }
+  .gross-dumbbell-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .gross-dumbbell-legend i {
+    display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+  }
+  .net-edge-viz { margin-top: 4px; }
+  .net-edge-box-svg { width: 100%; max-width: 420px; height: 44px; display: block; }
+  .net-edge-mini-hist {
+    display: flex; align-items: flex-end; gap: 1px; height: 40px; margin-top: 8px;
+    max-width: 420px;
+  }
+  .net-edge-mini-hist .bar {
+    flex: 1; min-width: 2px; background: rgba(59,130,246,0.55); border-radius: 1px 1px 0 0;
+  }
+
   /* ── Info Page ────────────── */
   .info-page { padding: 24px; max-width: 860px; }
   .info-row {
@@ -376,6 +417,34 @@
     margin: 24px; padding: 16px 20px; border-radius: 8px;
     background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2);
     color: var(--accent-red); font-size: 14px;
+  }
+
+  .decay-methodology {
+    margin: 0 24px 12px; max-width: 1100px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-card); font-size: 11px; color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .decay-methodology > summary {
+    padding: 8px 12px; cursor: pointer; font-weight: 600;
+    color: var(--text-secondary); list-style-position: outside;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .decay-methodology[open] > summary { border-bottom: 1px solid var(--border); }
+  .decay-methodology .dm-body { padding: 10px 12px 12px; }
+  .decay-methodology .dm-block {
+    margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+  }
+  .decay-methodology .dm-block:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+  .decay-methodology .dm-title {
+    font-weight: 700; color: var(--text-primary); margin-bottom: 4px;
+    font-family: 'DM Sans', sans-serif; font-size: 12px;
+  }
+  .decay-methodology code.dm-formula {
+    display: block; margin-top: 4px; padding: 8px 10px;
+    background: var(--bg-primary); border-radius: 6px;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--text-secondary); white-space: pre-wrap; word-break: break-word;
   }
 
   /* ── Chart Page ─────────── */
@@ -1770,11 +1839,11 @@ const COLS = [
   { key: 'beta', label: 'Beta', w: 65, hint: 'OLS beta (ETF vs underlying)' },
   { key: 'borrow_current', label: 'Borrow Rate', w: 105 },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
-  { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, hint: 'Screener point: daily log-drag / primary gross' },
-  { key: 'expected_gross_decay_annual', label: 'Exp. (Itô)', w: 95, hint: 'Mechanical 0.5|β||β−1|σ² from screener' },
-  { key: 'net_decay', label: 'Net (gross−borrow)', w: 100, hint: 'Point: realized gross − current borrow' },
+  { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, hint: 'Realized gross: mean daily log-hedge-drag × 252 (see Decay math)' },
+  { key: 'expected_gross_decay_annual', label: 'Exp. (Itô)', w: 95, hint: 'Theoretical gross: Itô vol-drag + fee + financing (+ mgr borrow if β<0)' },
+  { key: 'net_decay', label: 'Net (gross−borrow)', w: 100, hint: 'Point: realized gross − current ETF borrow (your short carry)' },
   { key: 'net_edge_p50_annual', label: 'Net edge p50', w: 100, hint: 'Block-bootstrap median, net of borrow' },
-  { key: 'net_edge_p05_annual', label: 'Net p5/p95', w: 100, hint: 'Bootstrap percentiles; not a full tail model' },
+  { key: 'net_edge_p05_annual', label: 'Net edge (band)', w: 115, hint: 'Bootstrap fan: p5–p95 whisker and p25–p75 box when available — hover for all percentiles' },
   { key: 'vol_underlying_annual', label: 'Vol Und', w: 80 },
   { key: 'vol_etf_annual', label: 'Vol ETF', w: 80 },
 ];
@@ -1869,6 +1938,143 @@ function ExpectedDecayCalculator() {
   );
 }
 
+// ── Gross realized vs expected (detail strip) ─────────────────────
+function GrossDecayComparisonStrip({ r }) {
+  const gR = Number(r.gross_decay_annual);
+  const gE = Number(r.expected_gross_decay_annual);
+  const gB = r.blended_gross_decay != null && r.blended_gross_decay !== undefined
+    ? Number(r.blended_gross_decay) : NaN;
+  const net = Number(r.net_decay);
+  const pts = [];
+  if (Number.isFinite(gR)) pts.push({ v: gR, cls: 'realized', lab: 'Realized gross' });
+  if (Number.isFinite(gE)) pts.push({ v: gE, cls: 'expected', lab: 'Expected (Itô)' });
+  if (Number.isFinite(gB)) pts.push({ v: gB, cls: 'blended', lab: 'Blended gross' });
+  if (Number.isFinite(net)) pts.push({ v: net, cls: 'net', lab: 'Net (after borrow)' });
+  if (pts.length === 0) return null;
+  const vals = pts.map(p => p.v);
+  let lo = Math.min(...vals);
+  let hi = Math.max(...vals);
+  if (!(hi > lo)) { lo -= 0.015; hi += 0.015; }
+  const pos = (v) => ((v - lo) / (hi - lo)) * 100;
+  return (
+    <div className="dv-block">
+      <div className="dv-title">Gross: realized vs expected (same scale as net)</div>
+      <div className="gross-dumbbell" aria-hidden="true">
+        <div className="gross-dumbbell-track" />
+        {pts.map((p, i) => (
+          <div key={i} className={`gross-dumbbell-tick ${p.cls}`} style={{ left: `${pos(p.v)}%` }} title={`${p.lab}: ${(p.v * 100).toFixed(2)}%`} />
+        ))}
+        <div style={{ position: 'absolute', left: 0, right: 0, top: '100%', marginTop: 2, display: 'flex', justifyContent: 'space-between' }}>
+          <span>{(lo * 100).toFixed(1)}%</span>
+          <span>{(hi * 100).toFixed(1)}%</span>
+        </div>
+      </div>
+      <div className="gross-dumbbell-legend">
+        <span><i style={{ background: 'var(--accent-blue)' }} /> Realized gross</span>
+        <span><i style={{ background: 'var(--accent-purple)' }} /> Expected (Itô)</span>
+        {Number.isFinite(gB) ? <span><i style={{ background: '#94a3b8' }} /> Blended gross</span> : null}
+        <span><i style={{ background: 'var(--positive)' }} /> Net (after borrow)</span>
+      </div>
+    </div>
+  );
+}
+
+function NetEdgeBootstrapViz({ r }) {
+  const p5 = Number(r.net_edge_p05_annual);
+  const p25 = Number(r.net_edge_p25_annual);
+  const p50 = Number(r.net_edge_p50_annual);
+  const p75 = Number(r.net_edge_p75_annual);
+  const p95 = Number(r.net_edge_p95_annual);
+  const hasBox = [p5, p25, p50, p75, p95].every(Number.isFinite);
+  let hist = null;
+  if (r.net_edge_hist_json && typeof r.net_edge_hist_json === 'string') {
+    try { hist = JSON.parse(r.net_edge_hist_json); } catch (e) { hist = null; }
+  }
+  if (!hasBox && !(hist && Array.isArray(hist.c) && hist.e && hist.e.length > 1)) return null;
+  let lo = hasBox ? p5 : NaN;
+  let hi = hasBox ? p95 : NaN;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+    if (hist && Array.isArray(hist.e) && hist.e.length > 1) {
+      lo = Number(hist.e[0]);
+      hi = Number(hist.e[hist.e.length - 1]);
+    } else {
+      lo = 0;
+      hi = 1;
+    }
+  }
+  const span = hi > lo ? hi - lo : 1e-6;
+  const x = (v) => 10 + ((v - lo) / span) * 180;
+  let bars = null;
+  if (hist && Array.isArray(hist.c) && hist.c.length) {
+    const mx = Math.max(...hist.c.map(Number), 1);
+    bars = (
+      <div className="net-edge-mini-hist" title="Bootstrap net edge (annual) histogram">
+        {hist.c.map((c, i) => (
+          <div key={i} className="bar" style={{ height: `${(Number(c) / mx) * 100}%` }} />
+        ))}
+      </div>
+    );
+  }
+  return (
+    <div className="dv-block net-edge-viz">
+      <div className="dv-title">Net edge (bootstrap) — distribution</div>
+      {hasBox ? (
+        <svg className="net-edge-box-svg" viewBox="0 0 200 44" preserveAspectRatio="none">
+          <title>Bootstrap net edge chart — hover the table “Net edge (band)” column for exact p5–p95 and IQR.</title>
+          <line x1={x(p5)} y1={22} x2={x(p95)} y2={22} stroke="rgba(120,138,168,0.85)" strokeWidth="1.5" />
+          <rect
+            x={x(p25)} y={14} width={Math.max(x(p75) - x(p25), 1)} height={16}
+            fill="rgba(59,130,246,0.22)" stroke="rgba(59,130,246,0.55)" strokeWidth="1"
+          />
+          <line x1={x(p50)} y1={10} x2={x(p50)} y2={34} stroke="var(--accent-blue)" strokeWidth="2" />
+        </svg>
+      ) : null}
+      {bars}
+    </div>
+  );
+}
+
+/** Inline table cell: whisker p5–p95 + optional IQR box; values only in tooltip (not p5/p95 as main text). */
+function NetEdgeFanTableCell({ r }) {
+  const p5 = Number(r.net_edge_p05_annual);
+  const p25 = Number(r.net_edge_p25_annual);
+  const p50 = Number(r.net_edge_p50_annual);
+  const p75 = Number(r.net_edge_p75_annual);
+  const p95 = Number(r.net_edge_p95_annual);
+  const hasWhisk = Number.isFinite(p5) && Number.isFinite(p95) && Number.isFinite(p50);
+  if (!hasWhisk) {
+    return <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>;
+  }
+  const hasIqr = Number.isFinite(p25) && Number.isFinite(p75);
+  const lo = p5;
+  const hi = p95;
+  const span = hi > lo ? hi - lo : 1e-8;
+  const W = 52;
+  const x = v => ((v - lo) / span) * W + 3;
+  const ymid = 10;
+  const tip = [
+    `p5 ${fmt(p5)}`,
+    hasIqr ? `p25 ${fmt(p25)}` : null,
+    `p50 ${fmt(p50)}`,
+    hasIqr ? `p75 ${fmt(p75)}` : null,
+    `p95 ${fmt(p95)}`,
+  ].filter(Boolean).join(' · ');
+  return (
+    <span title={tip} style={{ display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle' }} onClick={e => e.stopPropagation()}>
+      <svg width="58" height="18" viewBox="0 0 58 18" style={{ display: 'block' }} aria-hidden="true">
+        <line x1={x(p5)} y1={ymid} x2={x(p95)} y2={ymid} stroke="rgba(130,150,185,0.95)" strokeWidth="2" strokeLinecap="round" />
+        {hasIqr ? (
+          <rect
+            x={x(p25)} y={3} width={Math.max(x(p75) - x(p25), 1)} height={14} rx="1"
+            fill="rgba(59,130,246,0.38)" stroke="rgba(59,130,246,0.75)" strokeWidth="1"
+          />
+        ) : null}
+        <circle cx={x(p50)} cy={ymid} r={hasIqr ? 2.2 : 3} fill="var(--accent-blue)" />
+      </svg>
+    </span>
+  );
+}
+
 // ── Detail Row ──────────────────────────────
 function DetailRow({ r }) {
   return (
@@ -1878,10 +2084,6 @@ function DetailRow({ r }) {
           <div className="detail-item">
             <div className="dlabel">Borrow Fee (Gross)</div>
             <div className="dval">{fmt(r.borrow_fee_annual)}</div>
-          </div>
-          <div className="detail-item">
-            <div className="dlabel">Rebate</div>
-            <div className="dval">{fmt(r.borrow_rebate_annual)}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Borrow Rate (Fee Only)</div>
@@ -1908,13 +2110,6 @@ function DetailRow({ r }) {
             <div className="dval">{fmt(r.vol_etf_annual)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Spiking</div>
-            <div className="dval">
-              {r.borrow_spiking ? <span className="badge badge-bad">YES</span>
-                : <span className="badge badge-good">NO</span>}
-            </div>
-          </div>
-          <div className="detail-item">
             <div className="dlabel">Data Source</div>
             <div className="dval">
               {r.borrow_source === 'ibkr_ftp'
@@ -1922,14 +2117,10 @@ function DetailRow({ r }) {
                 : <span className="badge badge-stale">CSV</span>}
             </div>
           </div>
-          <div className="detail-item">
-            <div className="dlabel">CAGR Positive</div>
-            <div className="dval">
-              {r.cagr_positive === true ? <span className="badge badge-good">YES</span>
-               : r.cagr_positive === false ? <span className="badge badge-bad">NO</span>
-               : '—'}
-            </div>
-          </div>
+        </div>
+        <div className="detail-visuals">
+          <GrossDecayComparisonStrip r={r} />
+          <NetEdgeBootstrapViz r={r} />
         </div>
       </td>
     </tr>
@@ -4216,12 +4407,46 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
             <strong style={{ color: 'var(--text-secondary)' }}>Decay / edge —</strong>{' '}
             <em>Gross (realized)</em> and <em>net (gross−borrow)</em> are screener points. <em>Exp. (Itô)</em> is the mechanical expectation.{' '}
-            <em>Net edge p50 / p5–p95</em> = block bootstrap on daily log-drag (sampling uncertainty on net edge).{' '}
-            β &lt; 0 → <strong>Bucket 3 (inverse)</strong> (no separate bucket 4).
+            <em>Net edge p50</em> is the bootstrap median; the <strong>band</strong> column is a compact fan (p5–p95 whisker and p25–p75 box when available) — hover it for exact percentiles.
             {data?.uncertainty_footnote && (
               <span> {data.uncertainty_footnote}</span>
             )}
           </p>
+
+          <details className="decay-methodology">
+            <summary>Decay math — formulas behind the main columns</summary>
+            <div className="dm-body">
+              <div className="dm-block">
+                <div className="dm-title">Gross (realiz.) — realized <em>gross</em> structural edge from history</div>
+                Uses overlapping daily <strong>total-return</strong> log returns on the ETF and underlying. Let
+                r<sub>L,t</sub> = ln(P<sub>ETF,t</sub>/P<sub>ETF,t−1</sub>) and r<sub>U,t</sub> the same for the underlying.
+                Daily <strong>hedge P&amp;L drag</strong> for a β-hedged short ETF position is d<sub>t</sub> = β·r<sub>U,t</sub> − r<sub>L,t</sub>.
+                The column is the sample mean annualized on a <strong>252</strong> trading-day basis:
+                <code className="dm-formula">gross_decay_annual = mean(d_t) × 252</code>
+                This is a <strong>realized</strong> estimate (what happened on average), not a forecast of future total return.
+              </div>
+              <div className="dm-block">
+                <div className="dm-title">Exp. (Itô) — theoretical <em>gross</em> decay (closed form)</div>
+                Built from OLS β, underlying σ aligned with the same log-return object as above:
+                σ = sqrt(mean(r<sub>U,t</sub><sup>2</sup>) × 252) (uncentered second moment; capped in the screener).
+                The screener adds fee, financing, and (for inverse β&lt;0) manager borrow on the underlying:
+                <code className="dm-formula">{`expected = 0.5·|β|·|β−1|·σ² + f + (β−1)·r + |β|·λ̄_mgr   (λ̄_mgr only if β<0; else 0)`}</code>
+                where <em>f</em> is the fund expense ratio (decimal), <em>r</em> the risk-free rate used at run time, λ̄_mgr the underlying borrow input when available.
+              </div>
+              <div className="dm-block">
+                <div className="dm-title">Net (gross−borrow) — point estimate after <em>your</em> ETF borrow</div>
+                Subtracts the <strong>current</strong> annualized ETF borrow (short stock rate) from <strong>realized gross</strong>:
+                <code className="dm-formula">net_decay ≈ gross_decay_annual − borrow_current</code>
+                (Same sign convention as gross: higher is better for a structural short on decay, before trading costs.)
+              </div>
+              <div className="dm-block">
+                <div className="dm-title">Net edge — bootstrap distribution (table + expand row)</div>
+                Block-bootstrap the <strong>mean daily d<sub>t</sub></strong> to get a distribution of annualized <strong>gross</strong> drag, then form <strong>net</strong>
+                draws by subtracting borrow (weighted resample from full borrow history when the screener was run with that file; otherwise point-in-time borrow).
+                The main table shows <strong>p50</strong> as a number and an <strong>inline fan</strong> (whisker + IQR); the expanded row adds a histogram when <code>net_edge_hist_json</code> is present. Hover the fan for p5–p95 (and p25–p75 when exported). Not a full tail-risk model.
+              </div>
+            </div>
+          </details>
 
           {/* ── Table ─────────── */}
           <div className="table-container">
@@ -4265,10 +4490,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         <td>{fmt(r.expected_gross_decay_annual)}</td>
                         <td className={spreadCls(r.net_decay)}>{fmt(r.net_decay)}</td>
                         <td className={spreadCls(r.net_edge_p50_annual)}>{r.net_edge_p50_annual != null ? fmt(r.net_edge_p50_annual) : '—'}</td>
-                        <td style={{ fontSize: 11, color: 'var(--text-muted)' }} title={r.net_edge_fan_label || ''}>
-                          {r.net_edge_p05_annual != null && r.net_edge_p95_annual != null
-                            ? `${fmt(r.net_edge_p05_annual)} / ${fmt(r.net_edge_p95_annual)}`
-                            : (r.net_edge_fan_label || '—')}
+                        <td style={{ verticalAlign: 'middle' }}>
+                          <NetEdgeFanTableCell r={r} />
                         </td>
                         <td>{fmt(r.vol_underlying_annual)}</td>
                         <td>{fmt(r.vol_etf_annual)}</td>
