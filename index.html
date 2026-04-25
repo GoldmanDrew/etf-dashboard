@@ -1548,6 +1548,42 @@ const scenShortFavCls = v => {
 
 const SCENARIO_ETF_1M_FLAT_SORT_KEY = 'scenario_etf_1m_0und_1y_sigma';
 
+const YIELDBOOST_INCOME_PAIRS = new Set([
+  'AMYY|AMD', 'AZYY|AMZN', 'BBYY|BABA', 'COYY|COIN', 'CWY|CRWV',
+  'HMYY|HIMS', 'HOYY|HOOD', 'IOYY|IONQ', 'MAAY|MARA', 'FBYY|META',
+  'MTYY|MSTR', 'MUYY|MU', 'NUGY|GDX', 'NVYY|NVDA', 'PLYY|PLTR',
+  'QBY|QBTS', 'RGYY|RGTI', 'RTYY|RIOT', 'SEMY|SOXX', 'SMYY|SMCI',
+  'TMYY|TSM', 'TQQY|QQQ', 'TSYY|TSLA', 'XBTY|IBIT', 'YSPY|SPY',
+]);
+const isYieldBoostIncomeStrategy = r => {
+  if (r?.is_yieldboost === true || r?.scenario_style === 'income_style') return true;
+  const sym = String(r?.symbol || '').toUpperCase();
+  const und = String(r?.underlying || '').toUpperCase();
+  return YIELDBOOST_INCOME_PAIRS.has(`${sym}|${und}`);
+};
+const suppressScenarioForRow = r => r?.bucket === 'bucket_2_low_beta' && !isYieldBoostIncomeStrategy(r);
+const scenarioValueCls = (r, v) => isYieldBoostIncomeStrategy(r) ? spreadCls(v) : scenShortFavCls(v);
+
+function incomeAnnualYieldForScenario(r) {
+  const trailing = Number(r?.income_yield_trailing_annual);
+  if (Number.isFinite(trailing) && trailing > 0) return trailing;
+  const recent = Number(r?.income_yield_recent_annual);
+  if (Number.isFinite(recent) && recent > 0) return recent;
+  return null;
+}
+
+function estimateIncomeStyleEtfReturn({ beta, underlyingReturn, annualIncomeYield, horizonYears, minReturn = -0.9999 }) {
+  if (annualIncomeYield == null) return null;
+  const b = Number(beta);
+  const u = Number(underlyingReturn);
+  const y = Number(annualIncomeYield);
+  const t = Number(horizonYears);
+  if (!Number.isFinite(b) || !Number.isFinite(u) || !Number.isFinite(y) || y < 0 || !Number.isFinite(t) || t <= 0) {
+    return null;
+  }
+  return Math.max(minReturn, b * u + y * t);
+}
+
 /**
  * Vol block for the **chart lookback** (`chartVolLookbackRange` = TIMEFRAMES[].range), same key as ChartPage `volPoint`.
  * No cross-window fallback — matches Scenarios when that window is missing or invalid (cell shows —).
@@ -1566,11 +1602,21 @@ function realizedVolPointForScenarioColumn(r, chartVolLookbackRange) {
  * `chartVolLookbackRange` is persisted from chart timeframe buttons (default **6M**).
  */
 function computeScenarioEtf1mFlatUnd1yRealized(r, chartVolLookbackRange) {
+  if (suppressScenarioForRow(r)) return null;
   const SR = typeof window !== 'undefined' ? window.ScenarioReturns : null;
-  if (!SR || typeof SR.horizonToYears !== 'function' || typeof SR.estimateEtfReturn !== 'function') return null;
+  if (!SR || typeof SR.horizonToYears !== 'function') return null;
   const horizonYears = SR.horizonToYears('1M');
   const lev = Number(r?.beta);
   if (!Number.isFinite(horizonYears) || horizonYears <= 0 || !Number.isFinite(lev)) return null;
+  if (isYieldBoostIncomeStrategy(r)) {
+    return estimateIncomeStyleEtfReturn({
+      beta: lev,
+      underlyingReturn: 0,
+      annualIncomeYield: incomeAnnualYieldForScenario(r),
+      horizonYears,
+    });
+  }
+  if (typeof SR.estimateEtfReturn !== 'function') return null;
   const vp = realizedVolPointForScenarioColumn(r, chartVolLookbackRange);
   const sigma = Number(vp?.underlying_ewma) || Number(vp?.underlying);
   const nUnd = Number(vp?.n_returns_underlying);
@@ -1948,7 +1994,7 @@ const COLS = [
     sublabel: '0% und · EWMA σ',
     w: 112,
     numeric: true,
-    hint: 'Same as Scenarios table: ~1M horizon, underlying return 0%, σ = underlying EWMA for the chart lookback (persisted from the chart page; default 6M). Uses that row’s realized_vol[window] only — no silent fallback to another window. 1.0× vol column equivalent; borrow/carry excluded.',
+    hint: 'LETF rows: same as Scenarios table (~1M horizon, underlying return 0%, chart-lookback EWMA σ, 1.0× vol column, borrow/carry excluded). Tagged income-style Bucket 2 rows use distribution carry for a flat-underlying 1M scenario. Other Bucket 2 rows show —.',
   },
   { key: 'vol_underlying_annual', label: 'Vol Und', w: 80 },
   { key: 'vol_etf_annual', label: 'Vol ETF', w: 80 },
@@ -2390,7 +2436,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const undSym = r.underlying;
   const tradeFns = window.TradeLab || {};
 
-  const hideScenarios = r.bucket === 'bucket_2_low_beta';
+  const isIncomeStrategyScenario = isYieldBoostIncomeStrategy(r);
+  const hideScenarios = suppressScenarioForRow(r);
   useEffect(() => {
     if (hideScenarios && activePanel === 'scenarios') setActivePanel('chart');
   }, [hideScenarios, activePanel]);
@@ -2644,6 +2691,31 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     () => (etfMetricsSeries.length ? etfMetricsSeries[etfMetricsSeries.length - 1] : null),
     [etfMetricsSeries],
   );
+  const incomeAnnualYieldForChart = useMemo(() => {
+    const precomputed = incomeAnnualYieldForScenario(r);
+    if (precomputed != null) return precomputed;
+    const price = Number(latestEtfMetric?.close_price) || Number(latestEtfMetric?.nav);
+    if (!Number.isFinite(price) || price <= 0 || !etfDistributionsSeries.length) return null;
+    const now = new Date();
+    const cutoff = new Date(now);
+    cutoff.setDate(cutoff.getDate() - 365);
+    let trailing = 0;
+    let trailingCount = 0;
+    let latest = null;
+    etfDistributionsSeries.forEach((d) => {
+      const amount = Number(d?.amount);
+      const exDate = d?.ex_date ? new Date(`${d.ex_date}T00:00:00Z`) : null;
+      if (!Number.isFinite(amount) || amount <= 0 || !exDate || Number.isNaN(exDate.getTime())) return;
+      if (!latest || exDate > latest.exDate) latest = { exDate, amount };
+      if (exDate >= cutoff) {
+        trailing += amount;
+        trailingCount += 1;
+      }
+    });
+    if (trailing > 0 && trailingCount > 0) return trailing / price;
+    if (latest?.amount > 0) return (latest.amount * 12) / price;
+    return null;
+  }, [r, latestEtfMetric, etfDistributionsSeries]);
   const etfDistributionCount = etfDistributionsSeries.length;
   const etfLatestDistribution = etfDistributionCount
     ? etfDistributionsSeries[etfDistributionCount - 1]
@@ -2737,6 +2809,42 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       minReturn: -0.9999,
     });
   }, [scenarioFns, ewmaUnd, horizonYears, undObs, scenarioLeverage, annualCarryDrag]);
+
+  const incomeScenarioGrid = useMemo(() => {
+    if (!isIncomeStrategyScenario) return { ok: false, error: 'Income-style scenario not enabled for this product.' };
+    if (!Number.isFinite(Number(scenarioSigmaBest)) || Number(scenarioSigmaBest) <= 0) {
+      return { ok: false, error: 'Missing valid underlying EWMA volatility for this lookback.' };
+    }
+    if (!Number.isFinite(horizonYears) || horizonYears <= 0) {
+      return { ok: false, error: 'Invalid scenario horizon.' };
+    }
+    if (undObs < minObsForScenario) {
+      return { ok: false, error: `Insufficient lookback observations (${undObs}).` };
+    }
+    const annualIncomeYield = incomeAnnualYieldForChart;
+    if (annualIncomeYield == null || !Number.isFinite(Number(annualIncomeYield)) || Number(annualIncomeYield) < 0) {
+      return { ok: false, error: 'Missing distribution yield estimate for income-style scenario.' };
+    }
+    const sigma = Number(scenarioSigmaBest);
+    const incomeCarry = Number(annualIncomeYield) * horizonYears;
+    const rows = SCENARIO_SHOCK_MULTIPLIERS.map((sigmaMultiple) => {
+      const underlyingReturn = Math.exp(sigmaMultiple * sigma * Math.sqrt(horizonYears)) - 1;
+      const priceBetaReturn = Number(scenarioLeverage) * underlyingReturn;
+      const totalReturn = estimateIncomeStyleEtfReturn({
+        beta: scenarioLeverage,
+        underlyingReturn,
+        annualIncomeYield,
+        horizonYears,
+      });
+      return { sigmaMultiple, underlyingReturn, priceBetaReturn, incomeCarry, totalReturn };
+    });
+    return {
+      ok: true,
+      annualIncomeYield: Number(annualIncomeYield),
+      incomeCarry,
+      rows,
+    };
+  }, [isIncomeStrategyScenario, scenarioSigmaBest, horizonYears, undObs, minObsForScenario, incomeAnnualYieldForChart, scenarioLeverage]);
 
   const mcUpsideThresholds = useMemo(
     () => parseThresholdInput(mcUpsideThresholdsText),
@@ -3257,7 +3365,80 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
       {activePanel === 'scenarios' && (
         <div className="chart-section">
-          <div className="scenario-card" style={{ marginTop: 0 }}>
+          {isIncomeStrategyScenario ? (
+            <>
+              <div className="scenario-card" style={{ marginTop: 0 }}>
+                <div className="scenario-head">
+                  <div>
+                    <div className="scenario-title">Income Scenario Returns</div>
+                    <div className="scenario-sub">
+                      Lookback: {activeTf.label} | underlying EWMA σ: {fmt(scenarioSigmaBest)} | reference realized: {fmt(scenarioSigmaRef)}
+                    </div>
+                    <div className="scenario-sub">
+                      Price beta input: {Number.isFinite(Number(scenarioLeverage)) ? scenarioLeverage.toFixed(3) : '—'} | annual distribution yield estimate: {fmt(incomeScenarioGrid.annualIncomeYield)}
+                    </div>
+                  </div>
+                  <div className="tf-group" style={{ marginLeft: 0 }}>
+                    {SCENARIO_HORIZONS.map(h => (
+                      <button
+                        key={h.key}
+                        className={cls('tf-btn', scenarioHorizon === h.key && 'tf-active')}
+                        onClick={() => setScenarioHorizon(h.key)}
+                      >
+                        {h.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {!incomeScenarioGrid.ok ? (
+                  <div className="scenario-warning">{incomeScenarioGrid.error || 'Income scenario unavailable.'}</div>
+                ) : (
+                  <div className="scenario-table-wrap">
+                    <table className="scenario-table">
+                      <thead>
+                        <tr>
+                          <th>Underlying Shock</th>
+                          <th>Underlying Return</th>
+                          <th>ETF Price Beta Return</th>
+                          <th>Estimated Distribution Carry</th>
+                          <th>Estimated ETF Total Return</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {incomeScenarioGrid.rows.map((row, ridx) => (
+                          <tr key={ridx}>
+                            <td>{fmtSigmaMultiple(row.sigmaMultiple)}</td>
+                            <td>{fmt(row.underlyingReturn)}</td>
+                            <td>{fmt(row.priceBetaReturn)}</td>
+                            <td>{fmt(row.incomeCarry)}</td>
+                            <td
+                              className={spreadCls(row.totalReturn)}
+                              style={{ background: scenarioCellBg(row.totalReturn), color: 'var(--text-primary)' }}
+                            >
+                              {fmt(row.totalReturn)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                <div className="scenario-formula">
+                  ETF total return ≈ beta × underlying return + annual distribution yield × horizon.
+                </div>
+                <div className="scenario-formula">
+                  Distribution yield uses trailing 12-month cash distributions when available, otherwise latest distribution × 12, normalized by recent NAV/price.
+                </div>
+              </div>
+
+              <div className="chart-note">
+                Income scenarios are only enabled for tagged income-style Bucket 2 products. Generic low-beta products keep Scenarios hidden because LETF vol-drag math is not comparable.
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="scenario-card" style={{ marginTop: 0 }}>
             <div className="scenario-head">
               <div>
                 <div className="scenario-title">Scenario Returns</div>
@@ -3389,6 +3570,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           <div className="chart-note">
             Scenario grid uses shocks {`±1/3σ, ±1σ, ±3σ`} and log-space mapping so underlying return is always greater than -100%.
           </div>
+            </>
+          )}
         </div>
       )}
 
@@ -4591,7 +4774,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             <strong style={{ color: 'var(--text-secondary)' }}>Decay / edge —</strong>{' '}
             <em>Gross (realized)</em> is a screener point; <em>Exp. (Itô)</em> is the mechanical expectation.{' '}
             <strong>Net edge</strong> = <em>median</em> (large) + <em>fan</em> (gray whisker, cyan IQR, blue p50). Hover the fan for p5–p25–p50–p75–p95; expand row for borrow mode, quantile table, charts, and <em>net (gross−borrow)</em> point estimate.{' '}
-            <strong>Scen. 1M ETF</strong> matches the Scenarios grid: <strong>1M</strong> horizon, <strong>0%</strong> underlying move, σ = underlying <strong>EWMA</strong> for the <strong>{chartVolTfLabel}</strong> chart lookback (saved when you change timeframes on the chart; default 6M), same <code>estimateEtfReturn</code> path as the center vol column (borrow excluded).
+            <strong>Scen. 1M ETF</strong> matches the active scenario mode: LETF rows use <strong>1M</strong>, <strong>0%</strong> underlying, and <strong>{chartVolTfLabel}</strong> EWMA σ; tagged income-style Bucket 2 rows use estimated 1M distribution carry; other Bucket 2 rows show <strong>—</strong>.
             {data?.uncertainty_footnote && (
               <span> {data.uncertainty_footnote}</span>
             )}
@@ -4625,10 +4808,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                 where <em>f</em> is the fund expense ratio (decimal), <em>r</em> the risk-free rate used at run time, λ̄_mgr the underlying borrow input when available.
               </div>
               <div className="dm-block">
-                <div className="dm-title">Scen. 1M ETF (0% und · EWMA σ) — same cell as Scenarios grid</div>
-                Uses <code className="dm-formula">ScenarioReturns.estimateEtfReturn</code> with horizon <strong>1M</strong>, <strong>underlyingReturn = 0</strong>,
-                <strong>σ</strong> = <code>{'realized_vol[<lookback>].underlying_ewma'}</code> (fallback: that window&apos;s realized σ only), <strong>leverage = β</strong>, and <strong>annualCarryDrag = 0</strong> — matching <code>buildScenarioGrid</code> with <strong>bestVolAnnual = EWMA</strong> and the <strong>1.0×</strong> vol column for the same lookback the chart uses (currently <strong>{chartVolTfLabel}</strong> in this session). Scenario tab default horizon is <strong>1M</strong>.
-                This is a <strong>conditional</strong> one-month ETF return path, not the screener's annualized realized drag.
+                <div className="dm-title">Scen. 1M ETF (0% und · EWMA σ) — scenario-mode cell</div>
+                LETF rows use <code className="dm-formula">ScenarioReturns.estimateEtfReturn</code> with horizon <strong>1M</strong>, <strong>underlyingReturn = 0</strong>,
+                <strong>σ</strong> = <code>{'realized_vol[<lookback>].underlying_ewma'}</code> (fallback: that window&apos;s realized σ only), <strong>leverage = β</strong>, and <strong>annualCarryDrag = 0</strong>. Tagged income-style Bucket 2 rows instead use <code className="dm-formula">β × underlyingReturn + distribution_yield × horizon</code>, so the flat-underlying 1M cell is estimated distribution carry. Untagged Bucket 2 rows show <strong>—</strong> because LETF vol-drag math is not comparable.
+                This is a <strong>conditional</strong> one-month ETF return path, not the screener&apos;s annualized realized drag.
               </div>
               <div className="dm-block">
                 <div className="dm-title">Net (gross−borrow) — point estimate (detail row)</div>
@@ -4691,7 +4874,16 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         <td style={{ verticalAlign: 'middle' }}>
                           <NetEdgeMergedCell r={r} />
                         </td>
-                        <td className={scenShortFavCls(scen1mFlat)} title="Modeled ETF return over ~1 month if underlying is flat (0%); σ = underlying EWMA for the chart lookback; same estimateEtfReturn as Scenarios (borrow excluded).">
+                        <td
+                          className={scenarioValueCls(r, scen1mFlat)}
+                          title={
+                            suppressScenarioForRow(r)
+                              ? 'Scenario hidden for non-income Bucket 2 products.'
+                              : isYieldBoostIncomeStrategy(r)
+                                ? 'Income-style estimate over ~1 month if underlying is flat (0%): distribution carry only; uses trailing/recent distribution yield.'
+                                : 'Modeled ETF return over ~1 month if underlying is flat (0%); σ = underlying EWMA for the chart lookback; same estimateEtfReturn as Scenarios (borrow excluded).'
+                          }
+                        >
                           {scen1mFlat != null && Number.isFinite(scen1mFlat) ? fmt(scen1mFlat) : '—'}
                         </td>
                         <td>{fmt(r.vol_underlying_annual)}</td>

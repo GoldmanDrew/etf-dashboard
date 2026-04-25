@@ -59,6 +59,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
+import numbers
 import os
 import re
 import time
@@ -2341,6 +2343,31 @@ def link_news_to_events(news: list[NewsItem], events: list[CorporateEvent]) -> N
 # Persistence
 # ---------------------------------------------------------------------------
 
+def _json_safe(value):
+    """Convert dataclass payloads to strict JSON-safe values.
+
+    We write with ``allow_nan=False`` so GitHub Actions fails fast if an upstream
+    source leaks NaN/Infinity.  Normalize those values at the persistence
+    boundary instead of weakening JSON compliance.
+    """
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if value is pd.NA:
+        return None
+    if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, numbers.Real) and not isinstance(value, bool):
+        return float(value) if math.isfinite(float(value)) else None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
 def persist(events: list[CorporateEvent], news: list[NewsItem], universe_size: int) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     OUT_EVENTS.write_text(
@@ -2348,7 +2375,7 @@ def persist(events: list[CorporateEvent], news: list[NewsItem], universe_size: i
             {
                 "build_time": datetime.now(UTC).isoformat(),
                 "universe_size": int(universe_size),
-                "events": [asdict(e) for e in events],
+                "events": [_json_safe(asdict(e)) for e in events],
             },
             separators=(",", ":"),
             allow_nan=False,
@@ -2360,7 +2387,7 @@ def persist(events: list[CorporateEvent], news: list[NewsItem], universe_size: i
             {
                 "build_time": datetime.now(UTC).isoformat(),
                 "window_days": NEWS_WINDOW_DAYS,
-                "items": [asdict(n) for n in news],
+                "items": [_json_safe(asdict(n)) for n in news],
             },
             separators=(",", ":"),
             allow_nan=False,

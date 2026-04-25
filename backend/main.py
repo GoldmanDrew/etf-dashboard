@@ -58,6 +58,16 @@ START_TIME = time.monotonic()
 ERRORS: list[str] = []
 GITHUB_SYNC_STATUS: dict = {}  # last sync result
 
+YIELDBOOST_BUCKET2_PAIRS = {
+    ("AMYY", "AMD"), ("AZYY", "AMZN"), ("BBYY", "BABA"), ("COYY", "COIN"),
+    ("CWY", "CRWV"), ("HMYY", "HIMS"), ("HOYY", "HOOD"), ("IOYY", "IONQ"),
+    ("MAAY", "MARA"), ("FBYY", "META"), ("MTYY", "MSTR"), ("MUYY", "MU"),
+    ("NUGY", "GDX"), ("NVYY", "NVDA"), ("PLYY", "PLTR"), ("QBY", "QBTS"),
+    ("RGYY", "RGTI"), ("RTYY", "RIOT"), ("SEMY", "SOXX"), ("SMYY", "SMCI"),
+    ("TMYY", "TSM"), ("TQQY", "QQQ"), ("TSYY", "TSLA"), ("XBTY", "IBIT"),
+    ("YSPY", "SPY"),
+}
+
 
 def load_config(path: str = "config/config.yaml") -> dict:
     p = Path(path)
@@ -213,6 +223,15 @@ def _build_records_from_csv():
         bkt = str(row.get("bucket", Bucket.LOW_BETA.value))
         if bkt == "bucket_4_edge" or bkt == "bucket_4":
             bkt = Bucket.INVERSE.value
+        is_yieldboost = _v2bool(row, "is_yieldboost") or (
+            norm_sym(sym),
+            norm_sym(row.get("Underlying") or row.get("underlying") or ""),
+        ) in YIELDBOOST_BUCKET2_PAIRS
+        scenario_style = _v2s(row, "scenario_style") or (
+            "income_style"
+            if is_yieldboost
+            else ("hidden_low_beta" if bkt == Bucket.LOW_BETA.value else "letf_vol_drag")
+        )
         rec = ETFRecord(
             symbol=sym,
             underlying=str(row.get("underlying", "")),
@@ -243,6 +262,17 @@ def _build_records_from_csv():
             is_stale=False,
             asof_date=_v2s(row, "asof_date"),
             product_class=_v2s(row, "product_class"),
+            is_yieldboost=is_yieldboost,
+            scenario_style=scenario_style,
+            income_yield_trailing_annual=_v2f(row, "income_yield_trailing_annual"),
+            income_yield_recent_annual=_v2f(row, "income_yield_recent_annual"),
+            income_distribution_count_1y=(
+                int(row["income_distribution_count_1y"])
+                if "income_distribution_count_1y" in row and not _isnan(row.get("income_distribution_count_1y"))
+                else None
+            ),
+            income_latest_distribution=_v2f(row, "income_latest_distribution"),
+            income_latest_ex_date=_v2s(row, "income_latest_ex_date"),
             gross_edge_definition=_v2s(row, "gross_edge_definition"),
             primary_edge_annual=_v2f(row, "primary_edge_annual"),
             gross_for_primary_annual=_v2f(row, "gross_for_primary_annual"),
@@ -305,6 +335,13 @@ def _v2s(row, key) -> str | None:
         return None
     s = str(v).strip()
     return s or None
+
+
+def _v2bool(row, key) -> bool:
+    v = row.get(key) if hasattr(row, "get") else None
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return False
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "t"}
 
 
 # ──────────────────────────────────────────────

@@ -99,6 +99,9 @@ OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
 BORROW_HISTORY_FILE = OUTPUT_DIR / "borrow_history.json"
 BORROW_SPIKE_RISK_FILE = OUTPUT_DIR / "borrow_spike_risk.json"
 OPTIONS_CACHE_FILE = OUTPUT_DIR / "options_cache.json"
+ETF_METRICS_DAILY_FILE = OUTPUT_DIR / "etf_metrics_daily.csv"
+ETF_HOLDINGS_LATEST_FILE = OUTPUT_DIR / "etf_holdings_latest.csv"
+ETF_DISTRIBUTIONS_FILE = OUTPUT_DIR / "etf_distributions.json"
 LS_ALGO_DATA_PATH = Path(
     os.environ.get(
         "LS_ALGO_DATA_PATH",
@@ -115,6 +118,37 @@ INVERSE_ETFS = {
 }
 
 VOL_WINDOWS = ("1M", "3M", "6M", "YTD", "12M", "ALL")
+
+# Dashboard-side fallback until ls-algo emits a first-class `is_yieldboost` flag.
+# Pairs are kept explicit so generic low-beta covered-call funds do not inherit
+# income-style scenario math by accident.
+YIELDBOOST_BUCKET2_PAIRS = {
+    ("AMYY", "AMD"),
+    ("AZYY", "AMZN"),
+    ("BBYY", "BABA"),
+    ("COYY", "COIN"),
+    ("CWY", "CRWV"),
+    ("HMYY", "HIMS"),
+    ("HOYY", "HOOD"),
+    ("IOYY", "IONQ"),
+    ("MAAY", "MARA"),
+    ("FBYY", "META"),
+    ("MTYY", "MSTR"),
+    ("MUYY", "MU"),
+    ("NUGY", "GDX"),
+    ("NVYY", "NVDA"),
+    ("PLYY", "PLTR"),
+    ("QBY", "QBTS"),
+    ("RGYY", "RGTI"),
+    ("RTYY", "RIOT"),
+    ("SEMY", "SOXX"),
+    ("SMYY", "SMCI"),
+    ("TMYY", "TSM"),
+    ("TQQY", "QQQ"),
+    ("TSYY", "TSLA"),
+    ("XBTY", "IBIT"),
+    ("YSPY", "SPY"),
+}
 
 
 # ──────────────────────────────────────────────
@@ -167,6 +201,165 @@ def _int_schema_v(v, default: int = 2) -> int:
         return int(float(v))
     except (TypeError, ValueError):
         return default
+
+
+def _truthy(v) -> bool:
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return False
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "t"}
+
+
+def _product_id_from_url(v) -> str | None:
+    s = str(v or "").strip()
+    if not s:
+        return None
+    try:
+        parts = [p for p in urlparse(s).path.split("/") if p]
+    except Exception:
+        return None
+    for i, part in enumerate(parts[:-1]):
+        if part.lower() == "product":
+            return parts[i + 1]
+    return None
+
+
+def load_yieldboost_symbols(df: pd.DataFrame) -> set[str]:
+    """Return symbols that should use income-style scenario math.
+
+    Preferred sources, in order:
+      1. A future screener-emitted `is_yieldboost` column.
+      2. Local issuer holdings rows whose product JSON name contains YieldBOOST,
+         joined back to ticker through local metrics product IDs.
+      3. A conservative dashboard fallback pair list.
+    """
+    out: set[str] = set()
+    if "is_yieldboost" in df.columns:
+        for _, row in df.iterrows():
+            if _truthy(row.get("is_yieldboost")):
+                out.add(norm_sym(row.get("ETF") or row.get("symbol") or ""))
+
+    universe_pairs = {
+        (norm_sym(row.get("ETF") or row.get("symbol") or ""), norm_sym(row.get("Underlying") or row.get("underlying_sym") or ""))
+        for _, row in df.iterrows()
+    }
+    universe_symbols = {sym for sym, _ in universe_pairs if sym}
+
+    yieldboost_product_ids: set[str] = set()
+    if ETF_HOLDINGS_LATEST_FILE.exists():
+        try:
+            hdf = pd.read_csv(ETF_HOLDINGS_LATEST_FILE)
+            for _, row in hdf.iterrows():
+                name = str(row.get("security_name") or "")
+                if "yieldboost" not in name.replace(" ", "").lower():
+                    continue
+                pid = _product_id_from_url(row.get("source_url"))
+                if pid:
+                    yieldboost_product_ids.add(pid)
+        except Exception as e:
+            print(f"  Warning: could not derive YieldBOOST product IDs from holdings: {e}")
+
+    if yieldboost_product_ids and ETF_METRICS_DAILY_FILE.exists():
+        try:
+            mdf = pd.read_csv(ETF_METRICS_DAILY_FILE)
+            for _, row in mdf.iterrows():
+                ticker = norm_sym(row.get("ticker") or "")
+                if not ticker or ticker not in universe_symbols:
+                    continue
+                pid = _product_id_from_url(row.get("source_url"))
+                if pid in yieldboost_product_ids:
+                    out.add(ticker)
+        except Exception as e:
+            print(f"  Warning: could not map YieldBOOST products through metrics: {e}")
+
+    for pair in YIELDBOOST_BUCKET2_PAIRS:
+        if pair in universe_pairs:
+            out.add(pair[0])
+    return out
+
+
+def load_latest_metric_price_map() -> dict[str, float]:
+    """Latest usable NAV/close by ticker, for income-yield normalization."""
+    if not ETF_METRICS_DAILY_FILE.exists():
+        return {}
+    try:
+        df = pd.read_csv(ETF_METRICS_DAILY_FILE)
+    except Exception as e:
+        print(f"  Warning: could not read ETF metrics for income yields: {e}")
+        return {}
+    out: dict[str, float] = {}
+    if "ticker" not in df.columns:
+        return out
+    df = df.sort_values(["ticker", "date"], kind="stable") if "date" in df.columns else df
+    for _, row in df.iterrows():
+        ticker = norm_sym(row.get("ticker") or "")
+        if not ticker:
+            continue
+        for key in ("close_price", "nav"):
+            v = row.get(key)
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(f) and f > 0:
+                out[ticker] = f
+                break
+    return out
+
+
+def load_distribution_income_yields(price_by_symbol: dict[str, float]) -> dict[str, dict[str, float | int | str | None]]:
+    """Annualized distribution yields used by income-style scenario panels."""
+    if not ETF_DISTRIBUTIONS_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(ETF_DISTRIBUTIONS_FILE.read_text())
+    except Exception as e:
+        print(f"  Warning: could not read ETF distributions for income yields: {e}")
+        return {}
+    by_symbol = payload.get("by_symbol") if isinstance(payload, dict) else None
+    if not isinstance(by_symbol, dict):
+        return {}
+
+    today = dt.datetime.now(dt.UTC).date()
+    cutoff = today - dt.timedelta(days=365)
+    out: dict[str, dict[str, float | int | str | None]] = {}
+    for raw_sym, rows in by_symbol.items():
+        sym = norm_sym(raw_sym)
+        price = price_by_symbol.get(sym)
+        if not price or not isinstance(rows, list):
+            continue
+        trailing_amount = 0.0
+        trailing_count = 0
+        latest_date = None
+        latest_amount = None
+        for item in rows:
+            try:
+                ex_date = dt.date.fromisoformat(str(item.get("ex_date")))
+                amount = float(item.get("amount"))
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(amount) or amount <= 0:
+                continue
+            if latest_date is None or ex_date > latest_date:
+                latest_date = ex_date
+                latest_amount = amount
+            if ex_date >= cutoff:
+                trailing_amount += amount
+                trailing_count += 1
+        recent_annual = None
+        if latest_amount is not None:
+            recent_annual = round(float((latest_amount * 12) / price), 6)
+        trailing_annual = None
+        if trailing_amount > 0:
+            trailing_annual = round(float(trailing_amount / price), 6)
+        if trailing_annual is not None or recent_annual is not None:
+            out[sym] = {
+                "income_yield_trailing_annual": trailing_annual,
+                "income_yield_recent_annual": recent_annual,
+                "income_distribution_count_1y": trailing_count,
+                "income_latest_distribution": round(float(latest_amount), 6) if latest_amount is not None else None,
+                "income_latest_ex_date": latest_date.isoformat() if latest_date is not None else None,
+            }
+    return out
 
 
 def fetch_csv_from_github() -> pd.DataFrame:
@@ -2396,6 +2589,11 @@ def build():
     borrow_history = build_borrow_history_from_commits(set(df["symbol"].dropna().tolist()))
     borrow_history_symbols = borrow_history.get("symbols", {})
 
+    # 4c. Classify income-style low-beta products and precompute distribution yields.
+    yieldboost_symbols = load_yieldboost_symbols(df)
+    income_yield_map = load_distribution_income_yields(load_latest_metric_price_map())
+    print(f"Income-style scenario symbols: {len(yieldboost_symbols)}")
+
     today_utc = dt.datetime.now(dt.UTC).date().isoformat()
 
     # 5. Build records
@@ -2407,6 +2605,12 @@ def build():
         beta = float(row["Beta"]) if pd.notna(row.get("Beta")) else None
 
         bucket = assign_bucket(sym, beta or 0)
+        is_yieldboost = norm_sym(sym) in yieldboost_symbols
+        scenario_style = (
+            "income_style"
+            if is_yieldboost
+            else ("hidden_low_beta" if bucket == "bucket_2_low_beta" else "letf_vol_drag")
+        )
 
         # Borrow data: prefer IBKR FTP, fall back to CSV
         if ibkr["success"] and sym in ibkr["borrow_map"]:
@@ -2526,6 +2730,9 @@ def build():
             "beta": round(beta, 4) if beta else None,
             "beta_n_obs": int(row["Beta_n_obs"]) if pd.notna(row.get("Beta_n_obs")) else None,
             "bucket": bucket,
+            "is_yieldboost": bool(is_yieldboost),
+            "scenario_style": scenario_style,
+            **income_yield_map.get(norm_sym(sym), {}),
             "borrow_fee_annual": round(borrow_fee, 6) if borrow_fee is not None else None,
             "borrow_rebate_annual": round(borrow_rebate, 6) if borrow_rebate is not None else None,
             "borrow_current": round(borrow_current, 6) if borrow_current is not None else None,
