@@ -2351,8 +2351,20 @@ const COLS = [
     numeric: true,
     hint: 'Expected ETF total return over the next 3 months under flat underlying (long holder\'s perspective). Uses the shared forecast σ also used by the Scenarios tab: a simple 50/50 variance blend of model-implied σ (from Exp. decay p50 / YieldBOOST put-spread inversion) and robust 6M EWMA σ when both exist. Robust EWMA clips one-off event gaps before the EWMA update. Borrow and distributions are intentionally excluded (borrow is a short-side cost, distributions are passed through to longs as cash — both are folded into Net edge instead). Negative = ETF expected to grind down (short-favorable, green). Hover the cell for 1M and 6M companion values. Other (non-income) Bucket 2 rows show —.',
   },
-  { key: 'vol_underlying_annual', label: 'Vol Und', w: 80 },
-  { key: 'vol_etf_annual', label: 'Vol ETF', w: 80 },
+  {
+    key: 'vol_underlying_annual',
+    label: 'Vol Und',
+    sublabel: '6M realiz.',
+    w: 88,
+    hint: 'Backward-looking annualized realized σ on the underlying: 6M total-return log-return window from the data build (falls back to screener CSV if history is thin). Not the forward-looking forecast σ used for Exp. ETF return / Scenarios — see Forecast σ on the chart page or hover Scenarios.',
+  },
+  {
+    key: 'vol_etf_annual',
+    label: 'Vol ETF',
+    sublabel: '6M realiz.',
+    w: 88,
+    hint: 'Same as Vol Und but on the ETF leg (6M window in the build, else CSV). Diagnostic only; scenario stress uses forecast_vol_underlying_annual on the underlying.',
+  },
 ];
 
 // ── Summary Card ────────────────────────────
@@ -2385,6 +2397,7 @@ function ExpectedDecayCalculator() {
       <div className="calc-title">Expected Decay Calculator</div>
       <div className="calc-helper">
         This is theoretical gross decay from volatility drag; not a forecast of realized returns.
+        The headline scenario path uses <code>dragLog = 0.5·β·(β−1)·σ²·T</code> (same σ² factor; this calculator shows the magnitude <code>0.5·|β|·|β−1|·σ²·T</code> for quick mental math).
       </div>
 
       <div className="calc-grid">
@@ -2665,7 +2678,9 @@ function NetEdgeQuantileTable({ r }) {
 }
 
 // ── Detail Row ──────────────────────────────
-function DetailRow({ r }) {
+function DetailRow({ r, chartVolLookbackRange }) {
+  const fv = forecastVolForScenario(r, chartVolLookbackRange);
+  const fSig = fv?.sigma;
   return (
     <tr className="detail-row">
       <td colSpan={COLS.length + 1}>
@@ -2691,11 +2706,16 @@ function DetailRow({ r }) {
             <div className="dval">{r.beta?.toFixed(3) ?? '—'}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Vol Underlying</div>
+            <div className="dlabel">Forecast σ (und.)</div>
+            <div className="dval">{Number.isFinite(Number(fSig)) && Number(fSig) > 0 ? fmt(Number(fSig)) : '—'}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{fv?.source || ''}{fv?.eventAdjusted ? ' · event-clipped EWMA' : ''}</div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Vol Und (6M realiz.)</div>
             <div className="dval">{fmt(r.vol_underlying_annual)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Vol ETF</div>
+            <div className="dlabel">Vol ETF (6M realiz.)</div>
             <div className="dval">{fmt(r.vol_etf_annual)}</div>
           </div>
           <div className="detail-item">
@@ -3669,9 +3689,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-sub">{realizedUndSub}{Number.isFinite(Number(ewmaUnd)) ? ` • raw ewma ${fmt(ewmaUnd)}` : ''}</div>
             </div>
             <div className="chart-stat">
-              <div className="cs-label">Vol ETF</div>
+              <div className="cs-label">Vol ETF (6M table)</div>
               <div className="cs-value">{fmt(r.vol_etf_annual)}</div>
-              <div className="cs-sub">{etfSym}</div>
+              <div className="cs-sub">same field as main grid — not chart lookback</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">Realized Vol ETF</div>
@@ -5133,7 +5153,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             {data.ibkr_ftp_success ? 'IBKR Live' : 'CSV Data'}
             <span className={cls('fresh-badge', freshness.className)}>{freshness.label}</span>
             <span style={{ margin: '0 4px' }}>·</span>
-            Built {fmtTime(data.build_time)}
+            <span title={data.build_time ? `UTC: ${data.build_time}` : ''}>Built {fmtTime(data.build_time)}</span>
             {data.last_commit && <>
               <span style={{ margin: '0 4px' }}>·</span>
               Screener: <a href={`https://github.com/${data.source_repo}/blob/${data.source_branch}/${data.source_path || 'data/etf_screened_today.csv'}`} target="_blank">{data.last_commit.sha}</a>
@@ -5258,7 +5278,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             <strong>Gross (realized)</strong> — backward-looking: average daily log-return hedge drag (β·underlying − ETF), ×252 to a year.{' '}
             <strong>Exp. decay</strong> — forward-looking <em>median</em> gross decay: where data are rich enough we forecast a <em>distribution</em> of integrated variance (HARQ-Log: realized variance + quarticity), then map quantiles through the usual vol-drag link to decay; YieldBOOST uses the same vol idea but feeds a <strong>95/88 weekly put-spread</strong> NAV model (Monte Carlo or σ-point fallback); vol ETPs add a roll/tracking term; thin history falls back to a single <strong>σ²</strong> Itô-style estimate.{' '}
             <strong>Net edge</strong> — bootstrap: resample gross history, <em>re-center</em> on that exp. median, subtract borrow draws; big number = p50, fan = p5–p95 / IQR. Hover the fan for quantiles; expand row for borrow, table, charts, and a net (gross−borrow) point estimate.{' '}
-            <strong>Exp. ETF return (3M)</strong> — flat-underlying, long-side NAV forecast using the same <strong>shared forecast σ</strong> as Scenarios: 50/50 variance blend of model-implied σ and robust 6M EWMA when both exist. Standard path compounds <strong>−½·β·(β−1)·σ²·T</strong> in log space; YieldBOOST compounds weekly put-spread loss + expense instead. Borrow and distributions roll into <strong>Net edge</strong>, not this cell. More negative ⇒ more structural grind-down. Hover for 1M / 3M / 6M. Passive Bucket 2 (non-income): <strong>—</strong>.
+            <strong>Exp. ETF return (3M)</strong> — flat-underlying, long-side NAV forecast using the same <strong>shared forecast σ</strong> as Scenarios: 50/50 variance blend of model-implied σ and robust 6M EWMA when both exist. Standard path compounds <strong>−½·β·(β−1)·σ²·T</strong> in log space; YieldBOOST compounds weekly put-spread loss + expense instead. Borrow and distributions roll into <strong>Net edge</strong>, not this cell. More negative ⇒ more structural grind-down. Hover for 1M / 3M / 6M. Passive Bucket 2 (non-income): <strong>—</strong>.{' '}
+            <strong>Vol Und / Vol ETF</strong> — <em>different object</em>: trailing <strong>6M realized</strong> annualized σ (ETF vs underlying), for context; they are <strong>not</strong> the forecast σ in the prior sentence.
             {data?.uncertainty_footnote && (
               <span> {data.uncertainty_footnote}</span>
             )}
@@ -5290,6 +5311,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                   <code>forecast_vol_underlying_annual</code>. When both legs exist, the data builder blends <strong>variance</strong>, not σ:{' '}
                   <code className="dm-formula">σ²_forecast = 0.5·σ²_model + 0.5·σ²_robustEWMA</code>
                   The model leg is implied from <code>expected_gross_decay_p50_annual</code> (or inverted from the YieldBOOST put-spread p50); the short-term leg is a <strong>robust 6M EWMA</strong> that clips unusual one-day gaps before applying λ ≈ 0.94. Raw EWMA and realized σ still appear as diagnostics.
+                  <br /><br />
+                  <strong>Main-grid Vol Und / Vol ETF</strong> columns print <code>vol_underlying_annual</code> / <code>vol_etf_annual</code>: backward-looking <strong>6M realized</strong> σ from the same TR windows as <code>realized_vol[&quot;6M&quot;]</code> (CSV fallback if missing). They intentionally differ from <code>forecast_vol_underlying_annual</code> so you can compare trail realized vs the blended forecast used for scenarios.
                 </p>
               </div>
               <div className="dm-block">
@@ -5473,10 +5496,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         >
                           {expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}
                         </td>
-                        <td>{fmt(r.vol_underlying_annual)}</td>
-                        <td>{fmt(r.vol_etf_annual)}</td>
+                        <td title="6M backward-looking realized σ (underlying). Not forecast_vol (used for Exp. ETF return / Scenarios).">{fmt(r.vol_underlying_annual)}</td>
+                        <td title="6M backward-looking realized σ (ETF). Diagnostic; scenarios stress the underlying with forecast σ.">{fmt(r.vol_etf_annual)}</td>
                       </tr>
-                      {expanded && <DetailRow r={r} />}
+                      {expanded && <DetailRow r={r} chartVolLookbackRange={chartVolLookbackRange} />}
                     </React.Fragment>
                   );
                 })}
