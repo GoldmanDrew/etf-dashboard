@@ -1624,7 +1624,7 @@ function expectedDecayHeadlineValue(r) {
 const DECAY_DIST_MODEL_LABELS = {
   harq_log_anchored: 'HARQ-Log',
   empirical_lognormal: 'empirical lognormal',
-  simple_ito_fallback: 'Itô (no history)',
+  simple_ito_fallback: 'Itô fallback',
   no_drag_beta: 'no drag (β∈{0,1})',
 };
 
@@ -1639,12 +1639,28 @@ function decayDistTooltip(r) {
   const horizon = dist.horizon
     ? `${Math.round(dist.horizon)}d`
     : '252d';
+  const threshold = dist.horizon
+    ? Math.ceil(2.5 * Number(dist.horizon))
+    : 630;
+  const nObsRounded = dist.nObs != null ? Math.round(dist.nObs) : null;
+  let fallbackReason = null;
+  if (dist.model === 'simple_ito_fallback') {
+    if (nObsRounded == null || nObsRounded <= 0) {
+      fallbackReason = 'fallback reason: no usable underlying history';
+    } else if (nObsRounded < threshold) {
+      fallbackReason =
+        `fallback reason: short history (n=${nObsRounded} < ${threshold} required for ${horizon})`;
+    } else {
+      fallbackReason = `fallback reason: empirical moments unavailable (n=${nObsRounded})`;
+    }
+  }
   const lines = [
     `Distribution forecast (${horizon} horizon, gross of borrow)`,
-    `Model: ${modelLabel}` + (dist.nObs ? `  ·  n=${Math.round(dist.nObs)}` : ''),
+    `Model: ${modelLabel}` + (nObsRounded != null ? `  ·  n=${nObsRounded}` : ''),
     `p50 (median):  ${fmt(dist.p50)}`,
     `p10 / p90:      ${fmt(dist.p10)}  /  ${fmt(dist.p90)}`,
   ];
+  if (fallbackReason) lines.push(fallbackReason);
   if (dist.mean != null) lines.push(`lognormal mean: ${fmt(dist.mean)}`);
   if (dist.sigma != null) lines.push(`σ(log IV_T):    ${dist.sigma.toFixed(3)}`);
   const simple = Number(r?.expected_gross_decay_simple_ito_annual);
