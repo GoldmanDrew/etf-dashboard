@@ -2945,11 +2945,30 @@ def build():
                 "underlying_end_date": und_w.get("end_date"),
             }
 
-        # Keep legacy top-level fields as 6M default fallback.
+        # Headline TR realized σ: prefer longer windows first (12M smooths single-
+        # quarter earnings cadence vs 6M better than 3M/1M). Fallback to screener CSV.
         vol_und_csv = _safe_float(row, "vol_underlying_annual")
         vol_etf_csv = _safe_float(row, "vol_etf_annual")
-        vol_und = realized_vol.get("6M", {}).get("underlying")
-        vol_etf = realized_vol.get("6M", {}).get("etf")
+        vol_und = None
+        vol_etf = None
+        for _win in ("12M", "6M", "3M", "1M"):
+            u = realized_vol.get(_win, {}).get("underlying")
+            e = realized_vol.get(_win, {}).get("etf")
+            if u is not None and e is not None:
+                vol_und, vol_etf = u, e
+                break
+        if vol_und is None:
+            for _win in ("12M", "6M", "3M", "1M"):
+                u = realized_vol.get(_win, {}).get("underlying")
+                if u is not None:
+                    vol_und = u
+                    break
+        if vol_etf is None:
+            for _win in ("12M", "6M", "3M", "1M"):
+                e = realized_vol.get(_win, {}).get("etf")
+                if e is not None:
+                    vol_etf = e
+                    break
         if vol_und is None:
             vol_und = vol_und_csv
         if vol_etf is None:
