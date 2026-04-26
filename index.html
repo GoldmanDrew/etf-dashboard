@@ -4885,7 +4885,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
       {/* ── Chart Page ──────── */}
       {chartRecord ? (
-        <ChartPage record={chartRecord} onBack={navigateBack} />
+        <ChartPage
+          record={chartRecord}
+          onBack={navigateBack}
+          chartVolLookbackRange={chartVolLookbackRange}
+          setChartVolLookbackRange={setChartVolLookbackRange}
+        />
       ) : showNews ? (
         <NewsPage
           eventsPayload={corporateActions}
