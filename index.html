@@ -1555,14 +1555,110 @@ const YIELDBOOST_INCOME_PAIRS = new Set([
   'QBY|QBTS', 'RGYY|RGTI', 'RTYY|RIOT', 'SEMY|SOXX', 'SMYY|SMCI',
   'TMYY|TSM', 'TQQY|QQQ', 'TSYY|TSLA', 'XBTY|IBIT', 'YSPY|SPY',
 ]);
+const VOLATILITY_ETP_SYMBOLS = new Set(['UVIX', 'SVIX', 'UVXY', 'SVXY', 'VXX', 'VIXY', 'VIXM', 'VIX', 'VIX1D', 'VIX3M']);
 const isYieldBoostIncomeStrategy = r => {
   if (r?.is_yieldboost === true || r?.scenario_style === 'income_style') return true;
   const sym = String(r?.symbol || '').toUpperCase();
   const und = String(r?.underlying || '').toUpperCase();
   return YIELDBOOST_INCOME_PAIRS.has(`${sym}|${und}`);
 };
+const isVolatilityEtp = r => (
+  r?.product_class === 'volatility_etp'
+  || VOLATILITY_ETP_SYMBOLS.has(String(r?.symbol || '').toUpperCase())
+  || VOLATILITY_ETP_SYMBOLS.has(String(r?.underlying || '').toUpperCase())
+);
 const suppressScenarioForRow = r => r?.bucket === 'bucket_2_low_beta' && !isYieldBoostIncomeStrategy(r);
 const scenarioValueCls = (r, v) => isYieldBoostIncomeStrategy(r) ? spreadCls(v) : scenShortFavCls(v);
+
+function expectedDecayDisplayValue(r) {
+  const expected = Number(r?.expected_gross_decay_annual);
+  if (!isVolatilityEtp(r)) return Number.isFinite(expected) ? expected : null;
+  const adjusted = Number(r?.expected_gross_decay_adjusted_annual);
+  if (Number.isFinite(adjusted)) return adjusted;
+  const simple = Number(r?.expected_gross_decay_simple_ito_annual);
+  const base = Number.isFinite(simple) ? simple : expected;
+  const adj = Number(r?.expected_decay_adjustment_annual);
+  if (Number.isFinite(base) && Number.isFinite(adj)) return base + adj;
+  const gross = Number(r?.gross_decay_annual);
+  if (Number.isFinite(gross) && Number.isFinite(base)) return gross;
+  return Number.isFinite(base) ? base : null;
+}
+
+// Distributional forecast surfaced from ls-algo/decay_distribution.py.
+// Returns null when the screener row didn't carry the new fields, so
+// callers can fall back to expectedDecayDisplayValue() seamlessly.
+function expectedDecayDistribution(r) {
+  const p10 = Number(r?.expected_gross_decay_p10_annual);
+  const p50 = Number(r?.expected_gross_decay_p50_annual);
+  const p90 = Number(r?.expected_gross_decay_p90_annual);
+  if (!Number.isFinite(p10) || !Number.isFinite(p50) || !Number.isFinite(p90)) {
+    return null;
+  }
+  const mean = Number(r?.expected_gross_decay_mean_annual);
+  const sigma = Number(r?.expected_logIV_sigma_annual);
+  const mu = Number(r?.expected_logIV_mu_annual);
+  const nObs = Number(r?.expected_gross_decay_dist_n_obs);
+  const horizon = Number(r?.expected_gross_decay_dist_horizon_days);
+  return {
+    p10,
+    p50,
+    p90,
+    mean: Number.isFinite(mean) ? mean : null,
+    sigma: Number.isFinite(sigma) ? sigma : null,
+    mu: Number.isFinite(mu) ? mu : null,
+    model: r?.expected_gross_decay_dist_model || null,
+    nObs: Number.isFinite(nObs) ? nObs : null,
+    horizon: Number.isFinite(horizon) ? horizon : null,
+  };
+}
+
+// Single number used for sorting and the headline cell value. Prefers
+// the lognormal median (p50) when present, falls back to the legacy
+// model-aware point estimate.
+function expectedDecayHeadlineValue(r) {
+  const dist = expectedDecayDistribution(r);
+  if (dist) return dist.p50;
+  return expectedDecayDisplayValue(r);
+}
+
+const DECAY_DIST_MODEL_LABELS = {
+  harq_log_anchored: 'HARQ-Log',
+  empirical_lognormal: 'empirical lognormal',
+  simple_ito_fallback: 'Itô (no history)',
+  no_drag_beta: 'no drag (β∈{0,1})',
+};
+
+function decayDistTooltip(r) {
+  const dist = expectedDecayDistribution(r);
+  if (!dist) {
+    return isVolatilityEtp(r)
+      ? 'Volatility ETP adjustment: simple Itô expected decay plus empirical roll/tracking component. Raw Itô alone understates products like UVIX.'
+      : 'Simple Itô expected gross decay (no distributional forecast available).';
+  }
+  const modelLabel = DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || '—';
+  const horizon = dist.horizon
+    ? `${Math.round(dist.horizon)}d`
+    : '252d';
+  const lines = [
+    `Distribution forecast (${horizon} horizon, gross of borrow)`,
+    `Model: ${modelLabel}` + (dist.nObs ? `  ·  n=${Math.round(dist.nObs)}` : ''),
+    `p50 (median):  ${fmt(dist.p50)}`,
+    `p10 / p90:      ${fmt(dist.p10)}  /  ${fmt(dist.p90)}`,
+  ];
+  if (dist.mean != null) lines.push(`lognormal mean: ${fmt(dist.mean)}`);
+  if (dist.sigma != null) lines.push(`σ(log IV_T):    ${dist.sigma.toFixed(3)}`);
+  const simple = Number(r?.expected_gross_decay_simple_ito_annual);
+  if (Number.isFinite(simple)) lines.push(`simple Itô:     ${fmt(simple)}`);
+  if (isVolatilityEtp(r)) {
+    lines.push('volatility ETP — Itô alone understates VIX-futures decay');
+  }
+  return lines.join('\n');
+}
+
+function expectedDecayDisplayLabel(r) {
+  if (expectedDecayDistribution(r)) return 'Exp. (median)';
+  return isVolatilityEtp(r) ? 'Exp. (vol-adj)' : 'Exp. (Itô)';
+}
 
 function incomeAnnualYieldForScenario(r) {
   const trailing = Number(r?.income_yield_trailing_annual);
@@ -1572,16 +1668,68 @@ function incomeAnnualYieldForScenario(r) {
   return null;
 }
 
-function estimateIncomeStyleEtfReturn({ beta, underlyingReturn, annualIncomeYield, horizonYears, minReturn = -0.9999 }) {
-  if (annualIncomeYield == null) return null;
-  const b = Number(beta);
+function normalCdf(x) {
+  const z = Number(x);
+  if (!Number.isFinite(z)) return z < 0 ? 0 : 1;
+  const sign = z < 0 ? -1 : 1;
+  const a = Math.abs(z) / Math.SQRT2;
+  const p = 0.3275911;
+  const t = 1 / (1 + p * a);
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-a * a);
+  return 0.5 * (1 + sign * y);
+}
+
+function expectedPutSpreadLossWeekly({ underlyingReturn, sigmaAnnual, horizonYears }) {
   const u = Number(underlyingReturn);
-  const y = Number(annualIncomeYield);
+  const sigma = Number(sigmaAnnual);
   const t = Number(horizonYears);
-  if (!Number.isFinite(b) || !Number.isFinite(u) || !Number.isFinite(y) || y < 0 || !Number.isFinite(t) || t <= 0) {
+  if (!Number.isFinite(u) || u <= -0.9999 || !Number.isFinite(sigma) || sigma <= 0 || !Number.isFinite(t) || t <= 0) {
     return null;
   }
-  return Math.max(minReturn, b * u + y * t);
+  const tau = 1 / 52;
+  const muAnnual = Math.log1p(u) / t;
+  const m = (2 * muAnnual - 2 * sigma * sigma) * tau;
+  const s = 2 * sigma * Math.sqrt(tau);
+  if (!Number.isFinite(m) || !Number.isFinite(s) || s <= 0) return null;
+
+  const spreadPut = (k) => {
+    const alpha = (Math.log(k) - m) / s;
+    const beta = alpha - s;
+    const forward = Math.exp(m + 0.5 * s * s);
+    return k * normalCdf(alpha) - forward * normalCdf(beta);
+  };
+  const shortStrike = 0.95;
+  const longStrike = 0.88;
+  const loss = spreadPut(shortStrike) - spreadPut(longStrike);
+  return Number.isFinite(loss) ? Math.max(0, Math.min(shortStrike - longStrike, loss)) : null;
+}
+
+function estimateIncomeStyleScenarioReturn({ underlyingReturn, sigmaAnnual, annualIncomeYield, annualBorrowCost, horizonYears, expenseRatioAnnual = 0.0099 }) {
+  const dAnnual = Number(annualIncomeYield);
+  const borrowAnnual = Number(annualBorrowCost);
+  const t = Number(horizonYears);
+  if (!Number.isFinite(dAnnual) || dAnnual < 0 || !Number.isFinite(t) || t <= 0) return null;
+  const weeklySpreadLoss = expectedPutSpreadLossWeekly({ underlyingReturn, sigmaAnnual, horizonYears });
+  if (weeklySpreadLoss == null) return null;
+  const weeks = Math.max(1, Math.round(t * 52));
+  const weeklyExpense = Math.max(0, Number(expenseRatioAnnual) || 0) / 52;
+  const weeklyDistribution = dAnnual / 52;
+  const q = clampNum(1 - weeklySpreadLoss - weeklyExpense, 0.0001, 1.5);
+  const navEndRatio = Math.pow(q, weeks);
+  const navDecay = 1 - navEndRatio;
+  const geomSum = Math.abs(1 - q) < 1e-9 ? weeks : (1 - Math.pow(q, weeks)) / (1 - q);
+  const distributionsPaid = weeklyDistribution * geomSum;
+  const borrowCost = Number.isFinite(borrowAnnual) && borrowAnnual > 0 ? borrowAnnual * t : 0;
+  const netShortPnl = navDecay - distributionsPaid - borrowCost;
+  return {
+    weeklySpreadLoss,
+    navDecay,
+    navReturn: -navDecay,
+    distributionsPaid,
+    borrowCost,
+    netShortPnl,
+    longTotalReturn: -navDecay + distributionsPaid,
+  };
 }
 
 /**
@@ -1609,12 +1757,15 @@ function computeScenarioEtf1mFlatUnd1yRealized(r, chartVolLookbackRange) {
   const lev = Number(r?.beta);
   if (!Number.isFinite(horizonYears) || horizonYears <= 0 || !Number.isFinite(lev)) return null;
   if (isYieldBoostIncomeStrategy(r)) {
-    return estimateIncomeStyleEtfReturn({
-      beta: lev,
+    const vpIncome = realizedVolPointForScenarioColumn(r, chartVolLookbackRange);
+    const modeled = estimateIncomeStyleScenarioReturn({
       underlyingReturn: 0,
+      sigmaAnnual: Number(vpIncome?.underlying_ewma) || Number(vpIncome?.underlying),
       annualIncomeYield: incomeAnnualYieldForScenario(r),
+      annualBorrowCost: Number(getBorrowRate(r)),
       horizonYears,
     });
+    return modeled?.netShortPnl ?? null;
   }
   if (typeof SR.estimateEtfReturn !== 'function') return null;
   const vp = realizedVolPointForScenarioColumn(r, chartVolLookbackRange);
@@ -1980,7 +2131,7 @@ const COLS = [
   { key: 'borrow_current', label: 'Borrow Rate', w: 105 },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, hint: 'Realized gross: mean daily log-hedge-drag × 252 (see Decay math)' },
-  { key: 'expected_gross_decay_annual', label: 'Exp. (Itô)', w: 95, hint: 'Theoretical gross: Itô vol-drag + fee + financing (+ mgr borrow if β<0)' },
+  { key: 'expected_gross_decay_p50_annual', label: 'Exp. decay', sublabel: 'p50 · p10/p90', w: 110, hint: 'Distributional forecast of 1y gross decay. Headline = lognormal median (p50). Sub = p10 / p90 from HARQ-Log fit on the underlying anchored on the empirical 1y log-IV distribution. Sort uses p50; rows missing the distribution fall back to the legacy point estimate. Hover for model details and simple-Itô comparison.' },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
@@ -1994,7 +2145,7 @@ const COLS = [
     sublabel: '0% und · EWMA σ',
     w: 112,
     numeric: true,
-    hint: 'LETF rows: same as Scenarios table (~1M horizon, underlying return 0%, chart-lookback EWMA σ, 1.0× vol column, borrow/carry excluded). Tagged income-style Bucket 2 rows use distribution carry for a flat-underlying 1M scenario. Other Bucket 2 rows show —.',
+    hint: 'LETF rows: same as Scenarios table (~1M horizon, underlying return 0%, chart-lookback EWMA σ, 1.0× vol column, borrow/carry excluded). Tagged income-style Bucket 2 rows show net short P&L from the 95/88 weekly put-spread NAV decay model. Other Bucket 2 rows show —.',
   },
   { key: 'vol_underlying_annual', label: 'Vol Und', w: 80 },
   { key: 'vol_etf_annual', label: 'Vol ETF', w: 80 },
@@ -2093,13 +2244,13 @@ function ExpectedDecayCalculator() {
 // ── Gross realized vs expected (detail strip) ─────────────────────
 function GrossDecayComparisonStrip({ r }) {
   const gR = Number(r.gross_decay_annual);
-  const gE = Number(r.expected_gross_decay_annual);
+  const gE = expectedDecayDisplayValue(r);
   const gB = r.blended_gross_decay != null && r.blended_gross_decay !== undefined
     ? Number(r.blended_gross_decay) : NaN;
   const net = Number(r.net_decay);
   const pts = [];
   if (Number.isFinite(gR)) pts.push({ v: gR, cls: 'realized', lab: 'Realized gross' });
-  if (Number.isFinite(gE)) pts.push({ v: gE, cls: 'expected', lab: 'Expected (Itô)' });
+  if (Number.isFinite(gE)) pts.push({ v: gE, cls: 'expected', lab: expectedDecayDisplayLabel(r) });
   if (Number.isFinite(gB)) pts.push({ v: gB, cls: 'blended', lab: 'Blended gross' });
   if (Number.isFinite(net)) pts.push({ v: net, cls: 'net', lab: 'Net (after borrow)' });
   if (pts.length === 0) return null;
@@ -2826,25 +2977,26 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       return { ok: false, error: 'Missing distribution yield estimate for income-style scenario.' };
     }
     const sigma = Number(scenarioSigmaBest);
-    const incomeCarry = Number(annualIncomeYield) * horizonYears;
+    const annualBorrowCost = Number.isFinite(Number(annualCarryDrag)) ? Number(annualCarryDrag) : 0;
     const rows = SCENARIO_SHOCK_MULTIPLIERS.map((sigmaMultiple) => {
       const underlyingReturn = Math.exp(sigmaMultiple * sigma * Math.sqrt(horizonYears)) - 1;
-      const priceBetaReturn = Number(scenarioLeverage) * underlyingReturn;
-      const totalReturn = estimateIncomeStyleEtfReturn({
-        beta: scenarioLeverage,
+      const modeled = estimateIncomeStyleScenarioReturn({
         underlyingReturn,
+        sigmaAnnual: sigma,
         annualIncomeYield,
+        annualBorrowCost,
         horizonYears,
       });
-      return { sigmaMultiple, underlyingReturn, priceBetaReturn, incomeCarry, totalReturn };
+      return { sigmaMultiple, underlyingReturn, ...(modeled || {}) };
     });
     return {
       ok: true,
       annualIncomeYield: Number(annualIncomeYield),
-      incomeCarry,
+      annualBorrowCost,
+      weeks: Math.max(1, Math.round(horizonYears * 52)),
       rows,
     };
-  }, [isIncomeStrategyScenario, scenarioSigmaBest, horizonYears, undObs, minObsForScenario, incomeAnnualYieldForChart, scenarioLeverage]);
+  }, [isIncomeStrategyScenario, scenarioSigmaBest, horizonYears, undObs, minObsForScenario, incomeAnnualYieldForChart, annualCarryDrag]);
 
   const mcUpsideThresholds = useMemo(
     () => parseThresholdInput(mcUpsideThresholdsText),
@@ -3180,10 +3332,30 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-value" style={{ color: 'var(--positive)' }}>{fmt(r.gross_decay_annual)}</div>
               <div className="cs-sub">screener point, annual</div>
             </div>
-            <div className="chart-stat">
-              <div className="cs-label">Expected gross (Itô)</div>
-              <div className="cs-value">{fmt(r.expected_gross_decay_annual)}</div>
-              <div className="cs-sub">mechanical, from screener</div>
+            <div className="chart-stat" title={decayDistTooltip(r)}>
+              <div className="cs-label">{expectedDecayDisplayLabel(r)}</div>
+              {(() => {
+                const dist = expectedDecayDistribution(r);
+                if (!dist) {
+                  return (
+                    <>
+                      <div className="cs-value">{fmt(expectedDecayDisplayValue(r))}</div>
+                      <div className="cs-sub">
+                        {isVolatilityEtp(r) ? 'volatility ETP: Itô + empirical roll/tracking' : 'mechanical, from screener'}
+                      </div>
+                    </>
+                  );
+                }
+                const modelLabel = DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || 'distribution';
+                return (
+                  <>
+                    <div className="cs-value">{fmt(dist.p50)}</div>
+                    <div className="cs-sub">
+                      p10/p90 {fmt(dist.p10)} / {fmt(dist.p90)} · {modelLabel}
+                    </div>
+                  </>
+                );
+              })()}
             </div>
             <div className="chart-stat">
               <div className="cs-label">Borrow Rate</div>
@@ -3375,7 +3547,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       Lookback: {activeTf.label} | underlying EWMA σ: {fmt(scenarioSigmaBest)} | reference realized: {fmt(scenarioSigmaRef)}
                     </div>
                     <div className="scenario-sub">
-                      Price beta input: {Number.isFinite(Number(scenarioLeverage)) ? scenarioLeverage.toFixed(3) : '—'} | annual distribution yield estimate: {fmt(incomeScenarioGrid.annualIncomeYield)}
+                      Model: weekly 95/88 put-spread loss on 2× ETF | distributions {fmt(incomeScenarioGrid.annualIncomeYield)} ann. | borrow {fmt(incomeScenarioGrid.annualBorrowCost)} ann.
                     </div>
                   </div>
                   <div className="tf-group" style={{ marginLeft: 0 }}>
@@ -3400,9 +3572,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                         <tr>
                           <th>Underlying Shock</th>
                           <th>Underlying Return</th>
-                          <th>ETF Price Beta Return</th>
-                          <th>Estimated Distribution Carry</th>
-                          <th>Estimated ETF Total Return</th>
+                          <th>Weekly Spread Loss</th>
+                          <th>NAV Decay Profit</th>
+                          <th>Distributions Paid</th>
+                          <th>Borrow Cost</th>
+                          <th>Net Short P&amp;L</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3410,13 +3584,15 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <tr key={ridx}>
                             <td>{fmtSigmaMultiple(row.sigmaMultiple)}</td>
                             <td>{fmt(row.underlyingReturn)}</td>
-                            <td>{fmt(row.priceBetaReturn)}</td>
-                            <td>{fmt(row.incomeCarry)}</td>
+                            <td>{fmt(row.weeklySpreadLoss)}</td>
+                            <td>{fmt(row.navDecay)}</td>
+                            <td>{fmt(row.distributionsPaid)}</td>
+                            <td>{fmt(row.borrowCost)}</td>
                             <td
-                              className={spreadCls(row.totalReturn)}
-                              style={{ background: scenarioCellBg(row.totalReturn), color: 'var(--text-primary)' }}
+                              className={spreadCls(row.netShortPnl)}
+                              style={{ background: scenarioCellBg(row.netShortPnl), color: 'var(--text-primary)' }}
                             >
-                              {fmt(row.totalReturn)}
+                              {fmt(row.netShortPnl)}
                             </td>
                           </tr>
                         ))}
@@ -3425,10 +3601,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   </div>
                 )}
                 <div className="scenario-formula">
-                  ETF total return ≈ beta × underlying return + annual distribution yield × horizon.
+                  Weekly loss L = E[(0.95 − R)+ − (0.88 − R)+], where ln R follows the 2× ETF lognormal approximation from the research note.
                 </div>
                 <div className="scenario-formula">
-                  Distribution yield uses trailing 12-month cash distributions when available, otherwise latest distribution × 12, normalized by recent NAV/price.
+                  Net short P&amp;L = [1 − (1 − L − f)^N] − d × Σ(1 − L − f)^w − borrow × T. N = {incomeScenarioGrid.weeks || '—'} weeks.
                 </div>
               </div>
 
@@ -4615,8 +4791,16 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       d = d.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
     }
     d.sort((a, b) => {
-      let av = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY ? computeScenarioEtf1mFlatUnd1yRealized(a, chartVolLookbackRange) : a[sortKey];
-      let bv = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY ? computeScenarioEtf1mFlatUnd1yRealized(b, chartVolLookbackRange) : b[sortKey];
+      let av = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
+        ? computeScenarioEtf1mFlatUnd1yRealized(a, chartVolLookbackRange)
+        : sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
+        ? expectedDecayHeadlineValue(a)
+        : a[sortKey];
+      let bv = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
+        ? computeScenarioEtf1mFlatUnd1yRealized(b, chartVolLookbackRange)
+        : sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
+        ? expectedDecayHeadlineValue(b)
+        : b[sortKey];
       if (av == null) av = sortDesc ? -Infinity : Infinity;
       if (bv == null) bv = sortDesc ? -Infinity : Infinity;
       if (typeof av === 'string') return sortDesc ? bv.localeCompare(av) : av.localeCompare(bv);
@@ -4772,9 +4956,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
           <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
             <strong style={{ color: 'var(--text-secondary)' }}>Decay / edge —</strong>{' '}
-            <em>Gross (realized)</em> is a screener point; <em>Exp. (Itô)</em> is the mechanical expectation.{' '}
+            <em>Gross (realized)</em> is a screener point; <em>Exp. decay</em> is model-aware: simple Itô for normal LETFs, volatility-roll adjusted for VIX futures ETPs.{' '}
             <strong>Net edge</strong> = <em>median</em> (large) + <em>fan</em> (gray whisker, cyan IQR, blue p50). Hover the fan for p5–p25–p50–p75–p95; expand row for borrow mode, quantile table, charts, and <em>net (gross−borrow)</em> point estimate.{' '}
-            <strong>Scen. 1M ETF</strong> matches the active scenario mode: LETF rows use <strong>1M</strong>, <strong>0%</strong> underlying, and <strong>{chartVolTfLabel}</strong> EWMA σ; tagged income-style Bucket 2 rows use estimated 1M distribution carry; other Bucket 2 rows show <strong>—</strong>.
+            <strong>Scen. 1M ETF</strong> matches the active scenario mode: LETF rows use <strong>1M</strong>, <strong>0%</strong> underlying, and <strong>{chartVolTfLabel}</strong> EWMA σ; tagged income-style Bucket 2 rows use the 95/88 weekly put-spread NAV decay model and report net short P&amp;L; other Bucket 2 rows show <strong>—</strong>.
             {data?.uncertainty_footnote && (
               <span> {data.uncertainty_footnote}</span>
             )}
@@ -4800,17 +4984,17 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                 This is a <strong>realized</strong> estimate (what happened on average), not a forecast of future total return.
               </div>
               <div className="dm-block">
-                <div className="dm-title">Exp. (Itô) — theoretical <em>gross</em> decay (closed form)</div>
+                <div className="dm-title">Exp. decay — theoretical / model-adjusted <em>gross</em> decay</div>
                 Built from OLS β, underlying σ aligned with the same log-return object as above:
                 σ = sqrt(mean(r<sub>U,t</sub><sup>2</sup>) × 252) (uncentered second moment; capped in the screener).
                 The screener adds fee, financing, and (for inverse β&lt;0) manager borrow on the underlying:
                 <code className="dm-formula">{`expected = 0.5·|β|·|β−1|·σ² + f + (β−1)·r + |β|·λ̄_mgr   (λ̄_mgr only if β<0; else 0)`}</code>
-                where <em>f</em> is the fund expense ratio (decimal), <em>r</em> the risk-free rate used at run time, λ̄_mgr the underlying borrow input when available.
+                where <em>f</em> is the fund expense ratio (decimal), <em>r</em> the risk-free rate used at run time, λ̄_mgr the underlying borrow input when available. For volatility futures ETPs (e.g. UVIX/SVIX), the simple Itô model is not sufficient because roll yield, volatility risk premium, jumps, and mean reversion dominate; the displayed value adds the empirical roll/tracking component when available and marks the row as volatility-adjusted.
               </div>
               <div className="dm-block">
                 <div className="dm-title">Scen. 1M ETF (0% und · EWMA σ) — scenario-mode cell</div>
                 LETF rows use <code className="dm-formula">ScenarioReturns.estimateEtfReturn</code> with horizon <strong>1M</strong>, <strong>underlyingReturn = 0</strong>,
-                <strong>σ</strong> = <code>{'realized_vol[<lookback>].underlying_ewma'}</code> (fallback: that window&apos;s realized σ only), <strong>leverage = β</strong>, and <strong>annualCarryDrag = 0</strong>. Tagged income-style Bucket 2 rows instead use <code className="dm-formula">β × underlyingReturn + distribution_yield × horizon</code>, so the flat-underlying 1M cell is estimated distribution carry. Untagged Bucket 2 rows show <strong>—</strong> because LETF vol-drag math is not comparable.
+                <strong>σ</strong> = <code>{'realized_vol[<lookback>].underlying_ewma'}</code> (fallback: that window&apos;s realized σ only), <strong>leverage = β</strong>, and <strong>annualCarryDrag = 0</strong>. Tagged income-style Bucket 2 rows instead use the research-note closed form: expected weekly loss on a <strong>short 95% / long 88%</strong> put spread on the <strong>2× ETF</strong>, compounded NAV decay, minus distributions paid and borrow. Untagged Bucket 2 rows show <strong>—</strong> because LETF vol-drag math is not comparable.
                 This is a <strong>conditional</strong> one-month ETF return path, not the screener&apos;s annualized realized drag.
               </div>
               <div className="dm-block">
@@ -4870,7 +5054,20 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         </td>
                         <td>{fmtNum(r.shares_available)}</td>
                         <td>{fmt(r.gross_decay_annual)}</td>
-                        <td>{fmt(r.expected_gross_decay_annual)}</td>
+                        <td title={decayDistTooltip(r)}>
+                          {(() => {
+                            const dist = expectedDecayDistribution(r);
+                            if (!dist) return fmt(expectedDecayDisplayValue(r));
+                            return (
+                              <div style={{ lineHeight: 1.15 }}>
+                                <div>{fmt(dist.p50)}</div>
+                                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+                                  {fmt(dist.p10)} / {fmt(dist.p90)}
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </td>
                         <td style={{ verticalAlign: 'middle' }}>
                           <NetEdgeMergedCell r={r} />
                         </td>
@@ -4880,7 +5077,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                             suppressScenarioForRow(r)
                               ? 'Scenario hidden for non-income Bucket 2 products.'
                               : isYieldBoostIncomeStrategy(r)
-                                ? 'Income-style estimate over ~1 month if underlying is flat (0%): distribution carry only; uses trailing/recent distribution yield.'
+                                ? 'Income-style net short P&L over ~1 month if underlying is flat (0%): 95/88 weekly put-spread NAV decay minus distributions and borrow.'
                                 : 'Modeled ETF return over ~1 month if underlying is flat (0%); σ = underlying EWMA for the chart lookback; same estimateEtfReturn as Scenarios (borrow excluded).'
                           }
                         >

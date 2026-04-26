@@ -119,6 +119,11 @@ INVERSE_ETFS = {
 
 VOL_WINDOWS = ("1M", "3M", "6M", "YTD", "12M", "ALL")
 
+VOLATILITY_ETP_SYMBOLS = {
+    "UVIX", "SVIX", "UVXY", "SVXY", "VXX", "VIXY", "VIXM",
+    "VIX", "VIX1D", "VIX3M",
+}
+
 # Dashboard-side fallback until ls-algo emits a first-class `is_yieldboost` flag.
 # Pairs are kept explicit so generic low-beta covered-call funds do not inherit
 # income-style scenario math by accident.
@@ -207,6 +212,12 @@ def _truthy(v) -> bool:
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return False
     return str(v).strip().lower() in {"1", "true", "yes", "y", "t"}
+
+
+def is_volatility_etp(symbol: object, underlying: object) -> bool:
+    sym = norm_sym(symbol or "")
+    und = norm_sym(underlying or "")
+    return sym in VOLATILITY_ETP_SYMBOLS or und in VOLATILITY_ETP_SYMBOLS
 
 
 def _product_id_from_url(v) -> str | None:
@@ -2724,6 +2735,28 @@ def build():
                 f"(annual, short-favourable +)"
             )
 
+        product_class_raw = (
+            str(rdict["product_class"]).strip()
+            if rdict.get("product_class") and str(rdict.get("product_class") or "").strip() not in ("", "nan")
+            else None
+        )
+        vol_etp = is_volatility_etp(sym, row["underlying_sym"])
+        expected_simple_ito = _safe_float(rdict, "expected_gross_decay_annual")
+        volatility_adjustment = _safe_float(rdict, "realized_tracking_component_annual")
+        expected_model = "simple_ito"
+        expected_display = expected_simple_ito
+        expected_reliable_raw = rdict.get("expected_gross_decay_reliable", True)
+        expected_reliable = True if expected_reliable_raw is True else _truthy(expected_reliable_raw)
+        product_class_out = product_class_raw
+        if vol_etp:
+            product_class_out = "volatility_etp"
+            expected_model = "volatility_etp_empirical_roll_adjusted"
+            expected_reliable = False
+            if expected_simple_ito is not None and volatility_adjustment is not None:
+                expected_display = round(float(expected_simple_ito + volatility_adjustment), 6)
+            elif gross_decay is not None:
+                expected_display = gross_decay
+
         rec = {
             "symbol": sym,
             "underlying": row["underlying_sym"],
@@ -2742,8 +2775,30 @@ def build():
             "borrow_spiking": bool(row.get("borrow_spiking", False)),
             "borrow_missing": bool(row.get("borrow_missing_from_ftp", False)),
             "gross_decay_annual": gross_decay,
-            "expected_gross_decay_annual": _safe_float(rdict, "expected_gross_decay_annual"),
+            "expected_gross_decay_annual": expected_display,
+            "expected_gross_decay_adjusted_annual": expected_display if vol_etp else None,
+            "expected_gross_decay_simple_ito_annual": expected_simple_ito,
+            "expected_decay_adjustment_annual": volatility_adjustment if vol_etp else None,
+            "expected_decay_model": expected_model,
+            "expected_gross_decay_reliable": expected_reliable,
             "blended_gross_decay": _safe_float(rdict, "blended_gross_decay"),
+            # Distributional decay forecast (HARQ-Log anchored on empirical
+            # 1y log-IV; see ls-algo/decay_distribution.py). p50 is the
+            # forecast median, p10/p90 are the 10/90 lognormal quantiles.
+            "expected_gross_decay_p10_annual": _safe_float(rdict, "expected_gross_decay_p10_annual"),
+            "expected_gross_decay_p50_annual": _safe_float(rdict, "expected_gross_decay_p50_annual"),
+            "expected_gross_decay_p90_annual": _safe_float(rdict, "expected_gross_decay_p90_annual"),
+            "expected_gross_decay_mean_annual": _safe_float(rdict, "expected_gross_decay_mean_annual"),
+            "expected_logIV_mu_annual": _safe_float(rdict, "expected_logIV_mu_annual"),
+            "expected_logIV_sigma_annual": _safe_float(rdict, "expected_logIV_sigma_annual"),
+            "expected_gross_decay_dist_model": (
+                str(rdict["expected_gross_decay_dist_model"]).strip()
+                if rdict.get("expected_gross_decay_dist_model")
+                and str(rdict.get("expected_gross_decay_dist_model") or "").strip() not in ("", "nan", "None")
+                else None
+            ),
+            "expected_gross_decay_dist_n_obs": _safe_float(rdict, "expected_gross_decay_dist_n_obs"),
+            "expected_gross_decay_dist_horizon_days": _safe_float(rdict, "expected_gross_decay_dist_horizon_days"),
             "net_decay": net_decay,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
@@ -2755,7 +2810,7 @@ def build():
             "borrow_source": borrow_source,
             # Screener schema v2 (optional; from ls-algo daily_screener export)
             "asof_date": (str(rdict["asof_date"]) if rdict.get("asof_date") and str(rdict.get("asof_date") or "").strip() not in ("", "nan", "None") else None),
-            "product_class": (str(rdict["product_class"]).strip() if rdict.get("product_class") and str(rdict.get("product_class") or "").strip() not in ("", "nan") else None),
+            "product_class": product_class_out,
             "gross_edge_definition": (str(rdict["gross_edge_definition"]).strip() if rdict.get("gross_edge_definition") and str(rdict.get("gross_edge_definition") or "").strip() not in ("", "nan") else None),
             "primary_edge_annual": _safe_float(rdict, "primary_edge_annual"),
             "gross_for_primary_annual": _safe_float(rdict, "gross_for_primary_annual"),

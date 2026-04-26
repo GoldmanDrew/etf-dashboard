@@ -35,7 +35,25 @@ class ETFRecord(BaseModel):
     # Decay / analytics
     gross_decay_annual: Optional[float] = None
     expected_gross_decay_annual: Optional[float] = None
+    expected_gross_decay_adjusted_annual: Optional[float] = None
+    expected_gross_decay_simple_ito_annual: Optional[float] = None
+    expected_decay_adjustment_annual: Optional[float] = None
+    expected_decay_model: Optional[str] = None
+    expected_gross_decay_reliable: Optional[bool] = None
     blended_gross_decay: Optional[float] = None
+
+    # Distributional decay forecast (HARQ-Log anchored on empirical 1y
+    # log-IV; see ls-algo/decay_distribution.py).
+    expected_gross_decay_p10_annual: Optional[float] = None
+    expected_gross_decay_p50_annual: Optional[float] = None
+    expected_gross_decay_p90_annual: Optional[float] = None
+    expected_gross_decay_mean_annual: Optional[float] = None
+    expected_logIV_mu_annual: Optional[float] = None
+    expected_logIV_sigma_annual: Optional[float] = None
+    expected_gross_decay_dist_model: Optional[str] = None
+    expected_gross_decay_dist_n_obs: Optional[float] = None
+    expected_gross_decay_dist_horizon_days: Optional[float] = None
+
     spread: Optional[float] = None  # gross_decay - borrow_net
     decay_3m: Optional[float] = None
     decay_6m: Optional[float] = None

@@ -68,6 +68,11 @@ YIELDBOOST_BUCKET2_PAIRS = {
     ("YSPY", "SPY"),
 }
 
+VOLATILITY_ETP_SYMBOLS = {
+    "UVIX", "SVIX", "UVXY", "SVXY", "VXX", "VIXY", "VIXM",
+    "VIX", "VIX1D", "VIX3M",
+}
+
 
 def load_config(path: str = "config/config.yaml") -> dict:
     p = Path(path)
@@ -232,6 +237,25 @@ def _build_records_from_csv():
             if is_yieldboost
             else ("hidden_low_beta" if bkt == Bucket.LOW_BETA.value else "letf_vol_drag")
         )
+        vol_etp = norm_sym(sym) in VOLATILITY_ETP_SYMBOLS or norm_sym(row.get("Underlying") or row.get("underlying") or "") in VOLATILITY_ETP_SYMBOLS
+        expected_simple_ito = _v2f(row, "expected_gross_decay_simple_ito_annual")
+        if expected_simple_ito is None:
+            expected_simple_ito = _v2f(row, "expected_gross_decay_annual")
+        expected_adjustment = _v2f(row, "expected_decay_adjustment_annual")
+        if expected_adjustment is None and vol_etp:
+            expected_adjustment = _v2f(row, "realized_tracking_component_annual")
+        expected_display = _v2f(row, "expected_gross_decay_annual")
+        expected_model = _v2s(row, "expected_decay_model") or "simple_ito"
+        expected_reliable = _v2bool(row, "expected_gross_decay_reliable") if "expected_gross_decay_reliable" in row else True
+        product_class = _v2s(row, "product_class")
+        if vol_etp:
+            product_class = "volatility_etp"
+            expected_model = "volatility_etp_empirical_roll_adjusted"
+            expected_reliable = False
+            if expected_simple_ito is not None and expected_adjustment is not None:
+                expected_display = round(float(expected_simple_ito + expected_adjustment), 6)
+            elif gdec is not None:
+                expected_display = gdec
         rec = ETFRecord(
             symbol=sym,
             underlying=str(row.get("underlying", "")),
@@ -252,8 +276,22 @@ def _build_records_from_csv():
             borrow_spiking=bool(row.get("borrow_spiking", False)),
             borrow_missing=bool(row.get("borrow_missing_from_ftp", False)),
             gross_decay_annual=gdec,
-            expected_gross_decay_annual=_v2f(row, "expected_gross_decay_annual"),
+            expected_gross_decay_annual=expected_display,
+            expected_gross_decay_adjusted_annual=expected_display if vol_etp else _v2f(row, "expected_gross_decay_adjusted_annual"),
+            expected_gross_decay_simple_ito_annual=expected_simple_ito,
+            expected_decay_adjustment_annual=expected_adjustment if vol_etp else _v2f(row, "expected_decay_adjustment_annual"),
+            expected_decay_model=expected_model,
+            expected_gross_decay_reliable=expected_reliable,
             blended_gross_decay=_v2f(row, "blended_gross_decay"),
+            expected_gross_decay_p10_annual=_v2f(row, "expected_gross_decay_p10_annual"),
+            expected_gross_decay_p50_annual=_v2f(row, "expected_gross_decay_p50_annual"),
+            expected_gross_decay_p90_annual=_v2f(row, "expected_gross_decay_p90_annual"),
+            expected_gross_decay_mean_annual=_v2f(row, "expected_gross_decay_mean_annual"),
+            expected_logIV_mu_annual=_v2f(row, "expected_logIV_mu_annual"),
+            expected_logIV_sigma_annual=_v2f(row, "expected_logIV_sigma_annual"),
+            expected_gross_decay_dist_model=_v2s(row, "expected_gross_decay_dist_model"),
+            expected_gross_decay_dist_n_obs=_v2f(row, "expected_gross_decay_dist_n_obs"),
+            expected_gross_decay_dist_horizon_days=_v2f(row, "expected_gross_decay_dist_horizon_days"),
             spread=spread0,
             include_for_algo=bool(row.get("include_for_algo", False)),
             protected=bool(row.get("protected", False)),
@@ -261,7 +299,7 @@ def _build_records_from_csv():
             last_updated=dt.datetime.utcnow(),
             is_stale=False,
             asof_date=_v2s(row, "asof_date"),
-            product_class=_v2s(row, "product_class"),
+            product_class=product_class,
             is_yieldboost=is_yieldboost,
             scenario_style=scenario_style,
             income_yield_trailing_annual=_v2f(row, "income_yield_trailing_annual"),
@@ -431,10 +469,25 @@ def refresh_decay():
         if prefer_csv and UNIVERSE_DF is not None and "expected_gross_decay_annual" in UNIVERSE_DF.columns:
             m = UNIVERSE_DF["symbol"].astype(str) == sym
             if m.any():
-                ex = UNIVERSE_DF.loc[m, "expected_gross_decay_annual"]
-                ex = ex.iloc[0] if len(ex) else None
-                if ex is not None and not (isinstance(ex, float) and np.isnan(ex)):
-                    rec.expected_gross_decay_annual = float(ex)
+                row = UNIVERSE_DF.loc[m].iloc[0]
+                ex = _v2f(row, "expected_gross_decay_annual")
+                adj = _v2f(row, "expected_decay_adjustment_annual")
+                if adj is None:
+                    adj = _v2f(row, "realized_tracking_component_annual")
+                vol_etp = norm_sym(sym) in VOLATILITY_ETP_SYMBOLS or norm_sym(row.get("Underlying") or row.get("underlying") or "") in VOLATILITY_ETP_SYMBOLS
+                if vol_etp:
+                    rec.product_class = "volatility_etp"
+                    rec.expected_decay_model = "volatility_etp_empirical_roll_adjusted"
+                    rec.expected_gross_decay_reliable = False
+                    rec.expected_gross_decay_simple_ito_annual = ex
+                    rec.expected_decay_adjustment_annual = adj
+                    if ex is not None and adj is not None:
+                        rec.expected_gross_decay_annual = round(float(ex + adj), 6)
+                    elif rec.gross_decay_annual is not None:
+                        rec.expected_gross_decay_annual = rec.gross_decay_annual
+                    rec.expected_gross_decay_adjusted_annual = rec.expected_gross_decay_annual
+                elif ex is not None:
+                    rec.expected_gross_decay_annual = ex
         if sym in DECAY_DATA:
             d = DECAY_DATA[sym]
             if not (prefer_csv and rec.gross_decay_annual is not None):
