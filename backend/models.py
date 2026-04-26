@@ -53,6 +53,10 @@ class ETFRecord(BaseModel):
     expected_gross_decay_dist_model: Optional[str] = None
     expected_gross_decay_dist_n_obs: Optional[float] = None
     expected_gross_decay_dist_horizon_days: Optional[float] = None
+    # Anchor-shift bootstrap diagnostics (see ls-algo/screener_v2_fields.py).
+    gross_anchor_shift_annual: Optional[float] = None
+    gross_anchor_target_annual: Optional[float] = None
+    gross_anchor_source: Optional[str] = None
 
     spread: Optional[float] = None  # gross_decay - borrow_net
     decay_3m: Optional[float] = None

@@ -2799,6 +2799,18 @@ def build():
             ),
             "expected_gross_decay_dist_n_obs": _safe_float(rdict, "expected_gross_decay_dist_n_obs"),
             "expected_gross_decay_dist_horizon_days": _safe_float(rdict, "expected_gross_decay_dist_horizon_days"),
+            # Anchor-shift bootstrap diagnostics: how the realized
+            # net-edge draws were re-centered onto the forward-looking
+            # expected_gross_decay_p50_annual. NaN/None for rows that
+            # were left realized-only (e.g., passive low-β).
+            "gross_anchor_shift_annual": _safe_float(rdict, "gross_anchor_shift_annual"),
+            "gross_anchor_target_annual": _safe_float(rdict, "gross_anchor_target_annual"),
+            "gross_anchor_source": (
+                str(rdict["gross_anchor_source"]).strip()
+                if rdict.get("gross_anchor_source")
+                and str(rdict.get("gross_anchor_source") or "").strip() not in ("", "nan", "None")
+                else None
+            ),
             "net_decay": net_decay,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,

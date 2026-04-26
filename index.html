@@ -1671,21 +1671,26 @@ const PASSIVE_LOW_BETA_POLICY_TOOLTIP =
   'Passive low-β (β ≈ 1): expected decay is N/A by policy. The Itô identity (β²−β)/2·σ² collapses near β=1, so any model expected decay is noise. We surface the realized gross drag instead — see the "Gross (realized)" column.';
 
 // Single number used for sorting and the headline cell value.
-// Routing:
+// Routing (unified across product classes — see decay_distribution.py):
 //   - passive_low_beta / expected_decay_available=false → null (renders '—').
-//   - YieldBOOST income strategy → put-spread intrinsic decay
-//     (the HARQ p50 is just a low-β vol-drag estimate and badly
-//     understates the actual NAV decay mechanism for these products).
-//   - Otherwise → distributional p50 if available, else legacy
-//     model-aware point estimate (Itô / vol-ETP adjusted).
+//   - Distributional p50 is available for every product class with a
+//     non-trivial expected component (LETF, inverse, vol-ETP, YB);
+//     YB ships through the put-spread Monte-Carlo (model name
+//     'yieldboost_put_spread' / 'yieldboost_put_spread_point'), so the
+//     same `dist.p50` field carries the put-spread NAV-decay forecast
+//     and matches the Net edge anchor.
+//   - YB client-side intrinsic is only a fallback when the server row
+//     didn't ship the distribution (very short underlying history,
+//     pipeline rerun mid-day, etc.).
+//   - Else legacy model-aware point estimate (Itô / vol-ETP adjusted).
 function expectedDecayHeadlineValue(r) {
   if (!expectedDecayAvailableForRow(r)) return null;
+  const dist = expectedDecayDistribution(r);
+  if (dist) return dist.p50;
   if (isYieldBoostIncomeStrategy(r)) {
     const yb = yieldBoostIntrinsicAnnualDecay(r);
     if (yb != null) return yb;
   }
-  const dist = expectedDecayDistribution(r);
-  if (dist) return dist.p50;
   return expectedDecayDisplayValue(r);
 }
 
@@ -1694,32 +1699,54 @@ const DECAY_DIST_MODEL_LABELS = {
   empirical_lognormal: 'empirical lognormal',
   simple_ito_fallback: 'Itô fallback',
   no_drag_beta: 'no drag (β∈{0,1})',
+  yieldboost_put_spread: 'YB put-spread MC',
+  yieldboost_put_spread_point: 'YB put-spread (σ-trailing)',
 };
+
+const isYieldBoostPutSpreadDistModel = m =>
+  m === 'yieldboost_put_spread' || m === 'yieldboost_put_spread_point';
 
 function decayDistTooltip(r) {
   if (!expectedDecayAvailableForRow(r)) {
     return PASSIVE_LOW_BETA_POLICY_TOOLTIP;
   }
-  if (isYieldBoostIncomeStrategy(r)) {
+  const dist = expectedDecayDistribution(r);
+  // YB tooltip when server shipped the put-spread MC distribution (preferred path).
+  if (dist && isYieldBoostPutSpreadDistModel(dist.model)) {
+    const sigma = yieldBoostUnderlyingSigmaAnnual(r);
+    const isPoint = dist.model === 'yieldboost_put_spread_point';
+    const lines = [
+      'YieldBOOST expected annual NAV decay — distributional forecast (gross of distributions, gross of borrow).',
+      isPoint
+        ? 'Model: weekly 95/88 put-spread NAV decay using trailing realized σ as a single point estimate (p10=p50=p90 — underlying TR history was too short for the full HARQ-Log fit).'
+        : 'Model: Monte-Carlo over HARQ-Log σ-draws → weekly 95/88 put-spread NAV decay → 52× compounded, minus expense ratio. Same put-spread mechanics as the Scenarios tab.',
+      `p50 (median):  ${fmt(dist.p50)}`,
+      `p10 / p90:     ${fmt(dist.p10)}  /  ${fmt(dist.p90)}`,
+    ];
+    if (Number.isFinite(sigma) && sigma > 0) {
+      lines.push(`σ_underlying (annual): ${fmt(sigma)}`);
+    }
+    if (dist.mean != null) lines.push(`mean: ${fmt(dist.mean)}`);
+    if (dist.nObs != null) lines.push(`n=${Math.round(dist.nObs)} underlying obs`);
+    lines.push('Net edge bootstrap is anchor-shifted to this p50 so the pair-trade P&L reflects the put-spread forecast, not just the realized drag.');
+    lines.push('Distributions are paid from this decayed NAV — see Scenarios tab.');
+    return lines.join('\n');
+  }
+  // YB legacy fallback when server distribution is missing.
+  if (isYieldBoostIncomeStrategy(r) && !dist) {
     const yb = yieldBoostIntrinsicAnnualDecay(r);
     const sigma = yieldBoostUnderlyingSigmaAnnual(r);
     const lines = [
       'YieldBOOST intrinsic annual NAV decay (gross of distributions, gross of borrow).',
-      'Source: weekly 95/88 put-spread NAV decay model (same as Scenarios tab),',
+      'Server-side distribution unavailable — falling back to client-side weekly 95/88 put-spread model (same mechanics, single σ point).',
       `compounded 52× minus ${(YB_DEFAULT_EXPENSE_RATIO_ANNUAL * 100).toFixed(2)}% expense ratio.`,
     ];
     if (yb != null) lines.push(`Annualized: ${fmt(yb)}`);
     if (Number.isFinite(sigma) && sigma > 0) {
       lines.push(`σ_underlying (annual): ${fmt(sigma)}`);
     }
-    const dist = expectedDecayDistribution(r);
-    if (dist) {
-      lines.push(`(HARQ p50 vol-drag estimate ${fmt(dist.p50)} is shown for reference but does not capture the put-spread mechanism.)`);
-    }
-    lines.push('Distributions are paid from this decayed NAV — see Scenarios tab.');
     return lines.join('\n');
   }
-  const dist = expectedDecayDistribution(r);
   if (!dist) {
     return isVolatilityEtp(r)
       ? 'Volatility ETP adjustment: simple Itô expected decay plus empirical roll/tracking component. Raw Itô alone understates products like UVIX.'
@@ -1763,8 +1790,8 @@ function decayDistTooltip(r) {
 
 function expectedDecayDisplayLabel(r) {
   if (!expectedDecayAvailableForRow(r)) return 'Exp. (N/A)';
-  if (isYieldBoostIncomeStrategy(r)) return 'Exp. (intrinsic)';
   if (expectedDecayDistribution(r)) return 'Exp. (median)';
+  if (isYieldBoostIncomeStrategy(r)) return 'Exp. (intrinsic)';
   return isVolatilityEtp(r) ? 'Exp. (vol-adj)' : 'Exp. (Itô)';
 }
 
@@ -2239,13 +2266,13 @@ const COLS = [
   { key: 'borrow_current', label: 'Borrow Rate', w: 105 },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, hint: 'Realized gross: mean daily log-hedge-drag × 252 (see Decay math)' },
-  { key: 'expected_gross_decay_p50_annual', label: 'Exp. decay', sublabel: 'p50 · p10/p90', w: 110, hint: 'Distributional forecast of 1y gross decay. Headline = lognormal median (p50). Sub = p10 / p90 from HARQ-Log fit on the underlying anchored on the empirical 1y log-IV distribution. Sort uses p50; rows missing the distribution fall back to the legacy point estimate. Hover for model details and simple-Itô comparison.' },
+  { key: 'expected_gross_decay_p50_annual', label: 'Exp. decay', sublabel: 'p50 · p10/p90', w: 110, hint: 'Distributional forecast of 1y gross decay (gross of borrow). Headline = lognormal median (p50). Sub = p10 / p90. Source by product class: LETF/inverse → HARQ-Log fit on the underlying anchored on the empirical 1y log-IV distribution; vol-ETP → HARQ-Log + roll/tracking adjustment; YieldBOOST → weekly 95/88 put-spread NAV-decay Monte Carlo (full distribution if underlying TR history ≥ ~2.5y, single-σ point estimate otherwise); passive low-β → N/A by policy. Sort uses p50. Hover for model details and simple-Itô comparison.' },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
     sublabel: 'median · fan',
     w: 130,
-    hint: 'Bootstrap net structural edge (annual, short-favourable +). Large number = median (net_edge_p50_annual). Fan = same geometry everywhere: gray whisker p5–p95, cyan IQR p25–p75, blue dot p50. Hover fan for all quantiles. Sort uses median.',
+    hint: 'Bootstrap net structural edge (annual, short-favourable +). Large number = median (net_edge_p50_annual). Fan = same geometry everywhere: gray whisker p5–p95, cyan IQR p25–p75, blue dot p50. Hover fan for all quantiles. Sort uses median.\n\nMethod: stationary-block bootstrap of realized daily log-hedge-drag and borrow histories, then anchor-shifted to recenter the empirical mean on the forward-looking expected_gross_decay_p50 (HARQ-Log p50 for LETF/inverse/vol-ETP, put-spread MC p50 for YieldBOOST). Passive low-β rows are realized-only by policy. Result: dispersion comes from history, location comes from the forecast — pair-trade P&L reflects expected edge plus realized noise.',
   },
   {
     key: SCENARIO_ETF_1M_FLAT_SORT_KEY,
@@ -2494,7 +2521,25 @@ function NetEdgeFanGlyph({ r, w = 58, h = 18, vbW = 58 }) {
 
 function NetEdgeMergedCell({ r }) {
   const p50 = r.net_edge_p50_annual;
-  const tip = 'Bootstrap net edge (annual). Top: median. Below: fan (hover for p5 / p25 / p50 / p75 / p95).';
+  const anchorSource = r.gross_anchor_source;
+  const anchorShift = Number(r.gross_anchor_shift_annual);
+  const anchorTarget = Number(r.gross_anchor_target_annual);
+  const baseTip = 'Bootstrap net edge (annual). Top: median. Below: fan (hover for p5 / p25 / p50 / p75 / p95).';
+  const anchorTipParts = [];
+  if (Number.isFinite(anchorTarget)) {
+    anchorTipParts.push(`anchor-shifted to expected p50 ${fmt(anchorTarget)}`);
+  }
+  if (Number.isFinite(anchorShift) && Math.abs(anchorShift) > 1e-6) {
+    anchorTipParts.push(`shift ${anchorShift >= 0 ? '+' : ''}${fmt(anchorShift)}`);
+  }
+  if (anchorSource && anchorSource !== 'realized_only_passive_low_beta') {
+    anchorTipParts.push(`source: ${anchorSource}`);
+  } else if (anchorSource === 'realized_only_passive_low_beta') {
+    anchorTipParts.push('passive low-β: realized-only by policy');
+  }
+  const tip = anchorTipParts.length
+    ? `${baseTip}\n${anchorTipParts.join(' · ')}`
+    : baseTip;
   const hasFan = Number.isFinite(Number(r.net_edge_p05_annual)) && Number.isFinite(Number(r.net_edge_p95_annual)) && Number.isFinite(Number(p50));
   return (
     <div className="net-edge-merged" title={tip} onClick={e => e.stopPropagation()}>
@@ -3491,28 +3536,31 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     </>
                   );
                 }
+                const dist = expectedDecayDistribution(r);
+                if (dist) {
+                  const modelLabel = DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || 'distribution';
+                  const isYbDist = isYieldBoostPutSpreadDistModel(dist.model);
+                  return (
+                    <>
+                      <div className="cs-value">{fmt(dist.p50)}</div>
+                      <div className="cs-sub">
+                        {isYbDist
+                          ? `put-spread MC · p10/p90 ${fmt(dist.p10)} / ${fmt(dist.p90)}`
+                          : `p10/p90 ${fmt(dist.p10)} / ${fmt(dist.p90)} · ${modelLabel}`}
+                      </div>
+                    </>
+                  );
+                }
                 if (isYieldBoostIncomeStrategy(r)) {
                   const yb = yieldBoostIntrinsicAnnualDecay(r);
                   if (yb != null) {
                     return (
                       <>
                         <div className="cs-value">{fmt(yb)}</div>
-                        <div className="cs-sub">intrinsic 95/88 put-spread NAV decay (1y compounded)</div>
+                        <div className="cs-sub">intrinsic 95/88 put-spread NAV decay (client fallback)</div>
                       </>
                     );
                   }
-                }
-                const dist = expectedDecayDistribution(r);
-                if (dist) {
-                  const modelLabel = DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || 'distribution';
-                  return (
-                    <>
-                      <div className="cs-value">{fmt(dist.p50)}</div>
-                      <div className="cs-sub">
-                        p10/p90 {fmt(dist.p10)} / {fmt(dist.p90)} · {modelLabel}
-                      </div>
-                    </>
-                  );
                 }
                 return (
                   <>
@@ -5234,6 +5282,18 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                             if (!expectedDecayAvailableForRow(r)) {
                               return <span style={{ color: 'var(--text-muted)' }}>—</span>;
                             }
+                            const dist = expectedDecayDistribution(r);
+                            if (dist) {
+                              const isYbDist = isYieldBoostPutSpreadDistModel(dist.model);
+                              return (
+                                <div style={{ lineHeight: 1.15 }}>
+                                  <div>{fmt(dist.p50)}</div>
+                                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+                                    {isYbDist ? 'put-spread · ' : ''}{fmt(dist.p10)} / {fmt(dist.p90)}
+                                  </div>
+                                </div>
+                              );
+                            }
                             if (isYieldBoostIncomeStrategy(r)) {
                               const yb = yieldBoostIntrinsicAnnualDecay(r);
                               if (yb != null) {
@@ -5241,22 +5301,11 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                                   <div style={{ lineHeight: 1.15 }}>
                                     <div>{fmt(yb)}</div>
                                     <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
-                                      intrinsic (put-spread)
+                                      intrinsic (fallback)
                                     </div>
                                   </div>
                                 );
                               }
-                            }
-                            const dist = expectedDecayDistribution(r);
-                            if (dist) {
-                              return (
-                                <div style={{ lineHeight: 1.15 }}>
-                                  <div>{fmt(dist.p50)}</div>
-                                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
-                                    {fmt(dist.p10)} / {fmt(dist.p90)}
-                                  </div>
-                                </div>
-                              );
                             }
                             return fmt(expectedDecayDisplayValue(r));
                           })()}

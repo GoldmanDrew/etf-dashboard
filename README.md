@@ -2,38 +2,84 @@
 
 Live at: **https://goldmandrew.github.io/etf-dashboard/**
 
-Real-time IBKR short stock borrow rate monitoring with decay-vs-borrow spread analysis for leveraged and inverse ETFs. Deployed as a static site via GitHub Pages — no server required.
+Real-time IBKR short stock borrow rate monitoring with **distributional decay forecasts** and **product-class-aware** decay/edge routing for leveraged, inverse, volatility, and YieldBOOST income ETFs. Deployed as a static site via GitHub Pages — no server required.
+
+> **New agent in this repo?** Read **[AGENTS.md](./AGENTS.md)** first. It explains the full data pipeline, product taxonomy, decay models, and how the front-end routes them.
 
 ## How It Works
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  GoldmanDrew/ls-algo  (daily GitHub Action)                  │
-│    daily_screener.py → data/etf_screened_today.csv → git push │
-│    Optional: --borrow-history-path → this repo’s              │
-│    data/borrow_history.json for weighted net_edge_*          │
-└────────────────────────────┬─────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  GoldmanDrew/ls-algo  (daily GitHub Action)                          │
+│    daily_screener.py                                                 │
+│      ├─ Pulls daily prices, IBKR borrow snapshot, holdings           │
+│      ├─ Computes realized & expected gross decay                     │
+│      ├─ Computes HARQ-Log anchored distributional decay (p10/p50/p90)│
+│      ├─ Bootstraps net edge p05/p25/p50/p75/p95 + histogram          │
+│      ├─ Tags product_class + expected_decay_available                │
+│      └─ Writes data/etf_screened_today.csv (~520 KB) → git push      │
+└────────────────────────────┬─────────────────────────────────────────┘
                              │  raw.githubusercontent.com
-┌────────────────────────────▼─────────────────────────────────┐
-│  GoldmanDrew/etf-dashboard  (GitHub Actions)                  │
-│                                                              │
-│  scripts/build_data.py:                                      │
-│    Daily full build:                                          │
-│      1. Fetch CSV from ls-algo                                │
-│      2. Fetch IBKR FTP borrow rates + shares available        │
-│      3. Assign buckets (High β / Low β / Inverse)             │
-│      4. Compute decay estimates + spreads                     │
-│      5. Write data/dashboard_data.json                        │
-│      6. Commit + Deploy to GitHub Pages                       │
-│                                                                │
-│    30-min refresh:                                             │
-│      - Refresh borrow rates + shares only                     │
-│      - Keep prior universe/analytics data                     │
-│                                                              │
-│  index.html (React SPA):                                     │
-│    Reads dashboard_data.json → renders interactive dashboard │
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────────▼─────────────────────────────────────────┐
+│  GoldmanDrew/etf-dashboard  (this repo)                              │
+│                                                                       │
+│  scripts/build_data.py                                               │
+│    Daily full build:                                                 │
+│      1. Fetch CSV from ls-algo                                       │
+│      2. Refresh IBKR FTP borrow rates + shares available             │
+│      3. Pull realized vol (Yahoo, EWMA + window stats)               │
+│      4. Reconstruct borrow_history.json from screener git commits    │
+│      5. Run borrow-spike risk model → borrow_spike_risk.json         │
+│      6. Refresh options chains (Polygon + Tradier)                   │
+│      7. Bucket assignment (B1 high-β, B2 low-β/income, B3 inverse)   │
+│      8. Pass-through product_class, expected_decay_available, etc.   │
+│      9. Write data/dashboard_data.json (~2.9 MB)                     │
+│     10. Commit + Deploy to GitHub Pages                              │
+│                                                                       │
+│    --borrow-only:   refresh borrow + shares in dashboard_data.json   │
+│    --options-only:  refresh data/options_cache.json shard            │
+│                                                                       │
+│  index.html (React SPA, single file, served as-is)                   │
+│    Reads dashboard_data.json + the smaller per-feature JSONs and     │
+│    renders the interactive dashboard. Routes Exp. decay / Net edge / │
+│    Scenarios per product_class (see "Product Taxonomy" below).       │
+└──────────────────────────────────────────────────────────────────────┘
 ```
+
+## Product Taxonomy & Decay Routing
+
+`ls-algo`'s `screener_v2_fields._product_class` tags every row with one of:
+
+| `product_class` | Trigger | Headline `Exp. decay` cell | Net edge | Scenarios tab |
+|---|---|---|---|---|
+| `letf` | β > 1.5 | HARQ-Log p50 (fallback: simple Itô) | Bootstrap, **anchor-shifted** to expected p50 | LETF vol-drag grid |
+| `inverse` | β < 0 | HARQ-Log p50 (fallback: simple Itô) | Bootstrap, **anchor-shifted** to expected p50 | LETF vol-drag grid |
+| `volatility_etp` | UVIX/SVIX/VXX/VIXY/etc. | Simple Itô + empirical roll/tracking adjustment | Bootstrap, **anchor-shifted** to expected p50 | LETF vol-drag grid |
+| `income_yieldboost` | `is_yieldboost = true` | **Put-spread Monte-Carlo p50** (server-side, `yieldboost_decay.py`) | Bootstrap, **anchor-shifted** to put-spread p50 | Income put-spread grid |
+| `income_put_spread` | Lev ≈ 1.0 (legacy) | HARQ-Log p50 (fallback: simple Itô) | Bootstrap, anchor-shifted when expected p50 available | LETF grid |
+| `passive_low_beta` | 0 < β ≤ 1.5 (no income overlay) | **`—` (N/A by policy)** | Realized-only bootstrap (no anchor-shift) | Hidden |
+| `other_structured` | Fallback | `—` | Realized fallback | Hidden |
+
+The CSV also ships a boolean `expected_decay_available` flag derived from this taxonomy. The dashboard front-end uses it (with a graceful fallback for older builds) to drive the `—`-rendering policy in the Exp. decay / Net edge / Scen. 1M ETF columns.
+
+**Why passive low-β is `—`:** the simple Itô identity says expected gross decay ≈ `(β² − β)/2 · σ²`, which collapses to noise around β ≈ 1. We ship the realized gross drag in the `Gross (realized)` column instead — that's the only honest signal for these products. See `daily_screener.py` Step 5d ("passive_low_beta policy") and `screener_v2_fields._expected_decay_available`.
+
+**Why YieldBOOST gets a dedicated decay model:** YieldBOOST income ETFs (AMYY, AZYY, BBYY, COYY, …) have β ≈ 0.4–0.6 because the 2× LETF NAV is sleeved with a weekly 95/88 SPX-style put-spread. A vanilla HARQ-Log vol-drag p50 of ~2–3% badly understates the actual NAV decay mechanism, which is dominated by the put-spread premium. As of the YB-unification refactor (`ls-algo/yieldboost_decay.py`), the screener now ships a **put-spread Monte-Carlo distribution** for YieldBOOST rows: the underlying's HARQ-Log lognormal moments are sampled, fed through the same `expectedPutSpreadLossWeekly` mechanics that the Scenarios tab uses, compounded 52× minus the 0.99% expense ratio, and exported as `expected_gross_decay_p10/p50/p90/mean_annual` with `expected_gross_decay_dist_model = yieldboost_put_spread` (or `yieldboost_put_spread_point` when the underlying TR history is too short for a full HARQ-Log fit). This means YieldBOOST `Exp. decay` and Net edge ride through the **same column shape** as every other product class — the dashboard simply reads `dist.p50` for the headline and the Net-edge bootstrap is anchor-shifted to that p50 so the pair-trade P&L reflects the put-spread forecast, not just realized noise. The client-side `yieldBoostIntrinsicAnnualDecay` helper survives only as a fallback for rows where the server didn't ship the distribution.
+
+**Anchor-shift bootstrap:** every product class with a meaningful expected component runs a stationary-block bootstrap of realized daily log-hedge-drag and borrow histories, then re-centers the empirical mean on `expected_gross_decay_p50_annual`. Result: dispersion comes from history, location comes from the forward-looking forecast (HARQ-Log p50 for LETF/inverse/vol-ETP, put-spread MC p50 for YieldBOOST). Diagnostics are exposed as `gross_anchor_shift_annual`, `gross_anchor_target_annual`, and `gross_anchor_source` on every row. Passive low-β rows are realized-only by policy (no shift). See `ls-algo/screener_v2_fields.enrich_screener_v2_fields` and `tests/test_anchor_shift_bootstrap.py` for the implementation.
+
+## Decay Models in Use
+
+| Model | Source | Used by |
+|---|---|---|
+| **Realized log-drag** | `gross_decay_annual = mean(β·log(R_und) − log(R_etf)) × 252` | Headline `Gross (realized)` column on every row |
+| **Simple Itô** | `(β² − β)/2 · σ²` | Fallback when distributional model is unavailable; volatility ETP base term |
+| **Volatility ETP empirical roll/tracking** | `simple_ito + empirical_roll_tracking_component` | UVIX / SVIX / VXX / VIXY / etc. |
+| **HARQ-Log anchored empirical lognormal** | `decay_distribution.py` (lognormal IV_T quantiles) | `letf`, `inverse`, `income_put_spread`; emits p10/p50/p90/mean |
+| **YieldBOOST put-spread Monte-Carlo** | `yieldboost_decay.py` (HARQ-Log σ-draws → weekly 95/88 put-spread NAV-decay → 52× compounded − expense ratio) | All `is_yieldboost = True` rows; emits p10/p50/p90/mean (model `yieldboost_put_spread` / `yieldboost_put_spread_point`) |
+| **Net edge bootstrap** | Block-bootstrap of daily log-drag + weighted borrow resample, **anchor-shifted to `expected_gross_decay_p50_annual`** | `net_edge_p05/p25/p50/p75/p95_annual` + `net_edge_hist_json` (+ `gross_anchor_*` diagnostics) |
+
+The HARQ-Log model has plausibility caps (`_LOG_IV_SIGMA_ANNUAL_CAP`), winsorized realized variance/quarticity (`_R2_WINSOR_CAP`), and a horizon-panel-ratio threshold (`_HORIZON_PANEL_RATIO_MIN`) that gates fallback to simple Itô when the underlying history is thin.
 
 ## Setup (one-time)
 
@@ -49,90 +95,141 @@ Go to **Settings → Pages** in this repo:
 git add -A && git commit -m "initial dashboard" && git push
 ```
 
-The `build-and-deploy.yml` Action will run automatically on push, build the data, and deploy. Your site will be live at `https://goldmandrew.github.io/etf-dashboard/` within a few minutes.
+The `build-and-deploy.yml` Action runs on push, builds the data, and deploys. Your site will be live at `https://goldmandrew.github.io/etf-dashboard/` within a few minutes.
 
 ## Schedule
 
 - `build-and-deploy.yml` runs once daily on weekdays (plus push/manual) for full rebuild.
-- `refresh-borrow.yml` runs every 10 minutes for borrow + shares refresh only.
-- `refresh-options.yml` runs every 5 minutes (GitHub Actions minimum cadence) for a throttled options shard focused on Bucket 3 inverse ETFs.
-- `update-etf-metrics.yml` runs daily at **5:00 AM ET** to ingest NAV / AUM / shares outstanding panel data for the full ETF universe, plus the full per-ticker distribution history (`etf_distributions.json`) that the Stats tab uses to plot a distribution-adjusted ("Total-Return") NAV series beside the raw NAV line.
+- `refresh-borrow.yml` runs every 10 minutes for borrow + shares refresh only (`build_data.py --borrow-only`).
+- `refresh-options.yml` runs every 5 minutes (GitHub Actions minimum cadence) for a throttled options shard focused on Bucket 3 inverse ETFs (`build_data.py --options-only`).
+- `update-etf-metrics.yml` runs daily at **5:00 AM ET** to ingest NAV / AUM / shares outstanding panel data, plus per-ticker distribution history (`etf_distributions.json`) for the Total-Return NAV chart on the Stats tab.
 - `update-corporate-actions.yml` runs **every 6 hours** to ingest structured corporate-action events (splits, reverse splits, delistings, symbol changes, mergers) into `corporate_actions.json` and a filtered news feed into `etf_news.json`. Both artifacts power the top-level **News** tab (`#/news`). Dividends/distributions are explicitly excluded from the news feed because the Stats tab already visualizes them via the Total-Return NAV series.
 - Refresh workflows commit JSON only; GitHub Pages deployment is handled by `build-and-deploy.yml` to avoid queue contention.
 
 ## Running Locally
 
 ```bash
-# Generate the data
-pip install pandas numpy requests
+# 1. Install deps
+pip install -r requirements.txt
+
+# 2. Generate the data (pulls CSV from ls-algo upstream)
 python scripts/build_data.py
 
-# Serve the site
+# 3. Serve the site
 python -m http.server 8000
 # → open http://localhost:8000
 ```
+
+Optional FastAPI backend (used by the dev `run.py` server, not by GitHub Pages):
+
+```bash
+pip install fastapi uvicorn pyyaml apscheduler pydantic
+python run.py
+# → http://localhost:8000
+```
+
+The static `index.html` deployed to GitHub Pages is the production surface. The FastAPI app in `backend/` is a thin local-dev mirror with the same Pydantic models that build_data.py uses to pass-through the screener CSV — handy when iterating on field plumbing.
 
 ## File Structure
 
 ```
 etf-dashboard/
+├── README.md                           # ← you are here
+├── AGENTS.md                           # full architecture guide for AI/human agents
 ├── index.html                          # React SPA (single file, no build step)
+├── assets/
+│   ├── expected_decay.js               # standalone (β² − β)/2·σ² calculator
+│   ├── scenario_returns.js             # vol/shock grid + LETF return model
+│   ├── trade_lab.js                    # Trade Lab leg builder + Black-Scholes
+│   └── options_data.js                 # options cache helpers
 ├── data/
-│   ├── dashboard_data.json             # Generated by build script
-│   └── etf_screened_today.csv          # Cached copy from ls-algo
-│   ├── etf_metrics_daily.parquet       # Daily NAV/AUM/shares panel (full history)
-│   ├── etf_metrics_daily.csv           # Human-readable mirror
-│   ├── etf_metrics_daily.json          # Frontend-consumable metrics rows
-│   ├── etf_metrics_latest.json         # Latest snapshot by symbol
-│   ├── etf_distributions.json          # Per-ticker dividend/distribution history (powers the Total-Return NAV chart)
-│   ├── corporate_actions.json          # Structured corporate-action events (splits, delistings, etc.) -- News tab "pinned" strip
-│   └── etf_news.json                   # Classified news headlines for the News-tab rolling feed (dividends excluded)
+│   ├── dashboard_data.json             # PRIMARY — fed to the SPA
+│   ├── etf_screened_today.csv          # cached upstream from ls-algo
+│   ├── borrow_history.json             # daily borrow per symbol (for net_edge bootstrap)
+│   ├── borrow_spike_risk.json          # spike-risk model output per symbol
+│   ├── options_cache.json              # Polygon/Tradier options snapshots
+│   ├── etf_metrics_daily.{parquet,csv,json}  # NAV/AUM/shares panel
+│   ├── etf_metrics_latest.json         # latest snapshot per symbol
+│   ├── etf_distributions.json          # per-ticker distribution history
+│   ├── corporate_actions.json          # splits/delistings/etc. (News tab)
+│   ├── etf_news.json                   # classified news (News tab)
+│   └── investors.json                  # auth: bcrypt-hashed user accounts
+├── backend/                            # FastAPI dev server
+│   ├── main.py                         # FastAPI app + scheduler
+│   ├── models.py                       # ETFRecord / DashboardSummary / SystemStatus
+│   ├── universe.py                     # CSV loader + bucket assignment
+│   ├── decay.py                        # Stahl decay metrics + mock decay
+│   ├── ibkr_fetcher.py                 # IBKR FTP shortstock fetcher
+│   ├── github_sync.py                  # ls-algo → local sync helper
+│   └── db.py                           # SQLite history store (dev-only)
 ├── scripts/
-│   └── build_data.py                   # Fetches data, computes analytics, writes JSON
-│   └── ingest_etf_metrics.py           # Ingests NAV/AUM/shares history
-│   └── ingest_distributions.py         # Pulls per-ticker distribution history from Yahoo
-│   └── ingest_corporate_actions.py     # Polygon-backed corporate actions + classified news headlines
+│   ├── build_data.py                   # PRIMARY — fetches/transforms → JSON
+│   ├── ingest_etf_metrics.py           # ETF NAV/AUM/shares ingestion
+│   ├── ingest_distributions.py         # Yahoo distribution history
+│   ├── ingest_corporate_actions.py     # Polygon corporate-actions + news
+│   ├── etf_providers.py                # provider cascade (Tradier/Polygon/Yahoo)
+│   ├── etf_holdings_providers.py       # holdings ingestion
+│   ├── backfill_close_prices.py        # one-off price backfills
+│   ├── dedupe_etf_metrics.py           # parquet maintenance
+│   ├── options_cache_diagnostics.py    # CI gate for options coverage
+│   └── hash_investor_password.py       # bcrypt utility for investors.json
+├── tests/
+│   ├── test_bucketing.py               # bucket-assignment unit tests
+│   ├── test_ingest_corporate_actions.py
+│   ├── test_expected_decay.js          # JS expected_decay.js tests
+│   ├── test_scenario_returns.js        # JS scenario_returns.js tests
+│   └── test_trade_lab.js               # JS trade_lab.js tests
 ├── .github/workflows/
-│   └── build-and-deploy.yml            # Scheduled Action: build + deploy Pages
-│   └── update-corporate-actions.yml    # 6-hourly refresh for corporate_actions.json + etf_news.json
-├── requirements.txt
-└── README.md
+│   ├── build-and-deploy.yml            # daily + push: full build → Pages deploy
+│   ├── refresh-borrow.yml              # every 10 min: --borrow-only
+│   ├── refresh-options.yml             # every 5 min: --options-only shard
+│   ├── update-etf-metrics.yml          # daily 5 AM ET: NAV/AUM/distributions
+│   └── update-corporate-actions.yml    # every 6 h: corporate actions + news
+├── config/
+│   └── (yaml configs for the FastAPI dev server)
+├── Dockerfile                          # FastAPI backend dev image
+├── docker-compose.yml
+├── run.py                              # uvicorn launcher for the FastAPI app
+└── requirements.txt                    # pandas, numpy, requests, pyarrow, yfinance
 ```
 
-## Bucket Definitions
+## Bucket Definitions (UI buckets, separate from `product_class`)
 
 | Bucket | Rule | Description |
 |--------|------|-------------|
-| **Bucket 1** | Beta > 1.5 | High-beta leveraged ETFs |
-| **Bucket 2** | Beta ≤ 1.5 | Lower-beta leveraged ETFs |
-| **Bucket 3** | Curated list | ~32 inverse ETFs (hard-coded in build script) |
+| **Bucket 1** | β > 1.5 | High-beta leveraged ETFs |
+| **Bucket 2** | 0 ≤ β ≤ 1.5 | Lower-beta leveraged ETFs (incl. all YieldBOOST income strategies) |
+| **Bucket 3** | β < 0 or curated inverse list | ~32 inverse ETFs |
+
+`bucket` is a UI grouping (drives the bucket pill colour and the tabs in the main table). `product_class` is the **routing key** for decay/edge/scenarios — see the table at the top.
 
 ## Data Sources
 
-- **Universe**: `GoldmanDrew/ls-algo` → `data/etf_screened_today.csv`
+- **Universe**: `GoldmanDrew/ls-algo` → `data/etf_screened_today.csv` (HARQ-Log distributional decay, net-edge bootstrap, product taxonomy)
+- **Borrow rates**: IBKR public FTP (`ftp2.interactivebrokers.com/usa.txt`) — fee-only borrow with shares available
+- **Spot + options**: Tradier REST (spot primary) + Polygon REST (options snapshots/contracts, spot fallback)
+- **Realized vol & price history**: Yahoo Finance via `yfinance`
 
 ### Borrow history and ls-algo `net_edge_*`
 
-`scripts/build_data.py` maintains **`data/borrow_history.json`** (append-only daily `borrow_current` per symbol). To have ls-algo’s schema v2 **`net_edge_p05_annual` / `p50` / `p95`** use **weighted resampling** over that full history (recent-heavy half-life, default 90 calendar days), run the daily screener with either:
+`scripts/build_data.py` maintains **`data/borrow_history.json`** (append-only daily `borrow_current` per symbol, reconstructed from screener git commits). To have ls-algo's schema v2 **`net_edge_p05_annual` / `p50` / `p95`** use **weighted resampling** over that full history (recent-heavy half-life, default 90 calendar days), run the daily screener with either:
 
-- `python daily_screener.py --borrow-history-path ../etf-dashboard/data/borrow_history.json`, or  
+- `python daily_screener.py --borrow-history-path ../etf-dashboard/data/borrow_history.json`, or
 - `BORROW_HISTORY_PATH` set to the same file before `daily_screener.py`.
 
 Without that file, ls-algo still **auto-detects** a sibling `../etf-dashboard/data/borrow_history.json` or `ls-algo/data/borrow_history.json` (the ls-algo GitHub Action curls the public dashboard JSON into `data/` before the screener). New CSV columns include `borrow_resample_mode`, `borrow_weight_halflife_days`, `borrow_history_points_used`, **`net_edge_p25_annual` / `net_edge_p75_annual`**, and **`net_edge_hist_json`** (compact histogram of bootstrap net draws for the dashboard).
-- **Borrow rates**: IBKR public FTP (`ftp2.interactivebrokers.com/usa.txt`) — dashboard uses fee-only borrow (not net of rebate), with shares available
-- **Spot + options**: Tradier REST (spot primary) + Polygon REST (options snapshots/contracts, spot fallback)
-- **Decay**: Volatility drag model estimate (plug in real Stahl metrics when price data is available)
 
 ## Expected Decay Calculator
 
-The dashboard includes an **Expected Decay Calculator** using:
+The dashboard includes a standalone **Expected Decay Calculator** that uses the simple Itô identity:
 
 `expected_decay(T) = 0.5 * abs(beta) * abs(beta - 1) * (sigma_annual^2) * T_years`
 
-Where `T_years = days/252`, `weeks/52`, `months/12`, or `years`.
-Volatility input accepts either percent style (`130`) or decimal (`1.3`).
+Where `T_years = days/252`, `weeks/52`, `months/12`, or `years`. Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 
-## Environment Variables (optional)
+This is the same model as the simple Itô fallback in `decay_distribution.py`. For a richer forecast (median / p10 / p90), the main grid uses the HARQ-Log distribution for LETF/inverse/vol-ETP rows and the put-spread Monte-Carlo distribution (`yieldboost_decay.py`) for YieldBOOST rows. For a YieldBOOST product, the calculator's pure Itô output should be **ignored** — read the headline `Exp. decay` cell (which is now the put-spread MC p50) or open the put-spread Scenarios tab instead.
+
+## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -143,54 +240,25 @@ Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 | `GITHUB_TOKEN` | (from Actions) | Auto-set in CI; needed locally for private repos |
 | `POLYGON_API_KEY` | *(none)* | Polygon key for options snapshots/contracts |
 | `TRADIER_TOKEN` | *(none)* | Tradier token for primary spot quotes |
-| `TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH` | `200` | Max symbols per Tradier quote batch |
-| `TRADIER_SPOT_MAX_REQUESTS` | `30` | Request cap per build run before fallback |
-| `POLYGON_OPTIONS_MAX_SYMBOLS` | `100` | Max symbols to request from Polygon |
-| `POLYGON_FORCE_SYMBOLS` | *(empty)* | Optional symbols always included in options refresh (only if in selected universe) |
-| `OPTIONS_REFRESH_SLEEP_MS` | `0` | Throttle delay between API calls in ms |
-| `POLYGON_MAX_REQUESTS_PER_MINUTE` | `25` | Hard throttle per-minute Polygon requests in builder |
-| `POLYGON_MAX_TOTAL_REQUESTS` | `90` | Total Polygon request cap per run before stale fallback |
-| `POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL` | `1` | Max snapshot pagination depth per symbol |
-| `POLYGON_MAX_CONTRACT_PAGES_PER_SYMBOL` | `0` | Max contracts fallback pagination depth per symbol |
-| `POLYGON_RETRY_MAX_429` | `1` | Max retries after Polygon HTTP 429 |
-| `OPTIONS_SYMBOLS_PER_RUN` | `100` | Number of symbols refreshed per run (rest served from cache) |
-| `OPTIONS_SHARD_COUNT` | `1` | Number of time shards used for staggered refresh |
-| `OPTIONS_SHARD_INTERVAL_MINUTES` | `3` | Minutes per shard slot rotation |
-| `OPTIONS_STALE_AFTER_MINUTES` | `180` | Mark symbol cache entries stale past this age |
-| `OPTIONS_ONLY_BUCKET3` | `1` | Restrict options universe to Bucket 3 inverse ETFs only |
-| `OPTIONS_INCLUDE_BUCKET3_UNDERLYING` | `1` | Also include each Bucket 3 ETF underlying symbol for richer strike ladders |
-| `OPTIONS_ACCUMULATE_CACHE` | `1` | Merge newly fetched contracts with prior cache rows per symbol |
-| `OPTIONS_MAX_ROWS_PER_SYMBOL` | `1200` | Max option rows retained per symbol after merge/filter |
-| `TRADIER_CHAIN_SYMBOLS` | *(empty)* | Optional symbols that use Tradier chain-first path |
-| `TRADIER_MAX_REQUESTS_PER_MINUTE` | `25` | Tradier request throttle per minute |
-| `TRADIER_MAX_TOTAL_REQUESTS` | `70` | Tradier request cap per run |
-| `TRADIER_CHAIN_MAX_EXPIRIES` | `16` | Max expiries requested per symbol from Tradier |
-| `TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL` | `320` | Max Tradier contracts retained per symbol |
-| `TRADIER_CHAIN_STRIKE_BAND_PCT` | `0.50` | Legacy symmetric Tradier strike band around spot |
-| `TRADIER_CHAIN_STRIKE_BAND_DOWN_PCT` | `0.50` | Tradier minimum strike as % below spot |
-| `TRADIER_CHAIN_STRIKE_BAND_UP_PCT` | `0.50` | Tradier maximum strike as % above spot |
-| `TRADIER_APLZ_CHAIN_STRIKE_BAND_UP_PCT` | `2.00` | Extra upside strike band for APLZ (+200% default) |
-| `TRADIER_CHAIN_MONEYNESS_MODE` | `atm_otm` | `atm_otm` keeps only ATM/OTM legs (drops ITM) |
-| `POLYGON_CHAIN_MAX_EXPIRIES` | `16` | Max expiries retained for Polygon/merged rows |
-| `POLYGON_CHAIN_STRIKE_BAND_PCT` | `0.50` | Legacy symmetric Polygon strike band around spot |
-| `POLYGON_CHAIN_STRIKE_BAND_DOWN_PCT` | `0.50` | Polygon minimum strike as % below spot |
-| `POLYGON_CHAIN_STRIKE_BAND_UP_PCT` | `0.50` | Polygon maximum strike as % above spot |
-| `APLZ_CHAIN_STRIKE_BAND_UP_PCT` | `2.00` | Extra upside strike band for APLZ (+200% default) |
-| `POLYGON_CHAIN_MONEYNESS_MODE` | `atm_otm` | `atm_otm` keeps only ATM/OTM legs |
-| `POLYGON_DROP_NULL_QUOTES` | `0` | Keep contracts even if quote/greeks are missing (shows more strikes) |
+| `REALIZED_VOL_RANGE` | `2y` | Yahoo lookback for realized-vol panel |
+| `REALIZED_VOL_EWMA_LAMBDA` | `0.94` | EWMA decay for realized-vol panel |
+| `BORROW_HISTORY_MAX_COMMITS` | `400` | Max commits to walk when reconstructing borrow_history.json |
+
+A long tail of `POLYGON_*` / `TRADIER_*` / `OPTIONS_*` env vars control the options-cache shard (rate limits, strike bands, expiries, moneyness). Defaults are tuned for GitHub Actions minute budgets — see `scripts/build_data.py` `# Config` block at the top of the file for the full list.
 
 ### Spot fallback order
 
 For each symbol in `options_cache.json`:
+
 1. Tradier spot quote (if `TRADIER_TOKEN` present and quote available)
 2. Polygon-derived spot (`underlying_asset.price`, then Polygon spot endpoints)
 3. Prior cached symbol entry from previous `data/options_cache.json`
 
-If Polygon returns HTTP 429 for snapshots, contracts fallback is skipped for that symbol in the same run, and stale cache is preferred to preserve request budget.
+If Polygon returns HTTP 429 for snapshots, the contracts fallback is skipped for that symbol in the same run, and stale cache is preferred to preserve request budget.
 
 For symbols listed in `TRADIER_CHAIN_SYMBOLS`, the builder requests Tradier chains first (no websocket), then falls back only if needed.
 
-The options workflow can override shard settings (for example, 5-minute cadence with smaller `OPTIONS_SYMBOLS_PER_RUN`) to improve freshness while keeping request budgets bounded.
+The options workflow can override shard settings (e.g., 5-minute cadence with smaller `OPTIONS_SYMBOLS_PER_RUN`) to improve freshness while keeping request budgets bounded.
 
 ## ETF Metrics Coverage (All ETFs)
 
@@ -200,3 +268,19 @@ The ETF metrics pipeline covers the full universe with a provider cascade:
 2. `polygon` fallback for non-Tradr ETFs (daily close + shares/market-cap metadata)
 
 This ensures Stats-tab NAV/AUM/shares fields are populated for substantially more symbols across the entire dashboard universe.
+
+## Where to Look First
+
+| Task | File |
+|------|------|
+| Add a new column to the main table | `index.html` → `COLS` array (~line 2235) |
+| Change the headline `Exp. decay` routing | `index.html` → `expectedDecayHeadlineValue`, `expectedDecayDisplayLabel`, `decayDistTooltip` (~line 1670–1750) |
+| Change the YieldBOOST decay distribution | `ls-algo/yieldboost_decay.py` (server-side put-spread Monte-Carlo) — front-end just consumes `dist.p50/p10/p90` |
+| Change the YieldBOOST client-side fallback | `index.html` → `yieldBoostIntrinsicAnnualDecay` (~line 1631) — only used when server distribution missing |
+| Change the put-spread scenario model | `index.html` → `expectedPutSpreadLossWeekly`, `estimateIncomeStyleScenarioReturn` (~line 1790–1845) |
+| Change the net-edge anchor-shift gate | `ls-algo/screener_v2_fields.enrich_screener_v2_fields` (looks at `expected_decay_available` + valid `expected_gross_decay_p50_annual`) |
+| Add a new product_class | `ls-algo/screener_v2_fields.py` → `_product_class`, `_EXPECTED_DECAY_CLASSES` |
+| Plumb a new CSV column to the SPA | `scripts/build_data.py` → `rec = { … }` block, then read it in `index.html` |
+| Plumb a new CSV column to FastAPI | `backend/models.py` → `ETFRecord`, then `backend/main.py` → `_build_records_from_csv` |
+| Tweak bucket logic | `backend/universe.py` → `assign_buckets` (server side) **and** `scripts/build_data.py` (static side — the source of truth for prod) |
+| Investigate a stuck CI deploy | `.github/workflows/build-and-deploy.yml` (note: `build_data` step is `continue-on-error`; Pages still deploys with last-known-good JSON) |
