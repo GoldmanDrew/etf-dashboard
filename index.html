@@ -1820,12 +1820,27 @@ function expectedDecayDisplayLabel(r) {
   return isVolatilityEtp(r) ? 'Exp. (vol-adj)' : 'Exp. (Itô)';
 }
 
-function incomeAnnualYieldForScenario(r) {
+/**
+ * Annual cash distribution yield for income-style scenario math.
+ * Prefer trailing/recent from the distributions build; when those are
+ * absent (e.g. borrow-only refresh), fall back to annualized ETF cash
+ * yield from `dividend_adjustment` for the chart lookback window — same
+ * window logic as the non-income dividend add-on.
+ */
+function incomeAnnualYieldForScenario(r, chartVolLookbackRange) {
   const trailing = Number(r?.income_yield_trailing_annual);
   if (Number.isFinite(trailing) && trailing > 0) return trailing;
   const recent = Number(r?.income_yield_recent_annual);
   if (Number.isFinite(recent) && recent > 0) return recent;
-  return null;
+  if (!isYieldBoostIncomeStrategy(r)) return null;
+  const raw = chartVolLookbackRange != null && String(chartVolLookbackRange).trim() !== ''
+    ? String(chartVolLookbackRange)
+    : '6M';
+  const vk = VOL_TF_KEY_BY_RANGE[raw] || '6M';
+  const yw = Number(r?.dividend_adjustment?.[vk]?.etf_dividend_yield);
+  const winY = DIV_YIELD_WINDOW_YEARS[vk] ?? 0.5;
+  if (!Number.isFinite(yw) || yw <= 0 || !(winY > 0)) return null;
+  return yw / winY;
 }
 
 function normalCdf(x) {
@@ -1865,6 +1880,7 @@ function expectedPutSpreadLossWeekly({ underlyingReturn, sigmaAnnual, horizonYea
 }
 
 function estimateIncomeStyleScenarioReturn({ underlyingReturn, sigmaAnnual, annualIncomeYield, annualBorrowCost, horizonYears, expenseRatioAnnual = 0.0099 }) {
+  if (annualIncomeYield == null) return null;
   const dAnnual = Number(annualIncomeYield);
   const borrowAnnual = Number(annualBorrowCost);
   const t = Number(horizonYears);
@@ -1944,9 +1960,10 @@ function forecastVolForScenario(r, chartVolLookbackRange) {
  *     with the shared forecast σ from the data builder (50/50 model-implied
  *     variance + robust 6M EWMA variance when both exist).
  *   - YieldBOOST income rows         →  `estimateIncomeStyleScenarioReturn`
- *     **`longTotalReturn`** (= −navDecay + distributionsPaid): NAV erosion
+ *     **`navReturn + distributionsPaid`** (= `longTotalReturn`): NAV erosion
  *     from weekly 95/88 put-spread + expense, **plus** modeled cash
- *     distributions over the horizon (annual income yield / 52 × weeks).
+ *     distributions (trailing/recent yields from the distributions build, or
+ *     annualized `dividend_adjustment` cash yield when those are missing).
  *     Still **excludes borrow** (borrow in Net edge). Pair-trade / short
  *     economics use `netShortPnl` in the Scenarios income table.
  *   - Passive low-β / non-income Bucket 2 → `null` (suppressed by policy).
@@ -1973,16 +1990,18 @@ function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel 
     const modeled = estimateIncomeStyleScenarioReturn({
       underlyingReturn: 0,
       sigmaAnnual: sigma,
-      annualIncomeYield: incomeAnnualYieldForScenario(r),
+      annualIncomeYield: incomeAnnualYieldForScenario(r, chartVolLookbackRange),
       annualBorrowCost: Number(getBorrowRate(r)),
       horizonYears,
     });
     // Long holder: NAV decay from put-spread + expense, **plus** cash
-    // distributions received over the horizon (same decomposition as the
-    // income Scenarios table `longTotalReturn`). Borrow stays out of this
-    // cell (see Net edge).
-    const lt = modeled?.longTotalReturn;
-    return lt != null && Number.isFinite(Number(lt)) ? Number(lt) : (modeled?.navReturn ?? null);
+    // distributions over the horizon (navReturn + distributionsPaid — same
+    // as income Scenarios `longTotalReturn`). Borrow stays out of this cell.
+    if (!modeled) return null;
+    const navR = Number(modeled.navReturn);
+    const dist = Number(modeled.distributionsPaid);
+    if (Number.isFinite(navR) && Number.isFinite(dist)) return navR + dist;
+    return null;
   }
   if (typeof SR.estimateEtfReturn !== 'function') return null;
   const res = SR.estimateEtfReturn({
