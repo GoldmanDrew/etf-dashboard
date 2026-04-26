@@ -1612,10 +1612,78 @@ function expectedDecayDistribution(r) {
   };
 }
 
-// Single number used for sorting and the headline cell value. Prefers
-// the lognormal median (p50) when present, falls back to the legacy
-// model-aware point estimate.
+// Annualized intrinsic NAV decay for YieldBOOST income-style products.
+// Income ETFs sell weekly 95/88 SPX-style put-spreads; the put-spread
+// premium decays the NAV before any distributions are paid out. We
+// reuse the same put-spread NAV decay model that powers the Scenarios
+// tab so the headline expected-decay column, the Scenarios heatmap,
+// and the 1M ETF flat-underlying scenario all agree.
+const YB_DEFAULT_EXPENSE_RATIO_ANNUAL = 0.0099;
+function yieldBoostUnderlyingSigmaAnnual(r) {
+  const v = Number(r?.vol_underlying_annual);
+  if (Number.isFinite(v) && v > 0) return v;
+  const ewma6m = Number(r?.realized_vol?.['6M']?.underlying_ewma);
+  if (Number.isFinite(ewma6m) && ewma6m > 0) return ewma6m;
+  const real6m = Number(r?.realized_vol?.['6M']?.underlying);
+  if (Number.isFinite(real6m) && real6m > 0) return real6m;
+  return null;
+}
+function yieldBoostIntrinsicAnnualDecay(r) {
+  if (!isYieldBoostIncomeStrategy(r)) return null;
+  const sigma = yieldBoostUnderlyingSigmaAnnual(r);
+  if (!Number.isFinite(sigma) || sigma <= 0) return null;
+  const horizonYears = 1.0;
+  const weeklyLoss = expectedPutSpreadLossWeekly({
+    underlyingReturn: 0, sigmaAnnual: sigma, horizonYears,
+  });
+  if (weeklyLoss == null || !Number.isFinite(weeklyLoss)) return null;
+  const expenseAnnual = YB_DEFAULT_EXPENSE_RATIO_ANNUAL;
+  const weeklyExpense = expenseAnnual / 52;
+  const weeks = 52;
+  const q = Math.max(0.0001, Math.min(1.5, 1 - weeklyLoss - weeklyExpense));
+  const navEndRatio = Math.pow(q, weeks);
+  return 1 - navEndRatio;
+}
+
+// Passive low-β policy: Itô identity (β² − β)/2·σ² ≈ 0 around β ≈ 1,
+// so any "expected decay" we report is at best noise. We therefore
+// suppress the headline expected-decay/Net edge/Scenario cells for
+// these rows on the dashboard and rely on the realized gross drag
+// column for the falsifiable measure. See ls-algo daily_screener
+// Step 5d ("passive_low_beta policy") and screener_v2_fields
+// _expected_decay_available.
+function isPassiveLowBetaRow(r) {
+  if (r?.product_class === 'passive_low_beta') return true;
+  if (r?.expected_decay_available === false && r?.bucket === 'bucket_2_low_beta') {
+    return true;
+  }
+  if (r?.bucket === 'bucket_2_low_beta' && !isYieldBoostIncomeStrategy(r)) {
+    return true;
+  }
+  return false;
+}
+function expectedDecayAvailableForRow(r) {
+  if (r?.expected_decay_available === false) return false;
+  if (isPassiveLowBetaRow(r)) return false;
+  return true;
+}
+const PASSIVE_LOW_BETA_POLICY_TOOLTIP =
+  'Passive low-β (β ≈ 1): expected decay is N/A by policy. The Itô identity (β²−β)/2·σ² collapses near β=1, so any model expected decay is noise. We surface the realized gross drag instead — see the "Gross (realized)" column.';
+
+// Single number used for sorting and the headline cell value.
+// Routing:
+//   - passive_low_beta / expected_decay_available=false → null (renders '—').
+//   - YieldBOOST income strategy → put-spread intrinsic decay
+//     (the HARQ p50 is just a low-β vol-drag estimate and badly
+//     understates the actual NAV decay mechanism for these products).
+//   - Otherwise → distributional p50 if available, else legacy
+//     model-aware point estimate (Itô / vol-ETP adjusted).
 function expectedDecayHeadlineValue(r) {
+  if (!expectedDecayAvailableForRow(r)) return null;
+  if (isYieldBoostIncomeStrategy(r)) {
+    const yb = yieldBoostIntrinsicAnnualDecay(r);
+    if (yb != null) return yb;
+  }
   const dist = expectedDecayDistribution(r);
   if (dist) return dist.p50;
   return expectedDecayDisplayValue(r);
@@ -1629,6 +1697,28 @@ const DECAY_DIST_MODEL_LABELS = {
 };
 
 function decayDistTooltip(r) {
+  if (!expectedDecayAvailableForRow(r)) {
+    return PASSIVE_LOW_BETA_POLICY_TOOLTIP;
+  }
+  if (isYieldBoostIncomeStrategy(r)) {
+    const yb = yieldBoostIntrinsicAnnualDecay(r);
+    const sigma = yieldBoostUnderlyingSigmaAnnual(r);
+    const lines = [
+      'YieldBOOST intrinsic annual NAV decay (gross of distributions, gross of borrow).',
+      'Source: weekly 95/88 put-spread NAV decay model (same as Scenarios tab),',
+      `compounded 52× minus ${(YB_DEFAULT_EXPENSE_RATIO_ANNUAL * 100).toFixed(2)}% expense ratio.`,
+    ];
+    if (yb != null) lines.push(`Annualized: ${fmt(yb)}`);
+    if (Number.isFinite(sigma) && sigma > 0) {
+      lines.push(`σ_underlying (annual): ${fmt(sigma)}`);
+    }
+    const dist = expectedDecayDistribution(r);
+    if (dist) {
+      lines.push(`(HARQ p50 vol-drag estimate ${fmt(dist.p50)} is shown for reference but does not capture the put-spread mechanism.)`);
+    }
+    lines.push('Distributions are paid from this decayed NAV — see Scenarios tab.');
+    return lines.join('\n');
+  }
   const dist = expectedDecayDistribution(r);
   if (!dist) {
     return isVolatilityEtp(r)
@@ -1672,6 +1762,8 @@ function decayDistTooltip(r) {
 }
 
 function expectedDecayDisplayLabel(r) {
+  if (!expectedDecayAvailableForRow(r)) return 'Exp. (N/A)';
+  if (isYieldBoostIncomeStrategy(r)) return 'Exp. (intrinsic)';
   if (expectedDecayDistribution(r)) return 'Exp. (median)';
   return isVolatilityEtp(r) ? 'Exp. (vol-adj)' : 'Exp. (Itô)';
 }
@@ -2615,6 +2707,33 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const bucketCls = r.bucket === 'bucket_1_high_beta' ? 'b1'
     : r.bucket === 'bucket_2_low_beta' ? 'b2' : 'b3';
 
+  const productClassLabelMap = {
+    letf: 'LETF',
+    inverse: 'Inverse',
+    income_yieldboost: 'YieldBOOST (income)',
+    income_put_spread: 'Income (put-spread)',
+    passive_low_beta: 'Passive low-β',
+    volatility_etp: 'Volatility ETP',
+    other_structured: 'Other structured',
+  };
+  const productClassRaw = String(r?.product_class || '').trim().toLowerCase();
+  const productClassLabel = productClassRaw && productClassLabelMap[productClassRaw]
+    ? productClassLabelMap[productClassRaw]
+    : (productClassRaw || null);
+  const productClassTip = productClassRaw === 'passive_low_beta'
+    ? PASSIVE_LOW_BETA_POLICY_TOOLTIP
+    : productClassRaw === 'income_yieldboost'
+      ? 'YieldBOOST income strategy: weekly 95/88 put-spread overlay → see Scenarios for NAV decay & income.'
+      : productClassRaw === 'volatility_etp'
+        ? 'Volatility ETP (e.g. UVIX/SVIX): expected decay = simple Itô + empirical roll/tracking adjustment.'
+        : productClassRaw === 'income_put_spread'
+          ? 'Put-spread income overlay: scenario tab uses the 95/88 weekly NAV decay model.'
+          : productClassRaw === 'inverse'
+            ? 'Inverse ETF (β < 0).'
+            : productClassRaw === 'letf'
+              ? 'Leveraged ETF (β ≥ 1.5): expected decay uses HARQ-Log anchored lognormal forecast when sufficient history exists.'
+              : 'Product taxonomy from ls-algo screener_v2_fields.';
+
   const widgetHtml = useMemo(() => {
     keyRef.current++;
     return buildWidgetHtml(etfSym, undSym, activeTf.range, activeTf.interval);
@@ -3260,6 +3379,19 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           </>}
         </div>
         {bucketLabel && <span className={cls('chart-bucket-badge', bucketCls)}>{bucketLabel}</span>}
+        {productClassLabel && (
+          <span
+            className="chart-bucket-badge"
+            style={{
+              background: 'rgba(120, 130, 160, 0.18)',
+              color: 'var(--text-secondary)',
+              border: '1px solid rgba(120, 130, 160, 0.4)',
+            }}
+            title={productClassTip}
+          >
+            {productClassLabel}
+          </span>
+        )}
         <div className="chart-view-switch">
           <button className={cls('chart-view-btn', activePanel === 'chart' && 'active')} onClick={() => setActivePanel('chart')}>Chart</button>
           <button className={cls('chart-view-btn', activePanel === 'stats' && 'active')} onClick={() => setActivePanel('stats')}>Stats</button>
@@ -3351,23 +3483,42 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="chart-stat" title={decayDistTooltip(r)}>
               <div className="cs-label">{expectedDecayDisplayLabel(r)}</div>
               {(() => {
-                const dist = expectedDecayDistribution(r);
-                if (!dist) {
+                if (!expectedDecayAvailableForRow(r)) {
                   return (
                     <>
-                      <div className="cs-value">{fmt(expectedDecayDisplayValue(r))}</div>
+                      <div className="cs-value" style={{ color: 'var(--text-muted)' }}>—</div>
+                      <div className="cs-sub">passive low-β: N/A by policy</div>
+                    </>
+                  );
+                }
+                if (isYieldBoostIncomeStrategy(r)) {
+                  const yb = yieldBoostIntrinsicAnnualDecay(r);
+                  if (yb != null) {
+                    return (
+                      <>
+                        <div className="cs-value">{fmt(yb)}</div>
+                        <div className="cs-sub">intrinsic 95/88 put-spread NAV decay (1y compounded)</div>
+                      </>
+                    );
+                  }
+                }
+                const dist = expectedDecayDistribution(r);
+                if (dist) {
+                  const modelLabel = DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || 'distribution';
+                  return (
+                    <>
+                      <div className="cs-value">{fmt(dist.p50)}</div>
                       <div className="cs-sub">
-                        {isVolatilityEtp(r) ? 'volatility ETP: Itô + empirical roll/tracking' : 'mechanical, from screener'}
+                        p10/p90 {fmt(dist.p10)} / {fmt(dist.p90)} · {modelLabel}
                       </div>
                     </>
                   );
                 }
-                const modelLabel = DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || 'distribution';
                 return (
                   <>
-                    <div className="cs-value">{fmt(dist.p50)}</div>
+                    <div className="cs-value">{fmt(expectedDecayDisplayValue(r))}</div>
                     <div className="cs-sub">
-                      p10/p90 {fmt(dist.p10)} / {fmt(dist.p90)} · {modelLabel}
+                      {isVolatilityEtp(r) ? 'volatility ETP: Itô + empirical roll/tracking' : 'mechanical, from screener'}
                     </div>
                   </>
                 );
@@ -3588,11 +3739,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                         <tr>
                           <th>Underlying Shock</th>
                           <th>Underlying Return</th>
-                          <th>Weekly Spread Loss</th>
-                          <th>NAV Decay Profit</th>
+                          <th title="Per-week put-spread loss L = E[(0.95−R)+ − (0.88−R)+] under the 2× lognormal approximation. Drives the intrinsic NAV decay below.">Weekly Spread Loss</th>
+                          <th title="Intrinsic NAV decay over the horizon: 1 − (1 − L − f)^N. This is the put-spread component of expected decay before distributions are paid.">Intrinsic NAV Decay</th>
                           <th>Distributions Paid</th>
                           <th>Borrow Cost</th>
-                          <th>Net Short P&amp;L</th>
+                          <th title="Net short P&L = Intrinsic NAV decay − Distributions paid − Borrow cost. Distributions are the cash outflow, borrow is the carry cost on the short.">Net Short P&amp;L</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3620,7 +3771,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   Weekly loss L = E[(0.95 − R)+ − (0.88 − R)+], where ln R follows the 2× ETF lognormal approximation from the research note.
                 </div>
                 <div className="scenario-formula">
-                  Net short P&amp;L = [1 − (1 − L − f)^N] − d × Σ(1 − L − f)^w − borrow × T. N = {incomeScenarioGrid.weeks || '—'} weeks.
+                  Intrinsic NAV decay over horizon: 1 − (1 − L − f)^N (put-spread NAV erosion before distributions). This is also the YieldBOOST Exp. (intrinsic) value when shock = 0% and horizon = 1y.
+                </div>
+                <div className="scenario-formula">
+                  Net short P&amp;L = Intrinsic NAV decay − d × Σ(1 − L − f)^w − borrow × T. N = {incomeScenarioGrid.weeks || '—'} weeks.
                 </div>
               </div>
 
@@ -5077,29 +5231,55 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         <td>{fmt(r.gross_decay_annual)}</td>
                         <td title={decayDistTooltip(r)}>
                           {(() => {
+                            if (!expectedDecayAvailableForRow(r)) {
+                              return <span style={{ color: 'var(--text-muted)' }}>—</span>;
+                            }
+                            if (isYieldBoostIncomeStrategy(r)) {
+                              const yb = yieldBoostIntrinsicAnnualDecay(r);
+                              if (yb != null) {
+                                return (
+                                  <div style={{ lineHeight: 1.15 }}>
+                                    <div>{fmt(yb)}</div>
+                                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+                                      intrinsic (put-spread)
+                                    </div>
+                                  </div>
+                                );
+                              }
+                            }
                             const dist = expectedDecayDistribution(r);
-                            if (!dist) return fmt(expectedDecayDisplayValue(r));
-                            return (
-                              <div style={{ lineHeight: 1.15 }}>
-                                <div>{fmt(dist.p50)}</div>
-                                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
-                                  {fmt(dist.p10)} / {fmt(dist.p90)}
+                            if (dist) {
+                              return (
+                                <div style={{ lineHeight: 1.15 }}>
+                                  <div>{fmt(dist.p50)}</div>
+                                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+                                    {fmt(dist.p10)} / {fmt(dist.p90)}
+                                  </div>
                                 </div>
-                              </div>
-                            );
+                              );
+                            }
+                            return fmt(expectedDecayDisplayValue(r));
                           })()}
                         </td>
                         <td style={{ verticalAlign: 'middle' }}>
-                          <NetEdgeMergedCell r={r} />
+                          {isPassiveLowBetaRow(r) ? (
+                            <span title={PASSIVE_LOW_BETA_POLICY_TOOLTIP} style={{ color: 'var(--text-muted)' }}>
+                              —
+                            </span>
+                          ) : (
+                            <NetEdgeMergedCell r={r} />
+                          )}
                         </td>
                         <td
                           className={scenarioValueCls(r, scen1mFlat)}
                           title={
-                            suppressScenarioForRow(r)
-                              ? 'Scenario hidden for non-income Bucket 2 products.'
-                              : isYieldBoostIncomeStrategy(r)
-                                ? 'Income-style net short P&L over ~1 month if underlying is flat (0%): 95/88 weekly put-spread NAV decay minus distributions and borrow.'
-                                : 'Modeled ETF return over ~1 month if underlying is flat (0%); σ = underlying EWMA for the chart lookback; same estimateEtfReturn as Scenarios (borrow excluded).'
+                            isPassiveLowBetaRow(r)
+                              ? PASSIVE_LOW_BETA_POLICY_TOOLTIP
+                              : suppressScenarioForRow(r)
+                                ? 'Scenario hidden for non-income Bucket 2 products.'
+                                : isYieldBoostIncomeStrategy(r)
+                                  ? 'Income-style net short P&L over ~1 month if underlying is flat (0%): 95/88 weekly put-spread NAV decay minus distributions and borrow (intrinsic decay is the put-spread NAV decay before distributions).'
+                                  : 'Modeled ETF return over ~1 month if underlying is flat (0%); σ = underlying EWMA for the chart lookback; same estimateEtfReturn as Scenarios (borrow excluded).'
                           }
                         >
                           {scen1mFlat != null && Number.isFinite(scen1mFlat) ? fmt(scen1mFlat) : '—'}

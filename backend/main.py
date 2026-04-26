@@ -300,6 +300,11 @@ def _build_records_from_csv():
             is_stale=False,
             asof_date=_v2s(row, "asof_date"),
             product_class=product_class,
+            expected_decay_available=(
+                _v2bool(row, "expected_decay_available")
+                if "expected_decay_available" in row
+                else (product_class not in ("passive_low_beta", "other_structured"))
+            ),
             is_yieldboost=is_yieldboost,
             scenario_style=scenario_style,
             income_yield_trailing_annual=_v2f(row, "income_yield_trailing_annual"),

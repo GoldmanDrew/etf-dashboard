@@ -2811,6 +2811,11 @@ def build():
             # Screener schema v2 (optional; from ls-algo daily_screener export)
             "asof_date": (str(rdict["asof_date"]) if rdict.get("asof_date") and str(rdict.get("asof_date") or "").strip() not in ("", "nan", "None") else None),
             "product_class": product_class_out,
+            "expected_decay_available": (
+                _truthy(rdict.get("expected_decay_available"))
+                if rdict.get("expected_decay_available") is not None
+                else (product_class_out not in ("passive_low_beta", "other_structured"))
+            ),
             "gross_edge_definition": (str(rdict["gross_edge_definition"]).strip() if rdict.get("gross_edge_definition") and str(rdict.get("gross_edge_definition") or "").strip() not in ("", "nan") else None),
             "primary_edge_annual": _safe_float(rdict, "primary_edge_annual"),
             "gross_for_primary_annual": _safe_float(rdict, "gross_for_primary_annual"),

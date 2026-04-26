@@ -62,6 +62,7 @@ class ETFRecord(BaseModel):
     # ls-algo screener schema v2 (optional; from etf_screened_today.csv)
     asof_date: Optional[str] = None
     product_class: Optional[str] = None
+    expected_decay_available: Optional[bool] = None
     is_yieldboost: bool = False
     scenario_style: Optional[str] = None
     income_yield_trailing_annual: Optional[float] = None
