@@ -62,6 +62,14 @@ Real-time IBKR short stock borrow rate monitoring with **distributional decay fo
 
 The CSV also ships a boolean `expected_decay_available` flag derived from this taxonomy. The dashboard front-end uses it (with a graceful fallback for older builds) to drive the `—`-rendering policy in the Exp. decay / Net edge / Exp. ETF return (3M) columns.
 
+**Shared forecast volatility:** the main-grid `Exp. ETF return` column and the Scenarios tab now use the same default `forecast_vol_underlying_annual` built in `scripts/build_data.py`. When both legs are available, the builder blends **variance** 50/50:
+
+```text
+sigma_forecast^2 = 0.5 * sigma_model^2 + 0.5 * sigma_robust_ewma^2
+```
+
+`sigma_model` is implied from `expected_gross_decay_p50_annual` (or inverted from the YieldBOOST put-spread p50). `sigma_robust_ewma` is a 6M EWMA on underlying total-return log returns after clipping unusually large one-day moves, so recent earnings/news gaps influence the forecast but do not dominate it. Raw EWMA and realized volatility remain visible as diagnostics in `realized_vol`.
+
 **Why passive low-β is `—`:** the simple Itô identity says expected gross decay ≈ `(β² − β)/2 · σ²`, which collapses to noise around β ≈ 1. We ship the realized gross drag in the `Gross (realized)` column instead — that's the only honest signal for these products. See `daily_screener.py` Step 5d ("passive_low_beta policy") and `screener_v2_fields._expected_decay_available`.
 
 **Why YieldBOOST gets a dedicated decay model:** YieldBOOST income ETFs (AMYY, AZYY, BBYY, COYY, …) have β ≈ 0.4–0.6 because the 2× LETF NAV is sleeved with a weekly 95/88 SPX-style put-spread. A vanilla HARQ-Log vol-drag p50 of ~2–3% badly understates the actual NAV decay mechanism, which is dominated by the put-spread premium. As of the YB-unification refactor (`ls-algo/yieldboost_decay.py`), the screener now ships a **put-spread Monte-Carlo distribution** for YieldBOOST rows: the underlying's HARQ-Log lognormal moments are sampled, fed through the same `expectedPutSpreadLossWeekly` mechanics that the Scenarios tab uses, compounded 52× minus the 0.99% expense ratio, and exported as `expected_gross_decay_p10/p50/p90/mean_annual` with `expected_gross_decay_dist_model = yieldboost_put_spread` (or `yieldboost_put_spread_point` when the underlying TR history is too short for a full HARQ-Log fit). This means YieldBOOST `Exp. decay` and Net edge ride through the **same column shape** as every other product class — the dashboard simply reads `dist.p50` for the headline and the Net-edge bootstrap is anchor-shifted to that p50 so the pair-trade P&L reflects the put-spread forecast, not just realized noise. The client-side `yieldBoostIntrinsicAnnualDecay` helper survives only as a fallback for rows where the server didn't ship the distribution.

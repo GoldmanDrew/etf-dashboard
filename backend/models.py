@@ -58,6 +58,20 @@ class ETFRecord(BaseModel):
     gross_anchor_target_annual: Optional[float] = None
     gross_anchor_source: Optional[str] = None
 
+    # Shared forecast volatility used by the main-grid expected ETF return
+    # and the Scenarios tab. Built in scripts/build_data.py as a 50/50
+    # variance blend of model-implied sigma and robust 6M EWMA when available.
+    forecast_vol_underlying_annual: Optional[float] = None
+    forecast_vol_model_annual: Optional[float] = None
+    forecast_vol_model_source: Optional[str] = None
+    forecast_vol_robust_ewma_annual: Optional[float] = None
+    forecast_vol_raw_ewma_annual: Optional[float] = None
+    forecast_vol_realized_annual: Optional[float] = None
+    forecast_vol_blend_weight_model: Optional[float] = None
+    forecast_vol_source: Optional[str] = None
+    forecast_vol_event_adjusted: Optional[bool] = None
+    forecast_vol_note: Optional[str] = None
+
     spread: Optional[float] = None  # gross_decay - borrow_net
     decay_3m: Optional[float] = None
     decay_6m: Optional[float] = None

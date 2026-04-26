@@ -17,6 +17,7 @@ import collections
 import datetime as dt
 import io
 import json
+import math
 import os
 import sys
 import time
@@ -2112,16 +2113,37 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
 # Realized volatility (server-side canonical)
 # ──────────────────────────────────────────────
 def _compute_vol_stats_from_closes(closes: list[float]) -> dict:
-    """Compute realized and EWMA annualized vol from closes."""
+    """Compute realized, raw EWMA, and robust EWMA annualized vol from closes."""
     if len(closes) < 3:
-        return {"vol_annual": None, "ewma_vol_annual": None, "n_returns": 0}
+        return {
+            "vol_annual": None,
+            "ewma_vol_annual": None,
+            "robust_ewma_vol_annual": None,
+            "robust_event_flag": False,
+            "robust_clip_abs_logret": None,
+            "n_returns": 0,
+        }
     arr = np.asarray(closes, dtype=float)
     if not np.all(np.isfinite(arr)) or np.any(arr <= 0):
-        return {"vol_annual": None, "ewma_vol_annual": None, "n_returns": 0}
+        return {
+            "vol_annual": None,
+            "ewma_vol_annual": None,
+            "robust_ewma_vol_annual": None,
+            "robust_event_flag": False,
+            "robust_clip_abs_logret": None,
+            "n_returns": 0,
+        }
     rets = np.diff(np.log(arr))
     n_returns = int(rets.size)
     if n_returns < 2:
-        return {"vol_annual": None, "ewma_vol_annual": None, "n_returns": n_returns}
+        return {
+            "vol_annual": None,
+            "ewma_vol_annual": None,
+            "robust_ewma_vol_annual": None,
+            "robust_event_flag": False,
+            "robust_clip_abs_logret": None,
+            "n_returns": n_returns,
+        }
 
     vol = float(np.std(rets, ddof=1) * np.sqrt(252))
 
@@ -2131,9 +2153,34 @@ def _compute_vol_stats_from_closes(closes: list[float]) -> dict:
         ewma_var = lam * ewma_var + (1.0 - lam) * float(r * r)
     ewma_vol = float(np.sqrt(max(ewma_var, 0.0)) * np.sqrt(252))
 
+    abs_rets = np.abs(rets[np.isfinite(rets)])
+    robust_ewma_vol = None
+    robust_event_flag = False
+    clip_abs = None
+    if abs_rets.size >= 5:
+        med_abs = float(np.median(abs_rets))
+        p75_abs = float(np.percentile(abs_rets, 75))
+        # A fixed, auditable "event guard": cap daily log returns at roughly
+        # a 3.4-sigma normal event (5 * median(|r|)), with a p75 floor so
+        # calm windows do not collapse the cap onto normal noise.
+        clip_abs = max(5.0 * med_abs, p75_abs, 1e-6)
+        clipped = np.clip(rets, -clip_abs, clip_abs)
+        robust_var = float(clipped[0] * clipped[0])
+        for r in clipped[1:]:
+            robust_var = lam * robust_var + (1.0 - lam) * float(r * r)
+        robust_ewma_vol = float(np.sqrt(max(robust_var, 0.0)) * np.sqrt(252))
+        max_abs = float(abs_rets.max())
+        robust_event_flag = bool(
+            max_abs > 1.25 * clip_abs
+            or (robust_ewma_vol > 0 and ewma_vol / robust_ewma_vol > 1.25)
+        )
+
     return {
         "vol_annual": round(vol, 6),
         "ewma_vol_annual": round(ewma_vol, 6),
+        "robust_ewma_vol_annual": round(robust_ewma_vol, 6) if robust_ewma_vol is not None else None,
+        "robust_event_flag": robust_event_flag,
+        "robust_clip_abs_logret": round(float(clip_abs), 6) if clip_abs is not None else None,
         "n_returns": n_returns,
     }
 
@@ -2213,6 +2260,9 @@ def _build_market_windows(
         results[window] = {
             "vol_annual": stats["vol_annual"],
             "ewma_vol_annual": stats["ewma_vol_annual"],
+            "robust_ewma_vol_annual": stats["robust_ewma_vol_annual"],
+            "robust_event_flag": stats["robust_event_flag"],
+            "robust_clip_abs_logret": stats["robust_clip_abs_logret"],
             "n_returns": stats["n_returns"] if stats["n_returns"] > 0 else None,
             "asof": end_date.isoformat(),
             "start_date": start_date.isoformat(),
@@ -2336,6 +2386,172 @@ def compute_realized_vol_map(symbols: set[str]) -> dict[str, dict]:
             print(f"  Realized vol progress: {i}/{len(clean_symbols)} (ok={ok})")
 
     return out
+
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
+
+
+def _yieldboost_weekly_put_spread_loss_from_sigma(sigma_annual: float) -> float | None:
+    """Dashboard-side mirror of the YB 95/88 weekly put-spread loss at flat underlying."""
+    sigma = float(sigma_annual)
+    if not np.isfinite(sigma) or sigma <= 0:
+        return None
+    tau = 1.0 / 52.0
+    m = -2.0 * sigma * sigma * tau
+    s = 2.0 * sigma * math.sqrt(tau)
+    if not (np.isfinite(m) and np.isfinite(s) and s > 0):
+        return None
+
+    def spread_put(k: float) -> float:
+        alpha = (math.log(k) - m) / s
+        beta = alpha - s
+        forward = math.exp(m + 0.5 * s * s)
+        return k * _normal_cdf(alpha) - forward * _normal_cdf(beta)
+
+    loss = spread_put(0.95) - spread_put(0.88)
+    if not np.isfinite(loss):
+        return None
+    return max(0.0, min(0.07, float(loss)))
+
+
+def _yieldboost_annual_decay_from_sigma(
+    sigma_annual: float,
+    *,
+    expense_ratio_annual: float = 0.0099,
+) -> float | None:
+    loss = _yieldboost_weekly_put_spread_loss_from_sigma(sigma_annual)
+    if loss is None:
+        return None
+    weekly_expense = max(0.0, float(expense_ratio_annual or 0.0)) / 52.0
+    q = max(0.0001, min(1.5, 1.0 - loss - weekly_expense))
+    decay = 1.0 - (q ** 52)
+    return float(decay) if np.isfinite(decay) else None
+
+
+def _yieldboost_sigma_implied_by_decay(target_decay_annual: float) -> float | None:
+    """Invert the YB annual NAV-decay point into a scalar annual sigma."""
+    target = float(target_decay_annual)
+    if not np.isfinite(target) or target <= 0:
+        return None
+    lo, hi = 1e-4, 5.0
+    hi_decay = _yieldboost_annual_decay_from_sigma(hi)
+    if hi_decay is None:
+        return None
+    if hi_decay < target:
+        return hi
+    for _ in range(64):
+        mid = 0.5 * (lo + hi)
+        mid_decay = _yieldboost_annual_decay_from_sigma(mid)
+        if mid_decay is None:
+            return None
+        if mid_decay < target:
+            lo = mid
+        else:
+            hi = mid
+    return round(float(0.5 * (lo + hi)), 6)
+
+
+def _decay_implied_model_sigma(
+    *,
+    beta: float | None,
+    expected_decay: float | None,
+    is_yieldboost: bool,
+) -> tuple[float | None, str | None]:
+    """Convert expected gross decay into a scalar model sigma for shared scenarios."""
+    if expected_decay is None or not np.isfinite(float(expected_decay)) or float(expected_decay) <= 0:
+        return None, None
+    decay = float(expected_decay)
+    if is_yieldboost:
+        sigma = _yieldboost_sigma_implied_by_decay(decay)
+        return sigma, "yieldboost_put_spread_implied_sigma" if sigma is not None else None
+
+    if beta is None or not np.isfinite(float(beta)):
+        return None, None
+    b = float(beta)
+    cb = 0.5 * abs(b) * abs(b - 1.0)
+    if cb <= 1e-12:
+        return None, None
+    variance = max(decay / cb, 0.0)
+    sigma = math.sqrt(variance)
+    return (round(float(sigma), 6), "expected_decay_implied_sigma") if np.isfinite(sigma) and sigma > 0 else (None, None)
+
+
+def _build_forecast_vol_fields(
+    *,
+    beta: float | None,
+    expected_decay: float | None,
+    is_yieldboost: bool,
+    realized_vol: dict,
+) -> dict:
+    """Single shared forecast vol: 50/50 variance blend of model and robust EWMA."""
+    default_window = realized_vol.get("6M") or {}
+    robust = default_window.get("underlying_robust_ewma") or default_window.get("underlying_ewma")
+    raw_ewma = default_window.get("underlying_ewma")
+    plain = default_window.get("underlying")
+    model_sigma, model_source = _decay_implied_model_sigma(
+        beta=beta,
+        expected_decay=expected_decay,
+        is_yieldboost=is_yieldboost,
+    )
+
+    def positive_float(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if np.isfinite(f) and f > 0 else None
+
+    robust_f = positive_float(robust)
+    model_f = positive_float(model_sigma)
+    raw_f = positive_float(raw_ewma)
+    plain_f = positive_float(plain)
+
+    blend_weight_model = None
+    source = "unavailable"
+    forecast = None
+    if model_f is not None and robust_f is not None:
+        blend_weight_model = 0.5
+        variance = 0.5 * model_f * model_f + 0.5 * robust_f * robust_f
+        forecast = math.sqrt(max(variance, 0.0))
+        source = "50_50_model_robust_ewma"
+    elif model_f is not None:
+        forecast = model_f
+        blend_weight_model = 1.0
+        source = model_source or "model_only"
+    elif robust_f is not None:
+        forecast = robust_f
+        blend_weight_model = 0.0
+        source = "robust_ewma_only"
+    elif raw_f is not None:
+        forecast = raw_f
+        source = "raw_ewma_fallback"
+    elif plain_f is not None:
+        forecast = plain_f
+        source = "realized_vol_fallback"
+
+    event_flag = bool(default_window.get("underlying_robust_event_flag"))
+    note = None
+    if forecast is not None:
+        note = (
+            "Shared forecast sigma for main-grid expected return and Scenarios: "
+            "50/50 variance blend of model-implied sigma and robust 6M EWMA when both are available."
+        )
+        if event_flag:
+            note += " Robust EWMA clipped at least one unusually large daily move."
+
+    return {
+        "forecast_vol_underlying_annual": round(float(forecast), 6) if forecast is not None and np.isfinite(float(forecast)) else None,
+        "forecast_vol_model_annual": round(float(model_f), 6) if model_f is not None else None,
+        "forecast_vol_model_source": model_source,
+        "forecast_vol_robust_ewma_annual": round(float(robust_f), 6) if robust_f is not None else None,
+        "forecast_vol_raw_ewma_annual": round(float(raw_f), 6) if raw_f is not None else None,
+        "forecast_vol_realized_annual": round(float(plain_f), 6) if plain_f is not None else None,
+        "forecast_vol_blend_weight_model": blend_weight_model,
+        "forecast_vol_source": source,
+        "forecast_vol_event_adjusted": event_flag,
+        "forecast_vol_note": note,
+    }
 
 
 # ──────────────────────────────────────────────
@@ -2658,8 +2874,14 @@ def build():
             realized_vol[window] = {
                 "etf": etf_w.get("vol_annual"),
                 "etf_ewma": etf_w.get("ewma_vol_annual"),
+                "etf_robust_ewma": etf_w.get("robust_ewma_vol_annual"),
+                "etf_robust_event_flag": etf_w.get("robust_event_flag"),
+                "etf_robust_clip_abs_logret": etf_w.get("robust_clip_abs_logret"),
                 "underlying": und_w.get("vol_annual"),
                 "underlying_ewma": und_w.get("ewma_vol_annual"),
+                "underlying_robust_ewma": und_w.get("robust_ewma_vol_annual"),
+                "underlying_robust_event_flag": und_w.get("robust_event_flag"),
+                "underlying_robust_clip_abs_logret": und_w.get("robust_clip_abs_logret"),
                 "n_returns_etf": etf_w.get("n_returns"),
                 "n_returns_underlying": und_w.get("n_returns"),
                 "asof_etf": etf_w.get("asof"),
@@ -2732,7 +2954,7 @@ def build():
         if ne5 is not None and ne50 is not None and ne95 is not None:
             net_edge_fan_label = (
                 f"[p5 {ne5*100:.1f}%, p50 {ne50*100:.1f}%, p95 {ne95*100:.1f}%] "
-                f"(annual, short-favourable +)"
+                f"(annual, short-favorable +)"
             )
 
         product_class_raw = (
@@ -2756,6 +2978,15 @@ def build():
                 expected_display = round(float(expected_simple_ito + volatility_adjustment), 6)
             elif gross_decay is not None:
                 expected_display = gross_decay
+
+        expected_p50_for_forecast = _safe_float(rdict, "expected_gross_decay_p50_annual")
+        expected_decay_for_forecast = expected_p50_for_forecast if expected_p50_for_forecast is not None else expected_display
+        forecast_vol_fields = _build_forecast_vol_fields(
+            beta=beta,
+            expected_decay=expected_decay_for_forecast,
+            is_yieldboost=bool(is_yieldboost),
+            realized_vol=realized_vol,
+        )
 
         rec = {
             "symbol": sym,
@@ -2815,6 +3046,7 @@ def build():
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
             "realized_vol": realized_vol,
+            **forecast_vol_fields,
             "dividend_adjustment": dividend_adjustment,
             "include_for_algo": bool(row.get("include_for_algo", False)),
             "protected": bool(row.get("protected", False)),

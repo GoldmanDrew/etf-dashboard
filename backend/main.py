@@ -219,7 +219,7 @@ def _build_records_from_csv():
         ne5, ne50, ne95 = _v2f(row, "net_edge_p05_annual"), _v2f(row, "net_edge_p50_annual"), _v2f(row, "net_edge_p95_annual")
         nfan = None
         if ne5 is not None and ne50 is not None and ne95 is not None:
-            nfan = f"[p5 {ne5*100:.1f}%, p50 {ne50*100:.1f}%, p95 {ne95*100:.1f}%] (annual, short-favourable +)"
+            nfan = f"[p5 {ne5*100:.1f}%, p50 {ne50*100:.1f}%, p95 {ne95*100:.1f}%] (annual, short-favorable +)"
         try:
             scv = int(float(row.get("schema_v", 2)))
         except (TypeError, ValueError):

@@ -263,7 +263,7 @@ net_edge_p05_annual / p25 / p50 / p75 / p95 / hist_json
 
 `net_edge_hist_json` is a compact (bin_centers, counts) histogram of the bootstrap draws — the dashboard's `NetEdgeBootstrapViz` component renders it as a small density curve on the chart page.
 
-**Sign convention:** **short-favourable positive**. A `net_edge_p50 = +0.10` means a 10% annual structural edge to the short, after borrow.
+**Sign convention:** **short-favorable positive**. A `net_edge_p50 = +0.10` means a 10% annual structural edge to the short, after borrow.
 
 `gross_edge_definition` per class: `letf` / `inverse` / `volatility_etp` / `income_yieldboost` → `blended_realized_expected`; `passive_low_beta` / `income_put_spread` → `realized_daily_log_drag`.
 
@@ -566,7 +566,7 @@ index.html
 
 ### State management
 
-There is **no state library**. Everything is `useState` + `useEffect` + URL hash routing. Filtering / sorting / bucket selection lives in `DashboardRoot`. The chart timeframe (`chartVolLookbackRange`) lives in `App` and is propagated down because it drives both the Scenarios tab σ and the main-table `Exp. ETF return (3M)` σ.
+There is **no state library**. Everything is `useState` + `useEffect` + URL hash routing. Filtering / sorting / bucket selection lives in `DashboardRoot`. The chart timeframe (`chartVolLookbackRange`) lives in `App` and is propagated down for TradingView embeds and realized-vol diagnostics. The Scenarios tab and main-table `Exp. ETF return (3M)` default to `forecast_vol_underlying_annual` from `dashboard_data.json` (50/50 variance blend of model-implied σ and robust 6M EWMA when both exist), with chart EWMA only as a backward-compatible fallback for older data.
 
 ---
 
@@ -649,7 +649,7 @@ To change the EWMA λ, set the env var `REALIZED_VOL_EWMA_LAMBDA` (default 0.94)
 
 1. Pull `data/dashboard_data.json` and grep for the symbol. Check `product_class`, `expected_decay_available`, `is_yieldboost`, `bucket`.
 2. If `Exp. decay` looks wrong: check `expected_gross_decay_p50_annual` (HARQ-Log p50), then `expected_gross_decay_simple_ito_annual` (Itô fallback), then for YieldBOOST run `yieldBoostIntrinsicAnnualDecay(r)` mentally with `vol_underlying_annual` as input.
-3. If `Net edge` looks wrong: inspect `net_edge_p05_annual / p25 / p50 / p75 / p95` and `net_edge_hist_json`. The fan should be **short-favourable positive**.
+3. If `Net edge` looks wrong: inspect `net_edge_p05_annual / p25 / p50 / p75 / p95` and `net_edge_hist_json`. The fan should be **short-favorable positive**.
 4. If `Gross (realized)` looks wrong: that came from ls-algo's `gross_decay_annual`. Bug fix needs to happen in `daily_screener.py`.
 5. If only the UI is wrong but the JSON is right: the bug is in `index.html`'s display logic (formatter, routing helper, COLS).
 
@@ -756,7 +756,9 @@ There is no build step. Editing `index.html` is editing production. Validate loc
 - **Apr 2026 — YieldBOOST intrinsic decay.** YieldBOOST rows now show the put-spread NAV decay (1y compounded weekly loss minus expense ratio) in the `Exp. decay` column. The HARQ-Log p50 is preserved in the tooltip for context. The Income Scenarios table relabels `NAV Decay Profit` → `Intrinsic NAV Decay` to make the model explicit. **Do not** revert the YieldBOOST cell to use HARQ-Log p50 — the cb-factor ((β² − β)/2 ≈ 0 at β ≈ 0.5) crushes the intrinsic put-spread mechanism to ~2% which is wrong.
 - **Apr 2026 — `product_class` pill on chart-page detail header.** A small badge next to the bucket pill indicates the product class (`LETF`, `Inverse`, `Volatility ETP`, `YieldBOOST (income)`, `Income (put-spread)`, `Passive low-β`, `Structured`). Tooltip explains the routing.
 - **Apr 2026 — SBTU plausibility caps.** `decay_distribution.py` now winsorizes daily squared returns at `_R2_WINSOR_CAP` and caps `μ_logIV` via `_cap_mu_log_iv` to keep the distributional model from emitting impossible 800%+ p50 numbers on thin-history single-name ETFs.
-- **Apr 2026 — Chart timeframe button fix.** `chartVolLookbackRange` is now lifted to `App` and propagated down to both `ChartPage` and `DashboardRoot`. Clicking 1M / 3M / 6M / 1Y on the chart page now correctly updates the Scenarios tab and the `Exp. ETF return (3M)` column σ.
+- **Apr 2026 — Chart timeframe button fix.** `chartVolLookbackRange` is now lifted to `App` and propagated down to both `ChartPage` and `DashboardRoot`. It drives TradingView range and realized-vol diagnostics. The default Scenarios / `Exp. ETF return (3M)` σ now comes from `forecast_vol_underlying_annual`, with chart EWMA retained only as fallback.
+
+- **Apr 2026 — shared forecast volatility.** `scripts/build_data.py` now exports `forecast_vol_underlying_annual` plus component diagnostics (`forecast_vol_model_annual`, `forecast_vol_robust_ewma_annual`, `forecast_vol_raw_ewma_annual`, `forecast_vol_source`, `forecast_vol_event_adjusted`). The forecast blends variance 50/50 between model-implied σ (from `expected_gross_decay_p50_annual`, or YieldBOOST put-spread inversion) and robust 6M EWMA. Robust EWMA clips unusually large one-day returns before applying λ≈0.94. Both the main-grid `Exp. ETF return` and Scenarios tab use this same σ.
 
 - **Apr 2026 — `Scen. 1M ETF` → `Exp. ETF return (3M)` rebrand.** The main-table scenario column was switched from a 1M horizon to a **3M horizon** (CV scales as 1/√T → 3M is ~42% less noisy in relative terms while structural decay accumulates ~3× more visibly), and the YieldBOOST branch was switched from `netShortPnl` (a pair-trade short P&L, mostly positive) to `navReturn = −navDecay` (NAV-only erosion, always negative). Both branches now report a unified **long holder's expected ETF return**, with borrow excluded (short-side cost) and distributions excluded (passed through to longs as cash) — both of those live in Net edge instead. Coloring unified to `scenShortFavCls` everywhere. Sort key renamed `SCENARIO_ETF_1M_FLAT_SORT_KEY` → `SCENARIO_ETF_3M_FLAT_SORT_KEY`; helper renamed `computeScenarioEtf1mFlatUnd1yRealized` → `computeExpectedEtfReturnFlatUnd` (parametric in horizon) with a `computeScenarioEtf3mFlatUnd` thin wrapper. Tooltip on the cell now shows 1M / 3M / 6M companion values.
 - **Mar 2026 — HARQ-Log distributional decay.** `decay_distribution.py` introduced. The `Exp. decay` column on the main table now shows the lognormal median (`p50`) by default, with `p10 / p90` as the sublabel.
@@ -769,7 +771,7 @@ There is no build step. Editing `index.html` is editing production. Validate loc
 2. **`expected_decay_available = false` ⇒ `Exp. decay` cell renders `—`.** No fallback. No hidden tooltip with a number. The realized gross drag is the only honest signal.
 3. **YieldBOOST always uses intrinsic put-spread decay for the headline.** HARQ-Log is preserved in the tooltip only.
 4. **`Gross (realized)` is always shown if available**, regardless of `product_class`.
-5. **Sign convention is short-favourable positive throughout.** A higher `net_edge_p50` is better for the short side. Don't flip signs in display logic.
+5. **Sign convention is short-favorable positive throughout.** A higher `net_edge_p50` is better for the short side. Don't flip signs in display logic.
 6. **The CSV schema is the contract.** Both `build_data.py` and `backend/main.py` must mirror any column you read in `index.html`.
 7. **The dashboard is fail-soft.** A flaky daily build does not blank out the site. Keep `continue-on-error: true` on the build step and the `Restore committed data/index.html before deploy` step.
 8. **`borrow_history.json` is reconstructed from ls-algo's git history.** Don't reset that history.
