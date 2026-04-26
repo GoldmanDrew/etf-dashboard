@@ -1546,7 +1546,15 @@ const scenShortFavCls = v => {
   return 'val-negative';
 };
 
-const SCENARIO_ETF_1M_FLAT_SORT_KEY = 'scenario_etf_1m_0und_1y_sigma';
+// Sort key for the headline expected-ETF-return column.
+// Convention: scenario_etf_<horizon>_0und_<sigma_source>.
+//   horizon       = 3M (chosen over 1M for stability — CV scales as 1/√T,
+//                   so 3M is ~42% less noisy in relative terms; structural
+//                   decay accumulates ~3× while noise only grows √3×).
+//   underlying    = 0% (flat) — same as Scenarios tab "0×" shock column.
+//   sigma_source  = chart-lookback EWMA σ on the underlying (live, follows
+//                   the user's TIMEFRAMES selection).
+const SCENARIO_ETF_3M_FLAT_SORT_KEY = 'scenario_etf_3m_0und_chartlookback_sigma';
 
 const YIELDBOOST_INCOME_PAIRS = new Set([
   'AMYY|AMD', 'AZYY|AMZN', 'BBYY|BABA', 'COYY|COIN', 'CWY|CRWV',
@@ -1568,7 +1576,10 @@ const isVolatilityEtp = r => (
   || VOLATILITY_ETP_SYMBOLS.has(String(r?.underlying || '').toUpperCase())
 );
 const suppressScenarioForRow = r => r?.bucket === 'bucket_2_low_beta' && !isYieldBoostIncomeStrategy(r);
-const scenarioValueCls = (r, v) => isYieldBoostIncomeStrategy(r) ? spreadCls(v) : scenShortFavCls(v);
+// Both YieldBOOST and LETF/inverse/vol-ETP rows now show a long-perspective
+// expected ETF return, so the coloring is unified: more-negative = better for
+// a structural short = green (scenShortFavCls).
+const scenarioValueCls = (_r, v) => scenShortFavCls(v);
 
 function expectedDecayDisplayValue(r) {
   const expected = Number(r?.expected_gross_decay_annual);
@@ -1880,15 +1891,35 @@ function realizedVolPointForScenarioColumn(r, chartVolLookbackRange) {
 }
 
 /**
- * Same cell as Scenarios grid: horizon **1M**, underlying shock **0%**, σ = **1.0 × underlying EWMA**
- * from `realized_vol[chart lookback]`, `annualCarryDrag = 0`.
- * `chartVolLookbackRange` is persisted from chart timeframe buttons (default **6M**).
+ * Expected ETF return over a flat-underlying horizon, from a **long
+ * holder's perspective** (this is the headline of the "Exp. ETF return"
+ * column in the main grid).
+ *
+ *   - LETF / inverse / vol-ETP rows  →  `ScenarioReturns.estimateEtfReturn`
+ *     (Itô-style flat-underlying ETF NAV path; borrow excluded — borrow is
+ *     a short-side cost, not part of ETF NAV).
+ *   - YieldBOOST income rows         →  `estimateIncomeStyleScenarioReturn`
+ *     and we read **`navReturn`** (= −navDecay), i.e. NAV-only erosion from
+ *     the weekly 95/88 put-spread + expense compounded over the horizon.
+ *     This is the long's adjusted-close / total-return-ex-distributions
+ *     view (distributions are passed through to the long as cash, so
+ *     including them would double-count). Pair-trade / short P&L lives
+ *     in the Net edge column instead.
+ *   - Passive low-β / non-income Bucket 2 → `null` (suppressed by policy).
+ *
+ * Horizon is **3M** by default (caller passes `'3M'` for the headline cell
+ * and `'1M'` for the secondary tooltip number). 3M chosen over 1M because
+ * CV of the forecast scales as 1/√T (~42% less noisy in relative terms
+ * than 1M) and structural decay is more visible at 3M.
+ *
+ * `chartVolLookbackRange` is persisted from chart timeframe buttons
+ * (default 6M). `horizonLabel` is one of '1M' / '3M' / '6M' / '1Y'.
  */
-function computeScenarioEtf1mFlatUnd1yRealized(r, chartVolLookbackRange) {
+function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel = '3M') {
   if (suppressScenarioForRow(r)) return null;
   const SR = typeof window !== 'undefined' ? window.ScenarioReturns : null;
   if (!SR || typeof SR.horizonToYears !== 'function') return null;
-  const horizonYears = SR.horizonToYears('1M');
+  const horizonYears = SR.horizonToYears(horizonLabel);
   const lev = Number(r?.beta);
   if (!Number.isFinite(horizonYears) || horizonYears <= 0 || !Number.isFinite(lev)) return null;
   if (isYieldBoostIncomeStrategy(r)) {
@@ -1900,7 +1931,12 @@ function computeScenarioEtf1mFlatUnd1yRealized(r, chartVolLookbackRange) {
       annualBorrowCost: Number(getBorrowRate(r)),
       horizonYears,
     });
-    return modeled?.netShortPnl ?? null;
+    // navReturn = -navDecay: NAV-only erosion (intrinsic put-spread bleed
+    // + expense, compounded over the horizon). Distributions are NOT
+    // subtracted — long holder receives them as cash, so total-return
+    // ex-distributions = navReturn. This is the "if I own this ETF, what
+    // does my $1 do over the horizon" number, unified with the LETF path.
+    return modeled?.navReturn ?? null;
   }
   if (typeof SR.estimateEtfReturn !== 'function') return null;
   const vp = realizedVolPointForScenarioColumn(r, chartVolLookbackRange);
@@ -1917,6 +1953,11 @@ function computeScenarioEtf1mFlatUnd1yRealized(r, chartVolLookbackRange) {
     minReturn: -0.9999,
   });
   return res.ok ? res.value : null;
+}
+
+// Convenience wrapper: headline 3M return used by the main-table column.
+function computeScenarioEtf3mFlatUnd(r, chartVolLookbackRange) {
+  return computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
 }
 const borrowBadge = v => {
   if (v == null) return null;
@@ -2275,12 +2316,12 @@ const COLS = [
     hint: 'Bootstrap net structural edge (annual, short-favourable +). Large number = median (net_edge_p50_annual). Fan = same geometry everywhere: gray whisker p5–p95, cyan IQR p25–p75, blue dot p50. Hover fan for all quantiles. Sort uses median.\n\nMethod: stationary-block bootstrap of realized daily log-hedge-drag and borrow histories, then anchor-shifted to recenter the empirical mean on the forward-looking expected_gross_decay_p50 (HARQ-Log p50 for LETF/inverse/vol-ETP, put-spread MC p50 for YieldBOOST). Passive low-β rows are realized-only by policy. Result: dispersion comes from history, location comes from the forecast — pair-trade P&L reflects expected edge plus realized noise.',
   },
   {
-    key: SCENARIO_ETF_1M_FLAT_SORT_KEY,
-    label: 'Scen. 1M ETF',
-    sublabel: '0% und · EWMA σ',
-    w: 112,
+    key: SCENARIO_ETF_3M_FLAT_SORT_KEY,
+    label: 'Exp. ETF return',
+    sublabel: '3M · 0% und · EWMA σ',
+    w: 122,
     numeric: true,
-    hint: 'LETF rows: same as Scenarios table (~1M horizon, underlying return 0%, chart-lookback EWMA σ, 1.0× vol column, borrow/carry excluded). Tagged income-style Bucket 2 rows show net short P&L from the 95/88 weekly put-spread NAV decay model. Other Bucket 2 rows show —.',
+    hint: 'Expected ETF total return over the next 3 months under flat underlying (long holder\'s perspective). Sourced from the same per-class decay distribution that drives Exp. decay: HARQ-Log / Itô NAV path (estimateEtfReturn) for LETF / inverse / vol-ETP, weekly 95/88 put-spread NAV decay (navReturn = −navDecay) for YieldBOOST. σ = chart-lookback EWMA on the underlying. Borrow and distributions are intentionally excluded (borrow is a short-side cost, distributions are passed through to longs as cash — both are folded into Net edge instead). Negative = ETF expected to grind down (short-favourable, green). 3M horizon chosen over 1M because CV of the forecast scales as 1/√T — ~42% less noisy in relative terms and structural decay accumulates ~1.7× more visibly. Hover the cell for 1M and 6M companion values. Other (non-income) Bucket 2 rows show —.',
   },
   { key: 'vol_underlying_annual', label: 'Vol Und', w: 80 },
   { key: 'vol_etf_annual', label: 'Vol ETF', w: 80 },
@@ -4889,7 +4930,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [showInfo, setShowInfo] = useState(false);
   const [showNews, setShowNews] = useState(false);
   const [chartRecord, setChartRecord] = useState(null);
-  /** Persisted chart timeframe (TIMEFRAMES[].range); drives TradingView embed, Scenarios σ, and main-table Scen. 1M ETF. */
+  /** Persisted chart timeframe (TIMEFRAMES[].range); drives TradingView embed, Scenarios σ, and main-table Exp. ETF return (3M, flat und.). */
   const [chartVolLookbackRange, setChartVolLookbackRange] = useState(TIMEFRAMES[2].range);
   const [corporateActions, setCorporateActions] = useState(null);
   const [etfNews, setEtfNews] = useState(null);
@@ -5009,13 +5050,13 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       d = d.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
     }
     d.sort((a, b) => {
-      let av = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
-        ? computeScenarioEtf1mFlatUnd1yRealized(a, chartVolLookbackRange)
+      let av = sortKey === SCENARIO_ETF_3M_FLAT_SORT_KEY
+        ? computeScenarioEtf3mFlatUnd(a, chartVolLookbackRange)
         : sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
         ? expectedDecayHeadlineValue(a)
         : a[sortKey];
-      let bv = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
-        ? computeScenarioEtf1mFlatUnd1yRealized(b, chartVolLookbackRange)
+      let bv = sortKey === SCENARIO_ETF_3M_FLAT_SORT_KEY
+        ? computeScenarioEtf3mFlatUnd(b, chartVolLookbackRange)
         : sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
         ? expectedDecayHeadlineValue(b)
         : b[sortKey];
@@ -5181,7 +5222,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             <strong style={{ color: 'var(--text-secondary)' }}>Decay / edge —</strong>{' '}
             <em>Gross (realized)</em> is a screener point; <em>Exp. decay</em> is model-aware: simple Itô for normal LETFs, volatility-roll adjusted for VIX futures ETPs.{' '}
             <strong>Net edge</strong> = <em>median</em> (large) + <em>fan</em> (gray whisker, cyan IQR, blue p50). Hover the fan for p5–p25–p50–p75–p95; expand row for borrow mode, quantile table, charts, and <em>net (gross−borrow)</em> point estimate.{' '}
-            <strong>Scen. 1M ETF</strong> matches the active scenario mode: LETF rows use <strong>1M</strong>, <strong>0%</strong> underlying, and <strong>{chartVolTfLabel}</strong> EWMA σ; tagged income-style Bucket 2 rows use the 95/88 weekly put-spread NAV decay model and report net short P&amp;L; other Bucket 2 rows show <strong>—</strong>.
+            <strong>Exp. ETF return</strong> is a long-perspective forecast over <strong>3M</strong> under flat underlying — LETF / inverse / vol-ETP rows use <code>estimateEtfReturn</code> with leverage = β and {chartVolTfLabel} EWMA σ; YieldBOOST rows use <code>navReturn</code> from the weekly 95/88 put-spread NAV-decay model. Both exclude borrow (short-side cost) and distributions (passed through to longs as cash) — those live in the Net edge column. Negative = ETF expected to grind down. 3M was chosen over 1M for stability (CV scales as 1/√T); hover the cell for 1M / 3M / 6M companion values. Other (non-income) Bucket 2 rows show <strong>—</strong>.
             {data?.uncertainty_footnote && (
               <span> {data.uncertainty_footnote}</span>
             )}
@@ -5215,10 +5256,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                 where <em>f</em> is the fund expense ratio (decimal), <em>r</em> the risk-free rate used at run time, λ̄_mgr the underlying borrow input when available. For volatility futures ETPs (e.g. UVIX/SVIX), the simple Itô model is not sufficient because roll yield, volatility risk premium, jumps, and mean reversion dominate; the displayed value adds the empirical roll/tracking component when available and marks the row as volatility-adjusted.
               </div>
               <div className="dm-block">
-                <div className="dm-title">Scen. 1M ETF (0% und · EWMA σ) — scenario-mode cell</div>
-                LETF rows use <code className="dm-formula">ScenarioReturns.estimateEtfReturn</code> with horizon <strong>1M</strong>, <strong>underlyingReturn = 0</strong>,
-                <strong>σ</strong> = <code>{'realized_vol[<lookback>].underlying_ewma'}</code> (fallback: that window&apos;s realized σ only), <strong>leverage = β</strong>, and <strong>annualCarryDrag = 0</strong>. Tagged income-style Bucket 2 rows instead use the research-note closed form: expected weekly loss on a <strong>short 95% / long 88%</strong> put spread on the <strong>2× ETF</strong>, compounded NAV decay, minus distributions paid and borrow. Untagged Bucket 2 rows show <strong>—</strong> because LETF vol-drag math is not comparable.
-                This is a <strong>conditional</strong> one-month ETF return path, not the screener&apos;s annualized realized drag.
+                <div className="dm-title">Exp. ETF return (3M · 0% und · EWMA σ) — long-perspective forecast</div>
+                Expected ETF total return over the next <strong>3 months</strong> under flat underlying, from a <strong>long holder&apos;s perspective</strong>. LETF / inverse / vol-ETP rows use <code className="dm-formula">ScenarioReturns.estimateEtfReturn</code> with horizon <strong>3M</strong>, <strong>underlyingReturn = 0</strong>, <strong>σ</strong> = <code>{'realized_vol[<lookback>].underlying_ewma'}</code> (fallback: that window&apos;s realized σ only), <strong>leverage = β</strong>, and <strong>annualCarryDrag = 0</strong>. YieldBOOST rows instead use <code className="dm-formula">navReturn = −navDecay</code> from the weekly <strong>short 95% / long 88%</strong> put-spread NAV-decay model on the 2× ETF, compounded over 3M minus expense ratio. Borrow and distributions are intentionally excluded on both branches: borrow is a short-side cost, distributions are passed through to longs as cash — both are folded into Net edge instead.
+                <br /><br />
+                <strong>Why 3M over 1M:</strong> CV of the forecast scales as 1/√T, so 3M is ~42% less noisy in relative terms. Structural decay accumulates ~3× while noise grows only √3×, so similar products that look identical at 1M (within the noise band) cleanly separate at 3M. Hover the cell for 1M and 6M companion values.
+                <br /><br />
+                Untagged (non-income) Bucket 2 rows show <strong>—</strong> by passive-low-β policy.
               </div>
               <div className="dm-block">
                 <div className="dm-title">Net (gross−borrow) — point estimate (detail row)</div>
@@ -5258,7 +5301,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               <tbody>
                 {filtered.map(r => {
                   const expanded = expandedSym === r.symbol;
-                  const scen1mFlat = computeScenarioEtf1mFlatUnd1yRealized(r, chartVolLookbackRange);
+                  const expEtf3m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
+                  const expEtf1m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '1M');
+                  const expEtf6m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '6M');
                   return (
                     <React.Fragment key={r.symbol}>
                       <tr onClick={() => setExpandedSym(expanded ? null : r.symbol)}>
@@ -5320,18 +5365,33 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                           )}
                         </td>
                         <td
-                          className={scenarioValueCls(r, scen1mFlat)}
+                          className={scenarioValueCls(r, expEtf3m)}
                           title={
                             isPassiveLowBetaRow(r)
                               ? PASSIVE_LOW_BETA_POLICY_TOOLTIP
                               : suppressScenarioForRow(r)
-                                ? 'Scenario hidden for non-income Bucket 2 products.'
-                                : isYieldBoostIncomeStrategy(r)
-                                  ? 'Income-style net short P&L over ~1 month if underlying is flat (0%): 95/88 weekly put-spread NAV decay minus distributions and borrow (intrinsic decay is the put-spread NAV decay before distributions).'
-                                  : 'Modeled ETF return over ~1 month if underlying is flat (0%); σ = underlying EWMA for the chart lookback; same estimateEtfReturn as Scenarios (borrow excluded).'
+                                ? 'Expected ETF return hidden for non-income Bucket 2 products (passive low-β policy).'
+                                : (() => {
+                                    const lines = [];
+                                    if (isYieldBoostIncomeStrategy(r)) {
+                                      lines.push('Expected ETF return under flat underlying (long holder\'s perspective).');
+                                      lines.push('Source: weekly 95/88 put-spread NAV decay (navReturn = −navDecay).');
+                                      lines.push('Excludes distributions paid out (passed through to long as cash) and borrow (short-side cost — see Net edge).');
+                                    } else {
+                                      lines.push('Expected ETF return under flat underlying (long holder\'s perspective).');
+                                      lines.push('Source: ScenarioReturns.estimateEtfReturn (Itô NAV path) with leverage = β, σ = chart-lookback EWMA on underlying, annualCarryDrag = 0.');
+                                      lines.push('Borrow excluded — see Net edge for the pair-trade view.');
+                                    }
+                                    lines.push('');
+                                    lines.push('Horizon companion values:');
+                                    lines.push(`  1M: ${expEtf1m != null && Number.isFinite(expEtf1m) ? fmt(expEtf1m) : '—'}  (more reactive, noisier)`);
+                                    lines.push(`  3M: ${expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}  (headline — best signal/noise)`);
+                                    lines.push(`  6M: ${expEtf6m != null && Number.isFinite(expEtf6m) ? fmt(expEtf6m) : '—'}  (longer-horizon view)`);
+                                    return lines.join('\n');
+                                  })()
                           }
                         >
-                          {scen1mFlat != null && Number.isFinite(scen1mFlat) ? fmt(scen1mFlat) : '—'}
+                          {expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}
                         </td>
                         <td>{fmt(r.vol_underlying_annual)}</td>
                         <td>{fmt(r.vol_etf_annual)}</td>

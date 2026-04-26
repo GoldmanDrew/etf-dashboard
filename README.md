@@ -60,7 +60,7 @@ Real-time IBKR short stock borrow rate monitoring with **distributional decay fo
 | `passive_low_beta` | 0 < β ≤ 1.5 (no income overlay) | **`—` (N/A by policy)** | Realized-only bootstrap (no anchor-shift) | Hidden |
 | `other_structured` | Fallback | `—` | Realized fallback | Hidden |
 
-The CSV also ships a boolean `expected_decay_available` flag derived from this taxonomy. The dashboard front-end uses it (with a graceful fallback for older builds) to drive the `—`-rendering policy in the Exp. decay / Net edge / Scen. 1M ETF columns.
+The CSV also ships a boolean `expected_decay_available` flag derived from this taxonomy. The dashboard front-end uses it (with a graceful fallback for older builds) to drive the `—`-rendering policy in the Exp. decay / Net edge / Exp. ETF return (3M) columns.
 
 **Why passive low-β is `—`:** the simple Itô identity says expected gross decay ≈ `(β² − β)/2 · σ²`, which collapses to noise around β ≈ 1. We ship the realized gross drag in the `Gross (realized)` column instead — that's the only honest signal for these products. See `daily_screener.py` Step 5d ("passive_low_beta policy") and `screener_v2_fields._expected_decay_available`.
 

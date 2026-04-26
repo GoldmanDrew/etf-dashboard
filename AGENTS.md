@@ -512,7 +512,8 @@ index.html
 │       │   ├── expectedPutSpreadLossWeekly(...)
 │       │   ├── estimateIncomeStyleScenarioReturn(...)
 │       │   ├── realizedVolPointForScenarioColumn(r, range)
-│       │   └── computeScenarioEtf1mFlatUnd1yRealized(r, range)
+│       │   ├── computeExpectedEtfReturnFlatUnd(r, range, horizonLabel)
+│       │   └── computeScenarioEtf3mFlatUnd(r, range)   // headline 3M wrapper
 │       │
 │       ├── Visualizations
 │       │   ├── MonteCarloPlot
@@ -565,7 +566,7 @@ index.html
 
 ### State management
 
-There is **no state library**. Everything is `useState` + `useEffect` + URL hash routing. Filtering / sorting / bucket selection lives in `DashboardRoot`. The chart timeframe (`chartVolLookbackRange`) lives in `App` and is propagated down because it drives both the Scenarios tab σ and the main-table `Scen. 1M ETF` σ.
+There is **no state library**. Everything is `useState` + `useEffect` + URL hash routing. Filtering / sorting / bucket selection lives in `DashboardRoot`. The chart timeframe (`chartVolLookbackRange`) lives in `App` and is propagated down because it drives both the Scenarios tab σ and the main-table `Exp. ETF return (3M)` σ.
 
 ---
 
@@ -755,7 +756,9 @@ There is no build step. Editing `index.html` is editing production. Validate loc
 - **Apr 2026 — YieldBOOST intrinsic decay.** YieldBOOST rows now show the put-spread NAV decay (1y compounded weekly loss minus expense ratio) in the `Exp. decay` column. The HARQ-Log p50 is preserved in the tooltip for context. The Income Scenarios table relabels `NAV Decay Profit` → `Intrinsic NAV Decay` to make the model explicit. **Do not** revert the YieldBOOST cell to use HARQ-Log p50 — the cb-factor ((β² − β)/2 ≈ 0 at β ≈ 0.5) crushes the intrinsic put-spread mechanism to ~2% which is wrong.
 - **Apr 2026 — `product_class` pill on chart-page detail header.** A small badge next to the bucket pill indicates the product class (`LETF`, `Inverse`, `Volatility ETP`, `YieldBOOST (income)`, `Income (put-spread)`, `Passive low-β`, `Structured`). Tooltip explains the routing.
 - **Apr 2026 — SBTU plausibility caps.** `decay_distribution.py` now winsorizes daily squared returns at `_R2_WINSOR_CAP` and caps `μ_logIV` via `_cap_mu_log_iv` to keep the distributional model from emitting impossible 800%+ p50 numbers on thin-history single-name ETFs.
-- **Apr 2026 — Chart timeframe button fix.** `chartVolLookbackRange` is now lifted to `App` and propagated down to both `ChartPage` and `DashboardRoot`. Clicking 1M / 3M / 6M / 1Y on the chart page now correctly updates the Scenarios tab and the `Scen. 1M ETF` column σ.
+- **Apr 2026 — Chart timeframe button fix.** `chartVolLookbackRange` is now lifted to `App` and propagated down to both `ChartPage` and `DashboardRoot`. Clicking 1M / 3M / 6M / 1Y on the chart page now correctly updates the Scenarios tab and the `Exp. ETF return (3M)` column σ.
+
+- **Apr 2026 — `Scen. 1M ETF` → `Exp. ETF return (3M)` rebrand.** The main-table scenario column was switched from a 1M horizon to a **3M horizon** (CV scales as 1/√T → 3M is ~42% less noisy in relative terms while structural decay accumulates ~3× more visibly), and the YieldBOOST branch was switched from `netShortPnl` (a pair-trade short P&L, mostly positive) to `navReturn = −navDecay` (NAV-only erosion, always negative). Both branches now report a unified **long holder's expected ETF return**, with borrow excluded (short-side cost) and distributions excluded (passed through to longs as cash) — both of those live in Net edge instead. Coloring unified to `scenShortFavCls` everywhere. Sort key renamed `SCENARIO_ETF_1M_FLAT_SORT_KEY` → `SCENARIO_ETF_3M_FLAT_SORT_KEY`; helper renamed `computeScenarioEtf1mFlatUnd1yRealized` → `computeExpectedEtfReturnFlatUnd` (parametric in horizon) with a `computeScenarioEtf3mFlatUnd` thin wrapper. Tooltip on the cell now shows 1M / 3M / 6M companion values.
 - **Mar 2026 — HARQ-Log distributional decay.** `decay_distribution.py` introduced. The `Exp. decay` column on the main table now shows the lognormal median (`p50`) by default, with `p10 / p90` as the sublabel.
 - **Mar 2026 — Schema v2 net-edge bootstrap.** `screener_v2_fields.py` added the block-bootstrap `net_edge_p05/p25/p50/p75/p95_annual` + `net_edge_hist_json`. The dashboard switched to a fan visualization (`NetEdgeFanGlyph`).
 - **Volatility-ETP empirical roll/tracking adjustment.** UVIX/SVIX/VXX/etc. use `simple_ito + empirical_roll_tracking_component` for expected decay because pure Itô badly understates the contango roll-down. Symbol list is duplicated in three places — keep them in sync.
