@@ -164,11 +164,33 @@ def norm_sym(s: str) -> str:
     return str(s).strip().upper().replace(".", "-")
 
 
-def _borrow_history_point_for_avg(row: dict) -> bool:
-    """Include in borrow mean/median iff borrow is present and not a no-shares placeholder.
+def _shares_available_int(row: dict) -> int | None:
+    """Parse shares for gating; None if unknown (missing / unparsable)."""
+    sh = row.get("shares_available")
+    if sh is None or (isinstance(sh, float) and np.isnan(sh)):
+        return None
+    sstr = str(sh).strip()
+    if not sstr or sstr.lower() in {"nan", "none"}:
+        return None
+    try:
+        return int(float(sstr))
+    except (TypeError, ValueError):
+        return None
 
-    Drops ~0%% annual borrow when ``shares_available`` is known and <= 0 (matches
-    ls-algo weighted borrow resample). Legacy rows without ``shares_available`` stay in.
+
+# Fee at or below this (annual, decimal) is treated as a "zero" for placeholder gating.
+_BORROW_NEAR_ZERO_EPS = 1e-9
+
+
+def _borrow_history_point_for_avg(row: dict) -> bool:
+    """Include in borrow mean/median only for economically meaningful fee quotes.
+
+    Positive borrow rates always count (even if ``shares_available`` is missing).
+
+    Near-zero fee rows are almost always missing-locate / empty-book artifacts when
+    inventory is unknown or non-positive; those would bias simple means downward, so
+    they are **excluded** unless ``shares_available`` is known and **> 0** (explicit
+    quote with locates, fee may round to zero).
     """
     bc = row.get("borrow_current")
     if bc is None or (isinstance(bc, float) and np.isnan(bc)):
@@ -179,16 +201,12 @@ def _borrow_history_point_for_avg(row: dict) -> bool:
         return False
     if not np.isfinite(v):
         return False
-    if abs(v) > 1e-12:
+    if abs(v) > _BORROW_NEAR_ZERO_EPS:
         return True
-    sh = row.get("shares_available")
-    if sh is None:
-        return True
-    try:
-        si = int(float(sh))
-    except (TypeError, ValueError):
-        return True
-    return si > 0
+    si = _shares_available_int(row)
+    if si is None or si <= 0:
+        return False
+    return True
 
 
 def _safe_float(row, key):
@@ -2574,23 +2592,44 @@ def _calc_summary(records: list[dict]) -> dict:
     b2 = [r for r in records if r["bucket"] == "bucket_2_low_beta"]
     b3 = [r for r in records if r["bucket"] == "bucket_3_inverse"]
 
-    with_net = sorted(
-        [r for r in records if r.get("net_decay") is not None],
-        key=lambda r: r["net_decay"], reverse=True,
+    def _realized_net_vs_avg_borrow(r: dict) -> float | None:
+        g = r.get("gross_decay_annual")
+        ba = r.get("borrow_avg_annual")
+        if g is None or ba is None:
+            return None
+        try:
+            return float(g) - float(ba)
+        except (TypeError, ValueError):
+            return None
+
+    with_realized_vs_avg = sorted(
+        [r for r in records if _realized_net_vs_avg_borrow(r) is not None],
+        key=lambda r: _realized_net_vs_avg_borrow(r) or 0.0,
+        reverse=True,
     )
-    best_net_decay = [
-        {"symbol": r["symbol"], "net_decay": r["net_decay"],
-         "borrow": r.get("borrow_current"), "decay": r.get("gross_decay_annual")}
-        for r in with_net[:5]
+    top_realized_net_vs_avg_borrow = [
+        {
+            "symbol": r["symbol"],
+            "realized_net_vs_avg_borrow": round(
+                float(_realized_net_vs_avg_borrow(r) or 0.0), 6
+            ),
+            "gross_decay_annual": r.get("gross_decay_annual"),
+            "borrow_avg_annual": r.get("borrow_avg_annual"),
+        }
+        for r in with_realized_vs_avg[:5]
     ]
 
-    with_borrow = sorted(
-        [r for r in records if r.get("borrow_current") is not None],
-        key=lambda r: r["borrow_current"], reverse=True,
+    with_edge = sorted(
+        [r for r in records if r.get("net_edge_p50_annual") is not None],
+        key=lambda r: float(r["net_edge_p50_annual"] or 0.0),
+        reverse=True,
     )
-    worst_borrows = [
-        {"symbol": r["symbol"], "borrow": r.get("borrow_current"), "shares": r.get("shares_available")}
-        for r in with_borrow[:5]
+    top_net_edge = [
+        {
+            "symbol": r["symbol"],
+            "net_edge_p50_annual": round(float(r["net_edge_p50_annual"]), 6),
+        }
+        for r in with_edge[:5]
     ]
 
     missing = sum(1 for r in records if r.get("borrow_missing"))
@@ -2601,8 +2640,8 @@ def _calc_summary(records: list[dict]) -> dict:
         "bucket_1_count": len(b1),
         "bucket_2_count": len(b2),
         "bucket_3_count": len(b3),
-        "best_net_decay": best_net_decay,
-        "worst_borrows": worst_borrows,
+        "top_realized_net_vs_avg_borrow": top_realized_net_vs_avg_borrow,
+        "top_net_edge": top_net_edge,
         "pct_missing": round(missing / len(records) * 100, 1) if records else 0,
         "decay_computed_count": decay_count,
     }

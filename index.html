@@ -1306,6 +1306,20 @@ const optionMidFromContract = (c) => {
   return null;
 };
 const getBorrowRate = r => (r?.borrow_current ?? r?.borrow_net_annual ?? null);
+/** Match scripts/build_data.py:_borrow_history_point_for_avg — exclude ~0% fee when no positive locates. */
+const borrowHistoryPointForAvg = (pt) => {
+  const b = Number(pt?.borrow_current);
+  if (!Number.isFinite(b)) return false;
+  const eps = 1e-9;
+  if (Math.abs(b) > eps) return true;
+  const shRaw = pt?.shares_available;
+  if (shRaw == null || (typeof shRaw === 'number' && Number.isNaN(shRaw))) return false;
+  const sstr = String(shRaw).trim();
+  if (!sstr || /^nan$/i.test(sstr)) return false;
+  const si = Number(sstr);
+  if (!Number.isFinite(si)) return false;
+  return Math.trunc(si) > 0;
+};
 const getFreshness = (data) => {
   const built = data?.build_time ? new Date(data.build_time) : null;
   if (!built || Number.isNaN(built.getTime())) {
@@ -3140,10 +3154,20 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const etfLatestDistribution = etfDistributionCount
     ? etfDistributionsSeries[etfDistributionCount - 1]
     : null;
-  const avgBorrowFromHistory = (() => {
-    const vals = etfBorrowSeries.map(x => Number(x?.borrow_current)).filter(Number.isFinite);
-    if (!vals.length) return null;
-    return vals.reduce((a, b) => a + b, 0) / vals.length;
+  const avgBorrowFromHistoryStats = (() => {
+    const total = etfBorrowSeries.length;
+    const usedPts = etfBorrowSeries.filter(borrowHistoryPointForAvg);
+    const vals = usedPts.map(x => Number(x?.borrow_current)).filter(Number.isFinite);
+    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    return { total, used: vals.length, avg };
+  })();
+  const avgBorrowFromHistory = avgBorrowFromHistoryStats.avg;
+  const displayAvgBorrowForMeta = (() => {
+    if (Number.isFinite(avgBorrowFromHistory)) return avgBorrowFromHistory;
+    const a = Number(r.borrow_avg_annual);
+    if (Number.isFinite(a)) return a;
+    const c = Number(getBorrowRate(r));
+    return Number.isFinite(c) ? c : null;
   })();
   const etfSpikeRisk = borrowSpikeRiskMap?.[etfSym] || null;
   const etfSpikeProb = Number(etfSpikeRisk?.p_spike_5d);
@@ -3164,7 +3188,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const spikeAccuracy = borrowSpikeRiskMeta?.accuracy_tracking || null;
   const annualCarryDragRaw = Number.isFinite(avgBorrowFromHistory)
     ? avgBorrowFromHistory
-    : (Number.isFinite(Number(r.borrow_avg_annual)) ? Number(r.borrow_avg_annual) : Number(getBorrowRate(r)));
+    : (Number.isFinite(Number(r.borrow_avg_annual))
+      ? Number(r.borrow_avg_annual)
+      : Number(getBorrowRate(r)));
   const annualCarryDrag = Number.isFinite(annualCarryDragRaw) ? Math.max(0, annualCarryDragRaw) : 0;
   const tradeBorrowBySymbol = useMemo(() => ({ [etfSym]: annualCarryDrag }), [etfSym, annualCarryDrag]);
   const defaultIvBySymbol = useMemo(() => ({
@@ -4293,7 +4319,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="borrow-card">
               <div className="scenario-title">Borrow Rate History</div>
               <div className="borrow-meta">
-                Symbol: {etfSym} | points: {fmtNum(etfBorrowSeries.length)} | average borrow: {fmt(avgBorrowFromHistory)}
+                Symbol: {etfSym} | history days: {fmtNum(avgBorrowFromHistoryStats.total)}
+                {avgBorrowFromHistoryStats.used > 0
+                  ? <> · avg over {fmtNum(avgBorrowFromHistoryStats.used)} quoted days (excl. ~0% when shares missing/≤0)</>
+                  : <> · no quoted non-placeholder days — avg falls back to dashboard field</>}
+                {' '}| average borrow: {fmt(displayAvgBorrowForMeta)}
               </div>
               {borrowHistoryLoading ? (
                 <div className="scenario-warning">Loading borrow history…</div>
@@ -5205,39 +5235,39 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <div className="summary-strip">
             <SummaryCard label="Total Symbols" value={fmtNum(summary.total_symbols)} />
             <SummaryCard
-              label="Best Net Decay"
-              value={summary.best_net_decay?.[0] ? fmt(summary.best_net_decay[0].net_decay) : '—'}
-              sub={summary.best_net_decay?.[0]?.symbol || ''}
+              label="Highest realized net (vs avg borrow)"
+              value={summary.top_realized_net_vs_avg_borrow?.[0] ? fmt(summary.top_realized_net_vs_avg_borrow[0].realized_net_vs_avg_borrow) : '—'}
+              sub={summary.top_realized_net_vs_avg_borrow?.[0]?.symbol || ''}
               color="var(--positive)"
             />
             <SummaryCard
-              label="Worst Borrow"
-              value={summary.worst_borrows?.[0] ? fmt(summary.worst_borrows[0].borrow) : '—'}
-              sub={summary.worst_borrows?.[0]?.symbol || ''}
-              color="var(--negative)"
+              label="Top net edge (p50)"
+              value={summary.top_net_edge?.[0] ? fmt(summary.top_net_edge[0].net_edge_p50_annual) : '—'}
+              sub={summary.top_net_edge?.[0]?.symbol || ''}
+              color="var(--positive)"
             />
             <SummaryCard label="IBKR FTP" value={data.ibkr_ftp_success ? `${data.ibkr_symbols_fetched}` : 'Offline'}
               sub={data.ibkr_ftp_success ? 'symbols live' : 'using CSV'}
               color={data.ibkr_ftp_success ? 'var(--positive)' : 'var(--warning)'}
             />
             <div className="summary-card">
-              <div className="label">Top 5 Net Decay</div>
+              <div className="label">Top 5 realized net (gross − avg borrow)</div>
               <ul className="highlight-list">
-                {(summary.best_net_decay || []).map(s => (
+                {(summary.top_realized_net_vs_avg_borrow || []).map(s => (
                   <li key={s.symbol}>
                     <span className="sym">{s.symbol}</span>
-                    <span className="val-positive">{fmt(s.net_decay)}</span>
+                    <span className="val-positive">{fmt(s.realized_net_vs_avg_borrow)}</span>
                   </li>
                 ))}
               </ul>
             </div>
             <div className="summary-card">
-              <div className="label">Top 5 Worst Borrows</div>
+              <div className="label">Top 5 net edge (median)</div>
               <ul className="highlight-list">
-                {(summary.worst_borrows || []).map(s => (
+                {(summary.top_net_edge || []).map(s => (
                   <li key={s.symbol}>
                     <span className="sym">{s.symbol}</span>
-                    <span className="val-negative">{fmt(s.borrow)}</span>
+                    <span className="val-positive">{fmt(s.net_edge_p50_annual)}</span>
                   </li>
                 ))}
               </ul>
