@@ -1788,12 +1788,12 @@ function decayDistTooltip(r) {
   let fallbackReason = null;
   if (dist.model === 'simple_ito_fallback') {
     if (nObsRounded == null || nObsRounded <= 0) {
-      fallbackReason = 'fallback reason: no usable underlying history';
+      fallbackReason = 'Fallback: no usable underlying history.';
     } else if (nObsRounded < threshold) {
       fallbackReason =
-        `fallback reason: short history (n=${nObsRounded} < ${threshold} required for ${horizon})`;
+        `Fallback: short history (n=${nObsRounded} < ${threshold} for ${horizon}).`;
     } else {
-      fallbackReason = `fallback reason: empirical moments unavailable (n=${nObsRounded})`;
+      fallbackReason = `Fallback: empirical moments missing (n=${nObsRounded}).`;
     }
   }
   const lines = [
@@ -1803,10 +1803,10 @@ function decayDistTooltip(r) {
     `p10 / p90: ${fmt(dist.p10)} / ${fmt(dist.p90)}`,
   ];
   if (fallbackReason) lines.push(fallbackReason);
-  if (dist.mean != null) lines.push(`lognormal mean: ${fmt(dist.mean)}`);
-  if (dist.sigma != null) lines.push(`σ(log IV_T):    ${dist.sigma.toFixed(3)}`);
+  if (dist.mean != null) lines.push(`LN mean: ${fmt(dist.mean)}`);
+  if (dist.sigma != null) lines.push(`σ(log IV): ${dist.sigma.toFixed(3)}`);
   const simple = Number(r?.expected_gross_decay_simple_ito_annual);
-  if (Number.isFinite(simple)) lines.push(`simple Itô:     ${fmt(simple)}`);
+  if (Number.isFinite(simple)) lines.push(`Itô point: ${fmt(simple)}`);
   if (isVolatilityEtp(r)) {
     lines.push('volatility ETP — Itô alone understates VIX-futures decay');
   }
@@ -2486,15 +2486,15 @@ function ExpectedDecayCalculator() {
         <>
           <div className="calc-out-grid">
             <div className="calc-out">
-              <div className="k">Period Expected Decay (%)</div>
+              <div className="k">Period decay (%)</div>
               <div className="v">{(result.periodExpectedDecay * 100).toFixed(2)}%</div>
             </div>
             <div className="calc-out">
-              <div className="k">Period Expected Decay (decimal)</div>
+              <div className="k">Period decay (dec.)</div>
               <div className="v">{result.periodExpectedDecay.toFixed(6)}</div>
             </div>
             <div className="calc-out">
-              <div className="k">Annual Expected Decay (%)</div>
+              <div className="k">Annualized decay (%)</div>
               <div className="v">{(result.annualExpectedDecay * 100).toFixed(2)}%</div>
             </div>
           </div>
@@ -2524,7 +2524,7 @@ function GrossDecayComparisonStrip({ r }) {
   const netVsAvg = Number.isFinite(gR) && Number.isFinite(bAvg) ? gR - bAvg : NaN;
   const netSpot = Number(r.net_decay);
   const net = Number.isFinite(netVsAvg) ? netVsAvg : netSpot;
-  const netLab = Number.isFinite(netVsAvg) ? 'Net (realiz. − avg borrow)' : 'Net (gross − spot borrow)';
+  const netLab = Number.isFinite(netVsAvg) ? 'Net (gross − avg borrow)' : 'Net (gross − spot borrow)';
   const pts = [];
   if (Number.isFinite(gR)) pts.push({ v: gR, cls: 'realized', lab: 'Realized gross' });
   if (Number.isFinite(gE)) pts.push({ v: gE, cls: 'expected', lab: expectedDecayDisplayLabel(r) });
@@ -2538,7 +2538,7 @@ function GrossDecayComparisonStrip({ r }) {
   const pos = (v) => ((v - lo) / (hi - lo)) * 100;
   return (
     <div className="dv-block">
-      <div className="dv-title">Gross: realized vs expected (same scale as net)</div>
+      <div className="dv-title">Gross: realized vs expected (one scale)</div>
       <div className="gross-dumbbell" aria-hidden="true">
         <div className="gross-dumbbell-track" />
         {pts.map((p, i) => (
@@ -2703,7 +2703,7 @@ function EdgeFactsStrip({ r }) {
   if (!borrowLabel) return null;
   return (
     <div className="edge-facts-strip" aria-label="Borrow in net-edge bootstrap">
-      <span className="edge-fact neutral" title="How borrow entered the net-edge bootstrap">{borrowLabel}</span>
+      <span className="edge-fact neutral" title="Borrow resampling mode for net-edge fan">{borrowLabel}</span>
     </div>
   );
 }
@@ -2751,52 +2751,52 @@ function DetailRow({ r, chartVolLookbackRange }) {
       <td colSpan={COLS.length + 1}>
         <div className="detail-grid">
           <div className="detail-item">
-            <div className="dlabel">Borrow (fee-only, spot)</div>
+            <div className="dlabel">Borrow (spot, fee-only)</div>
             <div className={cls('dval', borrowCls(getBorrowRate(r)))}>{fmt(getBorrowRate(r))}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Avg borrow (history)</div>
+            <div className="dlabel">Borrow (hist. avg)</div>
             <div className="dval">{Number.isFinite(bAvg) ? fmt(bAvg) : '—'}</div>
-            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>Mean over quoted days (excl. 0% when no locates)</div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>Mean on quoted days (0% / no-locate days dropped)</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Net decay (realiz. gross − avg borrow)</div>
+            <div className="dlabel">Net decay (realized)</div>
             <div className={cls('dval', spreadCls(realizedNetVsAvgBorrow ?? r.net_decay))}>
               {realizedNetVsAvgBorrow != null && Number.isFinite(realizedNetVsAvgBorrow) ? fmt(realizedNetVsAvgBorrow) : fmt(r.net_decay)}
             </div>
             {realizedNetVsAvgBorrow != null && Number.isFinite(realizedNetVsAvgBorrow) ? (
               <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
-                vs spot: {fmt(r.net_decay)} (gross − current borrow)
+                vs spot borrow: {fmt(r.net_decay)} (= gross − <em>current</em> borrow)
               </div>
             ) : (
               <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
-                Avg borrow unavailable — value is gross − spot borrow only.
+                No hist. avg → gross − spot borrow only.
               </div>
             )}
           </div>
           <div className="detail-item">
-            <div className="dlabel">Shares Available</div>
+            <div className="dlabel">Shares avail.</div>
             <div className="dval">{fmtNum(r.shares_available)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Beta (obs: {fmtNum(r.beta_n_obs)})</div>
+            <div className="dlabel">Beta (n = {fmtNum(r.beta_n_obs)})</div>
             <div className="dval">{r.beta?.toFixed(3) ?? '—'}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Forecast σ (und.)</div>
             <div className="dval">{Number.isFinite(Number(fSig)) && Number(fSig) > 0 ? fmt(Number(fSig)) : '—'}</div>
-            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{fv?.source || ''}{fv?.eventAdjusted ? ' · event-clipped EWMA' : ''}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{fv?.source || ''}{fv?.eventAdjusted ? ' · EWMA clipped for gaps' : ''}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Vol Und (table / 12M prefer)</div>
+            <div className="dlabel">Und. vol (12M realized)</div>
             <div className="dval">{fmt(r.vol_underlying_annual)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Vol ETF (table / 12M prefer)</div>
+            <div className="dlabel">ETF vol (12M realized)</div>
             <div className="dval">{fmt(r.vol_etf_annual)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Data Source</div>
+            <div className="dlabel">Borrow feed</div>
             <div className="dval">
               {r.borrow_source === 'ibkr_ftp'
                 ? <span className="badge badge-ftp">IBKR FTP</span>
@@ -4185,7 +4185,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <input type="number" value={mcSeed} onChange={(e) => setMcSeed(Number(e.target.value || 0))} />
               </div>
               <div className="mc-field">
-                <label>Short Ruin Threshold (%)</label>
+                <label>Short floor (%)</label>
                 <input type="number" value={mcRuinThresholdPct} onChange={(e) => setMcRuinThresholdPct(Number(e.target.value || -80))} />
               </div>
               <div className="mc-field">
@@ -4205,24 +4205,24 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <>
                 <MonteCarloPlot result={monteCarloResult} mode="short" />
                 <div className="mc-stats-grid">
-                  <div className="mc-stat"><div className="k">Prob Short Loss</div><div className="v">{fmt(monteCarloResult.summary.short?.probLoss)}</div></div>
-                  <div className="mc-stat"><div className="k">Prob Short Ruin</div><div className="v">{fmt(monteCarloResult.summary.short?.probRuin)}</div></div>
-                  <div className="mc-stat"><div className="k">Mean Short Return</div><div className="v">{fmt(monteCarloResult.summary.short?.meanTerminal)}</div></div>
-                  <div className="mc-stat"><div className="k">Median Short Return</div><div className="v">{fmt(monteCarloResult.summary.short?.medianTerminal)}</div></div>
+                  <div className="mc-stat"><div className="k">P(short loss)</div><div className="v">{fmt(monteCarloResult.summary.short?.probLoss)}</div></div>
+                  <div className="mc-stat"><div className="k">P(ruin)</div><div className="v">{fmt(monteCarloResult.summary.short?.probRuin)}</div></div>
+                  <div className="mc-stat"><div className="k">Short mean</div><div className="v">{fmt(monteCarloResult.summary.short?.meanTerminal)}</div></div>
+                  <div className="mc-stat"><div className="k">Short median</div><div className="v">{fmt(monteCarloResult.summary.short?.medianTerminal)}</div></div>
                   <div className="mc-stat"><div className="k">Short CVaR (5% tail)</div><div className="v">{fmt(monteCarloResult.summary.short?.cvar5)}</div></div>
-                  <div className="mc-stat"><div className="k">Short Return p05 / p95</div><div className="v">{fmt(monteCarloResult.summary.short?.p05)} / {fmt(monteCarloResult.summary.short?.p95)}</div></div>
+                  <div className="mc-stat"><div className="k">Short p05 / p95</div><div className="v">{fmt(monteCarloResult.summary.short?.p05)} / {fmt(monteCarloResult.summary.short?.p95)}</div></div>
                 </div>
                 <div className="mc-list">
-                  <div><strong>Shorting Risk: Terminal ETF Upside Breach</strong></div>
+                  <div><strong>ETF upside — at horizon</strong> (terminal path)</div>
                   {monteCarloResult.summary.upsideTerminalCounts.map((u, i) => (
                     <div key={`t-${i}`}>{`> ${fmt(u.threshold)}: ${u.count}/${monteCarloResult.settings.pathCount} (${fmt(u.pct)})`}</div>
                   ))}
-                  <div style={{ marginTop: 6 }}><strong>Shorting Risk: Any-Time ETF Upside Breach</strong></div>
+                  <div style={{ marginTop: 6 }}><strong>ETF upside — any time</strong> (intrapath)</div>
                   {monteCarloResult.summary.upsideAnyCounts.map((u, i) => (
                     <div key={`a-${i}`}>{`> ${fmt(u.threshold)}: ${u.count}/${monteCarloResult.settings.pathCount} (${fmt(u.pct)})`}</div>
                   ))}
                   <div style={{ marginTop: 6, color: 'var(--text-muted)' }}>
-                    Definitions: simulated ETF leg is <strong>total return ex-borrow</strong>; short return = −ETF return then borrow applied in financing; short ruin when short return falls below threshold.
+                    ETF sim = <strong>long TR, no borrow</strong>. Short = <strong>−(ETF TR)</strong> + borrow carry; <strong>ruin</strong> if short return hits your floor.
                   </div>
                 </div>
               </>
@@ -4230,7 +4230,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           </div>
 
           <div className="chart-note">
-            Scenario grid uses shocks {`±1/3σ, ±1σ, ±3σ`} and log-space mapping so underlying return is always greater than -100%.
+            Shock ladder {`±⅓σ, ±σ, ±3σ`} on the underlying; log map keeps R<sub>U</sub> &gt; −100%.
           </div>
             </>
           )}
@@ -4244,13 +4244,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div>
                 <div className="scenario-title">Trade Lab</div>
                 <div className="scenario-sub">
-                  Build equity + options structures (e.g. short {undSym} / long {etfSym}) and evaluate across scenarios + Monte Carlo.
+                  Stack equity + listed options (e.g. hedge {etfSym} vs {undSym}), mark scenarios + MC with the same σ / horizon as Scenarios when checked.
                 </div>
               </div>
               <div className="trade-actions">
                 <label className="toggle-label">
                   <input type="checkbox" checked={tradeUseScenarioAssumptions} onChange={(e) => setTradeUseScenarioAssumptions(e.target.checked)} />
-                  Use current Scenarios assumptions
+                  Lock to Scenarios σ &amp; horizon
                 </label>
               </div>
             </div>
@@ -4329,27 +4329,27 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   })}
                 </div>
                 <div className="trade-note">
-                  Options source: {optionsCache?.source || 'cache unavailable'} | symbols: {fmtNum(Object.keys(optionsCache?.symbols || {}).length)}.
+                  Options cache: {optionsCache?.source || 'n/a'} · {fmtNum(Object.keys(optionsCache?.symbols || {}).length)} symbols.
                 </div>
                 {(optionsCacheError || (!optionsCache?.polygon_api_configured && !Object.keys(optionsCache?.symbols || {}).length)) && (
                   <div className="trade-warning">
-                    {optionsCacheError ? `Options cache error: ${optionsCacheError}. ` : ''}POLYGON_API_KEY not configured (or cache missing): options controls may be limited.
+                    {optionsCacheError ? `${optionsCacheError} ` : ''}Missing POLYGON key or cache — strikes/premiums may be thin.
                   </div>
                 )}
                 {(!hasCachedSpotUnd || !hasCachedSpotEtf) && (
                   <div className="trade-warning">
-                    Live spot missing for {(!hasCachedSpotUnd && !hasCachedSpotEtf) ? `${undSym}/${etfSym}` : (!hasCachedSpotUnd ? undSym : etfSym)} in options cache; using fallback spot=100 for calculations until cache refresh succeeds.
+                    Spot missing for {(!hasCachedSpotUnd && !hasCachedSpotEtf) ? `${undSym}/${etfSym}` : (!hasCachedSpotUnd ? undSym : etfSym)} — using placeholder 100 until cache fills.
                   </div>
                 )}
                 {((!undOptionsRows.length && optionsErrUnd) || (!etfOptionsRows.length && optionsErrEtf)) && (
                   <div className="trade-warning">
-                    Polygon diagnostics: {!undOptionsRows.length && optionsErrUnd ? `${undSym}: ${optionsErrUnd}. ` : ''}{!etfOptionsRows.length && optionsErrEtf ? `${etfSym}: ${optionsErrEtf}.` : ''}
+                    Chain fetch: {!undOptionsRows.length && optionsErrUnd ? `${undSym}: ${optionsErrUnd} ` : ''}{!etfOptionsRows.length && optionsErrEtf ? `${etfSym}: ${optionsErrEtf}` : ''}
                   </div>
                 )}
                 {!!(optionsCache?.polygon_api_configured && !Object.keys(optionsCache?.symbols || {}).length) && (
                   <div className="trade-warning">
-                    Polygon key is configured but no option rows were returned. Check API plan/permissions for options endpoints.
-                    {(optionsCache?.errors && optionsCache.errors.length) ? ` Example: ${String(optionsCache.errors[0])}` : ''}
+                    Polygon reachable but empty option set — check plan / options entitlement.
+                    {(optionsCache?.errors && optionsCache.errors.length) ? ` (${String(optionsCache.errors[0])})` : ''}
                   </div>
                 )}
               </div>
@@ -4437,7 +4437,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="trade-card" style={{ marginTop: 10 }}>
               <div className="trade-head">
                 <div className="scenario-title">TTX Sensitivity</div>
-                <div className="scenario-sub">Center-cell scenario PnL across days-to-expiry.</div>
+                <div className="scenario-sub">PnL vs days-to-expiry (center shock / vol column).</div>
               </div>
               <table className="ttx-table">
                 <thead><tr><th>TTX (days)</th><th>PnL</th></tr></thead>
@@ -4450,10 +4450,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             </div>
 
             <div className="trade-note">
-              Formula notes: options are marked with Black-Scholes for TTX &gt; 0 and intrinsic at expiry; scenario and Monte Carlo assumptions reuse active Scenarios controls (shared forecast sigma, horizon, leverage mapping).
+              <strong>Marks:</strong> BS while TTX &gt; 0, intrinsic at expiry. <strong>Scenarios/MC:</strong> reuse active σ, horizon, β→<em>L</em> when “Lock to Scenarios” is on.
             </div>
             <div className="trade-note">
-              Financing notes: short equity legs include financing PnL = short_notional * (short_proceeds_rate - borrow_rate) * elapsed_years. ETF short borrow defaults to current/avg borrow estimate from the Borrow tab data.
+              <strong>Carry:</strong> short equity PnL += notional×(short-proceeds rate − borrow)×years on short legs; ETF borrow pulls from Borrow tab (avg or spot).
             </div>
           </div>
         </div>
@@ -4465,11 +4465,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="borrow-card">
               <div className="scenario-title">Borrow Rate History</div>
               <div className="borrow-meta">
-                Symbol: {etfSym} | history days: {fmtNum(avgBorrowFromHistoryStats.total)}
+                {etfSym}: {fmtNum(avgBorrowFromHistoryStats.total)} days on file
                 {avgBorrowFromHistoryStats.used > 0
-                  ? <> · avg over {fmtNum(avgBorrowFromHistoryStats.used)} quoted days (excl. ~0% when shares missing/≤0)</>
-                  : <> · no quoted non-placeholder days — avg falls back to dashboard field</>}
-                {' '}| average borrow: {fmt(displayAvgBorrowForMeta)}
+                  ? <> · avg from {fmtNum(avgBorrowFromHistoryStats.used)} quoted days (drop 0% / bad locates)</>
+                  : <> · no clean history → avg = dashboard field</>}
+                {' '}→ <strong>{fmt(displayAvgBorrowForMeta)}</strong> avg borrow
               </div>
               {borrowHistoryLoading ? (
                 <div className="scenario-warning">Loading borrow history…</div>
@@ -4489,7 +4489,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="trade-card" style={{ marginTop: 10 }}>
                   <div className="trade-head">
                     <div className="scenario-title">Spike Risk (5D)</div>
-                    <div className="scenario-sub">Borrow jump stress probability</div>
+                    <div className="scenario-sub">P(jump in borrow, 5D)</div>
                   </div>
                   {borrowSpikeRiskLoading ? (
                     <div className="scenario-warning">Loading spike risk…</div>
@@ -4497,7 +4497,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     <div className="scenario-warning">{borrowSpikeRiskError}</div>
                   ) : etfSpikeRisk?.scoring_eligible === false ? (
                     <div className="scenario-warning">
-                      Insufficient history for stable spike probability (need at least {fmtNum(Number(borrowSpikeRiskMeta?.quality_gate?.min_obs_for_scoring) || 30)} borrow points).
+                      Spike model needs ≥{fmtNum(Number(borrowSpikeRiskMeta?.quality_gate?.min_obs_for_scoring) || 30)} borrow prints — not enough yet.
                     </div>
                   ) : !Number.isFinite(etfSpikeProb) ? (
                     <div className="scenario-warning">Spike risk not available for this symbol yet.</div>
@@ -4532,7 +4532,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="borrow-card">
               <div className="scenario-title">Shares Available History</div>
               <div className="borrow-meta">
-                Source: historical `etf_screened_today.csv` snapshots across available commit history.
+                From git snapshots of <code>etf_screened_today.csv</code> (shares quoted per run).
               </div>
               {borrowHistoryLoading ? (
                 <div className="scenario-warning">Loading borrow history…</div>
@@ -4552,7 +4552,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           </div>
 
           <div className="chart-note">
-            Monte Carlo carry drag uses average historical fee-only borrow when available, otherwise falls back to current borrow.
+            MC borrow drag: hist. avg fee-only if present, else spot borrow from this row.
           </div>
         </div>
       )}
@@ -4712,7 +4712,7 @@ function PinnedEventCard({ event, bucketOf, onNavigate }) {
           {isPending && (
             <span
               className="cat-badge cat-pending"
-              title="Announced via press release / news — not yet confirmed by Polygon"
+              title="Announced — not yet confirmed in Polygon records"
             >
               Announced
             </span>
@@ -4755,7 +4755,7 @@ function NewsCard({ item, bucketOf, onNavigate, eventsById }) {
         <div className="news-card-meta">
           <span className={cls('cat-badge', `cat-${cat}`)}>{fmtCategoryLabel(cat)}</span>
           {tier && (
-            <span className={cls('tier-badge', `tier-${tier}`)} title="Ticker match tier">
+            <span className={cls('tier-badge', `tier-${tier}`)} title="explicit = issuer text; high = model sure; inferred = weak match">
               {tier}
             </span>
           )}
@@ -4794,7 +4794,7 @@ function NewsCard({ item, bucketOf, onNavigate, eventsById }) {
           {linkedEv && (
             <span
               className="news-card-linked"
-              title={`Linked to structured event ${linkedEv.id}`}
+              title={`Structured ${linkedEv.id}`}
             >
               ↳ {fmtCategoryLabel(linkedEv.type)} · {fmtEventDate(linkedEv.execution_date)}
             </span>
@@ -4942,7 +4942,7 @@ function NewsPage({
             News & Corporate Actions
           </div>
           <div className="news-subtitle">
-            Splits · Reverse splits · Delistings · Symbol changes · Mergers — across all tracked ETFs
+            Splits, delists, ticker changes, M&A — all tracked ETFs
           </div>
         </div>
         <div className="news-meta">
@@ -4959,8 +4959,7 @@ function NewsPage({
 
       {loadError && (
         <div className="news-error-banner">
-          Failed to load news data: {loadError}. The scheduled workflow populates{' '}
-          <code>data/corporate_actions.json</code> and <code>data/etf_news.json</code> every 6 hours.
+          {loadError}. Workflow fills <code>data/corporate_actions.json</code> + <code>data/etf_news.json</code> every 6h.
         </div>
       )}
 
@@ -5013,19 +5012,19 @@ function NewsPage({
           className={cls('news-toggle', onlyHighConfidence && 'active')}
           onClick={() => setOnlyHighConfidence(v => !v)}
         >
-          {onlyHighConfidence ? '[x]' : '[ ]'} Only high confidence
+          {onlyHighConfidence ? '[x]' : '[ ]'} Conf ≥ 80%
         </div>
         <div
           className={cls('news-toggle', hideInferredOnly && 'active')}
           onClick={() => setHideInferredOnly(v => !v)}
         >
-          {hideInferredOnly ? '[x]' : '[ ]'} Hide inferred-only
+          {hideInferredOnly ? '[x]' : '[ ]'} Hide inferred tier
         </div>
         <div
           className={cls('news-toggle', groupByTickerCategory && 'active')}
           onClick={() => setGroupByTickerCategory(v => !v)}
         >
-          {groupByTickerCategory ? '[x]' : '[ ]'} One row per ticker/category
+          {groupByTickerCategory ? '[x]' : '[ ]'} Group by ticker + category
         </div>
       </div>
 
@@ -5054,9 +5053,7 @@ function NewsPage({
         <div className="news-empty" style={{ marginBottom: 18, padding: '22px 18px' }}>
           <div className="news-empty-title">{events.length} structured events loaded</div>
           <div>
-            None match the current category + time window. Try <b>All</b> categories and set
-            Window to <b>All available</b> to see historical splits (most execution dates are
-            older than 30–60 days).
+            Widen filters: category <b>All</b>, window <b>All available</b> — most splits are older than 30–60d.
           </div>
         </div>
       )}
@@ -5075,8 +5072,8 @@ function NewsPage({
           </div>
           <div>
             {isSeed && !hasAnyData
-              ? 'The GitHub Actions workflow update-corporate-actions.yml runs every 6 hours and will populate this feed.'
-              : 'Try widening the time window, clearing the search, or switching to All categories.'}
+              ? 'Workflow `update-corporate-actions.yml` runs every 6h — first payload pending.'
+              : 'Widen window, clear search, or pick All categories.'}
           </div>
         </div>
       ) : (
@@ -5096,7 +5093,7 @@ function NewsPage({
                         <span className={cls('cat-badge', `cat-${g.category || 'other'}`)}>{fmtCategoryLabel(g.category)}</span>
                         {g.ticker && <NewsTickerChip symbol={g.ticker} bucketOf={bucketOf} onNavigate={onNavigateToChart} />}
                         {primary?.match_tier && (
-                          <span className={cls('tier-badge', `tier-${primary.match_tier}`)} style={{ display: 'inline-flex' }}>
+                          <span className={cls('tier-badge', `tier-${primary.match_tier}`)} style={{ display: 'inline-flex' }} title="explicit = issuer text; high = model sure; inferred = weak match">
                             {primary.match_tier}
                           </span>
                         )}
@@ -5381,7 +5378,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <div className="summary-strip">
             <SummaryCard label="Total Symbols" value={fmtNum(summary.total_symbols)} />
             <SummaryCard
-              label="Highest realized net (vs avg borrow)"
+              label="Top realized net (gross − avg borrow)"
               value={summary.top_realized_net_vs_avg_borrow?.[0] ? fmt(summary.top_realized_net_vs_avg_borrow[0].realized_net_vs_avg_borrow) : '—'}
               sub={summary.top_realized_net_vs_avg_borrow?.[0]?.symbol || ''}
               color="var(--positive)"
@@ -5397,7 +5394,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               color={data.ibkr_ftp_success ? 'var(--positive)' : 'var(--warning)'}
             />
             <div className="summary-card">
-              <div className="label">Top 5 realized net (gross − avg borrow)</div>
+              <div className="label">Top 5 realized net (gross − hist. borrow)</div>
               <ul className="highlight-list">
                 {(summary.top_realized_net_vs_avg_borrow || []).map(s => (
                   <li key={s.symbol}>
@@ -5408,7 +5405,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               </ul>
             </div>
             <div className="summary-card">
-              <div className="label">Top 5 net edge (median)</div>
+              <div className="label">Top 5 net edge (p50)</div>
               <ul className="highlight-list">
                 {(summary.top_net_edge || []).map(s => (
                   <li key={s.symbol}>
