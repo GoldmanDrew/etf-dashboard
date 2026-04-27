@@ -54,9 +54,8 @@ REALIZED_VOL_EWMA_LAMBDA = float(os.environ.get("REALIZED_VOL_EWMA_LAMBDA", "0.9
 # before that date gets (close, adj_close) multiplied by factor (factors from
 # multiple dates compound in chronological order).
 _MANUAL_SPLIT_OVERRIDES: dict[str, dict[str, float]] = {
-    # 1-for-10 reverse split: pre-split history × 0.1 to post-split basis.
+    # SMUP 1-for-10 reverse split: Yahoo adj can be wrong; pre-split × 0.1 to post-split basis.
     "SMUP": {"2026-01-26": 0.1},
-    "EOSU": {"2026-04-15": 25.0},
 }
 BORROW_HISTORY_MAX_COMMITS = int(os.environ.get("BORROW_HISTORY_MAX_COMMITS", "400"))
 BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE_SIZE", "100"))
