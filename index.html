@@ -258,6 +258,18 @@
   .detail-grid {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 12px;
   }
+  .detail-item {
+    min-width: 0;
+  }
+  .detail-item-hint {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    line-height: 1.35;
+    overflow-wrap: break-word;
+    word-break: break-word;
+    max-width: 100%;
+  }
   .detail-item .dlabel {
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
     color: var(--text-muted); margin-bottom: 2px;
@@ -314,27 +326,71 @@
     font-size: 11px; font-weight: 700; color: var(--text-secondary);
     margin-bottom: 6px; letter-spacing: 0.3px;
   }
+  .gross-dumbbell-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .gross-dumbbell-rail {
+    min-width: 0;
+  }
+  .gross-dumbbell-rail-title {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.45px;
+    margin-bottom: 2px;
+  }
   .gross-dumbbell {
     position: relative; height: 32px; margin: 6px 0 4px;
     font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-muted);
+  }
+  .gross-dumbbell.gross-dumbbell--rail {
+    height: 26px;
+    margin: 2px 0 14px;
   }
   .gross-dumbbell-track {
     position: absolute; left: 0; right: 0; top: 50%; height: 4px; margin-top: -2px;
     background: rgba(100,120,160,0.25); border-radius: 3px;
   }
+  .gross-dumbbell-axis {
+    position: absolute; left: 0; right: 0; top: 100%;
+    margin-top: 3px;
+    display: flex; justify-content: space-between;
+  }
   .gross-dumbbell-tick {
-    position: absolute; top: 2px; width: 3px; height: 22px; margin-left: -1.5px; border-radius: 2px;
+    position: absolute; top: 2px; width: 3px; height: 20px; margin-left: -1.5px; border-radius: 2px;
   }
   .gross-dumbbell-tick.realized { background: var(--accent-blue); }
   .gross-dumbbell-tick.expected { background: var(--accent-purple); }
   .gross-dumbbell-tick.blended { background: #94a3b8; }
   .gross-dumbbell-tick.net { background: var(--positive); width: 4px; margin-left: -2px; }
+  .gross-dumbbell-tick.net-realized { background: var(--positive); width: 4px; margin-left: -2px; }
+  .gross-dumbbell-tick.net-spot { background: var(--accent-cyan); width: 3px; margin-left: -1.5px; opacity: 0.95; }
+  .gross-dumbbell-mark--diamond {
+    position: absolute; top: 50%; width: 8px; height: 8px; margin-left: -4px; margin-top: -6px;
+    transform: rotate(45deg); border-radius: 1px; background: var(--ne-p50);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.35); z-index: 2;
+  }
+  .gross-dumbbell-mark--diamond.net-edge { background: var(--ne-p50); }
+  .gross-dumbbell-legends {
+    display: flex; flex-direction: column; gap: 10px; margin-top: 4px;
+  }
+  .gross-dumbbell-legend-group-label {
+    font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); margin-bottom: 3px;
+  }
   .gross-dumbbell-legend {
-    display: flex; flex-wrap: wrap; gap: 10px 14px; margin-top: 22px; font-size: 10px; color: var(--text-muted);
+    display: flex; flex-wrap: wrap; gap: 10px 14px; font-size: 10px; color: var(--text-muted);
   }
   .gross-dumbbell-legend span { display: inline-flex; align-items: center; gap: 5px; }
   .gross-dumbbell-legend i {
     display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+  }
+  .gross-dumbbell-legend i.gross-legend-diamond {
+    width: 7px; height: 7px; border-radius: 1px; transform: rotate(45deg);
+    background: var(--ne-p50);
   }
   .net-edge-viz { margin-top: 4px; }
   .net-edge-box-svg { width: 100%; max-width: 420px; height: 44px; display: block; }
@@ -2514,46 +2570,143 @@ function ExpectedDecayCalculator() {
   );
 }
 
-// ── Gross realized vs expected (detail strip) ─────────────────────
+// ── Gross vs net comparison (detail strip): two rails, independent scales ──
 function GrossDecayComparisonStrip({ r }) {
   const gR = Number(r.gross_decay_annual);
-  const gE = expectedDecayDisplayValue(r);
-  const gB = r.blended_gross_decay != null && r.blended_gross_decay !== undefined
-    ? Number(r.blended_gross_decay) : NaN;
+  const gHead = expectedDecayHeadlineValue(r);
+  const gE = gHead != null && Number.isFinite(Number(gHead)) ? Number(gHead) : NaN;
+
   const bAvg = Number(r?.borrow_avg_annual);
   const netVsAvg = Number.isFinite(gR) && Number.isFinite(bAvg) ? gR - bAvg : NaN;
   const netSpot = Number(r.net_decay);
-  const net = Number.isFinite(netVsAvg) ? netVsAvg : netSpot;
-  const netLab = Number.isFinite(netVsAvg) ? 'Net (gross − avg borrow)' : 'Net (gross − spot borrow)';
-  const pts = [];
-  if (Number.isFinite(gR)) pts.push({ v: gR, cls: 'realized', lab: 'Realized gross' });
-  if (Number.isFinite(gE)) pts.push({ v: gE, cls: 'expected', lab: expectedDecayDisplayLabel(r) });
-  if (Number.isFinite(gB)) pts.push({ v: gB, cls: 'blended', lab: 'Blended gross' });
-  if (Number.isFinite(net)) pts.push({ v: net, cls: 'net', lab: netLab });
-  if (pts.length === 0) return null;
-  const vals = pts.map(p => p.v);
-  let lo = Math.min(...vals);
-  let hi = Math.max(...vals);
-  if (!(hi > lo)) { lo -= 0.015; hi += 0.015; }
-  const pos = (v) => ((v - lo) / (hi - lo)) * 100;
-  return (
-    <div className="dv-block">
-      <div className="dv-title">Gross: realized vs expected (one scale)</div>
-      <div className="gross-dumbbell" aria-hidden="true">
-        <div className="gross-dumbbell-track" />
-        {pts.map((p, i) => (
-          <div key={i} className={`gross-dumbbell-tick ${p.cls}`} style={{ left: `${pos(p.v)}%` }} title={`${p.lab}: ${(p.v * 100).toFixed(2)}%`} />
-        ))}
-        <div style={{ position: 'absolute', left: 0, right: 0, top: '100%', marginTop: 2, display: 'flex', justifyContent: 'space-between' }}>
-          <span>{(lo * 100).toFixed(1)}%</span>
-          <span>{(hi * 100).toFixed(1)}%</span>
+  const netP50 = Number(r.net_edge_p50_annual);
+
+  const grossPts = [];
+  if (Number.isFinite(gR)) grossPts.push({ key: 'gr', v: gR, kind: 'bar', cls: 'realized', legShort: 'Realized gross' });
+  if (Number.isFinite(gE)) {
+    grossPts.push({
+      key: 'ge',
+      v: gE,
+      kind: 'bar',
+      cls: 'expected',
+      legShort: `${expectedDecayDisplayLabel(r)} · gross`,
+    });
+  }
+
+  const netPts = [];
+  if (Number.isFinite(netP50)) {
+    netPts.push({
+      key: 'n50',
+      v: netP50,
+      kind: 'diamond',
+      cls: 'net-edge',
+      legShort: 'Net edge (p50, bootstrap)',
+    });
+  }
+  if (Number.isFinite(netVsAvg)) {
+    netPts.push({
+      key: 'nr',
+      v: netVsAvg,
+      kind: 'bar',
+      cls: 'net-realized',
+      legShort: 'Realized net decay (gross − hist. avg borrow)',
+    });
+  }
+  if (Number.isFinite(netSpot)) {
+    const sameAsAvg = Number.isFinite(netVsAvg) && Math.abs(netSpot - netVsAvg) < 1e-5;
+    if (!sameAsAvg) {
+      netPts.push({
+        key: 'ns',
+        v: netSpot,
+        kind: 'bar',
+        cls: 'net-spot',
+        legShort: 'Net (gross − spot borrow)',
+      });
+    }
+  }
+
+  if (grossPts.length === 0 && netPts.length === 0) return null;
+
+  const fmtPct1 = (x) => `${(x * 100).toFixed(1)}%`;
+
+  function SingleRail({ title, pts }) {
+    const vals = pts.map(p => p.v);
+    let lo = Math.min(...vals);
+    let hi = Math.max(...vals);
+    if (!(hi > lo)) {
+      lo -= 0.015;
+      hi += 0.015;
+    }
+    const pos = (v) => ((v - lo) / (hi - lo)) * 100;
+    return (
+      <div className="gross-dumbbell-rail">
+        <div className="gross-dumbbell-rail-title">{title}</div>
+        <div className="gross-dumbbell gross-dumbbell--rail" aria-hidden="true">
+          <div className="gross-dumbbell-track" />
+          {pts.map((p) =>
+            p.kind === 'diamond' ? (
+              <div
+                key={p.key}
+                className={`gross-dumbbell-mark--diamond ${p.cls}`}
+                style={{ left: `${pos(p.v)}%` }}
+                title={`${p.legShort}: ${(p.v * 100).toFixed(2)}%`}
+              />
+            ) : (
+              <div
+                key={p.key}
+                className={`gross-dumbbell-tick ${p.cls}`}
+                style={{ left: `${pos(p.v)}%` }}
+                title={`${p.legShort}: ${(p.v * 100).toFixed(2)}%`}
+              />
+            ),
+          )}
+          <div className="gross-dumbbell-axis">
+            <span>{fmtPct1(lo)}</span>
+            <span>{fmtPct1(hi)}</span>
+          </div>
         </div>
       </div>
-      <div className="gross-dumbbell-legend">
-        <span><i style={{ background: 'var(--accent-blue)' }} /> Realized gross</span>
-        <span><i style={{ background: 'var(--accent-purple)' }} /> Expected (Itô)</span>
-        {Number.isFinite(gB) ? <span><i style={{ background: '#94a3b8' }} /> Blended gross</span> : null}
-        <span><i style={{ background: 'var(--positive)' }} /> {Number.isFinite(netVsAvg) ? 'Net (realiz. − avg borrow)' : 'Net (gross − spot borrow)'}</span>
+    );
+  }
+
+  return (
+    <div className="dv-block">
+      <div className="dv-title">Annual rates — gross vs net (separate scales)</div>
+      <div className="gross-dumbbell-stack">
+        {grossPts.length > 0 ? <SingleRail title="Gross (before borrow)" pts={grossPts} /> : null}
+        {netPts.length > 0 ? <SingleRail title="Net (after borrow)" pts={netPts} /> : null}
+      </div>
+      <div className="gross-dumbbell-legends">
+        {grossPts.length > 0 ? (
+          <div className="gross-dumbbell-legend-group">
+            <div className="gross-dumbbell-legend-group-label">Gross</div>
+            <div className="gross-dumbbell-legend">
+              {grossPts.map((p) => (
+                <span key={`g-${p.key}`}>
+                  <i style={{ background: p.cls === 'realized' ? 'var(--accent-blue)' : 'var(--accent-purple)' }} />
+                  {p.legShort}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {netPts.length > 0 ? (
+          <div className="gross-dumbbell-legend-group">
+            <div className="gross-dumbbell-legend-group-label">Net</div>
+            <div className="gross-dumbbell-legend">
+              {netPts.map((p) => (
+                <span key={`n-${p.key}`}>
+                  {p.kind === 'diamond' ? (
+                    <i className="gross-legend-diamond" aria-hidden="true" />
+                  ) : (
+                    <i style={{ background: p.cls === 'net-realized' ? 'var(--positive)' : 'var(--accent-cyan)' }} />
+                  )}
+                  {p.legShort}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -2757,7 +2910,11 @@ function DetailRow({ r, chartVolLookbackRange }) {
           <div className="detail-item">
             <div className="dlabel">Borrow (hist. avg)</div>
             <div className="dval">{Number.isFinite(bAvg) ? fmt(bAvg) : '—'}</div>
-            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>Mean on quoted days (0% / no-locate days dropped)</div>
+            <div className="detail-item-hint">
+              Mean on quoted days only.
+              <br />
+              0% / no-locate days dropped.
+            </div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Net decay (realized)</div>
@@ -2765,13 +2922,13 @@ function DetailRow({ r, chartVolLookbackRange }) {
               {realizedNetVsAvgBorrow != null && Number.isFinite(realizedNetVsAvgBorrow) ? fmt(realizedNetVsAvgBorrow) : fmt(r.net_decay)}
             </div>
             {realizedNetVsAvgBorrow != null && Number.isFinite(realizedNetVsAvgBorrow) ? (
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
-                vs spot borrow: {fmt(r.net_decay)} (= gross − <em>current</em> borrow)
+              <div className="detail-item-hint">
+                vs spot borrow: {fmt(r.net_decay)}
+                <br />
+                (= gross − <em>current</em> borrow)
               </div>
             ) : (
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
-                No hist. avg → gross − spot borrow only.
-              </div>
+              <div className="detail-item-hint">No hist. avg → gross − spot borrow only.</div>
             )}
           </div>
           <div className="detail-item">
@@ -2785,7 +2942,7 @@ function DetailRow({ r, chartVolLookbackRange }) {
           <div className="detail-item">
             <div className="dlabel">Forecast σ (und.)</div>
             <div className="dval">{Number.isFinite(Number(fSig)) && Number(fSig) > 0 ? fmt(Number(fSig)) : '—'}</div>
-            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{fv?.source || ''}{fv?.eventAdjusted ? ' · EWMA clipped for gaps' : ''}</div>
+            <div className="detail-item-hint">{fv?.source || ''}{fv?.eventAdjusted ? ' · EWMA clipped for gaps' : ''}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Und. vol (12M realized)</div>

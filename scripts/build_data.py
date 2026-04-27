@@ -47,6 +47,17 @@ REALIZED_VOL_TIMEOUT_SEC = int(os.environ.get("REALIZED_VOL_TIMEOUT_SEC", "20"))
 REALIZED_VOL_RETRIES = int(os.environ.get("REALIZED_VOL_RETRIES", "2"))
 REALIZED_VOL_RANGE = os.environ.get("REALIZED_VOL_RANGE", "2y")
 REALIZED_VOL_EWMA_LAMBDA = float(os.environ.get("REALIZED_VOL_EWMA_LAMBDA", "0.94"))
+
+# Manual split overrides aligned with v9 backtest data treatment. Yahoo/yfinance
+# sometimes mishandles corporate actions; scale pre-effective closes to the
+# post-event basis. For each (symbol, ISO date, factor): every bar strictly
+# before that date gets (close, adj_close) multiplied by factor (factors from
+# multiple dates compound in chronological order).
+_MANUAL_SPLIT_OVERRIDES: dict[str, dict[str, float]] = {
+    # 1-for-10 reverse split: pre-split history × 0.1 to post-split basis.
+    "SMUP": {"2026-01-26": 0.1},
+    "EOSU": {"2026-04-15": 25.0},
+}
 BORROW_HISTORY_MAX_COMMITS = int(os.environ.get("BORROW_HISTORY_MAX_COMMITS", "400"))
 BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE_SIZE", "100"))
 POLYGON_OPTIONS_MAX_SYMBOLS = int(os.environ.get("POLYGON_OPTIONS_MAX_SYMBOLS", "100"))
@@ -2298,6 +2309,32 @@ def _build_market_windows(
     return results
 
 
+def _apply_manual_split_adjustments(
+    symbol: str,
+    points: list[tuple[dt.date, float, float]],
+) -> list[tuple[dt.date, float, float]]:
+    """Scale historical closes when Yahoo adj series is wrong (see _MANUAL_SPLIT_OVERRIDES)."""
+    sym = norm_sym(symbol)
+    raw_ov = _MANUAL_SPLIT_OVERRIDES.get(sym)
+    if not raw_ov or not points:
+        return points
+    try:
+        lines = sorted((dt.date.fromisoformat(ds), float(m)) for ds, m in raw_ov.items())
+    except (TypeError, ValueError):
+        return points
+    out: list[tuple[dt.date, float, float]] = []
+    for d, px_close, px_adj in points:
+        mult = 1.0
+        for eff, m in lines:
+            if d < eff:
+                mult *= m
+        if mult != 1.0:
+            out.append((d, float(px_close * mult), float(px_adj * mult)))
+        else:
+            out.append((d, px_close, px_adj))
+    return out
+
+
 def _fetch_yahoo_symbol_series(
     session: requests.Session,
     symbol: str,
@@ -2365,6 +2402,7 @@ def _fetch_yahoo_symbol_series(
                         continue
                     dividends.append((ev_date, float(amt)))
 
+            points = _apply_manual_split_adjustments(symbol, points)
             return {"points": points, "dividends": dividends}
         except Exception as e:
             last_err = e
