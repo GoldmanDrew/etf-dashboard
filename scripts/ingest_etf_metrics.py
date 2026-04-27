@@ -19,6 +19,9 @@ Row statuses:
   'partial' -> at least one of the three fields present (UI still has a NAV series to plot)
   'missing' -> nothing usable
 
+Before validation, ``repair_shares_vs_aum_nav`` may set ``shares_outstanding`` to
+``aum / nav`` when the reported figure disagrees by >80× (decimal-shift glitches).
+
 Every ticker ends up with exactly one row stamped at ``end_date`` in single-day mode; results
 sourced from an earlier date are flagged ``stale=True`` with ``stale_age_bdays``.
 
@@ -152,6 +155,43 @@ def _records_to_df(records: list[ProviderResult], ingested_at: datetime) -> pd.D
             out[c] = None
     out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
     return out[REQUIRED_COLUMNS]
+
+
+def repair_shares_vs_aum_nav(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Fix ``shares_outstanding`` when it disagrees with ``aum / nav`` by a huge factor.
+
+    Issuer and Yahoo feeds occasionally emit decimal-shifted share counts. When
+    NAV and AUM are mutually consistent with a third share count ``aum/nav`` but
+    reported shares differ by more than 80×, replace shares with that implied
+    value (same rule as the dashboard Stats panel).
+    """
+    if df.empty or "shares_outstanding" not in df.columns:
+        return df, 0
+    out = df.copy()
+    nav = pd.to_numeric(out["nav"], errors="coerce")
+    aum = pd.to_numeric(out["aum"], errors="coerce")
+    shares = pd.to_numeric(out["shares_outstanding"], errors="coerce")
+    implied = aum / nav
+    ok_triple = (
+        nav.notna()
+        & (nav > 0)
+        & aum.notna()
+        & (aum > 0)
+        & shares.notna()
+        & (shares > 0)
+        & implied.notna()
+        & (implied > 0)
+    )
+    ratio = shares / implied
+    bad = ok_triple & ((ratio > 80.0) | (ratio < (1.0 / 80.0)))
+    n_bad = int(bad.sum())
+    if n_bad:
+        LOGGER.warning(
+            "repair_shares_vs_aum_nav: correcting %d row(s) where shares diverged >80× from aum/nav",
+            n_bad,
+        )
+        out.loc[bad, "shares_outstanding"] = implied[bad]
+    return out, n_bad
 
 
 def enforce_status_consistency(df: pd.DataFrame) -> pd.DataFrame:
@@ -967,6 +1007,16 @@ def main() -> None:
     merged, n_collapse = collapse_redundant_consecutive_rows(merged)
     if n_collapse:
         LOGGER.info("Collapsed %d redundant consecutive (nav,aum,shares) rows", n_collapse)
+    merged, n_share_repairs = repair_shares_vs_aum_nav(merged)
+    if n_share_repairs:
+        merged = enforce_status_consistency(merged)
+        merged, n_post = collapse_redundant_consecutive_rows(merged)
+        if n_post:
+            LOGGER.info(
+                "Post-repair collapse removed %d redundant consecutive (nav,aum,shares) rows",
+                n_post,
+            )
+        LOGGER.info("Repaired shares on %d row(s); status re-evaluated", n_share_repairs)
     validate_df(merged)
     save_outputs(merged)
     LOGGER.info("Saved merged summary: %s", get_summary(merged))

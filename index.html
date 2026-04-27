@@ -3064,6 +3064,32 @@ function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYi
   );
 }
 
+/** ETF metrics: fix shares when AUM/NAV implies a consistent count but shares are off by ~10²+ (feed glitches). */
+function repairEtfMetricsShareOutliers(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  const RATIO_MAX = 80;
+  return rows.map((row) => {
+    const nav = Number(row?.nav);
+    const aum = Number(row?.aum);
+    const sh = Number(row?.shares_outstanding);
+    const implied = (Number.isFinite(nav) && nav > 0 && Number.isFinite(aum) && aum > 0)
+      ? aum / nav
+      : null;
+    if (implied == null || !Number.isFinite(implied) || implied <= 0 || !Number.isFinite(sh) || sh <= 0) {
+      return row;
+    }
+    const r = Math.max(sh / implied, implied / sh);
+    if (r <= RATIO_MAX) return row;
+    const base = String(row?.status || 'ok').trim();
+    const tag = '· repaired (shares ← AUM/NAV)';
+    return {
+      ...row,
+      shares_outstanding: implied,
+      status: base.includes('repaired') ? base : `${base} ${tag}`.trim(),
+    };
+  });
+}
+
 function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange }) {
   const activeTf = useMemo(
     () => TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2],
@@ -3348,7 +3374,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   ), [etfDistributionsMap, etfSym]);
   const etfMetricsSeries = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
-    const ok = raw.filter((x) => String(x?.status || '').toLowerCase() === 'ok');
+    const okRaw = raw.filter((x) => String(x?.status || '').toLowerCase() === 'ok');
+    const ok = repairEtfMetricsShareOutliers(okRaw);
     if (!ok.length) return ok;
 
     // Build a distribution-adjusted ("total return") NAV series. On each ex-date in our
@@ -3896,7 +3923,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
       {activePanel === 'stats' && (
         <div className="chart-section">
-          {/* Stats Grid */}
+          {/* Stats Grid — vol / decay / edge aligned with main table (COLS) */}
           <div className="chart-stats" style={{ marginTop: 0 }}>
             <div className="chart-stat">
               <div className="cs-label">Beta</div>
@@ -3904,12 +3931,23 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-sub">{fmtNum(r.beta_n_obs)} obs</div>
             </div>
             <div className="chart-stat">
-              <div className="cs-label">Gross (realized)</div>
-              <div className="cs-value" style={{ color: 'var(--positive)' }}>{fmt(r.gross_decay_annual)}</div>
+              <div className="cs-label">Borrow Rate</div>
+              <div className={cls('cs-value', borrowCls(getBorrowRate(r)))}>{fmt(getBorrowRate(r))}</div>
+              <div className="cs-sub">annual fee-only</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">Shares Avail</div>
+              <div className="cs-value">{fmtNum(r.shares_available)}</div>
+              <div className="cs-sub">{r.borrow_source === 'ibkr_ftp' ? 'IBKR Live' : 'CSV'}</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">Gross (realiz.)</div>
+              <div className="cs-value">{fmt(r.gross_decay_annual)}</div>
               <div className="cs-sub">last screener run · annual</div>
             </div>
             <div className="chart-stat" title={decayDistTooltip(r)}>
-              <div className="cs-label">{expectedDecayDisplayLabel(r)}</div>
+              <div className="cs-label">Exp. decay</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>median · band</div>
               {(() => {
                 if (!expectedDecayAvailableForRow(r)) {
                   return (
@@ -3921,27 +3959,24 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 }
                 const dist = expectedDecayDistribution(r);
                 if (dist) {
-                  const modelLabel = DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || 'distribution';
                   const isYbDist = isYieldBoostPutSpreadDistModel(dist.model);
                   return (
-                    <>
+                    <div style={{ lineHeight: 1.15 }}>
                       <div className="cs-value">{fmt(dist.p50)}</div>
-                      <div className="cs-sub">
-                        {isYbDist
-                          ? `put-spread MC · p10/p90 ${fmt(dist.p10)} / ${fmt(dist.p90)}`
-                          : `p10/p90 ${fmt(dist.p10)} / ${fmt(dist.p90)} · ${modelLabel}`}
+                      <div className="cs-sub" style={{ marginTop: 2 }}>
+                        {isYbDist ? 'put-spread · ' : ''}{fmt(dist.p10)} / {fmt(dist.p90)}
                       </div>
-                    </>
+                    </div>
                   );
                 }
                 if (isYieldBoostIncomeStrategy(r)) {
                   const yb = yieldBoostIntrinsicAnnualDecay(r);
                   if (yb != null) {
                     return (
-                      <>
+                      <div style={{ lineHeight: 1.15 }}>
                         <div className="cs-value">{fmt(yb)}</div>
-                        <div className="cs-sub">intrinsic 95/88 put-spread NAV decay (client fallback)</div>
-                      </>
+                        <div className="cs-sub" style={{ marginTop: 2 }}>intrinsic (fallback)</div>
+                      </div>
                     );
                   }
                 }
@@ -3955,40 +3990,63 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 );
               })()}
             </div>
-            <div className="chart-stat">
-              <div className="cs-label">Borrow Rate</div>
-              <div className={cls('cs-value', borrowCls(getBorrowRate(r)))}>{fmt(getBorrowRate(r))}</div>
-              <div className="cs-sub">annual fee-only</div>
+            <div className="chart-stat" style={{ minWidth: 140 }}>
+              <div className="cs-label">Net edge</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>median · range</div>
+              {isPassiveLowBetaRow(r) ? (
+                <span title={PASSIVE_LOW_BETA_POLICY_TOOLTIP} style={{ color: 'var(--text-muted)' }}>—</span>
+              ) : (
+                <NetEdgeMergedCell r={r} />
+              )}
             </div>
-            <div className="chart-stat">
-              <div className="cs-label">Net Decay</div>
-              <div className={cls('cs-value', spreadCls(r.net_decay))}>{fmt(r.net_decay)}</div>
-              <div className="cs-sub">gross − borrow</div>
+            {(() => {
+              const expEtf3m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
+              const expEtf1m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '1M');
+              const expEtf6m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '6M');
+              return (
+                <div
+                  className={cls('chart-stat', scenarioValueCls(r, expEtf3m))}
+                  title={
+                    isPassiveLowBetaRow(r)
+                      ? PASSIVE_LOW_BETA_POLICY_TOOLTIP
+                      : suppressScenarioForRow(r)
+                        ? 'Hidden for passive low-β (non-income): scenario not meaningful at β≈1.'
+                        : (() => {
+                            const lines = [];
+                            if (isYieldBoostIncomeStrategy(r)) {
+                              lines.push('Long total return, no borrow (cash + NAV path).');
+                              lines.push('= −NAV decay + cash from weekly 95/88 model (0% shock row in Scenarios).');
+                              lines.push(`σ (forecast): ${fmt(forecastVolForScenario(r, chartVolLookbackRange).sigma)} (${r?.forecast_vol_source || 'forecast_vol'}).`);
+                            } else {
+                              lines.push('Long total return, no borrow: Itô vol path + small dividend accrual when data exist.');
+                              lines.push(`σ (forecast): ${fmt(forecastVolForScenario(r, chartVolLookbackRange).sigma)}.`);
+                              lines.push('Ex-dates: Scenarios tab.');
+                            }
+                            if (r?.forecast_vol_event_adjusted) lines.push('EWMA leg clipped a large one-day move.');
+                            lines.push('');
+                            lines.push('Other horizons:');
+                            lines.push(`  1M: ${expEtf1m != null && Number.isFinite(expEtf1m) ? fmt(expEtf1m) : '—'}`);
+                            lines.push(`  3M: ${expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}  (table headline)`);
+                            lines.push(`  6M: ${expEtf6m != null && Number.isFinite(expEtf6m) ? fmt(expEtf6m) : '—'}`);
+                            return lines.join('\n');
+                          })()
+                  }
+                >
+                  <div className="cs-label">Exp. ETF return</div>
+                  <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>3M · long · no borrow</div>
+                  <div className="cs-value">{expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}</div>
+                </div>
+              );
+            })()}
+            <div className="chart-stat" title="Backward-looking realized σ (underlying); builder prefers 12M when available. Not forecast_vol.">
+              <div className="cs-label">Vol Und</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>12M realized</div>
+              <div className="cs-value">{fmt(r.vol_underlying_annual)}</div>
             </div>
-            <div className="chart-stat">
-              <div className="cs-label">Forecast Vol</div>
-              <div className="cs-value">{fmt(scenarioSigmaBest)}</div>
-              <div className="cs-sub">{scenarioSigmaSource}{forecastVol?.eventAdjusted ? ' • event-clipped' : ''}</div>
-            </div>
-            <div className="chart-stat">
-              <div className="cs-label">Realized Vol Underlying</div>
-              <div className="cs-value">{realizedUnd == null ? '—' : fmt(realizedUnd)}</div>
-              <div className="cs-sub">{realizedUndSub}{Number.isFinite(Number(ewmaUnd)) ? ` • raw ewma ${fmt(ewmaUnd)}` : ''}</div>
-            </div>
-            <div className="chart-stat">
+            <div className="chart-stat" title="Backward-looking realized σ (ETF); same window ladder as Vol Und.">
               <div className="cs-label">Vol ETF</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>12M realized</div>
               <div className="cs-value">{fmt(r.vol_etf_annual)}</div>
-              <div className="cs-sub">12M ladder (table field) · not scenario σ</div>
-            </div>
-            <div className="chart-stat">
-              <div className="cs-label">Realized Vol ETF</div>
-              <div className="cs-value">{realizedEtf == null ? '—' : fmt(realizedEtf)}</div>
-              <div className="cs-sub">{realizedEtfSub}{Number.isFinite(Number(ewmaEtf)) ? ` • ewma ${fmt(ewmaEtf)}` : ''}</div>
-            </div>
-            <div className="chart-stat">
-              <div className="cs-label">Shares Available</div>
-              <div className="cs-value">{fmtNum(r.shares_available)}</div>
-              <div className="cs-sub">{r.borrow_source === 'ibkr_ftp' ? 'IBKR Live' : 'CSV'}</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">Borrow Fee / Rebate</div>
@@ -4041,7 +4099,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           </div>
 
           <div className="chart-note">
-            Statistics are synchronized to the active lookback selection. ETF metrics (NAV/AUM/shares outstanding) refresh daily on a scheduled job. Total-return NAV reinvests every distribution at that day's NAV so the line is flat when the fund is fully covering its payouts and slopes down when payouts erode principal.
+            Gross decay, expected decay, net edge, Exp. ETF return (3M), and Vol Und / Vol ETF match the main grid (same row JSON and table logic). Chart timeframe pills still drive the price chart and dividend strip above; NAV/AUM/shares refresh on the daily metrics job. Total-return NAV reinvests each distribution at ex-day NAV. In the daily metrics table, if reported shares disagree with AUM÷NAV by more than about 80×, shares are replaced with that implied value and Status is flagged (same rule as the metrics ingest job).
           </div>
           {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics panel…</div>}
           {etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
@@ -4118,7 +4176,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <td>{Number.isFinite(Number(m.nav_total_return)) ? fmtUsd(Number(m.nav_total_return)) : '—'}</td>
                           <td>{fmtMoney(Number(m.aum))}</td>
                           <td>{fmtNum(Number(m.shares_outstanding))}</td>
-                          <td>{m.status || '—'}</td>
+                          <td className={String(m.status || '').includes('repaired') ? 'val-warning' : ''}>{m.status || '—'}</td>
                         </tr>
                       );
                     })}
