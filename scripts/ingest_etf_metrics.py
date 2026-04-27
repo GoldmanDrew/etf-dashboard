@@ -191,6 +191,11 @@ def repair_shares_vs_aum_nav(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
             n_bad,
         )
         out.loc[bad, "shares_outstanding"] = implied[bad]
+    # Whole share counts in outputs (providers sometimes emit float noise, which UIs format as 87,333.079.)
+    sh_col = pd.to_numeric(out["shares_outstanding"], errors="coerce")
+    round_mask = sh_col.notna() & (sh_col > 0)
+    if round_mask.any():
+        out.loc[round_mask, "shares_outstanding"] = np.round(sh_col[round_mask])
     return out, n_bad
 
 

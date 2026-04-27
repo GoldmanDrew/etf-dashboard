@@ -1323,6 +1323,10 @@ let ETF_DISTRIBUTIONS_CACHE = null;
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
 const fmtNum = v => v == null ? '—' : Number(v).toLocaleString();
+/** Whole-share counts (ETF shares outstanding, etc.): integer separators only — avoids 87,333.079 misread as 87,333,079. */
+const fmtSharesCount = v => (
+  v == null || !Number.isFinite(Number(v)) ? '—' : Math.round(Number(v)).toLocaleString('en-US')
+);
 const fmtUsd = v => (v == null || !Number.isFinite(Number(v))) ? '—' : `$${Number(v).toFixed(2)}`;
 const fmtMoney = v => (v == null || !Number.isFinite(Number(v))) ? '—' : `$${Math.round(Number(v)).toLocaleString()}`;
 const fmtTime = iso => {
@@ -4084,7 +4088,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             </div>
             <div className="chart-stat">
               <div className="cs-label">Shares Outstanding</div>
-              <div className="cs-value">{latestEtfMetric ? fmtNum(Number(latestEtfMetric.shares_outstanding)) : '—'}</div>
+              <div className="cs-value">{latestEtfMetric ? fmtSharesCount(Number(latestEtfMetric.shares_outstanding)) : '—'}</div>
               <div className="cs-sub">{latestEtfMetric?.date || '—'}</div>
             </div>
             <div className="chart-stat">
@@ -4142,7 +4146,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   valueKey="shares_outstanding"
                   color="rgba(245,158,11,0.95)"
                   label={`${etfSym} Shares Outstanding`}
-                  formatValue={(v) => fmtNum(v)}
+                  formatValue={(v) => fmtSharesCount(v)}
                   zeroLabel="0"
                 />
               </div>
@@ -4175,7 +4179,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <td>{premPct == null ? '—' : `${premPct >= 0 ? '+' : ''}${premPct.toFixed(2)}%`}</td>
                           <td>{Number.isFinite(Number(m.nav_total_return)) ? fmtUsd(Number(m.nav_total_return)) : '—'}</td>
                           <td>{fmtMoney(Number(m.aum))}</td>
-                          <td>{fmtNum(Number(m.shares_outstanding))}</td>
+                          <td>{fmtSharesCount(Number(m.shares_outstanding))}</td>
                           <td className={String(m.status || '').includes('repaired') ? 'val-warning' : ''}>{m.status || '—'}</td>
                         </tr>
                       );
