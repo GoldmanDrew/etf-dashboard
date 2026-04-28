@@ -86,8 +86,16 @@ sigma_forecast^2 = 0.5 * sigma_model^2 + 0.5 * sigma_robust_ewma^2
 | **HARQ-Log anchored empirical lognormal** | `decay_distribution.py` (lognormal IV_T quantiles) | `letf`, `inverse`, `income_put_spread`; emits p10/p50/p90/mean |
 | **YieldBOOST put-spread Monte-Carlo** | `yieldboost_decay.py` (HARQ-Log σ-draws → weekly 95/88 put-spread NAV-decay → 52× compounded − expense ratio) | All `is_yieldboost = True` rows; emits p10/p50/p90/mean (model `yieldboost_put_spread` / `yieldboost_put_spread_point`) |
 | **Net edge bootstrap** | Block-bootstrap of daily log-drag + weighted borrow resample, **anchor-shifted to `expected_gross_decay_p50_annual`** | `net_edge_p05/p25/p50/p75/p95_annual` + `net_edge_hist_json` (+ `gross_anchor_*` diagnostics) |
+| **`delta_v1` NAV forecast** | `nav_anchor · exp(β · log(spot_und / spot_und_anchor)) · (1 − TER_daily)` | Stats-tab Fair-value card (`scripts/forecast_nav.py`); LETF + inverse only — see [`data/nav_forecasts/README.md`](data/nav_forecasts/README.md) |
 
 The HARQ-Log model has plausibility caps (`_LOG_IV_SIGMA_ANNUAL_CAP`), winsorized realized variance/quarticity (`_R2_WINSOR_CAP`), and a horizon-panel-ratio threshold (`_HORIZON_PANEL_RATIO_MIN`) that gates fallback to simple Itô when the underlying history is thin.
+
+**`delta_v1` NAV forecaster (Stats-tab Fair-value card).** A two-stage pipeline writes a model NAV every 30 min during the US session and scores it against the next-day official NAV at 5 AM ET:
+
+* `scripts/forecast_nav.py` reads `dashboard_data.json` (β, product class) + `options_cache.json` (current underlying spot) + `data/nav_forecasts/_anchors.json` (last close) and appends one record per symbol to `data/nav_forecasts/snapshots/<DATE>.jsonl`. Confidence routes by `product_class`: `letf` / `inverse` → `high`; `volatility_etp` / `passive_low_beta` → `medium`; `income_yieldboost` / `income_put_spread` / `other_structured` → `na` (skipped). Triggered by `.github/workflows/refresh-nav-forecast.yml` (`*/30 13-22 * * 1-5`).
+* `scripts/score_nav_forecasts.py` runs inside `update-etf-metrics.yml` after the daily NAV ingest. It collapses the day's last forecast per symbol, diffs against `etf_metrics_latest.json[SYM].nav`, writes a single-line `data/nav_forecasts/realized/<DATE>.jsonl` plus a 60-trading-day rolling stat blob (`_metrics_daily.json`) and chart panel (`_history_panel.json`), and emits the next session's `_anchors.json` (one yfinance batch call for underlying closes).
+
+The dashboard fetches only the three small JSON blobs (`_latest.json`, `_metrics_daily.json`, `_history_panel.json`) — JSONL snapshots stay on disk for offline accuracy audits. Schema details and an upgrade path for new model versions (`delta_v2_swap_mark`, `yieldboost_putspread_v1`, …) live in [`data/nav_forecasts/README.md`](data/nav_forecasts/README.md).
 
 ## Setup (one-time)
 
@@ -110,7 +118,8 @@ The `build-and-deploy.yml` Action runs on push, builds the data, and deploys. Yo
 - `build-and-deploy.yml` runs once daily on weekdays (plus push/manual) for full rebuild.
 - `refresh-borrow.yml` runs every 10 minutes for borrow + shares refresh only (`build_data.py --borrow-only`).
 - `refresh-options.yml` runs every 5 minutes (GitHub Actions minimum cadence) for a throttled options shard focused on Bucket 3 inverse ETFs (`build_data.py --options-only`).
-- `update-etf-metrics.yml` runs daily at **5:00 AM ET** to ingest NAV / AUM / shares outstanding panel data, plus per-ticker distribution history (`etf_distributions.json`) for the Total-Return NAV chart on the Stats tab.
+- `update-etf-metrics.yml` runs daily at **5:00 AM ET** to ingest NAV / AUM / shares outstanding panel data, plus per-ticker distribution history (`etf_distributions.json`) for the Total-Return NAV chart on the Stats tab. The same workflow then scores yesterday's `delta_v1` NAV forecasts (`scripts/score_nav_forecasts.py`) and refreshes `data/nav_forecasts/_anchors.json` for the next trading day.
+- `refresh-nav-forecast.yml` runs **every 30 minutes Mon-Fri 13:00-22:00 UTC** and snapshots the simple `delta_v1` NAV model (`scripts/forecast_nav.py`) — see the Decay Models section + `data/nav_forecasts/README.md`.
 - `update-corporate-actions.yml` runs **every 6 hours** to ingest structured corporate-action events (splits, reverse splits, delistings, symbol changes, mergers) into `corporate_actions.json` and a filtered news feed into `etf_news.json`. Both artifacts power the top-level **News** tab (`#/news`). Dividends/distributions are explicitly excluded from the news feed because the Stats tab already visualizes them via the Total-Return NAV series.
 - Refresh workflows commit JSON only; GitHub Pages deployment is handled by `build-and-deploy.yml` to avoid queue contention.
 

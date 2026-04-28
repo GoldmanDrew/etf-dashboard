@@ -352,8 +352,16 @@ This same function is reused for **sorting** the column. If you change the rende
 | `polygon_ticker_events_cache.json` | `ingest_corporate_actions.py` | (internal) | every 6 h |
 | `ticker_alias_map.json` | manual | `ingest_corporate_actions.py` | manual |
 | `etf_holdings_daily.parquet` + `etf_holdings_latest.csv` | `etf_holdings_providers.py` | (internal, used for Tradr/AXS NAV reconstruction) | daily |
+| `nav_forecasts/_latest.json` | `scripts/forecast_nav.py` | Stats tab Fair-value card | every 30 min Mon-Fri 13:00-22:00 UTC |
+| `nav_forecasts/_metrics_daily.json` | `scripts/score_nav_forecasts.py` | Stats tab "Forecast accuracy (20d)" cell | daily 5 AM ET |
+| `nav_forecasts/_history_panel.json` | `scripts/score_nav_forecasts.py` | Stats tab NAV-vs-model overlay chart | daily 5 AM ET |
+| `nav_forecasts/_anchors.json` | `scripts/score_nav_forecasts.py` | `scripts/forecast_nav.py` (input only) | daily 5 AM ET |
+| `nav_forecasts/snapshots/<DATE>.jsonl` | `scripts/forecast_nav.py` | `scripts/score_nav_forecasts.py`; offline audits | every 30 min |
+| `nav_forecasts/realized/<DATE>.jsonl` | `scripts/score_nav_forecasts.py` | rolling-stats build | daily 5 AM ET |
 
 `dashboard_data.json` is large (~2.9 MB) because it contains every row plus the bootstrap histogram blobs. Keep it that way — the SPA expects to fetch a single primary JSON.
+
+**`nav_forecasts/` is its own self-describing folder** — see `data/nav_forecasts/README.md` for the full schema. The flow is: `forecast_nav.py` snapshots `delta_v1 = nav_anchor · exp(β · r_und) · (1 − TER_d)` every 30 min using `_anchors.json` (refreshed nightly) + the live underlying spot from `options_cache.json`; `score_nav_forecasts.py` runs after the daily NAV ingest, scores the day's last forecast against the official close NAV, rolls per-symbol accuracy into `_metrics_daily.json`, and writes new anchors. Confidence is `high` for `letf` / `inverse`, `medium` for `volatility_etp` / `passive_low_beta`, and `na` (skipped) for `income_yieldboost` / `income_put_spread` / `other_structured`. The schema is additive — new model versions bump the `model` field on the JSONL records and the scorer rolls them up by `(model, date)` automatically.
 
 ---
 

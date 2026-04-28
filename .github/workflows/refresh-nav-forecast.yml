@@ -1,0 +1,126 @@
+name: Refresh NAV Forecast (delta_v1)
+
+# Snapshots the simple NAV forecaster every 30 min during US trading hours.
+# Inputs are read from data/dashboard_data.json + data/options_cache.json +
+# data/nav_forecasts/_anchors.json (refreshed nightly by Update ETF Metrics
+# Daily). No external API calls in this loop, so it cannot blow rate limits.
+#
+# US session 09:30-16:00 ET = roughly 13:30-21:00 UTC during EDT and
+# 14:30-22:00 UTC during EST. We schedule the union 13:00-22:00 UTC and let
+# the script no-op when there's nothing to update (snapshots stay tiny).
+
+on:
+  schedule:
+    - cron: "*/30 13-22 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "nav-forecast-refresh"
+  cancel-in-progress: true
+
+jobs:
+  refresh-nav-forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run NAV forecaster (delta_v1)
+        run: python scripts/forecast_nav.py
+
+      - name: Print snapshot summary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("data/nav_forecasts/_latest.json")
+          if not p.exists():
+              raise SystemExit("Missing data/nav_forecasts/_latest.json")
+          payload = json.loads(p.read_text(encoding="utf-8"))
+          by = payload.get("by_symbol", {})
+          counts = {"high": 0, "medium": 0, "na": 0}
+          for r in by.values():
+              counts[r.get("confidence", "na")] = counts.get(r.get("confidence", "na"), 0) + 1
+          print(f"build_time={payload.get('build_time')} model={payload.get('model')}")
+          print(f"anchor_date={payload.get('anchor_date')} symbols={len(by)} {counts}")
+          PY
+
+      - name: Commit forecast outputs
+        run: |
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          ALL_PATHS="data/nav_forecasts/_latest.json data/nav_forecasts/snapshots"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Only stage paths that actually exist (the snapshots dir may be empty
+          # on a freshly-bootstrapped clone -- treat that as no-op).
+          STAGE=""
+          for p in ${ALL_PATHS}; do
+            if [ -e "$p" ]; then STAGE="${STAGE} $p"; fi
+          done
+          if [ -z "${STAGE# }" ]; then
+            echo "No NAV forecast artifacts present; skipping commit."
+            exit 0
+          fi
+          git add ${STAGE}
+          if git diff --staged --quiet; then
+            echo "No NAV forecast changes to commit"
+            exit 0
+          fi
+          TMP_DIR="$(mktemp -d)"
+          for p in ${STAGE}; do
+            mkdir -p "${TMP_DIR}/$(dirname "$p")"
+            cp -r "$p" "${TMP_DIR}/$p"
+          done
+          pushed=0
+          for i in 1 2 3; do
+            git fetch origin "${BRANCH}"
+            git reset --hard || true
+            git clean -fd || true
+            git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
+            ROUND=""
+            for p in ${ALL_PATHS}; do
+              if [ -e "${TMP_DIR}/$p" ]; then
+                mkdir -p "$(dirname "$p")"
+                cp -r "${TMP_DIR}/$p" "$p"
+                ROUND="${ROUND} $p"
+              fi
+            done
+            if [ -z "${ROUND# }" ]; then
+              echo "No files to stage after rebase"
+              pushed=1
+              break
+            fi
+            git add ${ROUND}
+            if git diff --staged --quiet; then
+              echo "No NAV forecast changes against latest origin"
+              pushed=1
+              break
+            fi
+            git commit -m "chore: refresh NAV forecast [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+            if git push origin "HEAD:${BRANCH}"; then
+              pushed=1
+              break
+            fi
+            git reset --hard "origin/${BRANCH}" || true
+            sleep $((i * 5))
+          done
+          rm -rf "${TMP_DIR}"
+          if [ "$pushed" -ne 1 ]; then
+            echo "Push failed after retries"
+            exit 1
+          fi

@@ -110,6 +110,15 @@ jobs:
         # option-income ETFs where raw NAV drops on every ex-date.
         run: python scripts/ingest_distributions.py --sleep 0.1
 
+      - name: Score NAV forecasts and refresh anchors
+        # Scores yesterday's intraday delta_v1 forecast snapshots against the
+        # freshly-ingested official NAV, rolls the per-symbol accuracy stats,
+        # and writes the next session's anchor file (using one yfinance batch
+        # call for the underlying closes). Non-fatal -- if scoring fails we
+        # still ship the metrics commit; the next run will catch up.
+        continue-on-error: true
+        run: python scripts/score_nav_forecasts.py
+
       - name: Print latest metrics status
         run: |
           python - <<'PY'
@@ -147,13 +156,15 @@ jobs:
           # calling `git add`, because `git add` on a missing pathspec aborts
           # the whole step and previously dropped committed close_price data
           # with it.
-          ALL_FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json data/etf_metrics_health.json data/etf_distributions.json data/etf_holdings_daily.parquet data/etf_holdings_latest.csv data/etf_holdings_latest.json"
+          ALL_FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json data/etf_metrics_health.json data/etf_distributions.json data/etf_holdings_daily.parquet data/etf_holdings_latest.csv data/etf_holdings_latest.json data/nav_forecasts/_anchors.json data/nav_forecasts/_metrics_daily.json data/nav_forecasts/_history_panel.json data/nav_forecasts/realized"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           EXISTING_FILES=""
           MISSING_FILES=""
           for f in ${ALL_FILES}; do
-            if [ -f "$f" ]; then
+            # -e covers both files and directories (data/nav_forecasts/realized
+            # is a directory of per-day JSONLs).
+            if [ -e "$f" ]; then
               EXISTING_FILES="${EXISTING_FILES} $f"
             else
               MISSING_FILES="${MISSING_FILES} $f"
@@ -173,7 +184,7 @@ jobs:
             TMP_DIR="$(mktemp -d)"
             for f in ${EXISTING_FILES}; do
               mkdir -p "${TMP_DIR}/$(dirname "$f")"
-              cp "$f" "${TMP_DIR}/$f"
+              cp -r "$f" "${TMP_DIR}/$f"
             done
             pushed=0
             for i in 1 2 3; do
@@ -183,9 +194,9 @@ jobs:
               git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
               ROUND_FILES=""
               for f in ${EXISTING_FILES}; do
-                if [ -f "${TMP_DIR}/$f" ]; then
+                if [ -e "${TMP_DIR}/$f" ]; then
                   mkdir -p "$(dirname "$f")"
-                  cp "${TMP_DIR}/$f" "$f"
+                  cp -r "${TMP_DIR}/$f" "$f"
                   ROUND_FILES="${ROUND_FILES} $f"
                 fi
               done

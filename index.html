@@ -1321,10 +1321,17 @@ const ETF_METRICS_DAILY_URL = "data/etf_metrics_daily.json";
 const ETF_DISTRIBUTIONS_URL = "data/etf_distributions.json";
 const CORPORATE_ACTIONS_URL = "data/corporate_actions.json";
 const ETF_NEWS_URL = "data/etf_news.json";
+// NAV forecast pipeline (delta_v1) — see data/nav_forecasts/README.md.
+const NAV_FORECAST_LATEST_URL = "data/nav_forecasts/_latest.json";
+const NAV_FORECAST_METRICS_URL = "data/nav_forecasts/_metrics_daily.json";
+const NAV_FORECAST_HISTORY_URL = "data/nav_forecasts/_history_panel.json";
 let BORROW_HISTORY_CACHE = null;
 let BORROW_SPIKE_RISK_CACHE = null;
 let ETF_METRICS_CACHE = null;
 let ETF_DISTRIBUTIONS_CACHE = null;
+let NAV_FORECAST_LATEST_CACHE = null;
+let NAV_FORECAST_METRICS_CACHE = null;
+let NAV_FORECAST_HISTORY_CACHE = null;
 
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
@@ -3129,6 +3136,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [etfMetricsError, setEtfMetricsError] = useState(null);
   const [etfDistributionsMap, setEtfDistributionsMap] = useState({});
   const [etfDistributionsError, setEtfDistributionsError] = useState(null);
+  const [navForecastLatest, setNavForecastLatest] = useState(null);
+  const [navForecastMetrics, setNavForecastMetrics] = useState(null);
+  const [navForecastHistory, setNavForecastHistory] = useState(null);
   const [tradeUseScenarioAssumptions, setTradeUseScenarioAssumptions] = useState(true);
   const [tradeBaseLegs, setTradeBaseLegs] = useState([]);
   const [tradeOptionLegs, setTradeOptionLegs] = useState([]);
@@ -3344,6 +3354,51 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     run();
     return () => { cancelled = true; };
   }, []);
+  // NAV forecast pipeline (delta_v1). Three small JSON blobs power the Stats
+  // tab Fair-value cards and the NAV-vs-forecast overlay chart. All three
+  // files can legitimately be missing during the bootstrap window before the
+  // first scoring run — the UI degrades gracefully to em-dashes.
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      const fetchOnce = async (url, cache, setter) => {
+        if (cache) {
+          if (!cancelled) setter(cache);
+          return cache;
+        }
+        try {
+          const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+          const res = await fetch(`${url}${cacheBust}`, { cache: 'no-store' });
+          if (!res.ok) return null;
+          const payload = await res.json();
+          if (!cancelled) setter(payload);
+          return payload;
+        } catch (_) {
+          return null;
+        }
+      };
+      const [a, b, c] = await Promise.all([
+        fetchOnce(NAV_FORECAST_LATEST_URL, NAV_FORECAST_LATEST_CACHE, setNavForecastLatest),
+        fetchOnce(NAV_FORECAST_METRICS_URL, NAV_FORECAST_METRICS_CACHE, setNavForecastMetrics),
+        fetchOnce(NAV_FORECAST_HISTORY_URL, NAV_FORECAST_HISTORY_CACHE, setNavForecastHistory),
+      ]);
+      if (a) NAV_FORECAST_LATEST_CACHE = a;
+      if (b) NAV_FORECAST_METRICS_CACHE = b;
+      if (c) NAV_FORECAST_HISTORY_CACHE = c;
+    };
+    run();
+    return () => { cancelled = true; };
+  }, []);
+  const navForecastRow = useMemo(() => (
+    navForecastLatest?.by_symbol?.[etfSym] || null
+  ), [navForecastLatest, etfSym]);
+  const navForecastStat = useMemo(() => (
+    navForecastMetrics?.by_symbol?.[etfSym] || null
+  ), [navForecastMetrics, etfSym]);
+  const navForecastSeries = useMemo(() => {
+    const arr = navForecastHistory?.by_symbol?.[etfSym];
+    return Array.isArray(arr) ? arr : [];
+  }, [navForecastHistory, etfSym]);
 
   const volWindowKey = VOL_TF_KEY_BY_RANGE[activeTf.range] || '6M';
   const volPoint = r?.realized_vol?.[volWindowKey] || null;
@@ -4110,6 +4165,58 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   : 'no distributions on file'}
               </div>
             </div>
+            <div
+              className="chart-stat"
+              title={(() => {
+                if (!navForecastRow) return 'No model fair-value yet (run forecast_nav.py to populate).';
+                if (navForecastRow.confidence === 'na') {
+                  return `delta_v1 not modeled for this product class (${navForecastRow.product_class || '—'}). ${navForecastRow.notes || ''}`;
+                }
+                const anchor = navForecastRow.nav_anchor != null ? fmtUsd(Number(navForecastRow.nav_anchor)) : '—';
+                return `delta_v1: nav_anchor (${anchor} on ${navForecastRow.nav_anchor_date || '—'}) * exp(beta * underlying logret) * (1 - TER). Snapshot ${navForecastRow.ts || '—'}.`;
+              })()}
+            >
+              <div className="cs-label">Fair value (model)</div>
+              <div className="cs-value">
+                {navForecastRow && Number.isFinite(Number(navForecastRow.nav_hat))
+                  ? fmtUsd(Number(navForecastRow.nav_hat))
+                  : '—'}
+              </div>
+              <div className="cs-sub">
+                {(() => {
+                  if (!navForecastRow) return 'no forecast';
+                  const conf = navForecastRow.confidence || 'na';
+                  if (conf === 'na') return `na · ${navForecastRow.product_class || ''}`.trim();
+                  const prem = Number(navForecastRow.premium_bp);
+                  const premStr = Number.isFinite(prem)
+                    ? `${prem >= 0 ? '+' : ''}${prem.toFixed(1)} bp`
+                    : '—';
+                  return `${conf} · ${navForecastRow.model || 'delta_v1'} · prem ${premStr}`;
+                })()}
+              </div>
+            </div>
+            <div
+              className="chart-stat"
+              title={navForecastStat
+                ? `Rolling |error| of model NAV vs official close NAV. n=${navForecastStat.n} day(s) in window.`
+                : 'Accuracy stats appear after the first scoring run (next 5 AM ET commit).'}
+            >
+              <div className="cs-label">Forecast accuracy (20d)</div>
+              <div className="cs-value">
+                {navForecastStat && Number.isFinite(Number(navForecastStat.median_abs_err_bp_20d))
+                  ? `${Number(navForecastStat.median_abs_err_bp_20d).toFixed(1)} bp`
+                  : '—'}
+              </div>
+              <div className="cs-sub">
+                {navForecastStat
+                  ? `5d ${Number.isFinite(Number(navForecastStat.median_abs_err_bp_5d))
+                      ? Number(navForecastStat.median_abs_err_bp_5d).toFixed(1) + ' bp'
+                      : '—'} · hit10 ${Number.isFinite(Number(navForecastStat.hit_rate_within_10bp))
+                      ? (Number(navForecastStat.hit_rate_within_10bp) * 100).toFixed(0) + '%'
+                      : '—'}`
+                  : 'no scored history'}
+              </div>
+            </div>
           </div>
 
           <div style={{ marginTop: 14 }}>
@@ -4234,7 +4341,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           </div>
 
           <div className="chart-note">
-            Gross decay, expected decay, net edge, Exp. ETF return (3M), and Vol Und / Vol ETF match the main grid (same row JSON and table logic). Forecast and realized-ladder σ are expanded in the Stats blocks above. Chart timeframe pills still drive the price chart and dividend strip; NAV/AUM/shares refresh on the daily metrics job. Total-return NAV reinvests each distribution at ex-day NAV. In the daily metrics table, if reported shares disagree with AUM÷NAV by more than about 80×, shares are replaced with that implied value and Status is flagged (same rule as the metrics ingest job).
+            Gross decay, expected decay, net edge, Exp. ETF return (3M), and Vol Und / Vol ETF match the main grid (same row JSON and table logic). Forecast and realized-ladder σ are expanded in the Stats blocks above. Chart timeframe pills still drive the price chart and dividend strip; NAV/AUM/shares refresh on the daily metrics job. Total-return NAV reinvests each distribution at ex-day NAV. In the daily metrics table, if reported shares disagree with AUM÷NAV by more than about 80×, shares are replaced with that implied value and Status is flagged (same rule as the metrics ingest job). Fair value (model) is the simple <code>delta_v1</code> closed form <code>nav_anchor · exp(β · log(spot / spot_anchor)) · (1 − TER<sub>daily</sub>)</code> snapshotted every 30 minutes during the US session; the 20-day accuracy stat below it is the rolling median |error in bp| against the next-day official NAV (LETF / inverse only — see <code>data/nav_forecasts/README.md</code>).
           </div>
           {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics panel…</div>}
           {etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
@@ -4280,6 +4387,19 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   formatValue={(v) => fmtSharesCount(v)}
                   zeroLabel="0"
                 />
+                {navForecastSeries.length > 0 && (
+                  <SimpleSeriesPlot
+                    series={navForecastSeries}
+                    valueKey="nav_actual"
+                    color="rgba(59,130,246,0.95)"
+                    label={`${etfSym} NAV vs delta_v1 model (${navForecastStat?.n ?? navForecastSeries.length} td)`}
+                    formatValue={(v) => fmtUsd(v)}
+                    zeroLabel="$0"
+                    overlayValueKey="nav_hat_close"
+                    overlayColor="rgba(236,72,153,0.95)"
+                    overlayLabel="delta_v1 model NAV"
+                  />
+                )}
               </div>
               <div className="scenario-table-wrap">
                 <table className="scenario-table">
