@@ -749,6 +749,12 @@
     letter-spacing: 0.4px;
     font-size: 10px;
   }
+  .scenario-table tr.stats-vol-active td {
+    background: rgba(59, 130, 246, 0.08);
+  }
+  .scenario-table tr.stats-vol-active td:first-child {
+    background: rgba(59, 130, 246, 0.14);
+  }
   .scenario-formula {
     margin-top: 6px;
     font-size: 10px;
@@ -2098,6 +2104,10 @@ const VOL_TF_KEY_BY_RANGE = {
   '12M': '12M',
   'ALL': 'ALL',
 };
+
+/** Keys present in `realized_vol` from `build_data.py` (VOL_WINDOWS). */
+const STATS_VOL_LADDER_KEYS = ['1M', '3M', '6M', 'YTD', '12M', 'ALL'];
+const STATS_VOL_LADDER_LABELS = { '1M': '1M', '3M': '3M', '6M': '6M', 'YTD': 'YTD', '12M': '1Y', 'ALL': 'ALL' };
 
 /** Window length (years) for `dividend_adjustment` ETF yield keys. */
 const DIV_YIELD_WINDOW_YEARS = { '1M': 1 / 12, '3M': 3 / 12, '6M': 6 / 12, 'YTD': 6 / 12, '12M': 1, 'ALL': 1 };
@@ -4102,8 +4112,129 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             </div>
           </div>
 
+          <div style={{ marginTop: 14 }}>
+            <div className="scenario-title">Forecast volatility (scenario σ)</div>
+            <div className="scenario-sub">
+              Blend used for Exp. ETF return / Scenarios: variance mix of model-implied σ and robust EWMA when present.
+              Pill <strong>{activeTf.label}</strong>
+              {' '}matches ladder row below.
+              {forecastVol?.note ? ` ${forecastVol.note}` : ''}
+            </div>
+            <div className="chart-stats" style={{ marginTop: 8 }}>
+              <div className="chart-stat" title={`Source: ${forecastVol?.source || ''}${forecastVol?.isFallback ? ' (fallback)' : ''}`}>
+                <div className="cs-label">Forecast σ (blend)</div>
+                <div className="cs-value">
+                  {Number.isFinite(Number(forecastVol?.sigma)) && Number(forecastVol?.sigma) > 0 ? fmt(Number(forecastVol.sigma)) : '—'}
+                </div>
+                <div className="cs-sub">{forecastVol?.source || '—'}{forecastVol?.eventAdjusted ? ' · EWMA clipped' : ''}</div>
+              </div>
+              <div className="chart-stat">
+                <div className="cs-label">Forecast — model σ</div>
+                <div className="cs-value">{Number.isFinite(Number(forecastVol?.model)) ? fmt(Number(forecastVol.model)) : '—'}</div>
+                <div className="cs-sub">HARQ-implied leg</div>
+              </div>
+              <div className="chart-stat">
+                <div className="cs-label">Forecast — robust EWMA</div>
+                <div className="cs-value">{Number.isFinite(Number(forecastVol?.robustEwma)) ? fmt(Number(forecastVol.robustEwma)) : '—'}</div>
+                <div className="cs-sub">6M clipped returns</div>
+              </div>
+              <div className="chart-stat">
+                <div className="cs-label">Forecast — raw EWMA</div>
+                <div className="cs-value">{Number.isFinite(Number(forecastVol?.rawEwma)) ? fmt(Number(forecastVol.rawEwma)) : '—'}</div>
+                <div className="cs-sub">same λ, no clip</div>
+              </div>
+              <div className="chart-stat">
+                <div className="cs-label">Forecast — realized ladder σ</div>
+                <div className="cs-value">{Number.isFinite(Number(forecastVol?.realized)) ? fmt(Number(forecastVol.realized)) : '—'}</div>
+                <div className="cs-sub">{Number.isFinite(Number(r?.forecast_vol_underlying_annual)) ? 'build inputs' : 'fallback window'}</div>
+              </div>
+              <div className="chart-stat">
+                <div className="cs-label">Chart window ({activeTf.label})</div>
+                <div className="cs-value">
+                  {volPoint
+                    ? (() => {
+                        const u = volPoint?.underlying;
+                        const e = volPoint?.etf;
+                        const fuu = x => (x != null && Number.isFinite(Number(x)) ? fmt(Number(x)) : '—');
+                        return `${fuu(u)} / ${fuu(e)}`;
+                      })()
+                    : '—'}
+                </div>
+                <div className="cs-sub">{volPoint ? `und / etf realized σ · ${volWindowKey}` : 'no ladder slot'}</div>
+              </div>
+            </div>
+
+            <div className="scenario-title" style={{ marginTop: 14 }}>Realized σ ladder — all windows</div>
+            <div className="scenario-sub">Annualized σ from overlapping windows ({undSym || 'underlying'} vs ETF). Highlighted row = chart pill.</div>
+            <div className="scenario-table-wrap" style={{ marginTop: 8 }}>
+              <table className="scenario-table">
+                <thead>
+                  <tr>
+                    <th>Win</th>
+                    <th>Und σ</th>
+                    <th>Und EWMA</th>
+                    <th>Und robust</th>
+                    <th>ETF σ</th>
+                    <th>ETF EWMA</th>
+                    <th>ETF robust</th>
+                    <th>n_U</th>
+                    <th>n_E</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {STATS_VOL_LADDER_KEYS.map((wk) => {
+                    const slot = r?.realized_vol?.[wk];
+                    const active = wk === volWindowKey;
+                    const fu = x => (x != null && Number.isFinite(Number(x)) ? fmt(Number(x)) : '—');
+                    return (
+                      <tr key={wk} className={cls(active && 'stats-vol-active')}>
+                        <td>{STATS_VOL_LADDER_LABELS[wk] || wk}</td>
+                        <td>{fu(slot?.underlying)}</td>
+                        <td>{fu(slot?.underlying_ewma)}</td>
+                        <td>{fu(slot?.underlying_robust_ewma)}{slot?.underlying_robust_event_flag ? ' ·evt' : ''}</td>
+                        <td>{fu(slot?.etf)}</td>
+                        <td>{fu(slot?.etf_ewma)}</td>
+                        <td>{fu(slot?.etf_robust_ewma)}{slot?.etf_robust_event_flag ? ' ·evt' : ''}</td>
+                        <td>{slot?.n_returns_underlying != null ? fmtNum(slot.n_returns_underlying) : '—'}</td>
+                        <td>{slot?.n_returns_etf != null ? fmtNum(slot.n_returns_etf) : '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="scenario-title" style={{ marginTop: 14 }}>EWMA diagnostics ({activeTf.label})</div>
+            <div className="scenario-sub">Robust pipeline clip threshold (|log ret| cap) when present.</div>
+            <div className="chart-stats" style={{ marginTop: 8 }}>
+              <div className="chart-stat">
+                <div className="cs-label">Und clip |log τ|</div>
+                <div className="cs-value">
+                  {volPoint?.underlying_robust_clip_abs_logret != null && Number.isFinite(Number(volPoint.underlying_robust_clip_abs_logret))
+                    ? fmt(Number(volPoint.underlying_robust_clip_abs_logret))
+                    : '—'}
+                </div>
+                <div className="cs-sub">{volPoint?.underlying_robust_event_flag ? 'event-flag set' : 'no flag'}</div>
+              </div>
+              <div className="chart-stat">
+                <div className="cs-label">ETF clip |log τ|</div>
+                <div className="cs-value">
+                  {volPoint?.etf_robust_clip_abs_logret != null && Number.isFinite(Number(volPoint.etf_robust_clip_abs_logret))
+                    ? fmt(Number(volPoint.etf_robust_clip_abs_logret))
+                    : '—'}
+                </div>
+                <div className="cs-sub">{volPoint?.etf_robust_event_flag ? 'event-flag set' : 'no flag'}</div>
+              </div>
+              <div className="chart-stat" title={volPoint?.asof_underlying || volPoint?.asof_etf ? 'Yahoo series as-of timestamps' : ''}>
+                <div className="cs-label">As-of (prices)</div>
+                <div className="cs-value" style={{ fontSize: 13 }}>{volPoint?.asof_underlying || '—'}</div>
+                <div className="cs-sub">und · {volPoint?.asof_etf || '—'} etf</div>
+              </div>
+            </div>
+          </div>
+
           <div className="chart-note">
-            Gross decay, expected decay, net edge, Exp. ETF return (3M), and Vol Und / Vol ETF match the main grid (same row JSON and table logic). Chart timeframe pills still drive the price chart and dividend strip above; NAV/AUM/shares refresh on the daily metrics job. Total-return NAV reinvests each distribution at ex-day NAV. In the daily metrics table, if reported shares disagree with AUM÷NAV by more than about 80×, shares are replaced with that implied value and Status is flagged (same rule as the metrics ingest job).
+            Gross decay, expected decay, net edge, Exp. ETF return (3M), and Vol Und / Vol ETF match the main grid (same row JSON and table logic). Forecast and realized-ladder σ are expanded in the Stats blocks above. Chart timeframe pills still drive the price chart and dividend strip; NAV/AUM/shares refresh on the daily metrics job. Total-return NAV reinvests each distribution at ex-day NAV. In the daily metrics table, if reported shares disagree with AUM÷NAV by more than about 80×, shares are replaced with that implied value and Status is flagged (same rule as the metrics ingest job).
           </div>
           {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics panel…</div>}
           {etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
