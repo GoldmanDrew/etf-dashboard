@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Stage 2 of the NAV-forecast pipeline: score yesterday's forecasts against the
-freshly-ingested official NAV, refresh rolling accuracy stats, and write the
-anchor file the forecaster will use tomorrow.
+"""Stage 2 of the NAV-forecast pipeline.
 
-Run order:
-    1. ``ingest_etf_metrics.py``      writes data/etf_metrics_latest.json
-    2. ``score_nav_forecasts.py``     <-- this script
-       reads:   etf_metrics_latest.json
-                dashboard_data.json
-                nav_forecasts/snapshots/<TARGET>.jsonl
-                nav_forecasts/realized/*.jsonl   (rolling window)
-       writes:  nav_forecasts/realized/<TARGET>.jsonl  (one row per scored symbol)
-                nav_forecasts/_metrics_daily.json     (per-symbol rolling stats)
-                nav_forecasts/_history_panel.json     (60-trading-day series)
-                nav_forecasts/_anchors.json           (NEW anchors for next session)
+Now that the forecaster (`forecast_nav.py`) emits one row per
+(symbol, model), the scorer:
 
-Underlying close prices for the new anchors come from a single yfinance batch
-download. yfinance is already a project dependency (see
-``ingest_etf_metrics.fetch_close_prices_batch``), so we don't add anything new.
-Disable with ``NAV_FORECAST_DISABLE_YFINANCE=1`` for offline/test runs.
+  1. Collapses the day's last forecast per (symbol, model) and scores
+     each one against the freshly-ingested official NAV.
+  2. Writes one realized line per (symbol, model, date) into
+     ``nav_forecasts/realized/<DATE>.jsonl``.
+  3. Rolls 60-trading-day accuracy stats per (symbol, model) into
+     ``_metrics_daily.json`` and a per-model history panel into
+     ``_history_panel.json``. For UI compatibility we also expose a
+     ``by_symbol`` view containing the **default** model's stats / panel
+     (the model the forecaster routed to the Stats card most recently).
+  4. Builds the next session's ``_anchors.json`` (one yfinance batch
+     call for the underlying closes) -- now also captures
+     ``shares_outstanding`` so the holdings models can divide cleanly.
+
+Disable yfinance for offline / unit-test runs with
+``NAV_FORECAST_DISABLE_YFINANCE=1``.
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ HISTORY_TRADING_DAYS = 60
 
 
 # ---------------------------------------------------------------------------
-# Small file/JSON helpers
+# JSON helpers
 # ---------------------------------------------------------------------------
 
 def _isfin(x: Any) -> bool:
@@ -96,18 +96,29 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
 # Snapshot collapsing + per-day scoring
 # ---------------------------------------------------------------------------
 
-def collapse_last_per_symbol(snapshots: list[dict]) -> dict[str, dict]:
-    """Pick the latest forecast per symbol (by ``ts`` ISO string)."""
-    out: dict[str, dict] = {}
+def collapse_last_per_symbol_model(snapshots: list[dict]) -> dict[tuple[str, str], dict]:
+    """Pick the latest forecast per (symbol, model) by ``ts`` ISO string.
+
+    Older snapshots that pre-date the multi-model rollout have no ``model``
+    field -- those are bucketed under ``delta_v1`` so the historical accuracy
+    log keeps working.
+    """
+    out: dict[tuple[str, str], dict] = {}
     for r in snapshots:
         sym = str(r.get("symbol") or "").upper()
         if not sym:
             continue
+        model = str(r.get("model") or "delta_v1")
         ts = str(r.get("ts") or "")
-        cur = out.get(sym)
+        key = (sym, model)
+        cur = out.get(key)
         if cur is None or str(cur.get("ts") or "") <= ts:
-            out[sym] = r
+            out[key] = r
     return out
+
+
+# Backwards compat alias used by the older tests.
+collapse_last_per_symbol = collapse_last_per_symbol_model
 
 
 def score_one_day(
@@ -115,13 +126,13 @@ def score_one_day(
     metrics_latest: dict,
     target: date,
 ) -> list[dict]:
-    """Match each end-of-day forecast against today's official NAV."""
-    by_sym = collapse_last_per_symbol(snap_rows)
+    """Match each end-of-day (symbol, model) forecast against today's NAV."""
+    by_key = collapse_last_per_symbol_model(snap_rows)
     metrics_by_sym = metrics_latest.get("by_symbol") or {}
     out: list[dict] = []
     target_iso = target.isoformat()
 
-    for sym, snap in sorted(by_sym.items()):
+    for (sym, model), snap in sorted(by_key.items()):
         if (snap.get("confidence") or "na") == "na":
             continue
         nav_hat = snap.get("nav_hat")
@@ -135,9 +146,6 @@ def score_one_day(
         date_str = m.get("date") or target_iso
         if not _isfin(nav_actual) or float(nav_actual) <= 0:
             continue
-        # Defensive: only score on rows whose NAV stamp matches the target
-        # date. If etf_metrics_latest is older than expected we skip (rather
-        # than score against a wrong day's NAV).
         if str(date_str) != target_iso:
             continue
 
@@ -148,7 +156,8 @@ def score_one_day(
         out.append({
             "date": date_str,
             "symbol": sym,
-            "model": snap.get("model"),
+            "model": model,
+            "is_default": bool(snap.get("is_default")),
             "product_class": snap.get("product_class"),
             "nav_hat_close": round(nav_hat_f, 6),
             "nav_actual": round(nav_actual_f, 6),
@@ -165,57 +174,109 @@ def score_one_day(
 # Rolling stats
 # ---------------------------------------------------------------------------
 
-def _walk_realized(realized_dir: Path, max_files: int) -> dict[str, list[dict]]:
+def _walk_realized(
+    realized_dir: Path, max_files: int,
+) -> dict[tuple[str, str], list[dict]]:
     files = sorted(realized_dir.glob("*.jsonl"))[-max_files:] if realized_dir.exists() else []
-    by_sym: dict[str, list[dict]] = {}
+    by_key: dict[tuple[str, str], list[dict]] = {}
     for fp in files:
         for r in _read_jsonl(fp):
             sym = str(r.get("symbol") or "").upper()
             if not sym:
                 continue
-            by_sym.setdefault(sym, []).append(r)
-    for sym in by_sym:
-        by_sym[sym].sort(key=lambda x: str(x.get("date") or ""))
-    return by_sym
+            model = str(r.get("model") or "delta_v1")
+            by_key.setdefault((sym, model), []).append(r)
+    for key in by_key:
+        by_key[key].sort(key=lambda x: str(x.get("date") or ""))
+    return by_key
 
 
-def update_metrics_daily(realized_dir: Path) -> dict[str, dict]:
-    """Roll up per-symbol accuracy stats from the last ``HISTORY_TRADING_DAYS``."""
-    by_sym = _walk_realized(realized_dir, HISTORY_TRADING_DAYS + 5)
-    summary: dict[str, dict] = {}
-    for sym, rows in by_sym.items():
+def _stats_block(rows: list[dict]) -> dict | None:
+    abs_err = [float(r["abs_err_bp"]) for r in rows if _isfin(r.get("abs_err_bp"))]
+    signed_err = [float(r["err_bp"]) for r in rows if _isfin(r.get("err_bp"))]
+    if not abs_err:
+        return None
+    n = len(abs_err)
+    within_10 = sum(1 for x in abs_err if x <= 10.0) / n
+    within_25 = sum(1 for x in abs_err if x <= 25.0) / n
+    last_5 = abs_err[-5:]
+    last_20 = abs_err[-20:]
+    return {
+        "model": rows[-1].get("model"),
+        "product_class": rows[-1].get("product_class"),
+        "n": n,
+        "median_abs_err_bp": round(statistics.median(abs_err), 2),
+        "median_abs_err_bp_5d": round(statistics.median(last_5), 2),
+        "median_abs_err_bp_20d": round(statistics.median(last_20), 2),
+        "mean_signed_err_bp": (
+            round(sum(signed_err) / len(signed_err), 2) if signed_err else None
+        ),
+        "hit_rate_within_10bp": round(within_10, 4),
+        "hit_rate_within_25bp": round(within_25, 4),
+        "last_date": rows[-1].get("date"),
+    }
+
+
+def update_metrics_daily(
+    realized_dir: Path,
+    *,
+    default_model_for_symbol: dict[str, str] | None = None,
+) -> dict:
+    """Roll up per-(symbol, model) accuracy stats from the rolling window.
+
+    Returns a payload with both:
+      * ``by_symbol_models[SYM][MODEL]`` -- the full A/B grid
+      * ``by_symbol[SYM]`` -- stats for the model the forecaster currently
+        routes as default (so the existing Stats-tab card keeps working).
+    """
+    default_model_for_symbol = default_model_for_symbol or {}
+    by_key = _walk_realized(realized_dir, HISTORY_TRADING_DAYS + 5)
+    by_symbol_models: dict[str, dict[str, dict]] = {}
+    for (sym, model), rows in by_key.items():
         rows = rows[-HISTORY_TRADING_DAYS:]
-        abs_err = [float(r["abs_err_bp"]) for r in rows if _isfin(r.get("abs_err_bp"))]
-        signed_err = [float(r["err_bp"]) for r in rows if _isfin(r.get("err_bp"))]
-        if not abs_err:
+        block = _stats_block(rows)
+        if block is None:
             continue
-        n = len(abs_err)
-        within_10 = sum(1 for x in abs_err if x <= 10.0) / n
-        within_25 = sum(1 for x in abs_err if x <= 25.0) / n
-        last_5 = abs_err[-5:]
-        last_20 = abs_err[-20:]
-        summary[sym] = {
-            "model": rows[-1].get("model"),
-            "product_class": rows[-1].get("product_class"),
-            "n": n,
-            "median_abs_err_bp": round(statistics.median(abs_err), 2),
-            "median_abs_err_bp_5d": round(statistics.median(last_5), 2),
-            "median_abs_err_bp_20d": round(statistics.median(last_20), 2),
-            "mean_signed_err_bp": (
-                round(sum(signed_err) / len(signed_err), 2) if signed_err else None
-            ),
-            "hit_rate_within_10bp": round(within_10, 4),
-            "hit_rate_within_25bp": round(within_25, 4),
-            "last_date": rows[-1].get("date"),
-        }
-    return summary
+        by_symbol_models.setdefault(sym, {})[model] = block
+
+    by_symbol_default: dict[str, dict] = {}
+    default_model_resolved: dict[str, str] = {}
+    for sym, by_model in by_symbol_models.items():
+        chosen = default_model_for_symbol.get(sym)
+        if chosen and chosen in by_model:
+            by_symbol_default[sym] = by_model[chosen]
+            default_model_resolved[sym] = chosen
+            continue
+        # Fallback ordering matches forecast_nav.select_default_model preference.
+        for m in (
+            "yieldboost_putspread_v1",
+            "delta_v3_swap_mark",
+            "delta_v2_ito",
+            "delta_v1",
+        ):
+            if m in by_model:
+                by_symbol_default[sym] = by_model[m]
+                default_model_resolved[sym] = m
+                break
+    return {
+        "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "window_trading_days": HISTORY_TRADING_DAYS,
+        "by_symbol": by_symbol_default,
+        "by_symbol_models": by_symbol_models,
+        "default_model_for_symbol": default_model_resolved,
+    }
 
 
-def update_history_panel(realized_dir: Path) -> dict:
-    by_sym = _walk_realized(realized_dir, HISTORY_TRADING_DAYS)
-    out: dict[str, list[dict]] = {}
-    for sym, rows in by_sym.items():
-        out[sym] = [
+def update_history_panel(
+    realized_dir: Path,
+    *,
+    default_model_for_symbol: dict[str, str] | None = None,
+) -> dict:
+    default_model_for_symbol = default_model_for_symbol or {}
+    by_key = _walk_realized(realized_dir, HISTORY_TRADING_DAYS)
+    by_symbol_models: dict[str, dict[str, list[dict]]] = {}
+    for (sym, model), rows in by_key.items():
+        slim = [
             {
                 "date": r.get("date"),
                 "nav_actual": r.get("nav_actual"),
@@ -225,19 +286,36 @@ def update_history_panel(realized_dir: Path) -> dict:
             }
             for r in rows
         ]
+        by_symbol_models.setdefault(sym, {})[model] = slim
+
+    by_symbol_default: dict[str, list[dict]] = {}
+    for sym, by_model in by_symbol_models.items():
+        chosen = default_model_for_symbol.get(sym)
+        if chosen and chosen in by_model:
+            by_symbol_default[sym] = by_model[chosen]
+            continue
+        for m in (
+            "yieldboost_putspread_v1",
+            "delta_v3_swap_mark",
+            "delta_v2_ito",
+            "delta_v1",
+        ):
+            if m in by_model:
+                by_symbol_default[sym] = by_model[m]
+                break
     return {
         "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "window_trading_days": HISTORY_TRADING_DAYS,
-        "by_symbol": out,
+        "by_symbol": by_symbol_default,
+        "by_symbol_models": by_symbol_models,
     }
 
 
 # ---------------------------------------------------------------------------
-# Anchor builder
+# Anchor builder (now captures shares_outstanding)
 # ---------------------------------------------------------------------------
 
 def fetch_underlying_closes(underlyings: list[str], target: date) -> dict[str, float]:
-    """Single yfinance batch call -> ``{ticker: close_on_target_or_most_recent_<=target}``."""
     if not underlyings:
         return {}
     if os.getenv("NAV_FORECAST_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
@@ -319,14 +397,7 @@ def build_anchors(
     *,
     underlying_closes_fn=fetch_underlying_closes,
 ) -> dict:
-    """Construct the anchor file the forecaster will use during the next session.
-
-    For each symbol whose latest official NAV matches the target trading day:
-      * record nav_close (from etf_metrics_latest)
-      * record und_close from yfinance for the same date
-      * carry product_class + beta + underlying so the forecaster doesn't have to
-        re-infer them
-    """
+    """Construct the anchor file the forecaster will use during the next session."""
     by_metric = metrics_latest.get("by_symbol") or {}
     rec_by_sym: dict[str, dict] = {}
     needed_unds: set[str] = set()
@@ -349,10 +420,9 @@ def build_anchors(
         nav = m.get("nav")
         close = m.get("close_price")
         date_str = m.get("date")
+        shares = m.get("shares_outstanding")
         if not _isfin(nav) or float(nav) <= 0:
             continue
-        # Only anchor on rows actually stamped at the target date - otherwise the
-        # forecaster would compute deltas against a stale official NAV.
         if str(date_str) != target_iso:
             continue
         und = str(rec.get("underlying") or "").upper() or None
@@ -361,6 +431,9 @@ def build_anchors(
             "as_of_date": str(date_str),
             "nav_close": round(float(nav), 6),
             "etf_close": round(float(close), 6) if _isfin(close) else None,
+            "shares_outstanding": (
+                round(float(shares), 4) if _isfin(shares) and float(shares) > 0 else None
+            ),
             "und_symbol": und,
             "und_close": (
                 round(float(und_closes.get(und)), 6)
@@ -369,11 +442,13 @@ def build_anchors(
             ),
             "beta": beta,
             "product_class": rec.get("product_class"),
+            "is_yieldboost": bool(rec.get("is_yieldboost")),
         }
     return {
         "as_of_date": target_iso,
         "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "n_with_und_close": sum(1 for v in out_by_sym.values() if v["und_close"] is not None),
+        "n_with_shares": sum(1 for v in out_by_sym.values() if v["shares_outstanding"] is not None),
         "n_total": len(out_by_sym),
         "by_symbol": out_by_sym,
     }
@@ -382,6 +457,19 @@ def build_anchors(
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
+
+def _load_default_model_for_symbol(latest_path: Path) -> dict[str, str]:
+    payload = _load_json(latest_path)
+    direct = payload.get("default_model_for_symbol")
+    if isinstance(direct, dict) and direct:
+        return {str(k).upper(): str(v) for k, v in direct.items()}
+    by_sym = payload.get("by_symbol") or {}
+    return {
+        str(sym).upper(): str(row.get("model"))
+        for sym, row in by_sym.items()
+        if row.get("model")
+    }
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Score yesterday's NAV forecasts and refresh anchors.")
@@ -394,6 +482,7 @@ def main() -> None:
     parser.add_argument("--anchors-out", default=str(ANCHORS_PATH))
     parser.add_argument("--metrics-latest", default=str(ETF_METRICS_LATEST_PATH))
     parser.add_argument("--dashboard-data", default=str(DASHBOARD_DATA_PATH))
+    parser.add_argument("--latest-forecast", default=str(LATEST_PATH))
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -419,25 +508,35 @@ def main() -> None:
         for r in realized_rows:
             f.write(json.dumps(r, separators=(",", ":"), allow_nan=False, sort_keys=True))
             f.write("\n")
-    LOGGER.info("wrote %d realized rows -> %s", len(realized_rows), realized_path)
+    by_model_count: dict[str, int] = {}
+    for r in realized_rows:
+        m = r.get("model") or "?"
+        by_model_count[m] = by_model_count.get(m, 0) + 1
+    LOGGER.info(
+        "wrote %d realized rows -> %s by_model=%s",
+        len(realized_rows), realized_path, by_model_count,
+    )
 
-    metrics_summary = update_metrics_daily(Path(args.realized_dir))
-    _atomic_write_json(Path(args.metrics_out), {
-        "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "window_trading_days": HISTORY_TRADING_DAYS,
-        "by_symbol": metrics_summary,
-    })
+    default_model_for_symbol = _load_default_model_for_symbol(Path(args.latest_forecast))
 
-    history_panel = update_history_panel(Path(args.realized_dir))
-    _atomic_write_json(Path(args.history_out), history_panel)
+    metrics_payload = update_metrics_daily(
+        Path(args.realized_dir), default_model_for_symbol=default_model_for_symbol,
+    )
+    _atomic_write_json(Path(args.metrics_out), metrics_payload)
+
+    history_payload = update_history_panel(
+        Path(args.realized_dir), default_model_for_symbol=default_model_for_symbol,
+    )
+    _atomic_write_json(Path(args.history_out), history_payload)
 
     dashboard = _load_json(Path(args.dashboard_data))
     records = dashboard.get("records") or dashboard.get("rows") or []
     anchors = build_anchors(records, metrics_latest, target)
     _atomic_write_json(Path(args.anchors_out), anchors)
     LOGGER.info(
-        "wrote anchors as_of_date=%s symbols=%d (with und_close=%d)",
-        anchors["as_of_date"], anchors["n_total"], anchors["n_with_und_close"],
+        "wrote anchors as_of_date=%s symbols=%d (with und_close=%d, with shares=%d)",
+        anchors["as_of_date"], anchors["n_total"],
+        anchors["n_with_und_close"], anchors["n_with_shares"],
     )
 
 
