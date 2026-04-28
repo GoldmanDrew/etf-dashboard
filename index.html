@@ -3999,10 +3999,30 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-value">{r.beta?.toFixed(3) ?? '—'}</div>
               <div className="cs-sub">{fmtNum(r.beta_n_obs)} obs</div>
             </div>
-            <div className="chart-stat">
+            <div
+              className="chart-stat"
+              title={(() => {
+                const spot = getBorrowRate(r);
+                const avg = Number(r?.borrow_avg_annual);
+                const sOk = spot != null && Number.isFinite(Number(spot));
+                const aOk = Number.isFinite(avg);
+                const s = sOk ? fmt(Number(spot)) : '—';
+                const a = aOk ? fmt(avg) : '—';
+                return `Spot borrow (fee-only): ${s}. Historical mean on quoted borrow days (0% / no-locate dropped): ${a}.`;
+              })()}
+            >
               <div className="cs-label">Borrow Rate</div>
-              <div className={cls('cs-value', borrowCls(getBorrowRate(r)))}>{fmt(getBorrowRate(r))}</div>
-              <div className="cs-sub">annual fee-only</div>
+              <div className={cls('cs-value', borrowCls(getBorrowRate(r)))}>
+                {(() => {
+                  const spot = getBorrowRate(r);
+                  const avg = Number(r?.borrow_avg_annual);
+                  const spotTxt = spot != null && Number.isFinite(Number(spot)) ? fmt(Number(spot)) : '—';
+                  return Number.isFinite(avg) ? `${spotTxt} · ${fmt(avg)}` : spotTxt;
+                })()}
+              </div>
+              <div className="cs-sub">
+                {Number.isFinite(Number(r?.borrow_avg_annual)) ? 'spot · hist. avg (annual)' : 'spot · hist. avg unavailable'}
+              </div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">Shares Avail</div>
@@ -4118,11 +4138,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-value">{fmt(r.vol_etf_annual)}</div>
             </div>
             <div className="chart-stat">
-              <div className="cs-label">Borrow Fee / Rebate</div>
-              <div className="cs-value" style={{ fontSize: 14 }}>{fmt(r.borrow_fee_annual)} / {fmt(r.borrow_rebate_annual)}</div>
-              <div className="cs-sub">gross / rebate</div>
-            </div>
-            <div className="chart-stat">
               <div className="cs-label">NAV (Daily)</div>
               <div className="cs-value">{latestEtfMetric ? fmtUsd(Number(latestEtfMetric.nav)) : '—'}</div>
               <div className="cs-sub">{latestEtfMetric?.date || '—'}</div>
@@ -4178,7 +4193,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             >
               <div className="cs-label">Fair value (model)</div>
               <div className="cs-value">
-                {navForecastRow && Number.isFinite(Number(navForecastRow.nav_hat))
+                {navForecastRow && navForecastRow.nav_hat != null && Number.isFinite(Number(navForecastRow.nav_hat))
                   ? fmtUsd(Number(navForecastRow.nav_hat))
                   : '—'}
               </div>
@@ -4280,12 +4295,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     <th>Win</th>
                     <th>Und σ</th>
                     <th>Und EWMA</th>
-                    <th>Und robust</th>
+                    <th title="Robust EWMA after clipping very large one-day log returns (same window).">Und robust</th>
                     <th>ETF σ</th>
                     <th>ETF EWMA</th>
-                    <th>ETF robust</th>
-                    <th>n_U</th>
-                    <th>n_E</th>
+                    <th title="Robust EWMA after clipping very large one-day log returns (same window).">ETF robust</th>
+                    <th title="Number of daily log returns for the underlying in this window (Yahoo total-return series).">n und</th>
+                    <th title="Number of daily log returns for the ETF in this window.">n etf</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -4298,10 +4313,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                         <td>{STATS_VOL_LADDER_LABELS[wk] || wk}</td>
                         <td>{fu(slot?.underlying)}</td>
                         <td>{fu(slot?.underlying_ewma)}</td>
-                        <td>{fu(slot?.underlying_robust_ewma)}{slot?.underlying_robust_event_flag ? ' ·evt' : ''}</td>
+                        <td title={slot?.underlying_robust_event_flag ? 'At least one daily return was clipped before robust EWMA (earnings gap, etc.).' : undefined}>{fu(slot?.underlying_robust_ewma)}</td>
                         <td>{fu(slot?.etf)}</td>
                         <td>{fu(slot?.etf_ewma)}</td>
-                        <td>{fu(slot?.etf_robust_ewma)}{slot?.etf_robust_event_flag ? ' ·evt' : ''}</td>
+                        <td title={slot?.etf_robust_event_flag ? 'At least one daily return was clipped before robust EWMA (earnings gap, etc.).' : undefined}>{fu(slot?.etf_robust_ewma)}</td>
                         <td>{slot?.n_returns_underlying != null ? fmtNum(slot.n_returns_underlying) : '—'}</td>
                         <td>{slot?.n_returns_etf != null ? fmtNum(slot.n_returns_etf) : '—'}</td>
                       </tr>
@@ -4310,39 +4325,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 </tbody>
               </table>
             </div>
-
-            <div className="scenario-title" style={{ marginTop: 14 }}>EWMA diagnostics ({activeTf.label})</div>
-            <div className="scenario-sub">Robust pipeline clip threshold (|log ret| cap) when present.</div>
-            <div className="chart-stats" style={{ marginTop: 8 }}>
-              <div className="chart-stat">
-                <div className="cs-label">Und clip |log τ|</div>
-                <div className="cs-value">
-                  {volPoint?.underlying_robust_clip_abs_logret != null && Number.isFinite(Number(volPoint.underlying_robust_clip_abs_logret))
-                    ? fmt(Number(volPoint.underlying_robust_clip_abs_logret))
-                    : '—'}
-                </div>
-                <div className="cs-sub">{volPoint?.underlying_robust_event_flag ? 'event-flag set' : 'no flag'}</div>
-              </div>
-              <div className="chart-stat">
-                <div className="cs-label">ETF clip |log τ|</div>
-                <div className="cs-value">
-                  {volPoint?.etf_robust_clip_abs_logret != null && Number.isFinite(Number(volPoint.etf_robust_clip_abs_logret))
-                    ? fmt(Number(volPoint.etf_robust_clip_abs_logret))
-                    : '—'}
-                </div>
-                <div className="cs-sub">{volPoint?.etf_robust_event_flag ? 'event-flag set' : 'no flag'}</div>
-              </div>
-              <div className="chart-stat" title={volPoint?.asof_underlying || volPoint?.asof_etf ? 'Yahoo series as-of timestamps' : ''}>
-                <div className="cs-label">As-of (prices)</div>
-                <div className="cs-value" style={{ fontSize: 13 }}>{volPoint?.asof_underlying || '—'}</div>
-                <div className="cs-sub">und · {volPoint?.asof_etf || '—'} etf</div>
-              </div>
-            </div>
           </div>
 
-          <div className="chart-note">
-            Gross decay, expected decay, net edge, Exp. ETF return (3M), and Vol Und / Vol ETF match the main grid (same row JSON and table logic). Forecast and realized-ladder σ are expanded in the Stats blocks above. Chart timeframe pills still drive the price chart and dividend strip; NAV/AUM/shares refresh on the daily metrics job. Total-return NAV reinvests each distribution at ex-day NAV. In the daily metrics table, if reported shares disagree with AUM÷NAV by more than about 80×, shares are replaced with that implied value and Status is flagged (same rule as the metrics ingest job). Fair value (model) is the simple <code>delta_v1</code> closed form <code>nav_anchor · exp(β · log(spot / spot_anchor)) · (1 − TER<sub>daily</sub>)</code> snapshotted every 30 minutes during the US session; the 20-day accuracy stat below it is the rolling median |error in bp| against the next-day official NAV (LETF / inverse only — see <code>data/nav_forecasts/README.md</code>).
-          </div>
           {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics panel…</div>}
           {etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
           {!etfMetricsLoading && !etfMetricsError && etfMetricsSeries.length > 0 && (
