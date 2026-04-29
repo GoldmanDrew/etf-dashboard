@@ -3144,6 +3144,7 @@ def build():
             **forecast_vol_fields,
             "dividend_adjustment": dividend_adjustment,
             "include_for_algo": bool(row.get("include_for_algo", False)),
+            "strategy_blacklisted": _truthy(rdict.get("strategy_blacklisted")),
             "protected": bool(row.get("protected", False)),
             "cagr_positive": bool(row.get("cagr_positive")) if pd.notna(row.get("cagr_positive")) else None,
             "borrow_source": borrow_source,

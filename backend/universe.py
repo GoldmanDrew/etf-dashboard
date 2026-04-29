@@ -51,7 +51,7 @@ def load_universe(csv_path: str | Path) -> pd.DataFrame:
     # Boolean columns
     for col in [
         "borrow_spiking", "borrow_missing_from_ftp", "protected",
-        "cagr_positive", "include_for_algo", "purgatory",
+        "cagr_positive", "include_for_algo", "purgatory", "strategy_blacklisted",
     ]:
         if col in df.columns:
             df[col] = df[col].astype(bool)
@@ -90,13 +90,20 @@ def assign_buckets(
                 no separate bucket_4 in the dashboard)
       Bucket 1: Beta > high_beta_threshold (and not Bucket 3)
       Bucket 2: Everyone else
+
+    ``blacklist`` only sets ``strategy_blacklisted``; symbols are not removed.
     """
     blacklist_set = set(norm_sym(s) for s in (blacklist or []))
     df = universe.copy()
 
-    # Filter blacklist
-    if blacklist_set:
-        df = df[~df["symbol"].isin(blacklist_set)].copy()
+    # Tag strategy blacklist for UI; keep every row (trade plan / rebalancer skip separately).
+    sym_series = df["symbol"].map(lambda s: norm_sym(str(s)) if pd.notna(s) and str(s).strip() else "")
+    cfg_bl = sym_series.isin(blacklist_set) if blacklist_set else pd.Series(False, index=df.index)
+    if "strategy_blacklisted" in df.columns:
+        csv_bl = df["strategy_blacklisted"].fillna(False).astype(bool)
+        df["strategy_blacklisted"] = (csv_bl | cfg_bl).astype(bool)
+    else:
+        df["strategy_blacklisted"] = cfg_bl.astype(bool)
 
     def _assign(row):
         sym = row.get("symbol", "")

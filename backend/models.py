@@ -121,6 +121,7 @@ class ETFRecord(BaseModel):
 
     # Algo flags from screener
     include_for_algo: bool = False
+    strategy_blacklisted: bool = False
     protected: bool = False
     cagr_positive: Optional[bool] = None
 

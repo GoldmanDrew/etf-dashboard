@@ -294,6 +294,7 @@ def _build_records_from_csv():
             expected_gross_decay_dist_horizon_days=_v2f(row, "expected_gross_decay_dist_horizon_days"),
             spread=spread0,
             include_for_algo=bool(row.get("include_for_algo", False)),
+            strategy_blacklisted=_v2bool(row, "strategy_blacklisted"),
             protected=bool(row.get("protected", False)),
             cagr_positive=bool(row.get("cagr_positive")) if not _isnan(row.get("cagr_positive")) else None,
             last_updated=dt.datetime.utcnow(),

@@ -2462,7 +2462,7 @@ function SimpleSeriesPlot({
 
 // ── Columns ─────────────────────────────────
 const COLS = [
-  { key: 'symbol', label: 'Symbol', w: 90 },
+  { key: 'symbol', label: 'Symbol', w: 100, hint: 'BL = strategy blacklist (shown for context; not sized in trade plan / rebalancer).' },
   { key: 'underlying', label: 'Underlying', w: 85 },
   { key: 'beta', label: 'Beta', w: 65, hint: 'OLS β: ETF log-returns regressed on underlying.' },
   { key: 'borrow_current', label: 'Borrow Rate', w: 105 },
@@ -6037,6 +6037,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         <td>
                           <span className="sym-cell" onClick={e => { e.stopPropagation(); navigateToChart(r); }}>
                             {r.symbol}
+                            {r.strategy_blacklisted ? (
+                              <span className="badge badge-stale" style={{ marginLeft: 6, fontSize: 9, verticalAlign: 'middle' }} title="On strategy blacklist — listed for dashboards only; not sized in trade plan / rebalancer.">BL</span>
+                            ) : null}
                           </span>
                         </td>
                         <td className="underlying-cell">{r.underlying}</td>

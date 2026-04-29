@@ -89,11 +89,12 @@ class TestBucketAssignment:
         sqqq = df[df["symbol"] == "SQQQ"].iloc[0]
         assert sqqq["bucket"] == Bucket.INVERSE.value
 
-    def test_blacklist_removes_symbols(self, sample_universe, inverse_set):
+    def test_blacklist_tags_symbols_keeps_rows(self, sample_universe, inverse_set):
         df = assign_buckets(sample_universe, inverse_set, blacklist=["TQQQ", "SSO"])
-        assert "TQQQ" not in df["symbol"].values
-        assert "SSO" not in df["symbol"].values
-        assert len(df) == 3
+        assert len(df) == len(sample_universe)
+        assert df.loc[df["symbol"] == "TQQQ", "strategy_blacklisted"].iloc[0] is True
+        assert df.loc[df["symbol"] == "SSO", "strategy_blacklisted"].iloc[0] is True
+        assert df.loc[df["symbol"] == "SQQQ", "strategy_blacklisted"].iloc[0] is False
 
     def test_nan_beta_goes_to_bucket_2(self, inverse_set):
         df = pd.DataFrame({
