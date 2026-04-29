@@ -51,13 +51,23 @@ import argparse
 import json
 import logging
 import math
+import os
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 LOGGER = logging.getLogger("forecast_nav")
+
+# Feature gates -- default off so behavior matches the conservative day-clock
+# build that's been logging realized accuracy. Flip these on once we have a
+# few weeks of paired forecasts to compare. Both env vars are also honored by
+# diamond-creek-quant's copy of this file (kept in sync intentionally).
+INTRADAY_DT_ENABLED = os.getenv("NAV_FORECAST_INTRADAY_DT", "0").lower() in ("1", "true", "yes")
+APPLY_DISTRIBUTION_ENABLED = os.getenv("NAV_FORECAST_APPLY_DISTRIBUTION", "0").lower() in ("1", "true", "yes")
+TRADING_CALENDAR = os.getenv("NAV_FORECAST_TRADING_CALENDAR", "XNYS")
+DISTRIBUTIONS_PATH_ENV = os.getenv("NAV_FORECAST_DISTRIBUTIONS_PATH")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
@@ -175,16 +185,132 @@ def _busday_diff(anchor_iso: str, today_iso: str) -> int:
 def _dt_years(anchor_date: str | None, ts_utc: datetime) -> float:
     """Time elapsed since anchor close, in trading-year units (252).
 
+    Two clocks:
+      * **Day clock (default)**: business-days-since-anchor / 252, floored
+        at 1/252.  Coarse but robust on snapshots far from RTH.
+      * **Intraday clock** (``NAV_FORECAST_INTRADAY_DT=1``): adds a fractional
+        in-session adjustment using the exchange calendar (``XNYS`` by
+        default).  We measure the share of today's trading session that has
+        elapsed up to ``ts_utc`` and add that to the integer business-day
+        count.  Holidays and early closes are honored automatically because
+        the calendar exposes per-session open/close.
+
     Floor at 1/252 so the v2 vol-drag term is non-zero even on snapshots
     taken on the same UTC date as the anchor (rare but possible during
-    pre-market refreshes)."""
+    pre-market refreshes).
+    """
     if not anchor_date:
         return 1.0 / 252.0
+
+    if INTRADAY_DT_ENABLED:
+        try:
+            return _dt_years_intraday(anchor_date, ts_utc, TRADING_CALENDAR)
+        except Exception as exc:  # pragma: no cover - calendar fallback
+            LOGGER.warning("intraday dt fallback (%s)", exc)
+
     today_iso = ts_utc.date().isoformat()
     bdays = _busday_diff(anchor_date, today_iso)
     if bdays < 0:
         bdays = 0
     return max(1.0 / 252.0, bdays / 252.0)
+
+
+def _dt_years_intraday(anchor_date: str, ts_utc: datetime, calendar: str) -> float:
+    """Trading-time Δt in years using ``exchange_calendars``.
+
+    Returns ``business_days_complete + fraction_of_today_session) / 252``.
+    For a snap taken at 11:30 ET on the day after a normal-close anchor we
+    get roughly ``(1 + 2/6.5) / 252`` -- close to 1.3 trading days. On the
+    half-day before Christmas Eve the session is 3.5 hours so the fraction
+    grows faster, which is what we want.
+    """
+    import exchange_calendars as xcals  # type: ignore
+
+    cal = xcals.get_calendar(calendar)
+    a = datetime.fromisoformat(anchor_date).date()
+    today = ts_utc.date()
+    # Integer business days strictly between anchor and today.
+    sessions_between = cal.sessions_in_range(a.isoformat(), today.isoformat())
+    bdays_complete = max(0, len(sessions_between) - 1)
+
+    # Fraction of *today's* session elapsed (0 if pre-open, 1 if post-close).
+    frac = 0.0
+    if cal.is_session(today.isoformat()):
+        ts_naive_utc = ts_utc.astimezone(timezone.utc).replace(tzinfo=None)
+        try:
+            session_open = cal.session_open(today.isoformat()).to_pydatetime().replace(tzinfo=None)
+            session_close = cal.session_close(today.isoformat()).to_pydatetime().replace(tzinfo=None)
+            if ts_naive_utc <= session_open:
+                frac = 0.0
+            elif ts_naive_utc >= session_close:
+                frac = 1.0
+            else:
+                total = (session_close - session_open).total_seconds()
+                used = (ts_naive_utc - session_open).total_seconds()
+                frac = max(0.0, min(1.0, used / total)) if total > 0 else 0.0
+        except Exception:
+            frac = 0.0
+    return max(1.0 / 252.0, (bdays_complete + frac) / 252.0)
+
+
+def _load_distributions_for_today(today_iso: str) -> dict[str, float]:
+    """Return ``{symbol: cash_per_share}`` for ETFs whose ex-date == today.
+
+    Reads ``data/etf_distributions.json`` (or whatever
+    ``NAV_FORECAST_DISTRIBUTIONS_PATH`` points to).  Best effort -- a missing
+    or malformed file just returns ``{}`` so the caller can fall through to
+    the unadjusted anchor NAV.
+    """
+    path = (
+        Path(DISTRIBUTIONS_PATH_ENV)
+        if DISTRIBUTIONS_PATH_ENV
+        else DATA_DIR / "etf_distributions.json"
+    )
+    if not path.exists():
+        return {}
+    try:
+        payload = _load_json(path)
+    except Exception:
+        return {}
+    out: dict[str, float] = {}
+    by_sym = payload.get("by_symbol") or payload.get("symbols") or payload
+    if not isinstance(by_sym, dict):
+        return {}
+    for sym, entry in by_sym.items():
+        events = entry.get("events") if isinstance(entry, dict) else None
+        if not isinstance(events, list):
+            # Some shapes ship a single ``next_ex_date`` + ``amount``.
+            ex_date = (entry or {}).get("next_ex_date") if isinstance(entry, dict) else None
+            amt = (entry or {}).get("next_amount") if isinstance(entry, dict) else None
+            if ex_date == today_iso and _isfin(amt):
+                out[str(sym).upper()] = float(amt)
+            continue
+        for evt in events:
+            if not isinstance(evt, dict):
+                continue
+            if str(evt.get("ex_date")) == today_iso and _isfin(evt.get("amount")):
+                out[str(sym).upper()] = float(evt["amount"])
+                break
+    return out
+
+
+def _adjust_anchor_for_ex_distribution(
+    nav_anchor: float | None, symbol: str, distributions_today: dict[str, float],
+) -> tuple[float | None, float]:
+    """Pre-trade adjustment: if today is ETF ``symbol``'s ex-date, the
+    market price drops by ~cash distribution at the open.  We mirror that
+    in the model NAV so ``premium_bp`` doesn't flash a phantom 30-bp
+    premium between 09:30 and the close.
+
+    Returns ``(adjusted_nav_anchor, distribution_applied)``.  When
+    ``distribution_applied > 0`` the caller should annotate ``notes``.
+    """
+    if not APPLY_DISTRIBUTION_ENABLED or nav_anchor is None or nav_anchor <= 0:
+        return nav_anchor, 0.0
+    amt = distributions_today.get(str(symbol).upper(), 0.0)
+    if not _isfin(amt) or amt <= 0:
+        return nav_anchor, 0.0
+    return max(0.0, float(nav_anchor) - float(amt)), float(amt)
 
 
 # ---------------------------------------------------------------------------
@@ -501,12 +627,14 @@ def _gather_inputs(
     record: dict,
     anchor: dict | None,
     options_cache: dict,
+    distributions_today: dict[str, float] | None = None,
 ) -> dict:
     """Resolve everything the per-model builders need. ``anchor`` may be None."""
     sym = str(record.get("symbol") or "").upper()
     pc = (str(record.get("product_class") or "").strip().lower() or None)
     is_yb = bool(record.get("is_yieldboost"))
     und = str(record.get("underlying") or "").upper() or None
+    distributions_today = distributions_today or {}
 
     syms = options_cache.get("symbols") or {}
     und_entry = syms.get(und) if und else None
@@ -532,6 +660,11 @@ def _gather_inputs(
     und_anchor = _f(anchor.get("und_close")) if anchor else None
     nav_anchor_date = anchor.get("as_of_date") if anchor else None
     shares_out = _f(anchor.get("shares_outstanding")) if anchor else None
+
+    # Optional pre-trade adjustment for ETFs that go ex-distribution today.
+    nav_anchor, distribution_applied = _adjust_anchor_for_ex_distribution(
+        nav_anchor, sym, distributions_today,
+    )
 
     sigma_annual = _f(record.get("forecast_vol_underlying_annual"))
     sigma_source = "forecast_vol_underlying_annual"
@@ -560,6 +693,7 @@ def _gather_inputs(
         "sigma_annual": sigma_annual,
         "sigma_source": sigma_source,
         "beta": beta,
+        "distribution_applied": distribution_applied,
     }
 
 
@@ -842,6 +976,7 @@ def build_forecasts_for_symbol(
     options_cache: dict,
     holdings_legs: list[dict] | None,
     ts_utc: datetime,
+    distributions_today: dict[str, float] | None = None,
 ) -> tuple[list[ForecastRecord], str | None]:
     """Compute every applicable model for a single screener row.
 
@@ -852,16 +987,23 @@ def build_forecasts_for_symbol(
     sym = str(record.get("symbol") or "").upper()
     if not sym:
         return [], None
-    inputs = _gather_inputs(record, anchor, options_cache)
+    inputs = _gather_inputs(record, anchor, options_cache, distributions_today)
     ter_daily = _ter_daily_for(sym)
     ts_iso = ts_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     rows: list[ForecastRecord] = []
+    extra_notes: list[str] = []
+    if inputs.get("distribution_applied", 0.0) > 0:
+        extra_notes.append(f"ex-dist applied -{inputs['distribution_applied']:.4f}")
 
     rows.append(build_v1(inputs, ts_iso, ter_daily))
     rows.append(build_v2_ito(inputs, ts_iso, ter_daily, ts_utc))
     rows.append(build_v3_swap_mark(inputs, ts_iso, ter_daily, holdings_legs, options_cache, ts_utc=ts_utc))
     rows.append(build_yieldboost_putspread_v1(inputs, ts_iso, ter_daily, holdings_legs, options_cache, ts_utc=ts_utc))
+
+    if extra_notes:
+        for r in rows:
+            r.notes = _compose_notes(([r.notes] if r.notes else []) + extra_notes)
 
     default = select_default_model(rows, inputs["product_class"], inputs["is_yieldboost"])
     if default is not None:
@@ -902,6 +1044,12 @@ def main() -> None:
         else SNAPSHOT_DIR / f"{ts.date().isoformat()}.jsonl"
     )
 
+    distributions_today: dict[str, float] = {}
+    if APPLY_DISTRIBUTION_ENABLED:
+        distributions_today = _load_distributions_for_today(ts.date().isoformat())
+        if distributions_today:
+            LOGGER.info("ex-dist today: %s", distributions_today)
+
     snapshot_rows: list[dict] = []
     by_symbol_default: dict[str, dict] = {}
     by_symbol_models: dict[str, dict[str, dict]] = {}
@@ -919,6 +1067,7 @@ def main() -> None:
                 options_cache,
                 holdings_by_sym.get(sym),
                 ts,
+                distributions_today,
             )
         except Exception as e:  # pragma: no cover - defensive
             LOGGER.warning("forecast %s failed: %s", sym, e)
