@@ -52,6 +52,13 @@ Run manually::
 
 Or via the scheduled workflow (``update-corporate-actions.yml``) which passes no
 ``--symbols`` to cover the full screened universe.
+
+Sister repos
+============
+``GoldmanDrew/Diamond-Creek-Quant`` copies the committed JSON from this repo's
+``main`` tree on GitHub (raw ``data/`` URLs) in CI so **only this repo** runs the
+Polygon + Google News ingest for that shared universe, keeping a single global
+API-key budget.
 """
 
 from __future__ import annotations
