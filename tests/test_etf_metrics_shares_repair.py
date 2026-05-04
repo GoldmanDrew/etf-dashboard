@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +12,35 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import ingest_etf_metrics as iem  # noqa: E402
+
+
+def test_merge_underlying_adj_close_joins_on_underlying_ticker():
+    df = pd.DataFrame(
+        [
+            {
+                "date": "2026-04-20",
+                "ticker": "SSO",
+                "nav": 100.0,
+                "aum": 1e9,
+                "shares_outstanding": 1e7,
+                "close_price": 101.0,
+                "underlying_adj_close": None,
+                "stale": False,
+                "stale_age_bdays": None,
+                "source_provider": "x",
+                "source_url": "",
+                "ingested_at_utc": "2026-04-27T00:00:00Z",
+                "status": "ok",
+            }
+        ]
+    )
+    und_df = pd.DataFrame(
+        [
+            {"date": date.fromisoformat("2026-04-20"), "ticker": "SPY", "underlying_adj_close": 500.25},
+        ]
+    )
+    out = iem.merge_underlying_adj_close(df, und_df, {"SSO": "SPY"})
+    assert abs(float(out.iloc[0]["underlying_adj_close"]) - 500.25) < 1e-6
 
 
 def test_repair_shares_decimal_shift():
@@ -23,6 +53,7 @@ def test_repair_shares_decimal_shift():
                 "aum": 574_477.0,
                 "shares_outstanding": 87_333_079.0,
                 "close_price": None,
+                "underlying_adj_close": None,
                 "stale": False,
                 "stale_age_bdays": None,
                 "source_provider": "x",
