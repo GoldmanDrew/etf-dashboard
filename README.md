@@ -4,6 +4,8 @@ Live at: **https://goldmandrew.github.io/etf-dashboard/**
 
 Real-time IBKR short stock borrow rate monitoring with **distributional decay forecasts** and **product-class-aware** decay/edge routing for leveraged, inverse, volatility, and YieldBOOST income ETFs. Deployed as a static site via GitHub Pages — no server required.
 
+**Forks (e.g. diamond-creek-quant):** if your site copies this `index.html` and `scripts/ingest_etf_metrics.py`, merge or cherry-pick the same **chunked Yahoo underlying fetch** and **Stats-tab table column CSS** so `underlying_adj_close` stays populated for full-universe ingests and the metrics grid column widths stay balanced.
+
 > **New agent in this repo?** Read **[AGENTS.md](./AGENTS.md)** first. It explains the full data pipeline, product taxonomy, decay models, and how the front-end routes them.
 
 ## How It Works

@@ -526,6 +526,10 @@ def fetch_underlying_adj_close_batch(
 
     ``auto_adjust=True`` so the column is dividend/split-adjusted total-return
     level (matches common \"Adj Close\" semantics). One row per (date, und ticker).
+
+    Yahoo's multi-symbol ``download`` becomes unreliable past ~60–80 tickers
+    (random symbols silently missing from the returned frame). Chunk the
+    universe and concatenate so every underlying gets a fair fetch pass.
     """
     cols = ["date", "ticker", "underlying_adj_close"]
     if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
@@ -533,8 +537,23 @@ def fetch_underlying_adj_close_batch(
     uniq = sorted({_normalize_symbol(s) for s in und_symbols if s and str(s).strip()})
     if not uniq:
         return pd.DataFrame(columns=cols)
-    raw = _yf_download_ohlcv(uniq, start, end, auto_adjust=True)
-    return _extract_yf_series_to_long(raw, uniq, "Close", "underlying_adj_close")
+    chunk_sz = max(1, int(os.getenv("ETF_METRICS_UNDERLYING_YF_CHUNK_SIZE", "50")))
+    frames: list[pd.DataFrame] = []
+    for i in range(0, len(uniq), chunk_sz):
+        chunk = uniq[i : i + chunk_sz]
+        raw = _yf_download_ohlcv(chunk, start, end, auto_adjust=True)
+        part = _extract_yf_series_to_long(raw, chunk, "Close", "underlying_adj_close")
+        if not part.empty:
+            frames.append(part)
+        else:
+            LOGGER.warning(
+                "underlying_adj_close chunk empty (%d tickers, offset %d)",
+                len(chunk), i,
+            )
+    if not frames:
+        return pd.DataFrame(columns=cols)
+    out = pd.concat(frames, ignore_index=True)
+    return out.drop_duplicates(subset=["date", "ticker"], keep="last")
 
 
 def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame:

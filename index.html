@@ -679,6 +679,33 @@
   .metrics-panel .scenario-table-wrap {
     margin-top: 16px;
   }
+  /* ETF metrics daily grid: fixed layout so long underlying labels do not steal width */
+  .metrics-panel .scenario-table {
+    table-layout: fixed;
+  }
+  .metrics-panel .scenario-table th:nth-child(1),
+  .metrics-panel .scenario-table td:nth-child(1) { width: 9%; min-width: 5.5rem; }
+  .metrics-panel .scenario-table th:nth-child(2),
+  .metrics-panel .scenario-table td:nth-child(2) { width: 8%; }
+  .metrics-panel .scenario-table th:nth-child(3),
+  .metrics-panel .scenario-table td:nth-child(3) { width: 8%; }
+  .metrics-panel .scenario-table th:nth-child(4),
+  .metrics-panel .scenario-table td:nth-child(4) { width: 7%; }
+  .metrics-panel .scenario-table th:nth-child(5),
+  .metrics-panel .scenario-table td:nth-child(5) { width: 9%; }
+  .metrics-panel .scenario-table th:nth-child(6),
+  .metrics-panel .scenario-table td:nth-child(6) { width: 11%; }
+  .metrics-panel .scenario-table th:nth-child(6) {
+    white-space: normal;
+    line-height: 1.25;
+    hyphens: auto;
+  }
+  .metrics-panel .scenario-table th:nth-child(7),
+  .metrics-panel .scenario-table td:nth-child(7) { width: 14%; }
+  .metrics-panel .scenario-table th:nth-child(8),
+  .metrics-panel .scenario-table td:nth-child(8) { width: 12%; }
+  .metrics-panel .scenario-table th:nth-child(9),
+  .metrics-panel .scenario-table td:nth-child(9) { width: 8%; min-width: 3.25rem; }
   .metrics-panel .scenario-table td,
   .metrics-panel .scenario-table th {
     padding-top: 8px;
