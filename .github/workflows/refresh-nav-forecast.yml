@@ -84,7 +84,15 @@ jobs:
           TMP_DIR="$(mktemp -d)"
           for p in ${STAGE}; do
             mkdir -p "${TMP_DIR}/$(dirname "$p")"
-            cp -r "$p" "${TMP_DIR}/$p"
+            # Copy contents into the mirrored path.  `cp -r src dest` when dest
+            # already exists nests src inside dest (here: snapshots/snapshots/...),
+            # which eventually exceeds PATH_MAX and breaks `git pull` on Windows.
+            if [ -d "$p" ]; then
+              mkdir -p "${TMP_DIR}/$p"
+              cp -a "$p"/. "${TMP_DIR}/$p"/
+            else
+              cp -a "$p" "${TMP_DIR}/$p"
+            fi
           done
           pushed=0
           for i in 1 2 3; do
@@ -96,7 +104,12 @@ jobs:
             for p in ${ALL_PATHS}; do
               if [ -e "${TMP_DIR}/$p" ]; then
                 mkdir -p "$(dirname "$p")"
-                cp -r "${TMP_DIR}/$p" "$p"
+                if [ -d "${TMP_DIR}/$p" ]; then
+                  mkdir -p "$p"
+                  cp -a "${TMP_DIR}/$p"/. "$p"/
+                else
+                  cp -a "${TMP_DIR}/$p" "$p"
+                fi
                 ROUND="${ROUND} $p"
               fi
             done
