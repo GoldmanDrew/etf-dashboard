@@ -3482,6 +3482,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     () => (etfMetricsSeries.length ? etfMetricsSeries[etfMetricsSeries.length - 1] : null),
     [etfMetricsSeries],
   );
+  const undAdjCloseLabel = useMemo(() => {
+    const u = String(undSym || '').trim().toUpperCase();
+    return u ? `${u} adj. close` : 'Und adj. close';
+  }, [undSym]);
   const incomeAnnualYieldForChart = useMemo(() => {
     const precomputed = incomeAnnualYieldForScenario(r);
     if (precomputed != null) return precomputed;
@@ -4179,6 +4183,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   ? `${etfDistributionCount} distrib. — last ${etfLatestDistribution?.ex_date || '—'}`
                   : 'no distributions on file'}
               </div>
+              <div
+                className="cs-sub"
+                style={{ marginTop: 4 }}
+                title={`Yahoo dividend/split-adjusted close for ${String(undSym || '').trim().toUpperCase() || 'underlying'} (same dates as metrics table).`}
+              >
+                {undAdjCloseLabel}:{' '}
+                {latestEtfMetric && Number.isFinite(Number(latestEtfMetric.underlying_adj_close))
+                  ? fmtUsd(Number(latestEtfMetric.underlying_adj_close))
+                  : '—'}
+              </div>
             </div>
             <div
               className="chart-stat"
@@ -4354,6 +4368,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   label={`${etfSym} Total-Return NAV (distributions reinvested)`}
                   formatValue={(v) => fmtUsd(v)}
                   zeroLabel="$0"
+                  overlayValueKey="underlying_adj_close"
+                  overlayColor="rgba(148,163,184,0.95)"
+                  overlayLabel={undAdjCloseLabel}
                 />
                 <SimpleSeriesPlot
                   series={etfMetricsSeries}
@@ -4394,6 +4411,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <th>Close</th>
                       <th>Prem/Disc</th>
                       <th>TR NAV</th>
+                      <th title="Yahoo Finance dividend/split-adjusted underlying close (total-return level).">{undAdjCloseLabel}</th>
                       <th>AUM / TNA</th>
                       <th>Shares Outstanding</th>
                       <th>Status</th>
@@ -4413,6 +4431,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <td>{Number.isFinite(close) ? fmtUsd(close) : '—'}</td>
                           <td>{premPct == null ? '—' : `${premPct >= 0 ? '+' : ''}${premPct.toFixed(2)}%`}</td>
                           <td>{Number.isFinite(Number(m.nav_total_return)) ? fmtUsd(Number(m.nav_total_return)) : '—'}</td>
+                          <td>{Number.isFinite(Number(m.underlying_adj_close)) ? fmtUsd(Number(m.underlying_adj_close)) : '—'}</td>
                           <td>{fmtMoney(Number(m.aum))}</td>
                           <td>{fmtSharesCount(Number(m.shares_outstanding))}</td>
                           <td className={String(m.status || '').includes('repaired') ? 'val-warning' : ''}>{m.status || '—'}</td>

@@ -83,6 +83,7 @@ REQUIRED_COLUMNS = [
     "aum",
     "shares_outstanding",
     "close_price",
+    "underlying_adj_close",
     "stale",
     "stale_age_bdays",
     "source_provider",
@@ -142,6 +143,7 @@ def _records_to_df(records: list[ProviderResult], ingested_at: datetime) -> pd.D
             "aum": r.aum,
             "shares_outstanding": r.shares_outstanding,
             "close_price": None,
+            "underlying_adj_close": None,
             "stale": bool(r.stale),
             "stale_age_bdays": r.stale_age_bdays,
             "source_provider": r.source_provider,
@@ -282,12 +284,15 @@ def _metric_triple_equal(a, b) -> bool:
 
 
 def collapse_redundant_consecutive_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    """Drop consecutive calendar rows per ticker when (nav, aum, shares) are unchanged.
+    """Drop consecutive calendar rows per ticker when core metrics + overlays are unchanged.
 
     Multiple scheduler or manual runs can re-ingest the same issuer figures for a new
     stamped date even when public feeds have not updated, producing flat stretches of
-    identical triples. Removing interior duplicates keeps history compact without losing
+    identical values. Removing interior duplicates keeps history compact without losing
     the first date a value appeared or real step-changes.
+
+    ``close_price`` and ``underlying_adj_close`` are part of the fingerprint so we do
+    not drop days where only Yahoo prices moved while issuer NAV/AUM/shares repeated.
     """
     if df.empty:
         return df, 0
@@ -296,15 +301,21 @@ def collapse_redundant_consecutive_rows(df: pd.DataFrame) -> tuple[pd.DataFrame,
     work = work.sort_values(["ticker", "date"]).reset_index(drop=True)
 
     keep_mask = [True] * len(work)
-    last_triple_by_ticker: dict[str, tuple] = {}
+    last_sig_by_ticker: dict[str, tuple] = {}
     for i, row in work.iterrows():
         t = str(row["ticker"]).upper()
-        triple = (row.get("nav"), row.get("aum"), row.get("shares_outstanding"))
-        prev = last_triple_by_ticker.get(t)
-        if prev is not None and all(_metric_triple_equal(a, b) for a, b in zip(prev, triple)):
+        sig = (
+            row.get("nav"),
+            row.get("aum"),
+            row.get("shares_outstanding"),
+            row.get("close_price"),
+            row.get("underlying_adj_close"),
+        )
+        prev = last_sig_by_ticker.get(t)
+        if prev is not None and all(_metric_triple_equal(a, b) for a, b in zip(prev, sig)):
             keep_mask[i] = False
         else:
-            last_triple_by_ticker[t] = triple
+            last_sig_by_ticker[t] = sig
 
     cleaned = work.loc[keep_mask].reset_index(drop=True)
     dropped = int(sum(1 for k in keep_mask if not k))
@@ -381,7 +392,7 @@ def _sanitize_json_df(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     d["date"] = pd.to_datetime(d["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     d["ingested_at_utc"] = pd.to_datetime(d["ingested_at_utc"], errors="coerce", utc=True).astype(str)
-    for col in ("nav", "aum", "shares_outstanding", "close_price", "stale_age_bdays"):
+    for col in ("nav", "aum", "shares_outstanding", "close_price", "underlying_adj_close", "stale_age_bdays"):
         if col in d.columns:
             d[col] = pd.to_numeric(d[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
     return d.astype(object).where(pd.notna(d), None)
@@ -390,6 +401,98 @@ def _sanitize_json_df(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Close-price fetch (yfinance bulk) + holdings persistence
 # ---------------------------------------------------------------------------
+
+def _yf_download_ohlcv(
+    tickers: list[str],
+    start: date,
+    end: date,
+    *,
+    auto_adjust: bool,
+) -> pd.DataFrame | None:
+    """Run yfinance multi-symbol daily download; return raw frame or None on failure."""
+    if not tickers:
+        return None
+    if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
+        return None
+    try:
+        import yfinance as yf
+    except Exception as e:  # pragma: no cover
+        LOGGER.warning("yfinance unavailable: %s", e)
+        return None
+    start_s = start.isoformat()
+    end_s = (end + timedelta(days=1)).isoformat()
+    try:
+        return yf.download(
+            tickers=list(tickers),
+            start=start_s,
+            end=end_s,
+            interval="1d",
+            auto_adjust=auto_adjust,
+            actions=False,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+        )
+    except Exception as e:
+        LOGGER.warning("yfinance batch download failed (auto_adjust=%s): %s", auto_adjust, e)
+        return None
+
+
+def _extract_yf_series_to_long(
+    raw: pd.DataFrame,
+    tickers: list[str],
+    price_col: str,
+    out_value_key: str,
+) -> pd.DataFrame:
+    """Pull ``price_col`` per ticker from yfinance download into long-form rows."""
+    cols = ["date", "ticker", out_value_key]
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=cols)
+    records: list[dict] = []
+    if isinstance(raw.columns, pd.MultiIndex):
+        for t in tickers:
+            up = t.upper()
+            if t not in raw.columns.get_level_values(0):
+                continue
+            try:
+                sub = raw[t]
+            except KeyError:
+                continue
+            if price_col not in sub.columns:
+                continue
+            ser = sub[price_col].dropna()
+            for idx, v in ser.items():
+                try:
+                    c = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if c > 0:
+                    records.append({
+                        "date": idx.date() if hasattr(idx, "date") else idx,
+                        "ticker": up,
+                        out_value_key: c,
+                    })
+    else:
+        if price_col in raw.columns and len(tickers) == 1:
+            up = tickers[0].upper()
+            for idx, v in raw[price_col].dropna().items():
+                try:
+                    c = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if c > 0:
+                    records.append({
+                        "date": idx.date() if hasattr(idx, "date") else idx,
+                        "ticker": up,
+                        out_value_key: c,
+                    })
+    if not records:
+        return pd.DataFrame(columns=cols)
+    out = pd.DataFrame.from_records(records)
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out = out.dropna(subset=["date", "ticker"])
+    return out.drop_duplicates(subset=["date", "ticker"], keep="last")
+
 
 def fetch_close_prices_batch(
     tickers: list[str],
@@ -406,88 +509,32 @@ def fetch_close_prices_batch(
     without close-prices rather than blow up the whole ingest.
     """
     cols = ["date", "ticker", "close_price"]
-    if not tickers:
-        return pd.DataFrame(columns=cols)
     if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
         LOGGER.info("close-price fetch disabled (ETF_METRICS_DISABLE_YFINANCE)")
         return pd.DataFrame(columns=cols)
+    raw = _yf_download_ohlcv(tickers, start, end, auto_adjust=False)
+    out = _extract_yf_series_to_long(raw, tickers, "Close", "close_price")
+    return out
 
-    try:
-        import yfinance as yf
-    except Exception as e:  # pragma: no cover
-        LOGGER.warning("yfinance unavailable for close-price fetch: %s", e)
+
+def fetch_underlying_adj_close_batch(
+    und_symbols: list[str],
+    start: date,
+    end: date,
+) -> pd.DataFrame:
+    """Long-form (date, ticker, underlying_adj_close) using Yahoo *adjusted* close.
+
+    ``auto_adjust=True`` so the column is dividend/split-adjusted total-return
+    level (matches common \"Adj Close\" semantics). One row per (date, und ticker).
+    """
+    cols = ["date", "ticker", "underlying_adj_close"]
+    if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
         return pd.DataFrame(columns=cols)
-
-    # yfinance end-date is exclusive; pad by one day.
-    start_s = start.isoformat()
-    end_s = (end + timedelta(days=1)).isoformat()
-    try:
-        # group_by='ticker' yields a wide DataFrame with MultiIndex columns.
-        raw = yf.download(
-            tickers=list(tickers),
-            start=start_s,
-            end=end_s,
-            interval="1d",
-            auto_adjust=False,
-            actions=False,
-            group_by="ticker",
-            threads=True,
-            progress=False,
-        )
-    except Exception as e:
-        LOGGER.warning("yfinance batch close fetch failed: %s", e)
+    uniq = sorted({_normalize_symbol(s) for s in und_symbols if s and str(s).strip()})
+    if not uniq:
         return pd.DataFrame(columns=cols)
-
-    if raw is None or raw.empty:
-        return pd.DataFrame(columns=cols)
-
-    records: list[dict] = []
-    if isinstance(raw.columns, pd.MultiIndex):
-        # Structure: raw[ticker]['Close']
-        for t in tickers:
-            up = t.upper()
-            if t not in raw.columns.get_level_values(0):
-                continue
-            try:
-                sub = raw[t]
-            except KeyError:
-                continue
-            if "Close" not in sub.columns:
-                continue
-            close = sub["Close"].dropna()
-            for idx, v in close.items():
-                try:
-                    c = float(v)
-                except (TypeError, ValueError):
-                    continue
-                if c > 0:
-                    records.append({
-                        "date": idx.date() if hasattr(idx, "date") else idx,
-                        "ticker": up,
-                        "close_price": c,
-                    })
-    else:
-        # Single-ticker fall-through: raw has a flat columns index.
-        if "Close" in raw.columns and len(tickers) == 1:
-            up = tickers[0].upper()
-            for idx, v in raw["Close"].dropna().items():
-                try:
-                    c = float(v)
-                except (TypeError, ValueError):
-                    continue
-                if c > 0:
-                    records.append({
-                        "date": idx.date() if hasattr(idx, "date") else idx,
-                        "ticker": up,
-                        "close_price": c,
-                    })
-
-    if not records:
-        return pd.DataFrame(columns=cols)
-    out = pd.DataFrame.from_records(records)
-    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
-    out = out.dropna(subset=["date", "ticker"])
-    return out.drop_duplicates(subset=["date", "ticker"], keep="last")
+    raw = _yf_download_ohlcv(uniq, start, end, auto_adjust=True)
+    return _extract_yf_series_to_long(raw, uniq, "Close", "underlying_adj_close")
 
 
 def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame:
@@ -512,6 +559,50 @@ def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame
         pd.to_numeric(merged["close_price"], errors="coerce")
     )
     merged = merged.drop(columns=["_close_new"])
+    return merged
+
+
+def merge_underlying_adj_close(
+    df: pd.DataFrame,
+    und_close_df: pd.DataFrame,
+    etf_to_underlying: dict[str, str],
+) -> pd.DataFrame:
+    """Attach Yahoo adjusted underlying close per ETF row on (date, underlying)."""
+    if und_close_df.empty or not etf_to_underlying:
+        if "underlying_adj_close" not in df.columns:
+            df = df.copy()
+            df["underlying_adj_close"] = None
+        return df
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+
+    def _etf_und(sym: object) -> str | None:
+        t = _normalize_symbol(sym) if sym is not None and str(sym).strip() else ""
+        if not t:
+            return None
+        u = etf_to_underlying.get(t)
+        if u is None or pd.isna(u):
+            return None
+        us = str(u).strip()
+        return _normalize_symbol(us) if us else None
+
+    out["_und_ticker"] = out["ticker"].map(_etf_und)
+    und_side = und_close_df.rename(columns={"ticker": "_und_ticker", "underlying_adj_close": "_und_adj_new"})
+    und_side["date"] = pd.to_datetime(und_side["date"], errors="coerce").dt.date
+    merged = out.merge(
+        und_side,
+        left_on=["date", "_und_ticker"],
+        right_on=["date", "_und_ticker"],
+        how="left",
+    )
+    merged = merged.drop(columns=["_und_ticker"])
+    if "underlying_adj_close" not in merged.columns:
+        merged["underlying_adj_close"] = None
+    merged["underlying_adj_close"] = pd.to_numeric(merged["_und_adj_new"], errors="coerce").combine_first(
+        pd.to_numeric(merged["underlying_adj_close"], errors="coerce")
+    )
+    merged = merged.drop(columns=["_und_adj_new"])
     return merged
 
 
@@ -1001,6 +1092,18 @@ def main() -> None:
             incoming["close_price"] = None
         LOGGER.info("close_price fetch returned no rows")
 
+    underlying_map = load_universe_underlying_map()
+    und_syms = sorted({str(v).strip().upper() for v in underlying_map.values() if v and str(v).strip()})
+    und_close_df = fetch_underlying_adj_close_batch(und_syms, resolved_start_date, resolved_end_date)
+    if not und_close_df.empty:
+        incoming = merge_underlying_adj_close(incoming, und_close_df, underlying_map)
+        got_u = pd.to_numeric(incoming["underlying_adj_close"], errors="coerce").notna().sum()
+        LOGGER.info("underlying_adj_close attached to %d/%d rows", int(got_u), len(incoming))
+    else:
+        if "underlying_adj_close" not in incoming.columns:
+            incoming["underlying_adj_close"] = None
+        LOGGER.info("underlying_adj_close fetch returned no rows")
+
     max_stale_business_days = int(os.getenv("ETF_METRICS_MAX_STALE_BUSINESS_DAYS", "3"))
     incoming = apply_stale_carry_forward(
         existing=existing,
@@ -1030,7 +1133,6 @@ def main() -> None:
     # never takes down the primary metrics output.
     if os.getenv("ETF_METRICS_SKIP_HOLDINGS", "").lower() not in ("1", "true", "yes"):
         try:
-            underlying_map = load_universe_underlying_map()
             holdings_stack = build_default_holdings_stack(
                 session, underlying_by_ticker=underlying_map,
             )
