@@ -119,6 +119,10 @@ jobs:
         continue-on-error: true
         run: python scripts/score_nav_forecasts.py
 
+      - name: Score borrow spike predictions (rollup)
+        continue-on-error: true
+        run: python scripts/score_borrow_spikes.py
+
       - name: Print latest metrics status
         run: |
           python - <<'PY'
@@ -144,6 +148,23 @@ jobs:
               print(f"health.missing_tickers ({len(mt)}):", mt[:30], "..." if len(mt) > 30 else "")
               pt = h.get("partial_tickers") or []
               print(f"health.partial_tickers ({len(pt)}):", pt[:30], "..." if len(pt) > 30 else "")
+          mn = Path("data/nav_forecasts/_metrics_daily.json")
+          if mn.exists():
+              m = json.loads(mn.read_text(encoding="utf-8"))
+              nbs = len(m.get("by_symbol") or {})
+              print(f"nav_forecasts._metrics_daily: by_symbol_keys={nbs} build_time={m.get('build_time')}")
+          else:
+              print("nav_forecasts._metrics_daily: missing")
+          rd = Path("data/nav_forecasts/realized")
+          if rd.exists():
+              nfiles = len([x for x in rd.rglob('*.jsonl') if len(x.name) == 15 and x.name[4] == '-' and x.name[7] == '-'])
+              print(f"nav_forecasts.realized: jsonl_files={nfiles}")
+          br = Path("data/borrow_spike_metrics.json")
+          if br.exists():
+              b = json.loads(br.read_text(encoding="utf-8"))
+              print(f"borrow_spike_metrics: n_rows={b.get('n_rows')} brier={b.get('brier_score')} log_loss={b.get('log_loss')} positive_rate={b.get('positive_rate')}")
+          else:
+              print("borrow_spike_metrics: missing")
           PY
 
       - name: Commit metrics artifacts
@@ -156,7 +177,7 @@ jobs:
           # calling `git add`, because `git add` on a missing pathspec aborts
           # the whole step and previously dropped committed close_price data
           # with it.
-          ALL_FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json data/etf_metrics_health.json data/etf_distributions.json data/etf_holdings_daily.parquet data/etf_holdings_latest.csv data/etf_holdings_latest.json data/nav_forecasts/_anchors.json data/nav_forecasts/_metrics_daily.json data/nav_forecasts/_history_panel.json data/nav_forecasts/realized"
+          ALL_FILES="data/etf_metrics_daily.parquet data/etf_metrics_daily.csv data/etf_metrics_daily.json data/etf_metrics_latest.json data/etf_metrics_health.json data/etf_distributions.json data/etf_holdings_daily.parquet data/etf_holdings_latest.csv data/etf_holdings_latest.json data/nav_forecasts/_anchors.json data/nav_forecasts/_metrics_daily.json data/nav_forecasts/_history_panel.json data/nav_forecasts/realized data/borrow_spike_realized.jsonl data/borrow_spike_metrics.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           EXISTING_FILES=""
