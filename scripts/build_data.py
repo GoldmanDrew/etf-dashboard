@@ -3086,7 +3086,11 @@ def build():
         rec = {
             "symbol": sym,
             "underlying": row["underlying_sym"],
-            "beta": round(beta, 4) if beta else None,
+            "beta": (
+                round(float(beta), 6)
+                if beta is not None and pd.notna(beta) and np.isfinite(float(beta))
+                else None
+            ),
             "beta_n_obs": int(row["Beta_n_obs"]) if pd.notna(row.get("Beta_n_obs")) else None,
             "bucket": bucket,
             "is_yieldboost": bool(is_yieldboost),

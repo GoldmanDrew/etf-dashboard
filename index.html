@@ -2464,7 +2464,7 @@ function SimpleSeriesPlot({
 const COLS = [
   { key: 'symbol', label: 'Symbol', w: 100, hint: 'BL = strategy blacklist (shown for context; not sized in trade plan / rebalancer).' },
   { key: 'underlying', label: 'Underlying', w: 85 },
-  { key: 'beta', label: 'Beta', w: 65, hint: 'OLS β: ETF log-returns regressed on underlying.' },
+  { key: 'beta', label: 'Beta', w: 65, hint: 'ls-algo hedge β: OLS on aligned daily simple returns vs underlying TR, shrunk toward listed leverage (AR(1)-adjusted n_eff).' },
   { key: 'borrow_current', label: 'Borrow Rate', w: 105 },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, hint: 'Trailing annualized hedge drag: mean daily (β·r_U − r_ETF) on log returns × 252. See Decay math.' },
@@ -5638,11 +5638,39 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [newsError, setNewsError] = useState(null);
 
   useEffect(() => {
-    const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
-    fetch(DATA_URL + cacheBust)
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then(d => { setData(d); setLoading(false); })
-      .catch(e => { setError(e.message); setLoading(false); });
+    let cancelled = false;
+    let loadGen = 0;
+    let visTimer = null;
+    const load = () => {
+      const myGen = ++loadGen;
+      const cacheBust = `?v=${Date.now()}`;
+      fetch(`${DATA_URL}${cacheBust}`, { cache: 'no-store' })
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then(d => {
+          if (!cancelled && myGen === loadGen) {
+            setData(d);
+            setLoading(false);
+          }
+        })
+        .catch(e => {
+          if (!cancelled && myGen === loadGen) {
+            setError(e.message);
+            setLoading(false);
+          }
+        });
+    };
+    load();
+    const onVis = () => {
+      if (document.visibilityState !== 'visible' || cancelled) return;
+      if (visTimer) clearTimeout(visTimer);
+      visTimer = setTimeout(() => { if (!cancelled) load(); }, 400);
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      cancelled = true;
+      if (visTimer) clearTimeout(visTimer);
+      document.removeEventListener('visibilitychange', onVis);
+    };
   }, []);
 
   // Corporate actions + news: refetch whenever the News tab opens so we never keep an
