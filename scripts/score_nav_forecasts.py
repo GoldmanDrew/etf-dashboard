@@ -27,6 +27,8 @@ import json
 import logging
 import math
 import os
+import re
+import shutil
 import statistics
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -47,6 +49,7 @@ ETF_METRICS_LATEST_PATH = DATA_DIR / "etf_metrics_latest.json"
 DASHBOARD_DATA_PATH = DATA_DIR / "dashboard_data.json"
 
 HISTORY_TRADING_DAYS = 60
+_REALIZED_JSONL_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}\.jsonl$")
 
 
 # ---------------------------------------------------------------------------
@@ -170,14 +173,115 @@ def score_one_day(
     return out
 
 
+def _score_one_day_diagnostics(
+    snap_rows: list[dict],
+    metrics_latest: dict,
+    target: date,
+) -> dict[str, int]:
+    """Counts why ``score_one_day`` may drop rows (for operator logs)."""
+    target_iso = target.isoformat()
+    metrics_by_sym = metrics_latest.get("by_symbol") or {}
+    na_conf = 0
+    bad_hat = 0
+    missing_m = 0
+    bad_nav = 0
+    date_mismatch = 0
+    for r in snap_rows:
+        sym = str(r.get("symbol") or "").upper()
+        if not sym:
+            continue
+        if (r.get("confidence") or "na") == "na":
+            na_conf += 1
+            continue
+        nav_hat = r.get("nav_hat")
+        if not _isfin(nav_hat) or float(nav_hat) <= 0:
+            bad_hat += 1
+            continue
+        m = metrics_by_sym.get(sym)
+        if not m:
+            missing_m += 1
+            continue
+        nav_actual = m.get("nav")
+        date_str = m.get("date") or target_iso
+        if not _isfin(nav_actual) or float(nav_actual) <= 0:
+            bad_nav += 1
+            continue
+        if str(date_str) != target_iso:
+            date_mismatch += 1
+    return {
+        "snap_rows": len(snap_rows),
+        "drop_na_confidence": na_conf,
+        "drop_bad_nav_hat": bad_hat,
+        "drop_missing_metrics_symbol": missing_m,
+        "drop_bad_or_missing_nav_actual": bad_nav,
+        "drop_metric_date_mismatch": date_mismatch,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Rolling stats
 # ---------------------------------------------------------------------------
 
+def _iter_realized_jsonl_paths(realized_dir: Path) -> list[Path]:
+    """All per-day realized files (flat or nested); only ``YYYY-MM-DD.jsonl`` names."""
+    if not realized_dir.exists():
+        return []
+    paths = [
+        p for p in realized_dir.rglob("*.jsonl")
+        if _REALIZED_JSONL_NAME.match(p.name)
+    ]
+    # Prefer unique basenames; if duplicates (nested copies), keep largest file.
+    by_name: dict[str, Path] = {}
+    for p in sorted(paths):
+        prev = by_name.get(p.name)
+        if prev is None or p.stat().st_size > prev.stat().st_size:
+            by_name[p.name] = p
+    return sorted(by_name.values(), key=lambda x: x.name)
+
+
+def flatten_nested_realized_jsonl(realized_dir: Path) -> int:
+    """Move misplaced ``realized/realized/.../DATE.jsonl`` up to ``realized/DATE.jsonl``."""
+    if not realized_dir.exists():
+        return 0
+    moved = 0
+    for p in _iter_realized_jsonl_paths(realized_dir):
+        if p.parent.resolve() == realized_dir.resolve():
+            continue
+        dest = realized_dir / p.name
+        realized_dir.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            shutil.move(str(p), str(dest))
+            moved += 1
+            continue
+        # Merge unique (date, symbol, model) rows into dest, then drop nested copy.
+        seen: set[tuple[str, str, str]] = set()
+        merged: list[str] = []
+        for fp in (dest, p):
+            for r in _read_jsonl(fp):
+                k = (
+                    str(r.get("date") or ""),
+                    str(r.get("symbol") or "").upper(),
+                    str(r.get("model") or "delta_v1"),
+                )
+                if not k[0] or not k[1]:
+                    continue
+                if k in seen:
+                    continue
+                seen.add(k)
+                merged.append(json.dumps(r, separators=(",", ":"), allow_nan=False, sort_keys=True))
+        dest.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        moved += 1
+    return moved
+
+
 def _walk_realized(
     realized_dir: Path, max_files: int,
 ) -> dict[tuple[str, str], list[dict]]:
-    files = sorted(realized_dir.glob("*.jsonl"))[-max_files:] if realized_dir.exists() else []
+    files = _iter_realized_jsonl_paths(realized_dir)[-max_files:] if realized_dir.exists() else []
     by_key: dict[tuple[str, str], list[dict]] = {}
     for fp in files:
         for r in _read_jsonl(fp):
@@ -497,12 +601,22 @@ def main() -> None:
         target = datetime.strptime(latest_str, "%Y-%m-%d").date()
     LOGGER.info("scoring target date: %s", target)
 
+    realized_dir = Path(args.realized_dir)
+    n_flat = flatten_nested_realized_jsonl(realized_dir)
+    if n_flat:
+        LOGGER.info("flattened %d misplaced realized/*.jsonl into %s", n_flat, realized_dir)
+
     snap_path = Path(args.snapshot_dir) / f"{target.isoformat()}.jsonl"
     snap_rows = _read_jsonl(snap_path)
     LOGGER.info("loaded %d snapshot rows from %s", len(snap_rows), snap_path)
+    if not snap_rows:
+        LOGGER.warning("snapshot file missing or empty — no forecasts to score for %s", target)
+
+    diag = _score_one_day_diagnostics(snap_rows, metrics_latest, target)
+    LOGGER.info("score_one_day input diagnostics: %s", diag)
 
     realized_rows = score_one_day(snap_rows, metrics_latest, target)
-    realized_path = Path(args.realized_dir) / f"{target.isoformat()}.jsonl"
+    realized_path = realized_dir / f"{target.isoformat()}.jsonl"
     realized_path.parent.mkdir(parents=True, exist_ok=True)
     with realized_path.open("w", encoding="utf-8") as f:
         for r in realized_rows:
@@ -516,16 +630,28 @@ def main() -> None:
         "wrote %d realized rows -> %s by_model=%s",
         len(realized_rows), realized_path, by_model_count,
     )
+    if not realized_rows and snap_rows:
+        LOGGER.warning(
+            "zero realized rows but %d snapshot rows — check NAV date alignment "
+            "and etf_metrics_latest.by_symbol[*].date vs target %s",
+            len(snap_rows), target,
+        )
 
     default_model_for_symbol = _load_default_model_for_symbol(Path(args.latest_forecast))
 
     metrics_payload = update_metrics_daily(
-        Path(args.realized_dir), default_model_for_symbol=default_model_for_symbol,
+        realized_dir, default_model_for_symbol=default_model_for_symbol,
     )
     _atomic_write_json(Path(args.metrics_out), metrics_payload)
+    n_by_sym = len(metrics_payload.get("by_symbol") or {})
+    n_files = len(_iter_realized_jsonl_paths(realized_dir))
+    LOGGER.info(
+        "metrics rollup: by_symbol=%d keys, realized_day_files=%d",
+        n_by_sym, n_files,
+    )
 
     history_payload = update_history_panel(
-        Path(args.realized_dir), default_model_for_symbol=default_model_for_symbol,
+        realized_dir, default_model_for_symbol=default_model_for_symbol,
     )
     _atomic_write_json(Path(args.history_out), history_payload)
 

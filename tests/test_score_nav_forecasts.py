@@ -130,6 +130,29 @@ def test_metrics_daily_falls_back_to_preference_order(tmp_path: Path):
     assert payload["by_symbol"]["AAPU"]["model"] == "delta_v1"
 
 
+def test_walk_realized_collects_nested_yyyy_mm_dd_jsonl(tmp_path: Path):
+    """Regression: nested ``realized/realized/DATE.jsonl`` must still roll up metrics."""
+    rdir = tmp_path / "realized"
+    nested = rdir / "realized" / "nested"
+    nested.mkdir(parents=True)
+    with (nested / "2026-04-26.jsonl").open("w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "date": "2026-04-26", "symbol": "TSLL", "model": "delta_v1",
+            "product_class": "letf", "nav_hat_close": 10.0, "nav_actual": 10.0,
+            "err_bp": 0.0, "abs_err_bp": 0.0,
+        }) + "\n")
+    with (nested / "2026-04-28.jsonl").open("w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "date": "2026-04-28", "symbol": "TSLL", "model": "delta_v1",
+            "product_class": "letf", "nav_hat_close": 10.4, "nav_actual": 10.4,
+            "err_bp": 0.0, "abs_err_bp": 0.0,
+        }) + "\n")
+    by_key = sc._walk_realized(rdir, max_files=50)
+    rows = by_key.get(("TSLL", "delta_v1"), [])
+    assert len(rows) == 2
+    assert rows[0]["date"] == "2026-04-26"
+
+
 def test_history_panel_per_model_default(tmp_path: Path):
     rdir = tmp_path / "realized"
     _write_realized_jsonl(rdir / "2026-04-28.jsonl", [

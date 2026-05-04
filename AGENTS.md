@@ -342,6 +342,9 @@ This same function is reused for **sorting** the column. If you change the rende
 | `etf_screened_today.csv` | `ls-algo/daily_screener.py` | `build_data.py` | daily (cached copy of upstream) |
 | `borrow_history.json` | `build_data.py` (walks ls-algo git history) | `ChartPage`, `ls-algo` net-edge bootstrap | daily |
 | `borrow_spike_risk.json` | `build_data.py` (spike model) | `ChartPage`, `BorrowMonitor` | daily |
+| `borrow_spike_predictions/<DATE>.json` | `build_data.py` (full + `--borrow-only`) | `scripts/score_borrow_spikes.py` | daily / every 10 min |
+| `borrow_spike_realized.jsonl` | `scripts/score_borrow_spikes.py` | ops / calibration audits | append on workflow |
+| `borrow_spike_metrics.json` | `scripts/score_borrow_spikes.py` | Brier, log-loss, band calibration rollup | daily / borrow refresh |
 | `options_cache.json` | `build_data.py --options-only` | `ChartPage`, `Trade Lab` | every 5 min (sharded) |
 | `etf_metrics_daily.{parquet,csv,json}` | `ingest_etf_metrics.py` | Stats tab (NAV/AUM/shares chart) | daily 5 AM ET |
 | `etf_metrics_latest.json` | `ingest_etf_metrics.py` | Stats tab (snapshot panel) | daily 5 AM ET |
@@ -358,6 +361,8 @@ This same function is reused for **sorting** the column. If you change the rende
 | `nav_forecasts/_anchors.json` | `scripts/score_nav_forecasts.py` | `scripts/forecast_nav.py` (input only) | daily 5 AM ET |
 | `nav_forecasts/snapshots/<DATE>.jsonl` | `scripts/forecast_nav.py` | `scripts/score_nav_forecasts.py`; offline audits | every 30 min |
 | `nav_forecasts/realized/<DATE>.jsonl` | `scripts/score_nav_forecasts.py` | rolling-stats build | daily 5 AM ET |
+
+**NAV realized rollup:** `score_nav_forecasts.py` collects every `YYYY-MM-DD.jsonl` under `nav_forecasts/realized/` (including nested paths from older CI copies), flattens duplicates into the top-level file, then builds `_metrics_daily.json` / `_history_panel.json`.
 
 `dashboard_data.json` is large (~2.9 MB) because it contains every row plus the bootstrap histogram blobs. Keep it that way — the SPA expects to fetch a single primary JSON.
 

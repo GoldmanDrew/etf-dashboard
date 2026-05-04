@@ -109,6 +109,7 @@ OUTPUT_DIR = Path(__file__).parent.parent / "data"
 OUTPUT_FILE = OUTPUT_DIR / "dashboard_data.json"
 BORROW_HISTORY_FILE = OUTPUT_DIR / "borrow_history.json"
 BORROW_SPIKE_RISK_FILE = OUTPUT_DIR / "borrow_spike_risk.json"
+BORROW_SPIKE_PREDICTIONS_DIR = OUTPUT_DIR / "borrow_spike_predictions"
 OPTIONS_CACHE_FILE = OUTPUT_DIR / "options_cache.json"
 ETF_METRICS_DAILY_FILE = OUTPUT_DIR / "etf_metrics_daily.csv"
 ETF_HOLDINGS_LATEST_FILE = OUTPUT_DIR / "etf_holdings_latest.csv"
@@ -685,6 +686,82 @@ def _risk_band(p: float | None) -> str:
     if p >= 0.10:
         return "elevated"
     return "low"
+
+
+def compute_borrow_spike_event_by_date(
+    hist: list[dict],
+    *,
+    horizon_days: int = 5,
+) -> dict[str, float | None]:
+    """Spike label per calendar row, matching ``build_borrow_spike_risk_payload``.
+
+    For each history row date ``D``, returns 1.0 if a spike occurred over the
+    next ``horizon_days`` **observations** (same rolling definition as training),
+    0.0 if not, or ``None`` if undefined (insufficient history or warm-up).
+
+    Used by ``scripts/score_borrow_spikes.py`` to score saved predictions.
+    """
+    if not hist or len(hist) < 12:
+        return {}
+    s = (
+        pd.DataFrame(hist)
+        .assign(
+            date=lambda d: pd.to_datetime(d["date"], errors="coerce"),
+            borrow_current=lambda d: pd.to_numeric(d.get("borrow_current"), errors="coerce"),
+            shares_available=lambda d: pd.to_numeric(d.get("shares_available"), errors="coerce"),
+        )
+        .dropna(subset=["date"])
+        .sort_values("date")
+        .drop_duplicates(subset=["date"], keep="last")
+        .reset_index(drop=True)
+    )
+    if len(s) < 12:
+        return {}
+    s["borrow_lag1"] = s["borrow_current"].shift(1)
+    s["borrow_lag5"] = s["borrow_current"].shift(5)
+    s["med60"] = s["borrow_current"].rolling(60, min_periods=10).median()
+    s["p99_180"] = s["borrow_current"].rolling(180, min_periods=20).quantile(0.99)
+    fut_max = s["borrow_current"].rolling(horizon_days, min_periods=1).max().shift(-horizon_days)
+    fut_jump = (fut_max - s["borrow_current"]).astype(float)
+    spike_threshold = np.maximum(1.0, np.maximum(3.0 * s["med60"], s["p99_180"]))
+    s["spike_event"] = ((fut_max > spike_threshold) & (fut_jump > 0.25)).astype(float)
+    out: dict[str, float | None] = {}
+    for _, row in s.iterrows():
+        d = row["date"]
+        if pd.isna(d):
+            continue
+        ds = d.strftime("%Y-%m-%d")
+        ev = row["spike_event"]
+        if pd.isna(ev) or not np.isfinite(ev):
+            out[ds] = None
+        else:
+            out[ds] = float(ev)
+    return out
+
+
+def write_borrow_spike_predictions_snapshot(
+    borrow_spike_risk: dict,
+    *,
+    pred_dir: Path,
+    as_of_date: str | None = None,
+) -> Path | None:
+    """Persist per-symbol scores for lagged outcome scoring (one JSON per day)."""
+    as_of = as_of_date or str((borrow_spike_risk or {}).get("as_of") or "").strip()
+    if not as_of:
+        return None
+    pred_dir = Path(pred_dir)
+    pred_dir.mkdir(parents=True, exist_ok=True)
+    path = pred_dir / f"{as_of}.json"
+    snap = {
+        "as_of": as_of,
+        "horizon_days": borrow_spike_risk.get("horizon_days"),
+        "label_definition": borrow_spike_risk.get("label_definition"),
+        "model": borrow_spike_risk.get("model"),
+        "symbols": borrow_spike_risk.get("symbols") or {},
+    }
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(snap, f, indent=None, separators=(",", ":"), allow_nan=False)
+    return path
 
 
 def build_borrow_spike_risk_payload(
@@ -2821,6 +2898,11 @@ def refresh_borrow_only() -> None:
         json.dump(hist_payload, f, indent=None, separators=(",", ":"))
     with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
         json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
+    _bp = write_borrow_spike_predictions_snapshot(
+        borrow_spike_risk, pred_dir=BORROW_SPIKE_PREDICTIONS_DIR, as_of_date=today_utc,
+    )
+    if _bp:
+        print(f"[OK] Borrow spike predictions snapshot -> {_bp}")
 
     print(f"[OK] Borrow-only refresh wrote {OUTPUT_FILE}")
     print(f"[OK] Borrow-only refresh wrote {BORROW_HISTORY_FILE}")
@@ -3238,6 +3320,11 @@ def build():
         json.dump(borrow_history, f, indent=None, separators=(",", ":"))
     with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
         json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
+    _bp = write_borrow_spike_predictions_snapshot(
+        borrow_spike_risk, pred_dir=BORROW_SPIKE_PREDICTIONS_DIR, as_of_date=today_utc,
+    )
+    if _bp:
+        print(f"  [OK] Borrow spike predictions snapshot -> {_bp}")
     symbols_for_options = select_symbols_for_polygon_cache(records)
     options_cache = build_polygon_options_cache(symbols_for_options)
     with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:

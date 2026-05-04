@@ -104,6 +104,11 @@ jobs:
           TRADIER_MAX_TOTAL_REQUESTS: "70"
         run: python scripts/build_data.py
 
+      - name: Score borrow spike predictions
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/score_borrow_spikes.py
+
       - name: Print options coverage diagnostics (with hard gate)
         # Same rationale as the build step: don't let a quota-limited options
         # refresh block the Pages deploy.  The diagnostic warning is still
@@ -120,7 +125,7 @@ jobs:
         if: steps.build_data.outcome == 'success'
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/borrow_spike_risk.json data/options_cache.json"
+          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/borrow_spike_risk.json data/borrow_spike_predictions data/borrow_spike_realized.jsonl data/borrow_spike_metrics.json data/options_cache.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ${FILES}
