@@ -707,6 +707,20 @@ node tests/test_trade_lab.js
 
 The JS tests are plain Node scripts (no test runner). They use `assert` and exit non-zero on failure.
 
+### 12.7 Sync **Diamond-Creek-Quant** (`GoldmanDrew/Diamond-Creek-Quant`) with this repo’s ETF metrics / Stats pipeline
+
+Cloud agents cannot push to that repo (token has no `push` on it). From your laptop (path to your **Diamond-Creek-Quant** clone):
+
+```bash
+cd /path/to/etf-dashboard   # this repo
+./scripts/sync_diamond_creek_quant_metrics.sh /path/to/Diamond-Creek-Quant
+cd /path/to/Diamond-Creek-Quant
+python3 -m pytest tests/test_backfill_underlying_adj_close_script.py tests/test_etf_metrics_shares_repair.py -v
+git add -A && git commit -m "sync: etf-dashboard ETF metrics + underlying adj close pipeline" && git push origin master
+```
+
+Then run **Update ETF Metrics** on Diamond-Creek-Quant (or `python scripts/ingest_etf_metrics.py` then `python scripts/backfill_underlying_adj_close.py`) so `data/etf_metrics_daily.json` picks up filled `underlying_adj_close`, and let **build-and-deploy** publish Pages.
+
 ---
 
 ## 13. Gotchas & pitfalls
