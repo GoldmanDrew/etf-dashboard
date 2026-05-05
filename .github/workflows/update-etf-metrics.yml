@@ -96,6 +96,12 @@ jobs:
       - name: Ingest ETF metrics
         run: python scripts/ingest_etf_metrics.py --lookback-days 10 --polygon-lookback-days 5
 
+      # Runs even when ingest skipped (ETF_METRICS_SKIP_IF_RECENT_HOURS): that early-exit
+      # used to skip gap-fill entirely, leaving historical underlying_adj_close null forever.
+      - name: Backfill underlying adj. close gaps
+        continue-on-error: true
+        run: python scripts/backfill_underlying_adj_close.py
+
       - name: Backfill historical close prices
         # One yfinance batch call fills close_price for every (date,ticker) row
         # that predates the column. Uses --only-missing (default) so re-runs are
