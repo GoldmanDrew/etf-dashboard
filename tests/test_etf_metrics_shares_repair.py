@@ -33,6 +33,59 @@ def test_fetch_underlying_adj_close_batch_chunks_yfinance_calls(monkeypatch):
     assert [len(c) for c in captured] == [2, 2, 1]
 
 
+def test_backfill_underlying_adj_close_gaps_fetches_per_underlying(monkeypatch):
+    df = pd.DataFrame(
+        [
+            {
+                "date": "2026-04-20",
+                "ticker": "APLZ",
+                "nav": 10.0,
+                "aum": 1e8,
+                "shares_outstanding": 1e7,
+                "close_price": 10.1,
+                "underlying_adj_close": None,
+                "stale": False,
+                "stale_age_bdays": None,
+                "source_provider": "x",
+                "source_url": "",
+                "ingested_at_utc": "2026-04-27T00:00:00Z",
+                "status": "ok",
+            },
+            {
+                "date": "2026-04-21",
+                "ticker": "APLZ",
+                "nav": 10.1,
+                "aum": 1e8,
+                "shares_outstanding": 1e7,
+                "close_price": 10.2,
+                "underlying_adj_close": None,
+                "stale": False,
+                "stale_age_bdays": None,
+                "source_provider": "x",
+                "source_url": "",
+                "ingested_at_utc": "2026-04-27T00:00:00Z",
+                "status": "ok",
+            },
+        ]
+    )
+    calls: list[tuple[str, date, date]] = []
+
+    def fake_fetch(syms, start, end):
+        calls.append((tuple(syms), start, end))
+        rows = []
+        for i, d in enumerate(pd.date_range(start, end, freq="D")):
+            rows.append(
+                {"date": d.date(), "ticker": syms[0], "underlying_adj_close": 33.0 + i * 0.1},
+            )
+        return pd.DataFrame(rows)
+
+    monkeypatch.setattr(iem, "fetch_underlying_adj_close_batch", fake_fetch)
+    out = iem.backfill_underlying_adj_close_gaps(df, {"APLZ": "APLD"})
+    assert len(calls) >= 1
+    assert calls[0][0] == ("APLD",)
+    assert float(out.iloc[0]["underlying_adj_close"]) > 32
+
+
 def test_merge_underlying_adj_close_joins_on_underlying_ticker():
     df = pd.DataFrame(
         [
