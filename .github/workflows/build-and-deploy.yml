@@ -135,7 +135,12 @@ jobs:
             TMP_DIR="$(mktemp -d)"
             for f in ${FILES}; do
               mkdir -p "${TMP_DIR}/$(dirname "$f")"
-              cp "$f" "${TMP_DIR}/$f"
+              if [ -d "$f" ]; then
+                mkdir -p "${TMP_DIR}/$f"
+                cp -a "$f"/. "${TMP_DIR}/$f"/
+              elif [ -f "$f" ]; then
+                cp "$f" "${TMP_DIR}/$f"
+              fi
             done
             pushed=0
             for i in 1 2 3; do
@@ -144,7 +149,10 @@ jobs:
               git clean -fd || true
               git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
               for f in ${FILES}; do
-                if [ -f "${TMP_DIR}/$f" ]; then
+                if [ -d "${TMP_DIR}/$f" ]; then
+                  mkdir -p "$f"
+                  cp -a "${TMP_DIR}/$f"/. "$f"/
+                elif [ -f "${TMP_DIR}/$f" ]; then
                   mkdir -p "$(dirname "$f")"
                   cp "${TMP_DIR}/$f" "$f"
                 fi
