@@ -631,11 +631,10 @@ def backfill_underlying_adj_close_gaps(
 ) -> pd.DataFrame:
     """Fill ``underlying_adj_close`` where it is still null but we know the underlying.
 
-    The main batch merge only covers ``[resolved_start_date, resolved_end_date]``.
-    Historical rows (or rows missed by Yahoo bulk quirks) can remain null; the
-    dashboard used to show them as ``$0.00`` because ``Number(null) === 0``.
-    For each underlying with any missing values, fetch that symbol alone for the
-    min/max dates of missing rows and left-merge adjusted closes onto those rows.
+    For each underlying with any missing values, fetch Yahoo adjusted closes for
+    ``(dmin, dmax)`` of those rows and merge. Call on the **full** merged daily
+    store (after ``upsert``), or from ``scripts/backfill_underlying_adj_close.py``
+    when the main ingest job skipped the provider pull.
     """
     if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
         return df
@@ -1127,7 +1126,22 @@ def main() -> None:
 
     existing = load_existing()
     if should_skip_scheduled_redundant_ingest(existing, tickers, resolved_end_date):
-        LOGGER.info("Exiting without network ingest (redundant scheduled run).")
+        LOGGER.info(
+            "Skipping redundant provider ingest — still running underlying_adj_close gap backfill on store",
+        )
+        underlying_map = load_universe_underlying_map()
+        merged = backfill_underlying_adj_close_gaps(existing.copy(), underlying_map)
+        before = int(pd.to_numeric(existing["underlying_adj_close"], errors="coerce").notna().sum())
+        after = int(pd.to_numeric(merged["underlying_adj_close"], errors="coerce").notna().sum())
+        if after > before:
+            validate_df(merged)
+            save_outputs(merged)
+            LOGGER.info(
+                "Saved metrics after skip-path backfill (+ %d non-null underlying_adj_close rows)",
+                after - before,
+            )
+        else:
+            LOGGER.info("Skip path: no new underlying_adj_close fills (%d non-null)", after)
         return
 
     session = _build_session()
