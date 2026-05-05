@@ -3319,7 +3319,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       setEtfMetricsLoading(true);
       setEtfMetricsError(null);
       try {
-        const cacheBust = `?t=${Math.floor(Date.now() / 3600000)}`;
+        // 1-minute bucket (same as borrow history): metrics workflow can land mid-hour;
+        // hourly bust left users seeing stale underlying_adj_close until the clock turned.
+        const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
         const res = await fetch(`${ETF_METRICS_DAILY_URL}${cacheBust}`, { cache: 'no-store' });
         if (!res.ok) throw new Error(`etf metrics HTTP ${res.status}`);
         const payload = await res.json();
@@ -3354,7 +3356,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       }
       setEtfDistributionsError(null);
       try {
-        const cacheBust = `?t=${Math.floor(Date.now() / 3600000)}`;
+        const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
         const res = await fetch(`${ETF_DISTRIBUTIONS_URL}${cacheBust}`, { cache: 'no-store' });
         if (!res.ok) throw new Error(`etf distributions HTTP ${res.status}`);
         const payload = await res.json();
