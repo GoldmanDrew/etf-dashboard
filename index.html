@@ -2334,9 +2334,9 @@ function SimpleSeriesPlot({
   if (!Array.isArray(series) || !series.length) {
     return <div className="scenario-warning">No data available.</div>;
   }
-  const primaryVals = series.map(p => Number(p?.[valueKey])).filter(Number.isFinite);
+  const primaryVals = series.map(p => toFiniteNum(p?.[valueKey])).filter(v => v != null);
   const overlayVals = overlayValueKey
-    ? series.map(p => Number(p?.[overlayValueKey])).filter(Number.isFinite)
+    ? series.map(p => toFiniteNum(p?.[overlayValueKey])).filter(v => v != null)
     : [];
   if (!primaryVals.length && !overlayVals.length) {
     return <div className="scenario-warning">No finite values available.</div>;
@@ -2368,9 +2368,9 @@ function SimpleSeriesPlot({
     .filter(Boolean)
     .join(' ');
 
-  const lineVals = series.map(p => Number(p?.[valueKey]));
+  const lineVals = series.map(p => toFiniteNum(p?.[valueKey]));
   const linePath = buildPath(lineVals);
-  const overlayLineVals = overlayValueKey ? series.map(p => Number(p?.[overlayValueKey])) : [];
+  const overlayLineVals = overlayValueKey ? series.map(p => toFiniteNum(p?.[overlayValueKey])) : [];
   const overlayPath = overlayValueKey ? buildPath(overlayLineVals) : '';
 
   const findLatestIdx = (vals) => {
@@ -4204,7 +4204,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             </div>
             <div className="chart-stat">
               <div className="cs-label">Total-Return NAV</div>
-              <div className="cs-value">{latestEtfMetric && Number.isFinite(Number(latestEtfMetric.nav_total_return)) ? fmtUsd(Number(latestEtfMetric.nav_total_return)) : '—'}</div>
+              <div className="cs-value">{latestEtfMetric && toFiniteNum(latestEtfMetric.nav_total_return) != null ? fmtUsd(toFiniteNum(latestEtfMetric.nav_total_return)) : '—'}</div>
               <div className="cs-sub">
                 {etfDistributionCount
                   ? `${etfDistributionCount} distrib. — last ${etfLatestDistribution?.ex_date || '—'}`
@@ -4216,8 +4216,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 title={`Yahoo dividend/split-adjusted close for ${String(undSym || '').trim().toUpperCase() || 'underlying'} (same dates as metrics table).`}
               >
                 {undAdjCloseLabel}:{' '}
-                {latestEtfMetric && Number.isFinite(Number(latestEtfMetric.underlying_adj_close))
-                  ? fmtUsd(Number(latestEtfMetric.underlying_adj_close))
+                {latestEtfMetric && toFiniteNum(latestEtfMetric.underlying_adj_close) != null
+                  ? fmtUsd(toFiniteNum(latestEtfMetric.underlying_adj_close))
                   : '—'}
               </div>
             </div>
@@ -4457,8 +4457,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <td>{fmtUsd(nav)}</td>
                           <td>{Number.isFinite(close) ? fmtUsd(close) : '—'}</td>
                           <td>{premPct == null ? '—' : `${premPct >= 0 ? '+' : ''}${premPct.toFixed(2)}%`}</td>
-                          <td>{Number.isFinite(Number(m.nav_total_return)) ? fmtUsd(Number(m.nav_total_return)) : '—'}</td>
-                          <td>{Number.isFinite(Number(m.underlying_adj_close)) ? fmtUsd(Number(m.underlying_adj_close)) : '—'}</td>
+                          <td>{toFiniteNum(m.nav_total_return) != null ? fmtUsd(toFiniteNum(m.nav_total_return)) : '—'}</td>
+                          <td>{toFiniteNum(m.underlying_adj_close) != null ? fmtUsd(toFiniteNum(m.underlying_adj_close)) : '—'}</td>
                           <td>{fmtMoney(Number(m.aum))}</td>
                           <td>{fmtSharesCount(Number(m.shares_outstanding))}</td>
                           <td className={String(m.status || '').includes('repaired') ? 'val-warning' : ''}>{m.status || '—'}</td>

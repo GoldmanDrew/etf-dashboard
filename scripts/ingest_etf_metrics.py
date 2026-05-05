@@ -625,6 +625,72 @@ def merge_underlying_adj_close(
     return merged
 
 
+def backfill_underlying_adj_close_gaps(
+    df: pd.DataFrame,
+    etf_to_underlying: dict[str, str],
+) -> pd.DataFrame:
+    """Fill ``underlying_adj_close`` where it is still null but we know the underlying.
+
+    The main batch merge only covers ``[resolved_start_date, resolved_end_date]``.
+    Historical rows (or rows missed by Yahoo bulk quirks) can remain null; the
+    dashboard used to show them as ``$0.00`` because ``Number(null) === 0``.
+    For each underlying with any missing values, fetch that symbol alone for the
+    min/max dates of missing rows and left-merge adjusted closes onto those rows.
+    """
+    if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
+        return df
+    if df.empty or not etf_to_underlying:
+        return df
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+
+    def _und_for(sym: object) -> str | None:
+        t = _normalize_symbol(sym) if sym is not None and str(sym).strip() else ""
+        if not t:
+            return None
+        u = etf_to_underlying.get(t)
+        if u is None or pd.isna(u):
+            return None
+        us = str(u).strip()
+        return _normalize_symbol(us) if us else None
+
+    out["_bf_und"] = out["ticker"].map(_und_for)
+    u0 = pd.to_numeric(out.get("underlying_adj_close"), errors="coerce")
+    miss = out["_bf_und"].notna() & u0.isna()
+    if not bool(miss.any()):
+        return out.drop(columns=["_bf_und"], errors="ignore")
+
+    filled_before = int(u0.notna().sum())
+    for und in sorted(out.loc[miss, "_bf_und"].astype(str).str.upper().unique()):
+        m = miss & (out["_bf_und"].astype(str).str.upper() == und)
+        if not m.any():
+            continue
+        dmin = out.loc[m, "date"].min()
+        dmax = out.loc[m, "date"].max()
+        patch = fetch_underlying_adj_close_batch([und], dmin, dmax)
+        if patch.empty:
+            LOGGER.warning(
+                "backfill underlying_adj_close: yfinance returned no rows for %s (%s..%s)",
+                und, dmin, dmax,
+            )
+            continue
+        pmap = patch.rename(columns={"ticker": "_p_sym", "underlying_adj_close": "_p_adj"})
+        pmap["date"] = pd.to_datetime(pmap["date"], errors="coerce").dt.date
+        pmap["_p_sym"] = pmap["_p_sym"].astype(str).str.upper()
+        out = out.merge(pmap, left_on=["date", "_bf_und"], right_on=["date", "_p_sym"], how="left")
+        u_old = pd.to_numeric(out["underlying_adj_close"], errors="coerce")
+        u_new = pd.to_numeric(out["_p_adj"], errors="coerce")
+        out["underlying_adj_close"] = u_old.combine_first(u_new)
+        out = out.drop(columns=["_p_sym", "_p_adj"], errors="ignore")
+
+    filled_after = int(pd.to_numeric(out["underlying_adj_close"], errors="coerce").notna().sum())
+    n_new = filled_after - filled_before
+    if n_new > 0:
+        LOGGER.info("backfill underlying_adj_close: +%d non-null row(s) after gap fetch", n_new)
+    return out.drop(columns=["_bf_und"], errors="ignore")
+
+
 def save_holdings_outputs(
     new_rows: pd.DataFrame,
     parquet_path: Path | None = None,
@@ -1122,6 +1188,8 @@ def main() -> None:
         if "underlying_adj_close" not in incoming.columns:
             incoming["underlying_adj_close"] = None
         LOGGER.info("underlying_adj_close fetch returned no rows")
+
+    incoming = backfill_underlying_adj_close_gaps(incoming, underlying_map)
 
     max_stale_business_days = int(os.getenv("ETF_METRICS_MAX_STALE_BUSINESS_DAYS", "3"))
     incoming = apply_stale_carry_forward(
