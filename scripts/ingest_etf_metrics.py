@@ -1189,8 +1189,6 @@ def main() -> None:
             incoming["underlying_adj_close"] = None
         LOGGER.info("underlying_adj_close fetch returned no rows")
 
-    incoming = backfill_underlying_adj_close_gaps(incoming, underlying_map)
-
     max_stale_business_days = int(os.getenv("ETF_METRICS_MAX_STALE_BUSINESS_DAYS", "3"))
     incoming = apply_stale_carry_forward(
         existing=existing,
@@ -1212,6 +1210,9 @@ def main() -> None:
                 n_post,
             )
         LOGGER.info("Repaired shares on %d row(s); status re-evaluated", n_share_repairs)
+    # Must run on full merged history: ``incoming`` is usually one trading day,
+    # so an earlier backfill never saw legacy null rows in the parquet store.
+    merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
     validate_df(merged)
     save_outputs(merged)
     LOGGER.info("Saved merged summary: %s", get_summary(merged))
