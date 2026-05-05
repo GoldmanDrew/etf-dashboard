@@ -617,7 +617,7 @@ Five workflows, four cron schedules:
 
 **Critical safety rail:** `build-and-deploy.yml`'s `Build dashboard data` step is `continue-on-error: true`. If `build_data.py` flakes (Polygon 429, Yahoo timeout, IBKR FTP outage), the workflow falls back to whatever JSON is currently committed to `main` and still ships a Pages deploy. This means a transient API outage will not blank out the site — but it also means a bad data push **will** stick until the next successful build. Always sanity-check `data/dashboard_data.json` after committing.
 
-The four refresh workflows commit JSON only and **do not** trigger a Pages deploy themselves. The deploy is consolidated to `build-and-deploy.yml` to avoid concurrency contention on the `pages-deploy` group.
+The four refresh workflows do not embed a Pages deploy step; instead **any push to `main`** (including their data commits) starts **`build-and-deploy.yml`**, which assembles `_site/` and publishes GitHub Pages. Until that job finishes, `https://…/etf-dashboard/data/etf_metrics_daily.json` on Pages can lag `main`. The SPA busts cache on that JSON with a **1-minute** `?t=` query param (`index.html`); hard-refresh if you still see stale cells after deploy.
 
 ### Required repo secrets
 
