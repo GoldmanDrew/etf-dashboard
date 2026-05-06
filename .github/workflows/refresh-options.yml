@@ -63,7 +63,7 @@ jobs:
           OPTIONS_ACCUMULATE_CACHE: "1"
           OPTIONS_MAX_ROWS_PER_SYMBOL: "1500"
           TRADIER_CHAIN_SYMBOLS: ""
-          TRADIER_CHAIN_MAX_EXPIRIES: "16"
+          TRADIER_CHAIN_MAX_EXPIRIES: "8"
           TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL: "320"
           TRADIER_CHAIN_STRIKE_BAND_PCT: "0.50"
           TRADIER_CHAIN_STRIKE_BAND_DOWN_PCT: "0.50"
@@ -71,7 +71,7 @@ jobs:
           TRADIER_APLZ_CHAIN_STRIKE_BAND_UP_PCT: "2.50"
           TRADIER_CHAIN_MONEYNESS_MODE: "atm_otm"
           TRADIER_MAX_REQUESTS_PER_MINUTE: "25"
-          TRADIER_MAX_TOTAL_REQUESTS: "70"
+          TRADIER_MAX_TOTAL_REQUESTS: "140"
         run: python scripts/build_data.py --options-only
 
       - name: Print options coverage diagnostics (with hard gate)
