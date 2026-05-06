@@ -41,6 +41,41 @@ def _row(
     }
 
 
+def test_reverse_split_baig_production_wrong_shares_polygon_hint(tmp_path: Path):
+    """BAIG May 2026: NAV post-split while Yahoo close stale; shares wrong so TNA not flat.
+
+    corporate_actions execution_date 2026-05-05 places a ±1d hint on 2026-05-04.
+    """
+    ca = tmp_path / "ca.json"
+    ca.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "type": "reverse_split",
+                        "ticker": "BAIG",
+                        "execution_date": "2026-05-05",
+                        "ratio_from": 10.0,
+                        "ratio_to": 1.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    df = pd.DataFrame(
+        [
+            _row("2026-05-01", nav=3.72, sh=2_933_537.0, close=3.72, aum=10_912_757.0),
+            _row("2026-05-04", nav=37.89, sh=4_330_000.0, close=3.79, aum=164_000_000.0),
+        ]
+    )
+    out, n = iem.repair_close_price_split_basis_mismatch(df, corporate_actions_path=ca)
+    assert n == 1
+    may4 = out.loc[out["date"] == date(2026, 5, 4), "close_price"].iloc[0]
+    assert abs(float(may4) - 37.9) < 0.06
+    assert abs(float(may4) / 37.89 - 1.0) < 0.02
+
+
 def test_reverse_split_baig_style_repair():
     aum = 10_912_757.0
     df = pd.DataFrame(

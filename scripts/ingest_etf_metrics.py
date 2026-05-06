@@ -248,11 +248,28 @@ def _load_split_price_mult_hints_json(path: Path | None) -> dict[str, dict[date,
     return out
 
 
-def _nearest_split_price_mult_from_shares(sh_prev: float, sh_curr: float, *, rel_tol: float = 0.07) -> float | None:
+def _nearest_split_price_mult_from_shares(sh_prev: float, sh_curr: float, *, rel_tol: float = 0.075) -> float | None:
     """Return whitelist ``R ≈ sh_prev / sh_curr`` (price mult for stale Yahoo close), or None."""
     if sh_prev <= 0 or sh_curr <= 0:
         return None
     obs = sh_prev / sh_curr
+    best_r: float | None = None
+    best_err = 1e9
+    for r in _SPLIT_RATIOS:
+        err = abs(obs / float(r) - 1.0)
+        if err < best_err:
+            best_err = err
+            best_r = float(r)
+    if best_r is None or best_err > rel_tol:
+        return None
+    return best_r
+
+
+def _nearest_split_price_mult_from_nav(nav_prev: float, nav_curr: float, *, rel_tol: float = 0.12) -> float | None:
+    """Return whitelist ``R ≈ nav_curr / nav_prev`` when NAV steps across a split, or None."""
+    if nav_prev <= 0 or nav_curr <= 0:
+        return None
+    obs = nav_curr / nav_prev
     best_r: float | None = None
     best_err = 1e9
     for r in _SPLIT_RATIOS:
@@ -275,9 +292,10 @@ def repair_close_price_split_basis_mismatch(
     Yahoo ``Close`` with ``auto_adjust=False`` can print the pre-split dollar level on the
     first post-split session while issuer-reported ``nav`` / ``shares_outstanding`` are
     already consolidated. That makes ``(close - nav) / nav`` in the UI look like a huge
-    discount/premium. Multiply only offending rows by ``shares_prev / shares_curr`` (must
-    match a ratio in ``_SPLIT_RATIOS``) when NAV and TNA co-move with that ratio
-    and rescaling pulls ``close`` onto ``nav``. Idempotent when Yahoo later fixes history.
+    discount/premium.     Primary ratio comes from ``shares_prev / shares_curr``; when share counts are
+    wrong on the ex-date (TNA explodes) we fall back to ``nav_curr / nav_prev`` and/or
+    ``corporate_actions.json`` split hints (±1 day) to bypass the TNA flatness gate.
+    Rescaling pulls ``close`` onto ``nav``. Idempotent when Yahoo later fixes history.
     """
     if df.empty:
         return df, 0
@@ -319,12 +337,20 @@ def repair_close_price_split_basis_mismatch(
             if abs(close_c / nav_c - 1.0) <= 0.055:
                 continue
 
+            hmap = hints.get(ticker) or {}
+            hint = hmap.get(d_curr)
+
             r = _nearest_split_price_mult_from_shares(sh_p, sh_c)
+            if r is None:
+                r = _nearest_split_price_mult_from_nav(nav_p, nav_c)
+            if r is None and hint is not None:
+                nav_ratio_guess = nav_c / nav_p
+                if abs(nav_ratio_guess / float(hint) - 1.0) <= 0.15:
+                    r = float(hint)
+
             if r is None:
                 continue
 
-            hmap = hints.get(ticker) or {}
-            hint = hmap.get(d_curr)
             if hint is not None and abs(r - float(hint)) / max(float(hint), 1e-9) <= 0.12:
                 r = float(hint)
 
@@ -333,9 +359,18 @@ def repair_close_price_split_basis_mismatch(
                 continue
 
             tna_p, tna_c = nav_p * sh_p, nav_c * sh_c
-            if tna_p <= 0 or tna_c <= 0:
-                continue
-            if abs(tna_c / tna_p - 1.0) > 0.10:
+            tna_ok = (
+                tna_p > 0
+                and tna_c > 0
+                and abs(tna_c / tna_p - 1.0) <= 0.10
+            )
+            # Polygon split feed (+/-1d) on this row: allow repair when issuer NAV
+            # already repriced but Yahoo close / vendor shares are inconsistent (BAIG May 2026).
+            bypass_tna = (
+                hint is not None
+                and abs(nav_ratio / float(hint) - 1.0) <= 0.15
+            )
+            if not tna_ok and not bypass_tna:
                 continue
 
             if not math.isnan(close_p) and close_p > 0:
