@@ -42,6 +42,7 @@ from ingest_etf_metrics import (  # noqa: E402
     collapse_redundant_consecutive_rows,
     enforce_status_consistency,
     load_existing,
+    repair_close_price_split_basis_mismatch,
     save_outputs,
     validate_df,
 )
@@ -252,6 +253,9 @@ def main() -> None:
     updated, n_collapse = collapse_redundant_consecutive_rows(updated)
     if n_collapse:
         LOGGER.info("collapse_redundant dropped %d rows", n_collapse)
+    updated, n_close_split = repair_close_price_split_basis_mismatch(updated)
+    if n_close_split:
+        LOGGER.info("repair_close_price_split_basis_mismatch: %d row(s)", n_close_split)
     validate_df(updated)
     save_outputs(updated)
     LOGGER.info(

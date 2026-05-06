@@ -46,6 +46,16 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+# Split price multipliers for ``repair_close_price_split_basis_mismatch``.
+# Mirrors ls-algo ``splits._SPLIT_RATIOS`` (this repo does not vendor ``splits.py``).
+_INTEGER_SPLIT_FACTORS: tuple[int, ...] = (2, 3, 4, 5, 10, 15, 20, 25, 50)
+_SPLIT_RATIOS: tuple[float, ...] = tuple(
+    sorted(
+        set(list(_INTEGER_SPLIT_FACTORS) + [1.0 / f for f in _INTEGER_SPLIT_FACTORS]),
+        reverse=True,
+    )
+)
+
 from etf_providers import (
     ProviderResult,
     _build_session,
@@ -201,6 +211,160 @@ def repair_shares_vs_aum_nav(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return out, n_bad
 
 
+def _load_split_price_mult_hints_json(path: Path | None) -> dict[str, dict[date, float]]:
+    """Map (ticker, calendar date) -> ``shares_prev / shares_curr`` on the ex-date row.
+
+    ``data/corporate_actions.json`` uses Polygon-style ``ratio_from`` / ``ratio_to`` where
+    ``ratio_from / ratio_to`` matches the per-share price rescale (and share-count step)
+    for both reverse and forward splits. Execution dates are expanded by ±1 calendar day
+    so rows stamped one day off the reference feed still pick up the hint.
+    """
+    out: dict[str, dict[date, float]] = {}
+    p = path or (DATA_DIR / "corporate_actions.json")
+    if not p.exists():
+        return out
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return out
+    for ev in payload.get("events") or []:
+        if str(ev.get("type") or "") not in {"reverse_split", "forward_split"}:
+            continue
+        ticker = str(ev.get("ticker") or "").strip().upper()
+        ed = ev.get("execution_date")
+        rf, rt = ev.get("ratio_from"), ev.get("ratio_to")
+        if not ticker or not ed or rf is None or rt is None:
+            continue
+        try:
+            d0 = date.fromisoformat(str(ed)[:10])
+            mult = float(rf) / float(rt)
+        except (ValueError, TypeError, ZeroDivisionError):
+            continue
+        if mult <= 0:
+            continue
+        for delta in (-1, 0, 1):
+            d1 = d0 + timedelta(days=delta)
+            out.setdefault(ticker, {})[d1] = mult
+    return out
+
+
+def _nearest_split_price_mult_from_shares(sh_prev: float, sh_curr: float, *, rel_tol: float = 0.07) -> float | None:
+    """Return whitelist ``R ≈ sh_prev / sh_curr`` (price mult for stale Yahoo close), or None."""
+    if sh_prev <= 0 or sh_curr <= 0:
+        return None
+    obs = sh_prev / sh_curr
+    best_r: float | None = None
+    best_err = 1e9
+    for r in _SPLIT_RATIOS:
+        err = abs(obs / float(r) - 1.0)
+        if err < best_err:
+            best_err = err
+            best_r = float(r)
+    if best_r is None or best_err > rel_tol:
+        return None
+    return best_r
+
+
+def repair_close_price_split_basis_mismatch(
+    df: pd.DataFrame,
+    *,
+    corporate_actions_path: Path | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """Scale ``close_price`` on split ex-dates when Yahoo raw close lags NAV/shares basis.
+
+    Yahoo ``Close`` with ``auto_adjust=False`` can print the pre-split dollar level on the
+    first post-split session while issuer-reported ``nav`` / ``shares_outstanding`` are
+    already consolidated. That makes ``(close - nav) / nav`` in the UI look like a huge
+    discount/premium. Multiply only offending rows by ``shares_prev / shares_curr`` (must
+    match a ratio in ``_SPLIT_RATIOS``) when NAV and TNA co-move with that ratio
+    and rescaling pulls ``close`` onto ``nav``. Idempotent when Yahoo later fixes history.
+    """
+    if df.empty:
+        return df, 0
+    need = {"date", "ticker", "nav", "shares_outstanding", "close_price"}
+    if not need.issubset(df.columns):
+        return df, 0
+
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+
+    hints = _load_split_price_mult_hints_json(corporate_actions_path)
+    n_rep = 0
+
+    for ticker in out["ticker"].unique():
+        m = out["ticker"] == ticker
+        g = out.loc[m, ["date", "nav", "shares_outstanding", "close_price"]].sort_values("date")
+        if len(g) < 2:
+            continue
+        idx_order = g.index.tolist()
+        nav = pd.to_numeric(g["nav"], errors="coerce").to_numpy()
+        sh = pd.to_numeric(g["shares_outstanding"], errors="coerce").to_numpy()
+        cl = pd.to_numeric(g["close_price"], errors="coerce").to_numpy()
+        dts = g["date"].tolist()
+
+        for k in range(1, len(g)):
+            ix = idx_order[k]
+            sh_p, sh_c = float(sh[k - 1]), float(sh[k])
+            nav_p, nav_c = float(nav[k - 1]), float(nav[k])
+            close_p, close_c = cl[k - 1], cl[k]
+            d_curr = dts[k]
+
+            if any(x <= 0 or math.isnan(x) for x in (sh_p, sh_c, nav_p, nav_c)):
+                continue
+            if math.isnan(close_c) or close_c <= 0:
+                continue
+
+            # Already on NAV basis (or Yahoo self-healed).
+            if abs(close_c / nav_c - 1.0) <= 0.055:
+                continue
+
+            r = _nearest_split_price_mult_from_shares(sh_p, sh_c)
+            if r is None:
+                continue
+
+            hmap = hints.get(ticker) or {}
+            hint = hmap.get(d_curr)
+            if hint is not None and abs(r - float(hint)) / max(float(hint), 1e-9) <= 0.12:
+                r = float(hint)
+
+            nav_ratio = nav_c / nav_p
+            if abs(nav_ratio / r - 1.0) > 0.15:
+                continue
+
+            tna_p, tna_c = nav_p * sh_p, nav_c * sh_c
+            if tna_p <= 0 or tna_c <= 0:
+                continue
+            if abs(tna_c / tna_p - 1.0) > 0.10:
+                continue
+
+            if not math.isnan(close_p) and close_p > 0:
+                if abs(close_c / close_p - 1.0) > 0.42:
+                    # Likely not the "flat stale print" pattern; avoid touching real gap moves.
+                    continue
+
+            aligned = abs(close_c * r / nav_c - 1.0)
+            if aligned > 0.22:
+                continue
+
+            new_close = float(close_c * r)
+            out.loc[ix, "close_price"] = new_close
+            n_rep += 1
+            LOGGER.info(
+                "repair_close_price_split_basis_mismatch: %s %s ×%.6g stale_close %.6g -> %.6g (nav=%.6g sh %.6g->%.6g)",
+                ticker,
+                d_curr,
+                r,
+                float(close_c),
+                new_close,
+                nav_c,
+                sh_p,
+                sh_c,
+            )
+
+    return out, n_rep
+
+
 def enforce_status_consistency(df: pd.DataFrame) -> pd.DataFrame:
     """Reconcile stored status with actual field presence. Preserves 'partial' rows."""
     out = df.copy()
@@ -247,6 +411,23 @@ def validate_df(df: pd.DataFrame) -> None:
         raise ValueError("invalid aum for ok rows")
     if (ok & (shares.isna() | (shares <= 0))).any():
         raise ValueError("invalid shares for ok rows")
+
+    close = pd.to_numeric(df["close_price"], errors="coerce")
+    absurd = (
+        ok
+        & nav.notna()
+        & close.notna()
+        & (nav > 0)
+        & (close > 0)
+        & (abs(close / nav - 1.0) > 0.5)
+    )
+    if absurd.any():
+        sample = df.loc[absurd, ["date", "ticker", "nav", "close_price"]].head(8)
+        LOGGER.warning(
+            "validate_df: %d ok row(s) have |close/nav-1| > 0.5 (possible split mismatch); sample=%s",
+            int(absurd.sum()),
+            sample.to_dict("records"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1224,6 +1405,9 @@ def main() -> None:
                 n_post,
             )
         LOGGER.info("Repaired shares on %d row(s); status re-evaluated", n_share_repairs)
+    merged, n_close_split = repair_close_price_split_basis_mismatch(merged)
+    if n_close_split:
+        LOGGER.info("Repaired split-basis close_price on %d row(s)", n_close_split)
     # Must run on full merged history: ``incoming`` is usually one trading day,
     # so an earlier backfill never saw legacy null rows in the parquet store.
     merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
