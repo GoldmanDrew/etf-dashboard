@@ -3185,6 +3185,28 @@ function buildTotalReturnMetricsSeries(rawRows, distributions) {
   });
 }
 
+/** Prefer underlying ticker as short leg when it exists as a dashboard row in the same bucket; else second name in bucket. */
+function defaultPairBacktestShortSymbol(anchorRecord, allRecords) {
+  if (!anchorRecord) return '';
+  const long = String(anchorRecord.symbol || '').toUpperCase();
+  const bucket = anchorRecord.bucket;
+  const rows = Array.isArray(allRecords) ? allRecords : [];
+  const und = String(anchorRecord.underlying || '').trim().toUpperCase();
+  if (und && und !== long) {
+    const undRow = rows.find((r) => String(r.symbol || '').toUpperCase() === und && r.bucket === bucket);
+    if (undRow) return und;
+  }
+  const same = rows
+    .filter((r) => r.bucket === bucket)
+    .map((r) => String(r.symbol || '').toUpperCase())
+    .filter(Boolean)
+    .sort();
+  if (same.length < 2) return '';
+  const idx = same.indexOf(long);
+  if (idx === -1) return same.find((s) => s !== long) || '';
+  return same[idx === same.length - 1 ? idx - 1 : idx + 1];
+}
+
 function medianSharesTraded(rows, lookback = 60) {
   const vals = (Array.isArray(rows) ? rows : [])
     .slice(Math.max(0, (rows || []).length - lookback))
@@ -3196,12 +3218,12 @@ function medianSharesTraded(rows, lookback = 60) {
   return vals.length % 2 ? vals[mid] : 0.5 * (vals[mid - 1] + vals[mid]);
 }
 
-function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange }) {
+function ChartPage({ record, allRecords, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart' }) {
   const activeTf = useMemo(
     () => TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2],
     [chartVolLookbackRange],
   );
-  const [activePanel, setActivePanel] = useState('chart');
+  const [activePanel, setActivePanel] = useState(defaultPanel === 'backtest' ? 'backtest' : 'chart');
   const [scenarioHorizon, setScenarioHorizon] = useState('1M');
   const [mcPathCount, setMcPathCount] = useState(500);
   const [mcSeed, setMcSeed] = useState(42);
@@ -3983,6 +4005,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           )}
           <button className={cls('chart-view-btn', activePanel === 'trade' && 'active')} onClick={() => setActivePanel('trade')}>Trade Lab</button>
           <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => setActivePanel('borrow')}>Borrow</button>
+          <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => setActivePanel('backtest')}>Backtest</button>
         </div>
 
         {/* Timeframe buttons */}
@@ -5002,6 +5025,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         </div>
       )}
 
+      {activePanel === 'backtest' && (
+        <div className="chart-section">
+          <PairBacktestPanel records={allRecords || []} anchorRecord={r} />
+        </div>
+      )}
+
       {activePanel === 'borrow' && (
         <div className="chart-section">
           <div className="borrow-grid">
@@ -5760,8 +5789,11 @@ function PairBacktestChart({ result }) {
   );
 }
 
-function PairBacktestPage({ records }) {
-  const [bucketKey, setBucketKey] = useState('bucket_1_high_beta');
+function PairBacktestPanel({ records, anchorRecord }) {
+  if (!anchorRecord) {
+    return <div className="scenario-warning">Open a chart row to run the pair backtest.</div>;
+  }
+  const bucketKey = anchorRecord.bucket;
   const [longSym, setLongSym] = useState('');
   const [shortSym, setShortSym] = useState('');
   const [rebalanceEvery, setRebalanceEvery] = useState(5);
@@ -5818,20 +5850,21 @@ function PairBacktestPage({ records }) {
     return () => { cancelled = true; };
   }, []);
 
-  const bucketOptions = [
-    { key: 'bucket_1_high_beta', label: 'Bucket 1 — High β' },
-    { key: 'bucket_2_low_beta', label: 'Bucket 2 — Low β / income' },
-    { key: 'bucket_3_inverse', label: 'Bucket 3 — Inverse' },
-  ];
   const bucketRows = useMemo(() => (records || [])
     .filter((r) => r.bucket === bucketKey)
     .sort((a, b) => String(a.symbol).localeCompare(String(b.symbol))), [records, bucketKey]);
   const symbols = bucketRows.map((r) => r.symbol);
   useEffect(() => {
     if (!symbols.length) return;
-    if (!symbols.includes(longSym)) setLongSym(symbols[0]);
-    if (!symbols.includes(shortSym)) setShortSym(symbols[Math.min(1, symbols.length - 1)] || symbols[0]);
-  }, [bucketKey, symbols.join('|')]);
+    const long = String(anchorRecord.symbol || '').toUpperCase();
+    const peer = defaultPairBacktestShortSymbol(anchorRecord, records);
+    if (symbols.includes(long)) setLongSym(long);
+    if (peer && symbols.includes(peer)) setShortSym(peer);
+    else {
+      const alt = symbols.find((s) => s !== long);
+      if (alt) setShortSym(alt);
+    }
+  }, [anchorRecord.symbol, anchorRecord.bucket, anchorRecord.underlying, symbols.join('|'), records]);
 
   const result = useMemo(() => {
     const fn = window.PairBacktest?.runPairBacktest;
@@ -5858,20 +5891,24 @@ function PairBacktestPage({ records }) {
   }, [metricsMap, distMap, borrowMap, records, longSym, shortSym, rebalanceEvery, driftPct, hedgeToPct, initialGross, floorBps, impactBps, capBps]);
 
   const summary = result?.summary || {};
+  const bucketBadge = bucketKey === 'bucket_1_high_beta' ? 'Bucket 1 — High β'
+    : bucketKey === 'bucket_2_low_beta' ? 'Bucket 2 — Low β / income'
+      : bucketKey === 'bucket_3_inverse' ? 'Bucket 3 — Inverse' : bucketKey;
+  const suggestedShort = defaultPairBacktestShortSymbol(anchorRecord, records);
   return (
     <div className="backtest-page">
-      <div className="chart-header" style={{ margin: '10px 0 12px' }}>
-        <div>
-          <div className="chart-title">Pairwise Bucket Backtest</div>
-          <div className="chart-subtitle">
-            Close-to-close, total-return NAV when distributions are available. Rebalance fires on cadence OR net/gross drift.
-          </div>
-        </div>
+      <div className="scenario-title" style={{ marginBottom: 6 }}>Pair backtest</div>
+      <div className="scenario-sub" style={{ marginBottom: 10 }}>
+        Same bucket as this row (<strong>{bucketBadge}</strong>). Defaults: long <strong>{String(anchorRecord.symbol || '').toUpperCase()}</strong>, short <strong>{suggestedShort || '—'}</strong> when the underlying is listed in the universe with the same bucket; otherwise the next ticker in the bucket.
       </div>
+      {symbols.length < 2 && (
+        <div className="scenario-warning">
+          Need at least two ETFs in this bucket. If the underlying is not a separate row in the dashboard (same bucket), pick another short from the universe or use a different pair.
+        </div>
+      )}
       {loadError && <div className="scenario-warning">{loadError}</div>}
       <div className="trade-card">
         <div className="backtest-controls">
-          <div className="backtest-control"><label>Bucket</label><select value={bucketKey} onChange={(e) => setBucketKey(e.target.value)}>{bucketOptions.map((b) => <option key={b.key} value={b.key}>{b.label}</option>)}</select></div>
           <div className="backtest-control"><label>Long leg</label><select value={longSym} onChange={(e) => setLongSym(e.target.value)}>{symbols.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
           <div className="backtest-control"><label>Short leg</label><select value={shortSym} onChange={(e) => setShortSym(e.target.value)}>{symbols.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
           <div className="backtest-control"><label>Gross $</label><input type="number" value={initialGross} onChange={(e) => setInitialGross(Number(e.target.value || 0))} /></div>
@@ -5940,8 +5977,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [expandedSym, setExpandedSym] = useState(null);
   const [showInfo, setShowInfo] = useState(false);
   const [showNews, setShowNews] = useState(false);
-  const [showBacktest, setShowBacktest] = useState(false);
   const [chartRecord, setChartRecord] = useState(null);
+  /** When opening a chart from the hash, optionally land on the Backtest tab (`#/chart/SYM/backtest`). */
+  const [chartDefaultPanel, setChartDefaultPanel] = useState('chart');
   /** Persisted chart timeframe (TIMEFRAMES[].range); drives TradingView embed and realized-vol diagnostics. Scenarios/default Exp. ETF return use forecast_vol_underlying_annual. */
   const [chartVolLookbackRange, setChartVolLookbackRange] = useState(TIMEFRAMES[2].range);
   const [corporateActions, setCorporateActions] = useState(null);
@@ -6018,14 +6056,15 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   useEffect(() => {
     const handleHash = () => {
       const hash = window.location.hash;
-      if (hash.startsWith('#/chart/') && data) {
-        const sym = decodeURIComponent(hash.slice(8)).toUpperCase();
+      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest))?$/i.exec(hash);
+      if (chartMatch && data) {
+        const sym = decodeURIComponent(chartMatch[1]).toUpperCase();
         const rec = (data.records || []).find(r => r.symbol === sym);
         if (rec) {
           setChartRecord(rec);
           setShowInfo(false);
           setShowNews(false);
-          setShowBacktest(false);
+          setChartDefaultPanel(String(chartMatch[2] || '').toLowerCase() === 'backtest' ? 'backtest' : 'chart');
           return;
         }
       }
@@ -6033,19 +6072,15 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setChartRecord(null);
         setShowInfo(false);
         setShowNews(true);
-        setShowBacktest(false);
         return;
       }
       if (hash === '#/backtest') {
-        setChartRecord(null);
-        setShowInfo(false);
-        setShowNews(false);
-        setShowBacktest(true);
+        window.location.replace(`${window.location.pathname}${window.location.search}#`);
         return;
       }
       setChartRecord(null);
       setShowNews(false);
-      setShowBacktest(false);
+      setChartDefaultPanel('chart');
     };
     handleHash();
     window.addEventListener('hashchange', handleHash);
@@ -6062,10 +6097,6 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
   const navigateToNews = useCallback(() => {
     window.location.hash = '/news';
-  }, []);
-
-  const navigateToBacktest = useCallback(() => {
-    window.location.hash = '/backtest';
   }, []);
 
   const navigateBack = useCallback(() => {
@@ -6174,13 +6205,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           >
             ▦ News
           </button>
-          <button
-            className={cls('topbar-btn', showBacktest && !chartRecord && 'active')}
-            onClick={() => { if (showBacktest) navigateBack(); else navigateToBacktest(); }}
-          >
-            ⇄ Backtest
-          </button>
-          <button className={cls('topbar-btn', showInfo && !chartRecord && !showNews && !showBacktest && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
+          <button className={cls('topbar-btn', showInfo && !chartRecord && !showNews && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
             ◉ Info
           </button>
         </div>
@@ -6189,10 +6214,13 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       {/* ── Chart Page ──────── */}
       {chartRecord ? (
         <ChartPage
+          key={`${chartRecord.symbol}-${chartDefaultPanel}`}
           record={chartRecord}
+          allRecords={records}
           onBack={navigateBack}
           chartVolLookbackRange={chartVolLookbackRange}
           setChartVolLookbackRange={setChartVolLookbackRange}
+          defaultPanel={chartDefaultPanel}
         />
       ) : showNews ? (
         <NewsPage
@@ -6204,8 +6232,6 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         />
       ) : showInfo ? (
         <InfoPage data={data} />
-      ) : showBacktest ? (
-        <PairBacktestPage records={records} />
       ) : (
         <>
           {/* ── Summary ──────── */}
