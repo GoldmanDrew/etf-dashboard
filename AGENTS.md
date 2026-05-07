@@ -560,7 +560,7 @@ index.html
 │       │   │   ├── Trade Lab tab (option leg builder)
 │       │   │   └── Options chains tab
 │       │   ├── InfoPage                        // hash route #/info
-│       │   ├── PairBacktestPage                // hash route #/backtest
+│       │   ├── PairBacktestPanel               // chart page tab “Backtest” (prefill long/short); optional hash #/chart/SYM/backtest
 │       │   ├── NewsPage                        // hash route #/news
 │       │   └── App                             // top-level router
 │       └── ReactDOM.createRoot(...).render(<App/>)
