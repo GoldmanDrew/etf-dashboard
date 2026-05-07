@@ -1350,7 +1350,7 @@
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
 <script src="assets/trade_lab.js?v=tl-v1"></script>
-<script src="assets/pair_backtest.js?v=pb-v3"></script>
+<script src="assets/pair_backtest.js?v=pb-v4"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
@@ -3185,6 +3185,42 @@ function buildTotalReturnMetricsSeries(rawRows, distributions) {
   });
 }
 
+/** Same TR-NAV reinvestment as Stats, but any calendar day with both ETF and underlying prices (not only status=ok) for a longer backtest window when history exists. */
+function buildTotalReturnBacktestSeries(rawRows, distributions) {
+  const hasBothLegPrices = (row) => {
+    const pl = Number(row?.close_price) || Number(row?.nav);
+    const ps = Number(row?.underlying_adj_close);
+    const ds = String(row?.date || '').trim();
+    return Boolean(ds) && Number.isFinite(pl) && pl > 0 && Number.isFinite(ps) && ps > 0;
+  };
+  const dated = Array.isArray(rawRows)
+    ? rawRows.filter(hasBothLegPrices).sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')))
+    : [];
+  const ok = repairEtfMetricsShareOutliers(dated);
+  if (!ok.length) return [];
+  const dists = (Array.isArray(distributions) ? distributions : [])
+    .map((d) => ({ ex_date: String(d?.ex_date || ''), amount: Number(d?.amount) }))
+    .filter((d) => d.ex_date && Number.isFinite(d.amount) && d.amount > 0)
+    .sort((a, b) => a.ex_date.localeCompare(b.ex_date));
+  const seriesStart = String(ok[0]?.date || '');
+  let reinvFactor = 1;
+  let dIdx = 0;
+  while (dIdx < dists.length && String(dists[dIdx].ex_date) <= seriesStart) dIdx += 1;
+  return ok.map((row) => {
+    const dateStr = String(row?.date || '');
+    const nav = Number(row?.nav);
+    if (dateStr && Number.isFinite(nav) && nav > 0) {
+      while (dIdx < dists.length && String(dists[dIdx].ex_date) <= dateStr) {
+        const amt = Number(dists[dIdx].amount);
+        if (Number.isFinite(amt) && amt > 0) reinvFactor *= (nav + amt) / nav;
+        dIdx += 1;
+      }
+    }
+    const tr = Number.isFinite(nav) && nav > 0 ? nav * reinvFactor : null;
+    return { ...row, nav_total_return: tr, tr_reinvestment_factor: reinvFactor };
+  });
+}
+
 function medianSharesTraded(rows, lookback = 60) {
   const vals = (Array.isArray(rows) ? rows : [])
     .slice(Math.max(0, (rows || []).length - lookback))
@@ -3317,7 +3353,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [btHedgeBackPct, setBtHedgeBackPct] = useState(1);
   const [btFloorBps, setBtFloorBps] = useState(2);
   const [btImpactBps, setBtImpactBps] = useState(25);
-  const [btCostCapBps, setBtCostCapBps] = useState(100);
   const [btHedgeRatio, setBtHedgeRatio] = useState(1);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
@@ -3633,6 +3668,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     return buildTotalReturnMetricsSeries(raw, etfDistributionsSeries);
   }, [etfMetricsMap, etfSym, etfDistributionsSeries]);
+  const etfBacktestSeries = useMemo(() => {
+    const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
+    return buildTotalReturnBacktestSeries(raw, etfDistributionsSeries);
+  }, [etfMetricsMap, etfSym, etfDistributionsSeries]);
   const latestEtfMetric = useMemo(
     () => (etfMetricsSeries.length ? etfMetricsSeries[etfMetricsSeries.length - 1] : null),
     [etfMetricsSeries],
@@ -3714,17 +3753,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (typeof sim !== 'function') {
       return { ok: false, error: 'Pair backtest module unavailable', daily: [], rebalanceMarks: [], summary: {} };
     }
-    const raw = Array.isArray(etfMetricsMap?.[etfSym])
-      ? repairEtfMetricsShareOutliers(
-        etfMetricsMap[etfSym].filter((x) => String(x?.status || '').toLowerCase() === 'ok'),
-      ).sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')))
-      : [];
     const bAnn = Number.isFinite(avgBorrowFromHistory)
       ? avgBorrowFromHistory
       : (Number.isFinite(Number(r.borrow_avg_annual))
         ? Number(r.borrow_avg_annual)
         : Number(getBorrowRate(r)));
-    return sim(raw, {
+    return sim(etfBacktestSeries, {
       gross: Number(btGross) || 0,
       hedgeRatio: Number(btHedgeRatio) || 1,
       beta: Number(r?.beta),
@@ -3733,12 +3767,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       hedgeBackPct: Number(btHedgeBackPct) || 1,
       floorBps: Number(btFloorBps) || 0,
       impactBps: Number(btImpactBps) || 0,
-      costCapBps: Number(btCostCapBps) || 0,
-      avgBorrowAnnual: Number.isFinite(bAnn) && bAnn >= 0 ? bAnn : 0,
+      avgBorrowAnnual: Number.isFinite(bAnn) && bAnn > 0 ? bAnn : 0,
     });
   }, [
-    etfMetricsMap, etfSym, btGross, btHedgeRatio, btEveryN, btDriftPct, btHedgeBackPct,
-    btFloorBps, btImpactBps, btCostCapBps, avgBorrowFromHistory, r.borrow_avg_annual, r,
+    etfBacktestSeries, btGross, btHedgeRatio, btEveryN, btDriftPct, btHedgeBackPct,
+    btFloorBps, btImpactBps, avgBorrowFromHistory, r.borrow_avg_annual, r,
     r?.beta,
   ]);
   const tradeBorrowBySymbol = useMemo(() => ({ [etfSym]: annualCarryDrag }), [etfSym, annualCarryDrag]);
@@ -5143,11 +5176,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           <div className="scenario-title">Pair backtest — ETF vs underlying replay</div>
           <div className="scenario-sub" style={{ marginBottom: 10 }}>
             Strategy from screener <strong>β</strong>: {pairBtShortEtfLongUnd
-              ? <>short <strong>{etfSym}</strong>, long <strong>{String(undSym || '').toUpperCase()}</strong> (borrow on ETF short only).</>
-              : <>short <strong>{etfSym}</strong> and short <strong>{String(undSym || '').toUpperCase()}</strong> (borrow on both shorts).</>}
+              ? <>short <strong>{etfSym}</strong>, long <strong>{String(undSym || '').toUpperCase()}</strong> (ETF short borrow only).</>
+              : <>short <strong>{etfSym}</strong> and short <strong>{String(undSym || '').toUpperCase()}</strong> (ETF short borrow only; underlying short treated as 0% borrow).</>}
             {' '}Notional <strong>h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>|</strong> (default <strong>|β|</strong>); gross <strong>G</strong> at rebalance: <code>MV<sub>ETF</sub> = h·G/(1+h)</code>, <code>MV<sub>und</sub> = G/(1+h)</code>.
-            Uses every <strong>ok</strong> metrics day (ETF close or NAV + underlying adj. close).
-            Borrow: same <strong>avg annual fee</strong> as the Borrow tab, charged daily on the short notional(s).
+            Uses every day with both legs priced (same total-return NAV reinvestment as Stats; includes rows before status=ok when data exists).
+            Borrow: same <strong>avg annual fee</strong> as the Borrow tab, applied to the ETF short notional only.
           </div>
 
           <div className="trade-card" style={{ marginBottom: 12 }}>
@@ -5161,13 +5194,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="backtest-control"><label>Hedge h (|MV<sub>ETF</sub>| / |MV<sub>und</sub>|)</label><input type="number" min={0.01} step={0.01} value={btHedgeRatio} onChange={(e) => setBtHedgeRatio(Number(e.target.value) || 1)} title="At rebalance: ETF dollar exposure divided by underlying dollar exposure. Default |β| from this row." /></div>
               <div className="backtest-control"><label>Every N days</label><input type="number" min={1} step={1} value={btEveryN} onChange={(e) => setBtEveryN(Number(e.target.value) || 1)} /></div>
               <div className="backtest-control"><label>Drift % (weight)</label><input type="number" min={0} step={0.5} value={btDriftPct} onChange={(e) => setBtDriftPct(Number(e.target.value) || 0)} title="Rebalance when ETF abs MV / gross drifts vs target h/(1+h)" /></div>
-              <div className="backtest-control"><label>Max net/gross %</label><input type="number" min={0.1} step={0.5} value={btHedgeBackPct} onChange={(e) => setBtHedgeBackPct(Number(e.target.value) || 1)} title="Rebalance when |long$−short$| / gross exceeds this" /></div>
+              <div className="backtest-control"><label>Max net/gross %</label><input type="number" min={0.1} step={0.5} value={btHedgeBackPct} onChange={(e) => setBtHedgeBackPct(Number(e.target.value) || 1)} title="Rebalance when |MV_ETF − MV_und| / (MV_ETF + MV_und) exceeds this" /></div>
               <div className="backtest-control"><label>Floor bps</label><input type="number" min={0} step={1} value={btFloorBps} onChange={(e) => setBtFloorBps(Number(e.target.value) || 0)} /></div>
               <div className="backtest-control"><label>Impact bps @ 100% ADV</label><input type="number" min={0} step={1} value={btImpactBps} onChange={(e) => setBtImpactBps(Number(e.target.value) || 0)} /></div>
-              <div className="backtest-control"><label>Cost cap bps</label><input type="number" min={0} step={1} value={btCostCapBps} onChange={(e) => setBtCostCapBps(Number(e.target.value) || 0)} /></div>
             </div>
             <div className="trade-note">
-              Rebalance at close: calendar <strong>N</strong>, short-weight drift vs <code>h/(1+h)</code>, or net/gross breach. T-cost: <code>(floor + impact)</code> bps on traded notional per rebalance, capped.
+              Rebalance at close: calendar <strong>N</strong>, ETF-weight drift vs <code>h/(1+h)</code>, or net/gross breach. T-cost: <code>(floor + impact)</code> bps on traded notional per rebalance.
             </div>
           </div>
 
@@ -5194,7 +5226,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="chart-stat">
                   <div className="cs-label">Borrow paid</div>
                   <div className="cs-value">{fmtMoney(pairBacktestResult.summary.borrowPaid)}</div>
-                  <div className="cs-sub">Avg annual × borrow base / 252</div>
+                  <div className="cs-sub">Avg annual × ETF short MV / 252</div>
                 </div>
                 <div className="chart-stat">
                   <div className="cs-label">T-costs</div>

@@ -494,7 +494,7 @@ index.html
 │   ├── assets/expected_decay.js     (standalone Itô calculator)
 │   ├── assets/scenario_returns.js   (vol/shock grid + LETF model)
 │   ├── assets/trade_lab.js          (Black-Scholes + leg builder)
-│   ├── assets/pair_backtest.js      (`simulateInversePairBacktest`: h = |MV_ETF|/|MV_und|, gross MV_ETF = h·G/(1+h), MV_und = G/(1+h); β≥0 short ETF + long und, β<0 short both; legacy `runPairBacktest`)
+│   ├── assets/pair_backtest.js      (`simulateInversePairBacktest`: h = |MV_ETF|/|MV_und|, gross split at rebalance; β≥0 short ETF + long und, β<0 short both; borrow on ETF short only; net/gross = |MV_ETF−MV_und|/(MV_ETF+MV_und); t-cost floor+impact bps; Chart backtest uses `buildTotalReturnBacktestSeries` for full two-leg history; legacy `runPairBacktest`)
 │   ├── assets/options_data.js       (options cache helpers)
 │   ├── babel-standalone CDN
 │   └── <script type="text/babel">                                (lines 1248–end)
