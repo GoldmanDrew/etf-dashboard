@@ -222,12 +222,140 @@
     };
   }
 
+  /**
+   * Long ETF vs short underlying (share ratio h: qS = h * qL).
+   * Gross G = qL*PL + qS*PS at each rebalance. Borrow: constant annual on short MV, /252 per day.
+   * Rows: per-day objects with close_price (or nav), underlying_adj_close, date.
+   */
+  function simulateInversePairBacktest(rows, opts) {
+    const gross = Math.max(0, toNum(opts && opts.gross));
+    const hedgeRatioH = Math.max(1e-8, toNum(opts && opts.hedgeRatio));
+    const everyN = Math.max(1, Math.floor(toNum(opts && opts.everyNDays) || 5));
+    const driftFrac = Math.max(0, toNum(opts && opts.driftPct) / 100);
+    const maxNetGross = Math.max(0.0001, toNum(opts && opts.hedgeBackPct) / 100);
+    const floorBps = Math.max(0, toNum(opts && opts.floorBps));
+    const impactBps = Math.max(0, toNum(opts && opts.impactBps));
+    const costCapBps = Math.max(floorBps + impactBps, toNum(opts && opts.costCapBps));
+    const avgBorrowAnnual = Math.max(0, toNum(opts && opts.avgBorrowAnnual));
+
+    if (!Array.isArray(rows) || rows.length < 2 || !Number.isFinite(gross) || gross <= 0) {
+      return { ok: false, error: "Invalid rows or gross capital.", daily: [], rebalanceMarks: [], summary: {} };
+    }
+
+    const pts = [];
+    for (const row of rows) {
+      const pl = toNum(row && row.close_price) || toNum(row && row.nav);
+      const ps = toNum(row && row.underlying_adj_close);
+      const ds = String((row && row.date) || "").trim();
+      if (!ds || !Number.isFinite(pl) || pl <= 0 || !Number.isFinite(ps) || ps <= 0) continue;
+      pts.push({ date: ds, pl, ps });
+    }
+    if (pts.length < 3) {
+      return {
+        ok: false,
+        error: "Need at least 3 days with ETF close (or NAV) and underlying adj. close.",
+        daily: [],
+        rebalanceMarks: [],
+        summary: {},
+      };
+    }
+
+    function targetShortWeight(pl, ps, h) {
+      const den = pl + h * ps;
+      return den > 0 ? (h * ps) / den : 0.5;
+    }
+
+    let qL = 0;
+    let qS = 0;
+    let lastRebal = -1;
+    let daysSinceRebal = 0;
+    let cumLong = 0;
+    let cumShort = 0;
+    let cumBorrow = 0;
+    let cumTc = 0;
+    const daily = [];
+    const rebalanceMarks = [];
+
+    function rebalanceAt(i, reason) {
+      const { pl, ps, date } = pts[i];
+      const h = hedgeRatioH;
+      const den = pl + h * ps;
+      if (!(den > 0)) return false;
+      const qLNew = gross / den;
+      const qSNew = h * qLNew;
+      if (lastRebal >= 0) {
+        const tradeNotional = Math.abs(qLNew - qL) * pl + Math.abs(qSNew - qS) * ps;
+        const feeBps = Math.min(costCapBps, floorBps + impactBps);
+        cumTc += (tradeNotional * feeBps) / 10000;
+      }
+      qL = qLNew;
+      qS = qSNew;
+      lastRebal = i;
+      daysSinceRebal = 0;
+      rebalanceMarks.push({ date, reason });
+      return true;
+    }
+
+    rebalanceAt(0, "inception");
+
+    for (let i = 1; i < pts.length; i += 1) {
+      const cur = pts[i];
+      const prev = pts[i - 1];
+      const dLong = qL * (cur.pl - prev.pl);
+      const dShort = -qS * (cur.ps - prev.ps);
+      const shortMvOpen = qS * prev.ps;
+      const borrowDay = shortMvOpen * (avgBorrowAnnual / 252);
+      cumLong += dLong;
+      cumShort += dShort;
+      cumBorrow += borrowDay;
+
+      const grossMv = Math.abs(qL * cur.pl) + Math.abs(qS * cur.ps);
+      const netMv = Math.abs(qL * cur.pl - qS * cur.ps);
+      const netGross = grossMv > 1e-9 ? netMv / grossMv : 0;
+      const wShort = grossMv > 1e-9 ? (qS * cur.ps) / grossMv : 0;
+      const wTarget = targetShortWeight(cur.pl, cur.ps, hedgeRatioH);
+      daysSinceRebal += 1;
+
+      let rebalReason = "";
+      if (daysSinceRebal >= everyN) rebalReason = "calendar";
+      else if (Number.isFinite(driftFrac) && driftFrac > 0 && Math.abs(wShort - wTarget) > driftFrac) {
+        rebalReason = "drift";
+      } else if (netGross > maxNetGross) rebalReason = "net/gross";
+
+      if (rebalReason) rebalanceAt(i, rebalReason);
+
+      const netPnl = cumLong + cumShort - cumBorrow - cumTc;
+      daily.push({
+        date: cur.date,
+        netPnl,
+        longPnl: cumLong,
+        shortPnl: cumShort,
+        borrow: -cumBorrow,
+        tCosts: -cumTc,
+        netGross,
+        rebal: rebalReason || "",
+      });
+    }
+
+    const summary = {
+      netPnl: cumLong + cumShort - cumBorrow - cumTc,
+      longPnl: cumLong,
+      shortPnl: cumShort,
+      borrowPaid: cumBorrow,
+      tCosts: cumTc,
+      nDays: pts.length,
+      nRebalances: rebalanceMarks.length,
+    };
+    return { ok: true, daily, rebalanceMarks, summary, inception: pts[0].date, end: pts[pts.length - 1].date };
+  }
+
   const exported = {
     alignPair,
     median,
     runPairBacktest,
     slippageCost,
     exposureRatio,
+    simulateInversePairBacktest,
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = exported;

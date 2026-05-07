@@ -1350,7 +1350,7 @@
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
 <script src="assets/trade_lab.js?v=tl-v1"></script>
-<script src="assets/pair_backtest.js?v=pb-v1"></script>
+<script src="assets/pair_backtest.js?v=pb-v2"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
@@ -3185,28 +3185,6 @@ function buildTotalReturnMetricsSeries(rawRows, distributions) {
   });
 }
 
-/** Prefer underlying ticker as short leg when it exists as a dashboard row in the same bucket; else second name in bucket. */
-function defaultPairBacktestShortSymbol(anchorRecord, allRecords) {
-  if (!anchorRecord) return '';
-  const long = String(anchorRecord.symbol || '').toUpperCase();
-  const bucket = anchorRecord.bucket;
-  const rows = Array.isArray(allRecords) ? allRecords : [];
-  const und = String(anchorRecord.underlying || '').trim().toUpperCase();
-  if (und && und !== long) {
-    const undRow = rows.find((r) => String(r.symbol || '').toUpperCase() === und && r.bucket === bucket);
-    if (undRow) return und;
-  }
-  const same = rows
-    .filter((r) => r.bucket === bucket)
-    .map((r) => String(r.symbol || '').toUpperCase())
-    .filter(Boolean)
-    .sort();
-  if (same.length < 2) return '';
-  const idx = same.indexOf(long);
-  if (idx === -1) return same.find((s) => s !== long) || '';
-  return same[idx === same.length - 1 ? idx - 1 : idx + 1];
-}
-
 function medianSharesTraded(rows, lookback = 60) {
   const vals = (Array.isArray(rows) ? rows : [])
     .slice(Math.max(0, (rows || []).length - lookback))
@@ -3218,7 +3196,56 @@ function medianSharesTraded(rows, lookback = 60) {
   return vals.length % 2 ? vals[mid] : 0.5 * (vals[mid - 1] + vals[mid]);
 }
 
-function ChartPage({ record, allRecords, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart' }) {
+/** Sparkline for long ETF / short-underlying inverse hedge replay (cumulative paths). */
+function PairBacktestSparkline({ daily }) {
+  const w = 720;
+  const h = 200;
+  const padL = 44;
+  const padR = 12;
+  const padT = 10;
+  const padB = 28;
+  if (!Array.isArray(daily) || daily.length < 2) {
+    return <div className="scenario-sub">Not enough daily points to plot.</div>;
+  }
+  const xs = (i) => padL + (i / (daily.length - 1)) * (w - padL - padR);
+  const series = [
+    { key: 'netPnl', color: 'rgba(34,211,238,0.95)', label: 'Net' },
+    { key: 'longPnl', color: 'rgba(74,222,128,0.9)', label: 'Long' },
+    { key: 'shortPnl', color: 'rgba(192,132,252,0.95)', label: 'Short' },
+  ];
+  const vals = [];
+  daily.forEach((row) => {
+    series.forEach((s) => vals.push(Number(row[s.key])));
+  });
+  const rawMin = Math.min(...vals);
+  const rawMax = Math.max(...vals);
+  const span = Math.max(1e-6, rawMax - rawMin);
+  const minV = rawMin - span * 0.06;
+  const maxV = rawMax + span * 0.06;
+  const ys = (v) => padT + (1 - (v - minV) / (maxV - minV)) * (h - padT - padB);
+  const linePath = (key) => daily.map((row, i) => {
+    const v = Number(row[key]);
+    const x = xs(i);
+    const y = ys(v);
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join('');
+  const zeroY = ys(0);
+  return (
+    <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ maxWidth: 900, display: 'block' }}>
+      <line x1={padL} y1={zeroY} x2={w - padR} y2={zeroY} stroke="rgba(148,163,184,0.35)" strokeDasharray="4 4" />
+      {series.map((s) => (
+        <path key={s.key} d={linePath(s.key)} fill="none" stroke={s.color} strokeWidth="2" />
+      ))}
+      <g fontSize="10" fill="var(--text-muted)">
+        {series.map((s, i) => (
+          <text key={s.key} x={padL + i * 72} y={h - 6} fill={s.color}>{s.label}</text>
+        ))}
+      </g>
+    </svg>
+  );
+}
+
+function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart' }) {
   const activeTf = useMemo(
     () => TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2],
     [chartVolLookbackRange],
@@ -3252,6 +3279,14 @@ function ChartPage({ record, allRecords, onBack, chartVolLookbackRange, setChart
   const [tradeTtxDays, setTradeTtxDays] = useState(30);
   const [tradeRatePct, setTradeRatePct] = useState(4.0);
   const [tradeShortProceedsPct, setTradeShortProceedsPct] = useState(1.0);
+  const [btGross, setBtGross] = useState(100000);
+  const [btEveryN, setBtEveryN] = useState(5);
+  const [btDriftPct, setBtDriftPct] = useState(5);
+  const [btHedgeBackPct, setBtHedgeBackPct] = useState(1);
+  const [btFloorBps, setBtFloorBps] = useState(2);
+  const [btImpactBps, setBtImpactBps] = useState(25);
+  const [btCostCapBps, setBtCostCapBps] = useState(100);
+  const [btHedgeRatio, setBtHedgeRatio] = useState(1);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -3263,9 +3298,13 @@ function ChartPage({ record, allRecords, onBack, chartVolLookbackRange, setChart
 
   const isIncomeStrategyScenario = isYieldBoostIncomeStrategy(r);
   const hideScenarios = suppressScenarioForRow(r);
+  const showBacktestPanel = Boolean(String(undSym || '').trim());
   useEffect(() => {
     if (hideScenarios && activePanel === 'scenarios') setActivePanel('chart');
   }, [hideScenarios, activePanel]);
+  useEffect(() => {
+    if (!showBacktestPanel && activePanel === 'backtest') setActivePanel('chart');
+  }, [showBacktestPanel, activePanel]);
 
   const bucketLabel = r.bucket === 'bucket_1_high_beta' ? 'Bucket 1 — High β'
     : r.bucket === 'bucket_2_low_beta' ? 'Bucket 2 — Low β'
@@ -3299,6 +3338,12 @@ function ChartPage({ record, allRecords, onBack, chartVolLookbackRange, setChart
             : productClassRaw === 'letf'
               ? 'LETF (|β| large): HARQ-Log decay band when history is long enough.'
               : 'Screener taxonomy (ls-algo).';
+
+  useEffect(() => {
+    const b = Math.abs(Number(r?.beta));
+    if (Number.isFinite(b) && b > 0) setBtHedgeRatio(b);
+    else setBtHedgeRatio(1);
+  }, [etfSym, r?.beta]);
 
   const widgetHtml = useMemo(() => {
     keyRef.current++;
@@ -3630,6 +3675,36 @@ function ChartPage({ record, allRecords, onBack, chartVolLookbackRange, setChart
       ? Number(r.borrow_avg_annual)
       : Number(getBorrowRate(r)));
   const annualCarryDrag = Number.isFinite(annualCarryDragRaw) ? Math.max(0, annualCarryDragRaw) : 0;
+  const pairBacktestResult = useMemo(() => {
+    const sim = window.PairBacktest?.simulateInversePairBacktest;
+    if (typeof sim !== 'function') {
+      return { ok: false, error: 'Pair backtest module unavailable', daily: [], rebalanceMarks: [], summary: {} };
+    }
+    const raw = Array.isArray(etfMetricsMap?.[etfSym])
+      ? repairEtfMetricsShareOutliers(
+        etfMetricsMap[etfSym].filter((x) => String(x?.status || '').toLowerCase() === 'ok'),
+      ).sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')))
+      : [];
+    const bAnn = Number.isFinite(avgBorrowFromHistory)
+      ? avgBorrowFromHistory
+      : (Number.isFinite(Number(r.borrow_avg_annual))
+        ? Number(r.borrow_avg_annual)
+        : Number(getBorrowRate(r)));
+    return sim(raw, {
+      gross: Number(btGross) || 0,
+      hedgeRatio: Number(btHedgeRatio) || 1,
+      everyNDays: Number(btEveryN) || 5,
+      driftPct: Number(btDriftPct) || 0,
+      hedgeBackPct: Number(btHedgeBackPct) || 1,
+      floorBps: Number(btFloorBps) || 0,
+      impactBps: Number(btImpactBps) || 0,
+      costCapBps: Number(btCostCapBps) || 0,
+      avgBorrowAnnual: Number.isFinite(bAnn) && bAnn >= 0 ? bAnn : 0,
+    });
+  }, [
+    etfMetricsMap, etfSym, btGross, btHedgeRatio, btEveryN, btDriftPct, btHedgeBackPct,
+    btFloorBps, btImpactBps, btCostCapBps, avgBorrowFromHistory, r.borrow_avg_annual, r,
+  ]);
   const tradeBorrowBySymbol = useMemo(() => ({ [etfSym]: annualCarryDrag }), [etfSym, annualCarryDrag]);
   const defaultIvBySymbol = useMemo(() => ({
     [undSym]: Number.isFinite(Number(realizedUnd)) && Number(realizedUnd) > 0 ? Number(realizedUnd) : 0.8,
@@ -4005,7 +4080,9 @@ function ChartPage({ record, allRecords, onBack, chartVolLookbackRange, setChart
           )}
           <button className={cls('chart-view-btn', activePanel === 'trade' && 'active')} onClick={() => setActivePanel('trade')}>Trade Lab</button>
           <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => setActivePanel('borrow')}>Borrow</button>
-          <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => setActivePanel('backtest')}>Backtest</button>
+          {showBacktestPanel && (
+            <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => setActivePanel('backtest')}>Backtest</button>
+          )}
         </div>
 
         {/* Timeframe buttons */}
@@ -5025,9 +5102,100 @@ function ChartPage({ record, allRecords, onBack, chartVolLookbackRange, setChart
         </div>
       )}
 
-      {activePanel === 'backtest' && (
+      {activePanel === 'backtest' && showBacktestPanel && (
         <div className="chart-section">
-          <PairBacktestPanel records={allRecords || []} anchorRecord={r} />
+          <div className="scenario-title">Long / short hedge replay</div>
+          <div className="scenario-sub" style={{ marginBottom: 10 }}>
+            Long <strong>{etfSym}</strong> vs short <strong>{String(undSym || '').toUpperCase()}</strong> (underlying from the screener row — not editable).
+            Share sizing: <code>q_short = h × q_long</code> with hedge ratio <strong>h</strong> defaulting to <strong>|β|</strong> from this row.
+            Uses every <strong>ok</strong> metrics day from <strong>first available date through latest</strong> (ETF close or NAV + underlying Yahoo adj. close).
+            Borrow: <strong>historical average fee-only annual</strong> (same priority as the Borrow tab) applied daily as <code>shortMV × avg / 252</code>.
+          </div>
+
+          <div className="trade-card" style={{ marginBottom: 12 }}>
+            <div className="trade-head">
+              <div className="scenario-title">Parameters</div>
+            </div>
+            <div className="backtest-controls">
+              <div className="backtest-control"><label>Long leg</label><input type="text" value={etfSym} readOnly disabled style={{ opacity: 0.85 }} /></div>
+              <div className="backtest-control"><label>Short leg</label><input type="text" value={String(undSym || '').toUpperCase()} readOnly disabled style={{ opacity: 0.85 }} /></div>
+              <div className="backtest-control"><label>Gross $</label><input type="number" min={1000} step={1000} value={btGross} onChange={(e) => setBtGross(Number(e.target.value) || 0)} /></div>
+              <div className="backtest-control"><label>Hedge ratio h (shares)</label><input type="number" min={0.01} step={0.01} value={btHedgeRatio} onChange={(e) => setBtHedgeRatio(Number(e.target.value) || 1)} title="Default |β|: short h shares of underlying per 1 share ETF" /></div>
+              <div className="backtest-control"><label>Every N days</label><input type="number" min={1} step={1} value={btEveryN} onChange={(e) => setBtEveryN(Number(e.target.value) || 1)} /></div>
+              <div className="backtest-control"><label>Drift % (weight)</label><input type="number" min={0} step={0.5} value={btDriftPct} onChange={(e) => setBtDriftPct(Number(e.target.value) || 0)} title="Rebalance when short weight drifts this far vs target" /></div>
+              <div className="backtest-control"><label>Max net/gross %</label><input type="number" min={0.1} step={0.5} value={btHedgeBackPct} onChange={(e) => setBtHedgeBackPct(Number(e.target.value) || 1)} title="Rebalance when |long$−short$| / gross exceeds this" /></div>
+              <div className="backtest-control"><label>Floor bps / trade</label><input type="number" min={0} step={1} value={btFloorBps} onChange={(e) => setBtFloorBps(Number(e.target.value) || 0)} /></div>
+              <div className="backtest-control"><label>Impact bps @100% ADV</label><input type="number" min={0} step={1} value={btImpactBps} onChange={(e) => setBtImpactBps(Number(e.target.value) || 0)} /></div>
+              <div className="backtest-control"><label>Cost cap bps</label><input type="number" min={0} step={1} value={btCostCapBps} onChange={(e) => setBtCostCapBps(Number(e.target.value) || 0)} /></div>
+            </div>
+          </div>
+
+          {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics for backtest…</div>}
+          {etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
+          {!etfMetricsLoading && !etfMetricsError && !pairBacktestResult?.ok && (
+            <div className="scenario-warning">{pairBacktestResult?.error || 'Backtest unavailable.'}</div>
+          )}
+          {!etfMetricsLoading && !etfMetricsError && pairBacktestResult?.ok && (
+            <>
+              <div className="chart-stats" style={{ marginTop: 4 }}>
+                <div className="chart-stat">
+                  <div className="cs-label">Net PnL</div>
+                  <div className="cs-value">{fmtUsd(pairBacktestResult.summary.netPnl)}</div>
+                  <div className="cs-sub">{pairBacktestResult.inception} → {pairBacktestResult.end}</div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">Long / Short</div>
+                  <div className="cs-value">
+                    {fmtUsd(pairBacktestResult.summary.longPnl)} / {fmtUsd(pairBacktestResult.summary.shortPnl)}
+                  </div>
+                  <div className="cs-sub">Mark-to-market</div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">Borrow paid</div>
+                  <div className="cs-value">{fmtUsd(pairBacktestResult.summary.borrowPaid)}</div>
+                  <div className="cs-sub">Avg annual × short MV / 252</div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">T-costs</div>
+                  <div className="cs-value">{fmtUsd(pairBacktestResult.summary.tCosts)}</div>
+                  <div className="cs-sub">{fmtNum(pairBacktestResult.summary.nRebalances)} rebalance marks</div>
+                </div>
+              </div>
+              <div style={{ marginTop: 12 }}>
+                <PairBacktestSparkline daily={pairBacktestResult.daily} />
+              </div>
+              <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 280, overflow: 'auto' }}>
+                <table className="scenario-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Net PnL</th>
+                      <th>Long</th>
+                      <th>Short</th>
+                      <th>Borrow</th>
+                      <th>T-costs</th>
+                      <th>Net/gross</th>
+                      <th>Rebal</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...pairBacktestResult.daily].slice(-24).reverse().map((row) => (
+                      <tr key={row.date}>
+                        <td>{row.date}</td>
+                        <td>{fmtUsd(row.netPnl)}</td>
+                        <td>{fmtUsd(row.longPnl)}</td>
+                        <td>{fmtUsd(row.shortPnl)}</td>
+                        <td>{fmtUsd(row.borrow)}</td>
+                        <td>{fmtUsd(row.tCosts)}</td>
+                        <td>{Number.isFinite(row.netGross) ? `${(row.netGross * 100).toFixed(2)}%` : '—'}</td>
+                        <td>{row.rebal || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -5717,254 +5885,6 @@ function NewsPage({
   );
 }
 
-function PairBacktestChart({ result }) {
-  if (!result?.ok || !Array.isArray(result.rows) || result.rows.length < 2) {
-    return <div className="scenario-warning">{result?.error || 'Run a pair backtest to see the PnL chart.'}</div>;
-  }
-  const series = result.rows;
-  const keys = [
-    ['netPnl', 'Net PnL', 'rgba(6,182,212,0.98)'],
-    ['longPnl', 'Long PnL', 'rgba(16,185,129,0.95)'],
-    ['shortPnl', 'Short PnL', 'rgba(139,92,246,0.95)'],
-    ['borrow', 'Borrow', 'rgba(239,68,68,0.95)'],
-    ['transactionCosts', 'T-costs', 'rgba(245,158,11,0.95)'],
-  ];
-  const vals = [];
-  series.forEach((r) => keys.forEach(([k]) => {
-    const sign = (k === 'borrow' || k === 'transactionCosts') ? -1 : 1;
-    const v = Number(r?.[k]);
-    if (Number.isFinite(v)) vals.push(sign * v);
-  }));
-  const minRaw = Math.min(...vals, 0);
-  const maxRaw = Math.max(...vals, 0);
-  const pad = (maxRaw - minRaw || Math.max(1, Math.abs(maxRaw))) * 0.1;
-  const yMin = minRaw - pad;
-  const yMax = maxRaw + pad;
-  const W = 980, H = 320, L = 78, R = 14, T = 14, B = 40;
-  const PW = W - L - R, PH = H - T - B;
-  const x = (i) => L + (i / Math.max(1, series.length - 1)) * PW;
-  const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, yMax - yMin))) * PH;
-  const pathFor = (k) => series.map((r, i) => {
-    const sign = (k === 'borrow' || k === 'transactionCosts') ? -1 : 1;
-    const v = sign * Number(r?.[k]);
-    return Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : '';
-  }).filter(Boolean).join(' ');
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map(q => yMin + (yMax - yMin) * q).reverse();
-  const dateLabel = (idx) => {
-    const raw = series[idx]?.date;
-    if (!raw) return '';
-    const d = new Date(`${raw}T00:00:00Z`);
-    return Number.isNaN(d.getTime()) ? String(raw) : d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
-  };
-  const xTicks = Array.from(new Set([0, Math.floor((series.length - 1) / 2), series.length - 1]));
-  return (
-    <div>
-      <div className="mc-plot" style={{ height: 320, marginBottom: 0 }}>
-        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
-          <rect x={L} y={T} width={PW} height={PH} fill="rgba(11,19,34,0.2)" stroke="rgba(56,72,96,0.5)" />
-          {ticks.map((tick, i) => (
-            <g key={i}>
-              <line x1={L} y1={y(tick)} x2={W - R} y2={y(tick)} stroke="rgba(56,72,96,0.35)" />
-              <text x={L - 8} y={y(tick) + 4} textAnchor="end" fontSize="11" fill="#9db0d2" fontFamily="DM Sans">{fmtMoney(tick)}</text>
-            </g>
-          ))}
-          <line x1={L} y1={y(0)} x2={W - R} y2={y(0)} stroke="rgba(255,255,255,0.5)" strokeDasharray="6 5" />
-          {xTicks.map((idx) => (
-            <text key={idx} x={x(idx)} y={H - 12} textAnchor={idx === 0 ? 'start' : idx === series.length - 1 ? 'end' : 'middle'} fontSize="11" fill="#7f8ea8" fontFamily="DM Sans">{dateLabel(idx)}</text>
-          ))}
-          {keys.map(([k, _label, color]) => (
-            <path key={k} d={pathFor(k)} fill="none" stroke={color} strokeWidth={k === 'netPnl' ? 2.6 : 1.7} strokeDasharray={(k === 'borrow' || k === 'transactionCosts') ? '5 4' : ''} />
-          ))}
-          {series.map((r, i) => r.rebalance ? (
-            <line key={`rb-${i}`} x1={x(i)} x2={x(i)} y1={T} y2={H - B} stroke="rgba(148,163,184,0.18)" />
-          ) : null)}
-        </svg>
-      </div>
-      <div className="backtest-chart-legend">
-        {keys.map(([k, label, color]) => (
-          <span key={k}><span className="backtest-legend-dot" style={{ background: color }} />{label}{(k === 'borrow' || k === 'transactionCosts') ? ' (cost plotted negative)' : ''}</span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function PairBacktestPanel({ records, anchorRecord }) {
-  if (!anchorRecord) {
-    return <div className="scenario-warning">Open a chart row to run the pair backtest.</div>;
-  }
-  const bucketKey = anchorRecord.bucket;
-  const [longSym, setLongSym] = useState('');
-  const [shortSym, setShortSym] = useState('');
-  const [rebalanceEvery, setRebalanceEvery] = useState(5);
-  const [driftPct, setDriftPct] = useState(5);
-  const [hedgeToPct, setHedgeToPct] = useState(1);
-  const [initialGross, setInitialGross] = useState(100000);
-  const [floorBps, setFloorBps] = useState(2);
-  const [impactBps, setImpactBps] = useState(25);
-  const [capBps, setCapBps] = useState(100);
-  const [metricsMap, setMetricsMap] = useState({});
-  const [distMap, setDistMap] = useState({});
-  const [borrowMap, setBorrowMap] = useState({});
-  const [loadError, setLoadError] = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
-    const fetchJson = async (url) => {
-      const res = await fetch(`${url}${cacheBust}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`${url} HTTP ${res.status}`);
-      return res.json();
-    };
-    (async () => {
-      try {
-        const [metrics, dists, borrow] = await Promise.all([
-          fetchJson(ETF_METRICS_DAILY_URL),
-          fetchJson(ETF_DISTRIBUTIONS_URL),
-          fetchJson(BORROW_HISTORY_URL),
-        ]);
-        if (cancelled) return;
-        const bySymbol = {};
-        (Array.isArray(metrics?.rows) ? metrics.rows : []).forEach((row) => {
-          const sym = String(row?.ticker || '').toUpperCase();
-          if (!sym) return;
-          if (!bySymbol[sym]) bySymbol[sym] = [];
-          bySymbol[sym].push(row);
-        });
-        Object.keys(bySymbol).forEach((sym) => bySymbol[sym].sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || ''))));
-        const rawD = dists?.by_symbol || {};
-        const dBy = {};
-        Object.keys(rawD).forEach((sym) => {
-          dBy[String(sym).toUpperCase()] = (Array.isArray(rawD[sym]) ? rawD[sym] : [])
-            .map((d) => ({ ex_date: String(d?.ex_date || ''), amount: Number(d?.amount) }))
-            .filter((d) => d.ex_date && Number.isFinite(d.amount) && d.amount > 0)
-            .sort((a, b) => a.ex_date.localeCompare(b.ex_date));
-        });
-        setMetricsMap(bySymbol);
-        setDistMap(dBy);
-        setBorrowMap(borrow?.symbols || borrow || {});
-      } catch (e) {
-        if (!cancelled) setLoadError(e?.message || 'Backtest data unavailable');
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  const bucketRows = useMemo(() => (records || [])
-    .filter((r) => r.bucket === bucketKey)
-    .sort((a, b) => String(a.symbol).localeCompare(String(b.symbol))), [records, bucketKey]);
-  const symbols = bucketRows.map((r) => r.symbol);
-  useEffect(() => {
-    if (!symbols.length) return;
-    const long = String(anchorRecord.symbol || '').toUpperCase();
-    const peer = defaultPairBacktestShortSymbol(anchorRecord, records);
-    if (symbols.includes(long)) setLongSym(long);
-    if (peer && symbols.includes(peer)) setShortSym(peer);
-    else {
-      const alt = symbols.find((s) => s !== long);
-      if (alt) setShortSym(alt);
-    }
-  }, [anchorRecord.symbol, anchorRecord.bucket, anchorRecord.underlying, symbols.join('|'), records]);
-
-  const result = useMemo(() => {
-    const fn = window.PairBacktest?.runPairBacktest;
-    if (typeof fn !== 'function') return { ok: false, error: 'Pair backtest engine unavailable.' };
-    if (!longSym || !shortSym || longSym === shortSym) return { ok: false, error: 'Choose two different symbols in the same bucket.' };
-    const longRows = buildTotalReturnMetricsSeries(metricsMap[longSym] || [], distMap[longSym] || []);
-    const shortRows = buildTotalReturnMetricsSeries(metricsMap[shortSym] || [], distMap[shortSym] || []);
-    const shortRec = (records || []).find((r) => r.symbol === shortSym);
-    return fn({
-      longRows,
-      shortRows,
-      long: { valueKey: 'nav_total_return', priceKey: 'close_price' },
-      short: { valueKey: 'nav_total_return', priceKey: 'close_price' },
-      shortBorrowRows: borrowMap[shortSym] || [],
-      fallbackBorrowAnnual: getBorrowRate(shortRec) || 0,
-      rebalanceEveryDays: rebalanceEvery,
-      driftThresholdPct: driftPct,
-      hedgeToPct,
-      initialGross,
-      floorBps,
-      impactBps,
-      capBps,
-    });
-  }, [metricsMap, distMap, borrowMap, records, longSym, shortSym, rebalanceEvery, driftPct, hedgeToPct, initialGross, floorBps, impactBps, capBps]);
-
-  const summary = result?.summary || {};
-  const bucketBadge = bucketKey === 'bucket_1_high_beta' ? 'Bucket 1 — High β'
-    : bucketKey === 'bucket_2_low_beta' ? 'Bucket 2 — Low β / income'
-      : bucketKey === 'bucket_3_inverse' ? 'Bucket 3 — Inverse' : bucketKey;
-  const suggestedShort = defaultPairBacktestShortSymbol(anchorRecord, records);
-  return (
-    <div className="backtest-page">
-      <div className="scenario-title" style={{ marginBottom: 6 }}>Pair backtest</div>
-      <div className="scenario-sub" style={{ marginBottom: 10 }}>
-        Same bucket as this row (<strong>{bucketBadge}</strong>). Defaults: long <strong>{String(anchorRecord.symbol || '').toUpperCase()}</strong>, short <strong>{suggestedShort || '—'}</strong> when the underlying is listed in the universe with the same bucket; otherwise the next ticker in the bucket.
-      </div>
-      {symbols.length < 2 && (
-        <div className="scenario-warning">
-          Need at least two ETFs in this bucket. If the underlying is not a separate row in the dashboard (same bucket), pick another short from the universe or use a different pair.
-        </div>
-      )}
-      {loadError && <div className="scenario-warning">{loadError}</div>}
-      <div className="trade-card">
-        <div className="backtest-controls">
-          <div className="backtest-control"><label>Long leg</label><select value={longSym} onChange={(e) => setLongSym(e.target.value)}>{symbols.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
-          <div className="backtest-control"><label>Short leg</label><select value={shortSym} onChange={(e) => setShortSym(e.target.value)}>{symbols.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
-          <div className="backtest-control"><label>Gross $</label><input type="number" value={initialGross} onChange={(e) => setInitialGross(Number(e.target.value || 0))} /></div>
-          <div className="backtest-control"><label>Every N days</label><input type="number" min="1" value={rebalanceEvery} onChange={(e) => setRebalanceEvery(Number(e.target.value || 1))} /></div>
-          <div className="backtest-control"><label>Drift X %</label><input type="number" min="0" value={driftPct} onChange={(e) => setDriftPct(Number(e.target.value || 0))} /></div>
-          <div className="backtest-control"><label>Hedge back to Y %</label><input type="number" min="0" value={hedgeToPct} onChange={(e) => setHedgeToPct(Number(e.target.value || 0))} /></div>
-          <div className="backtest-control"><label>Floor bps</label><input type="number" min="0" value={floorBps} onChange={(e) => setFloorBps(Number(e.target.value || 0))} /></div>
-          <div className="backtest-control"><label>Impact bps @ 100% ADV</label><input type="number" min="0" value={impactBps} onChange={(e) => setImpactBps(Number(e.target.value || 0))} /></div>
-          <div className="backtest-control"><label>Cost cap bps</label><input type="number" min="0" value={capBps} onChange={(e) => setCapBps(Number(e.target.value || 0))} /></div>
-        </div>
-        <div className="trade-note">
-          Timing: date t return accrues from t-1 close to t close; drift is measured at close[t], and any rebalance executes at close[t].
-          Borrow accrues daily on the prior close short market value. T-costs apply to rebalance turnover and scale with trade notional / median dollar volume.
-        </div>
-      </div>
-      <div className="chart-stats" style={{ marginTop: 12 }}>
-        <div className="chart-stat"><div className="cs-label">Net PnL</div><div className="cs-value">{Number.isFinite(summary.netPnl) ? fmtMoney(summary.netPnl) : '—'}</div><div className="cs-sub">{summary.startDate || '—'} → {summary.endDate || '—'}</div></div>
-        <div className="chart-stat"><div className="cs-label">Long / Short PnL</div><div className="cs-value">{fmtMoney(summary.longPnl)} / {fmtMoney(summary.shortPnl)}</div><div className="cs-sub">gross before borrow & costs</div></div>
-        <div className="chart-stat"><div className="cs-label">Borrow Paid</div><div className="cs-value">{fmtMoney(summary.borrow)}</div><div className="cs-sub">short leg only</div></div>
-        <div className="chart-stat"><div className="cs-label">T-costs</div><div className="cs-value">{fmtMoney(summary.transactionCosts)}</div><div className="cs-sub">{fmtNum(summary.rebalanceCount)} rebalance marks</div></div>
-        <div className="chart-stat"><div className="cs-label">Median Shares Traded</div><div className="cs-value">{fmtSharesCount(summary.longMedianSharesTraded)} / {fmtSharesCount(summary.shortMedianSharesTraded)}</div><div className="cs-sub">long / short · overlap window</div></div>
-      </div>
-      <div className="trade-card" style={{ marginTop: 12 }}>
-        <div className="trade-head">
-          <div>
-            <div className="scenario-title">{longSym || 'Long'} vs {shortSym || 'Short'} PnL Breakdown</div>
-            <div className="scenario-sub">Net = long PnL + short PnL − borrow − transaction costs.</div>
-          </div>
-        </div>
-        <PairBacktestChart result={result} />
-      </div>
-      {result?.ok && (
-        <div className="scenario-table-wrap" style={{ marginTop: 12 }}>
-          <table className="scenario-table">
-            <thead><tr><th>Date</th><th>Net PnL</th><th>Long</th><th>Short</th><th>Borrow</th><th>T-costs</th><th>Net/Gross</th><th>Rebalance</th></tr></thead>
-            <tbody>
-              {[...result.rows].slice(-20).reverse().map((row) => (
-                <tr key={row.date}>
-                  <td>{row.date}</td>
-                  <td>{fmtMoney(row.netPnl)}</td>
-                  <td>{fmtMoney(row.longPnl)}</td>
-                  <td>{fmtMoney(row.shortPnl)}</td>
-                  <td>{fmtMoney(row.borrow)}</td>
-                  <td>{fmtMoney(row.transactionCosts)}</td>
-                  <td>{fmt(row.exposureRatio)}</td>
-                  <td>{row.rebalance ? row.rebalanceReason : '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Main App ────────────────────────────────
 function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [data, setData] = useState(null);
@@ -6216,7 +6136,6 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         <ChartPage
           key={`${chartRecord.symbol}-${chartDefaultPanel}`}
           record={chartRecord}
-          allRecords={records}
           onBack={navigateBack}
           chartVolLookbackRange={chartVolLookbackRange}
           setChartVolLookbackRange={setChartVolLookbackRange}
