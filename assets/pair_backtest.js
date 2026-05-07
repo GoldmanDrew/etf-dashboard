@@ -226,10 +226,11 @@
    * Two-leg hedge vs ETF close (or NAV) and underlying adj. close, with **notional** hedge ratio h = |MV_etf| / |MV_und|
    * on the two risk legs (split: MV_etf = h·G/(1+h), MV_und = G/(1+h) at rebalance).
    *
-   * - **β ≥ 0**: short ETF, long underlying (borrow on short ETF only).
-   * - **β < 0**: short ETF, short underlying (borrow on both short legs).
+   * - **β ≥ 0**: short ETF, long underlying (borrow on ETF short only).
+   * - **β < 0**: short ETF, short underlying (borrow on ETF short only; underlying short borrow 0%).
    *
    * Pass `opts.beta` (screener β). `opts.hedgeRatio` is the magnitude h (default |β| in UI).
+   * T-cost per rebalance: `(floorBps + impactBps) / 10000` × traded notional (no separate cap).
    * Rows: per-day objects with close_price (or nav), underlying_adj_close, date.
    */
   function simulateInversePairBacktest(rows, opts) {
@@ -242,7 +243,6 @@
     const maxNetGross = Math.max(0.0001, toNum(opts && opts.hedgeBackPct) / 100);
     const floorBps = Math.max(0, toNum(opts && opts.floorBps));
     const impactBps = Math.max(0, toNum(opts && opts.impactBps));
-    const costCapBps = Math.max(floorBps + impactBps, toNum(opts && opts.costCapBps));
     const avgBorrowAnnual = Math.max(0, toNum(opts && opts.avgBorrowAnnual));
 
     if (!Array.isArray(rows) || rows.length < 2 || !Number.isFinite(gross) || gross <= 0) {
@@ -294,7 +294,7 @@
       const qUNew = mvUnd / ps;
       if (lastRebal >= 0) {
         const tradeNotional = Math.abs(qENew - qE) * pl + Math.abs(qUNew - qU) * ps;
-        const feeBps = Math.min(costCapBps, floorBps + impactBps);
+        const feeBps = floorBps + impactBps;
         cumTc += (tradeNotional * feeBps) / 10000;
       }
       qE = qENew;
@@ -317,16 +317,18 @@
       cumEtf += dEtf;
       cumUnd += dUnd;
 
-      const borrowBase = shortEtfLongUnd ? qE * prev.pl : qE * prev.pl + qU * prev.ps;
+      /** Borrow: ETF short leg only (underlying short assumed 0% borrow). */
+      const borrowBase = qE * prev.pl;
       const borrowDay = borrowBase * (avgBorrowAnnual / 252);
       cumBorrow += borrowDay;
 
-      const etfMvSigned = -qE * cur.pl;
-      const undMvSigned = shortEtfLongUnd ? qU * cur.ps : -qU * cur.ps;
-      const grossMv = Math.abs(etfMvSigned) + Math.abs(undMvSigned);
-      const netMv = Math.abs(etfMvSigned + undMvSigned);
+      /** Dollar notionals (positive magnitudes) for drift / net–gross (avoids signed-MV net/gross bug when short both). */
+      const mvEtfAbs = qE * cur.pl;
+      const mvUndAbs = qU * cur.ps;
+      const grossMv = mvEtfAbs + mvUndAbs;
+      const netMv = Math.abs(mvEtfAbs - mvUndAbs);
       const netGross = grossMv > 1e-9 ? netMv / grossMv : 0;
-      const wEtfInGross = grossMv > 1e-9 ? (qE * cur.pl) / grossMv : 0;
+      const wEtfInGross = grossMv > 1e-9 ? mvEtfAbs / grossMv : 0;
       const wTarget = targetEtfWeightInGross(hedgeRatioH);
       daysSinceRebal += 1;
 

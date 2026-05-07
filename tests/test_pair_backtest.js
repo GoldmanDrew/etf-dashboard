@@ -106,7 +106,6 @@ test("inverse pair: flat prices only borrow drag on short leg", () => {
     hedgeBackPct: 99,
     floorBps: 0,
     impactBps: 0,
-    costCapBps: 0,
     avgBorrowAnnual: 0.1,
   });
   assert.equal(out.ok, true);
@@ -134,7 +133,6 @@ test("inverse pair (β≥0): rising ETF flat und — short ETF leg loses", () =>
     hedgeBackPct: 99,
     floorBps: 0,
     impactBps: 0,
-    costCapBps: 0,
     avgBorrowAnnual: 0,
   });
   assert.equal(out.ok, true);
@@ -161,11 +159,36 @@ test("inverse pair (β<0): rising und flat ETF — short underlying leg loses", 
     hedgeBackPct: 99,
     floorBps: 0,
     impactBps: 0,
-    costCapBps: 0,
     avgBorrowAnnual: 0,
   });
   assert.equal(out.ok, true);
   assert.equal(out.strategy, "short_both");
   assert.equal(out.summary.longPnl, 0);
   assert.ok(out.summary.shortPnl < 0);
+});
+
+test("short both flat prices: net/gross is ~0 (not 100% from signed MV bug)", () => {
+  const rows = [];
+  for (let d = 1; d <= 10; d += 1) {
+    rows.push({
+      date: `2024-05-${String(d).padStart(2, "0")}`,
+      close_price: 20,
+      underlying_adj_close: 100,
+    });
+  }
+  const out = simulateInversePairBacktest(rows, {
+    gross: 200000,
+    hedgeRatio: 1,
+    beta: -2,
+    everyNDays: 100,
+    driftPct: 99,
+    hedgeBackPct: 99,
+    floorBps: 0,
+    impactBps: 0,
+    avgBorrowAnnual: 0.05,
+  });
+  assert.equal(out.ok, true);
+  const mid = out.daily[Math.floor(out.daily.length / 2)];
+  assert.ok(Number.isFinite(mid.netGross));
+  assert.ok(mid.netGross < 0.02, `expected small net/gross, got ${mid.netGross}`);
 });
