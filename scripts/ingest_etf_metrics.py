@@ -92,6 +92,7 @@ REQUIRED_COLUMNS = [
     "nav",
     "aum",
     "shares_outstanding",
+    "shares_traded",
     "close_price",
     "underlying_adj_close",
     "stale",
@@ -152,6 +153,7 @@ def _records_to_df(records: list[ProviderResult], ingested_at: datetime) -> pd.D
             "nav": r.nav,
             "aum": r.aum,
             "shares_outstanding": r.shares_outstanding,
+            "shares_traded": None,
             "close_price": None,
             "underlying_adj_close": None,
             "stale": bool(r.stale),
@@ -524,6 +526,7 @@ def collapse_redundant_consecutive_rows(df: pd.DataFrame) -> tuple[pd.DataFrame,
             row.get("nav"),
             row.get("aum"),
             row.get("shares_outstanding"),
+            row.get("shares_traded"),
             row.get("close_price"),
             row.get("underlying_adj_close"),
         )
@@ -596,6 +599,8 @@ def apply_stale_carry_forward(
         out.at[idx, "nav"] = float(last["nav"])
         out.at[idx, "aum"] = float(last["aum"])
         out.at[idx, "shares_outstanding"] = float(last["shares_outstanding"])
+        if "shares_traded" in out.columns and "shares_traded" in last.index:
+            out.at[idx, "shares_traded"] = last.get("shares_traded")
         out.at[idx, "status"] = "ok"
         out.at[idx, "stale"] = True
         out.at[idx, "stale_age_bdays"] = int(age_bdays)
@@ -608,7 +613,7 @@ def _sanitize_json_df(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     d["date"] = pd.to_datetime(d["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     d["ingested_at_utc"] = pd.to_datetime(d["ingested_at_utc"], errors="coerce", utc=True).astype(str)
-    for col in ("nav", "aum", "shares_outstanding", "close_price", "underlying_adj_close", "stale_age_bdays"):
+    for col in ("nav", "aum", "shares_outstanding", "shares_traded", "close_price", "underlying_adj_close", "stale_age_bdays"):
         if col in d.columns:
             d[col] = pd.to_numeric(d[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
     return d.astype(object).where(pd.notna(d), None)
@@ -715,7 +720,7 @@ def fetch_close_prices_batch(
     start: date,
     end: date,
 ) -> pd.DataFrame:
-    """Return long-form DataFrame (date, ticker, close_price) from yfinance.
+    """Return long-form DataFrame (date, ticker, close_price, shares_traded) from yfinance.
 
     Uses ``yf.download`` with a ticker list; that issues a single multi-symbol
     request rather than one GET per ticker, which is ~20x faster and stays
@@ -724,13 +729,27 @@ def fetch_close_prices_batch(
     An empty DataFrame is returned on any failure so the caller can proceed
     without close-prices rather than blow up the whole ingest.
     """
-    cols = ["date", "ticker", "close_price"]
+    cols = ["date", "ticker", "close_price", "shares_traded"]
     if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
         LOGGER.info("close-price fetch disabled (ETF_METRICS_DISABLE_YFINANCE)")
         return pd.DataFrame(columns=cols)
     raw = _yf_download_ohlcv(tickers, start, end, auto_adjust=False)
-    out = _extract_yf_series_to_long(raw, tickers, "Close", "close_price")
-    return out
+    close = _extract_yf_series_to_long(raw, tickers, "Close", "close_price")
+    volume = _extract_yf_series_to_long(raw, tickers, "Volume", "shares_traded")
+    if close.empty and volume.empty:
+        return pd.DataFrame(columns=cols)
+    if close.empty:
+        out = volume.copy()
+        out["close_price"] = None
+    elif volume.empty:
+        out = close.copy()
+        out["shares_traded"] = None
+    else:
+        out = close.merge(volume, on=["date", "ticker"], how="outer")
+    for c in cols:
+        if c not in out.columns:
+            out[c] = None
+    return out[cols].drop_duplicates(subset=["date", "ticker"], keep="last")
 
 
 def fetch_underlying_adj_close_batch(
@@ -773,27 +792,35 @@ def fetch_underlying_adj_close_batch(
 
 
 def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame:
-    """Left-join close prices onto the metrics frame on (date, ticker)."""
+    """Left-join close prices and exchange-reported share volume on (date, ticker)."""
     if close_df.empty:
         if "close_price" not in df.columns:
             df = df.copy()
             df["close_price"] = None
+        if "shares_traded" not in df.columns:
+            df = df.copy()
+            df["shares_traded"] = None
         return df
     out = df.copy()
     out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
     out["ticker"] = out["ticker"].astype(str).str.upper()
     merged = out.merge(
-        close_df.rename(columns={"close_price": "_close_new"}),
+        close_df.rename(columns={"close_price": "_close_new", "shares_traded": "_shares_traded_new"}),
         on=["date", "ticker"],
         how="left",
     )
     if "close_price" not in merged.columns:
         merged["close_price"] = None
+    if "shares_traded" not in merged.columns:
+        merged["shares_traded"] = None
     # Prefer the freshly fetched value; keep the existing one when yfinance is silent.
     merged["close_price"] = pd.to_numeric(merged["_close_new"], errors="coerce").combine_first(
         pd.to_numeric(merged["close_price"], errors="coerce")
     )
-    merged = merged.drop(columns=["_close_new"])
+    merged["shares_traded"] = pd.to_numeric(merged["_shares_traded_new"], errors="coerce").combine_first(
+        pd.to_numeric(merged["shares_traded"], errors="coerce")
+    )
+    merged = merged.drop(columns=["_close_new", "_shares_traded_new"])
     return merged
 
 

@@ -346,7 +346,7 @@ This same function is reused for **sorting** the column. If you change the rende
 | `borrow_spike_realized.jsonl` | `scripts/score_borrow_spikes.py` | ops / calibration audits | append on workflow |
 | `borrow_spike_metrics.json` | `scripts/score_borrow_spikes.py` | Brier, log-loss, band calibration rollup | daily / borrow refresh |
 | `options_cache.json` | `build_data.py --options-only` | `ChartPage`, `Trade Lab` | every 5 min (sharded) |
-| `etf_metrics_daily.{parquet,csv,json}` | `ingest_etf_metrics.py` | Stats tab (NAV/AUM/shares chart); `underlying_adj_close` via chunked Yahoo (`ETF_METRICS_UNDERLYING_YF_CHUNK_SIZE`) plus **gap backfill after upsert** (per-underlying Yahoo fetch over each underlying’s full null span in the merged store). If ingest **skips** (`ETF_METRICS_SKIP_IF_RECENT_HOURS`), `update-etf-metrics.yml` still runs **`scripts/backfill_underlying_adj_close.py`** so gaps do not stick forever. | daily 5 AM ET |
+| `etf_metrics_daily.{parquet,csv,json}` | `ingest_etf_metrics.py` | Stats tab (NAV/AUM/shares outstanding/shares traded chart) and Pair Backtest total-return legs + liquidity; `shares_traded` comes from Yahoo daily `Volume`; `underlying_adj_close` via chunked Yahoo (`ETF_METRICS_UNDERLYING_YF_CHUNK_SIZE`) plus **gap backfill after upsert** (per-underlying Yahoo fetch over each underlying’s full null span in the merged store). If ingest **skips** (`ETF_METRICS_SKIP_IF_RECENT_HOURS`), `update-etf-metrics.yml` still runs **`scripts/backfill_underlying_adj_close.py`** so gaps do not stick forever. | daily 5 AM ET |
 | `etf_metrics_latest.json` | `ingest_etf_metrics.py` | Stats tab (snapshot panel) | daily 5 AM ET |
 | `etf_distributions.json` | `ingest_distributions.py` | Stats tab Total-Return NAV line | daily 5 AM ET |
 | `corporate_actions.json` | `ingest_corporate_actions.py` | News tab pinned events | every 6 h |
@@ -494,6 +494,7 @@ index.html
 │   ├── assets/expected_decay.js     (standalone Itô calculator)
 │   ├── assets/scenario_returns.js   (vol/shock grid + LETF model)
 │   ├── assets/trade_lab.js          (Black-Scholes + leg builder)
+│   ├── assets/pair_backtest.js      (close-to-close pair backtest engine)
 │   ├── assets/options_data.js       (options cache helpers)
 │   ├── babel-standalone CDN
 │   └── <script type="text/babel">                                (lines 1248–end)
@@ -559,6 +560,7 @@ index.html
 │       │   │   ├── Trade Lab tab (option leg builder)
 │       │   │   └── Options chains tab
 │       │   ├── InfoPage                        // hash route #/info
+│       │   ├── PairBacktestPage                // hash route #/backtest
 │       │   ├── NewsPage                        // hash route #/news
 │       │   └── App                             // top-level router
 │       └── ReactDOM.createRoot(...).render(<App/>)
