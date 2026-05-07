@@ -30,6 +30,7 @@ def _row(
         "nav": nav,
         "aum": aum,
         "shares_outstanding": sh,
+        "shares_traded": None,
         "close_price": close,
         "underlying_adj_close": None,
         "stale": False,
@@ -173,3 +174,22 @@ def test_no_repair_on_normal_drift():
     out, n = iem.repair_close_price_split_basis_mismatch(df)
     assert n == 0
     assert float(out.iloc[1]["close_price"]) == 10.05
+
+
+def test_merge_close_prices_attaches_yahoo_volume_as_shares_traded():
+    base = pd.DataFrame([
+        _row("2026-04-01", nav=10.0, sh=1e6, close=9.9, aum=10e6, ticker="VOL"),
+    ])
+    base["date"] = pd.to_datetime(base["date"]).dt.date
+    close_df = pd.DataFrame([
+        {
+            "date": date(2026, 4, 1),
+            "ticker": "VOL",
+            "close_price": 10.05,
+            "shares_traded": 123456,
+        }
+    ])
+    out = iem.merge_close_prices(base, close_df)
+    got = out.iloc[0]
+    assert float(got["close_price"]) == 10.05
+    assert int(got["shares_traded"]) == 123456
