@@ -223,8 +223,10 @@
   }
 
   /**
-   * Long ETF vs short underlying (share ratio h: qS = h * qL).
-   * Gross G = qL*PL + qS*PS at each rebalance. Borrow: constant annual on short MV, /252 per day.
+   * Long ETF vs short underlying with **notional** hedge ratio h:
+   *   shortMV = h × longMV,  gross G = longMV + shortMV  ⇒  longMV = G/(1+h), shortMV = h·G/(1+h).
+   * Positions: q_L = longMV/P_ETF, q_S = shortMV/P_und at each rebalance.
+   * Borrow: constant annual on short MV, /252 per day.
    * Rows: per-day objects with close_price (or nav), underlying_adj_close, date.
    */
   function simulateInversePairBacktest(rows, opts) {
@@ -260,9 +262,10 @@
       };
     }
 
-    function targetShortWeight(pl, ps, h) {
-      const den = pl + h * ps;
-      return den > 0 ? (h * ps) / den : 0.5;
+    /** Target fraction of gross market value on the short leg when notionally hedged: short/(long+short) = h/(1+h). */
+    function targetShortWeightNotional(h) {
+      const hh = Math.max(1e-12, h);
+      return hh / (1 + hh);
     }
 
     let qL = 0;
@@ -279,10 +282,11 @@
     function rebalanceAt(i, reason) {
       const { pl, ps, date } = pts[i];
       const h = hedgeRatioH;
-      const den = pl + h * ps;
-      if (!(den > 0)) return false;
-      const qLNew = gross / den;
-      const qSNew = h * qLNew;
+      if (!(pl > 0) || !(ps > 0)) return false;
+      const longMv = gross / (1 + h);
+      const shortMv = (gross * h) / (1 + h);
+      const qLNew = longMv / pl;
+      const qSNew = shortMv / ps;
       if (lastRebal >= 0) {
         const tradeNotional = Math.abs(qLNew - qL) * pl + Math.abs(qSNew - qS) * ps;
         const feeBps = Math.min(costCapBps, floorBps + impactBps);
@@ -313,7 +317,7 @@
       const netMv = Math.abs(qL * cur.pl - qS * cur.ps);
       const netGross = grossMv > 1e-9 ? netMv / grossMv : 0;
       const wShort = grossMv > 1e-9 ? (qS * cur.ps) / grossMv : 0;
-      const wTarget = targetShortWeight(cur.pl, cur.ps, hedgeRatioH);
+      const wTarget = targetShortWeightNotional(hedgeRatioH);
       daysSinceRebal += 1;
 
       let rebalReason = "";
@@ -346,7 +350,26 @@
       nDays: pts.length,
       nRebalances: rebalanceMarks.length,
     };
-    return { ok: true, daily, rebalanceMarks, summary, inception: pts[0].date, end: pts[pts.length - 1].date };
+    const chartRows = daily.map((d) => ({
+      date: d.date,
+      netPnl: d.netPnl,
+      longPnl: d.longPnl,
+      shortPnl: d.shortPnl,
+      borrow: d.borrow,
+      transactionCosts: d.tCosts,
+      exposureRatio: d.netGross,
+      rebalance: Boolean(d.rebal),
+      rebalanceReason: d.rebal || "",
+    }));
+    return {
+      ok: true,
+      daily,
+      rows: chartRows,
+      rebalanceMarks,
+      summary,
+      inception: pts[0].date,
+      end: pts[pts.length - 1].date,
+    };
   }
 
   const exported = {
