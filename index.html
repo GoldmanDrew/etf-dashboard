@@ -1350,7 +1350,7 @@
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
 <script src="assets/trade_lab.js?v=tl-v1"></script>
-<script src="assets/pair_backtest.js?v=pb-v2"></script>
+<script src="assets/pair_backtest.js?v=pb-v3"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
@@ -3202,10 +3202,12 @@ function PairBacktestChart({ result }) {
     return <div className="scenario-warning">{result?.error || 'Run a backtest to see the PnL chart.'}</div>;
   }
   const series = result.rows;
+  const legEtf = result?.legChartLabels?.etf || 'Long';
+  const legUnd = result?.legChartLabels?.und || 'Short';
   const keys = [
     ['netPnl', 'Net PnL', 'rgba(6,182,212,0.98)'],
-    ['longPnl', 'Long PnL', 'rgba(16,185,129,0.95)'],
-    ['shortPnl', 'Short PnL', 'rgba(139,92,246,0.95)'],
+    ['longPnl', `${legEtf} (cum)`, 'rgba(16,185,129,0.95)'],
+    ['shortPnl', `${legUnd} (cum)`, 'rgba(139,92,246,0.95)'],
     ['borrow', 'Borrow', 'rgba(239,68,68,0.95)'],
     ['transactionCosts', 'T-costs', 'rgba(245,158,11,0.95)'],
   ];
@@ -3324,6 +3326,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const r = record;
   const etfSym = r.symbol;
   const undSym = r.underlying;
+  /** β ≥ 0: short ETF + long und; β < 0: short both (matches `simulateInversePairBacktest`). */
+  const pairBtShortEtfLongUnd = !(Number.isFinite(Number(r?.beta)) && Number(r?.beta) < 0);
   const tradeFns = window.TradeLab || {};
 
   const isIncomeStrategyScenario = isYieldBoostIncomeStrategy(r);
@@ -3723,6 +3727,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return sim(raw, {
       gross: Number(btGross) || 0,
       hedgeRatio: Number(btHedgeRatio) || 1,
+      beta: Number(r?.beta),
       everyNDays: Number(btEveryN) || 5,
       driftPct: Number(btDriftPct) || 0,
       hedgeBackPct: Number(btHedgeBackPct) || 1,
@@ -3734,6 +3739,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   }, [
     etfMetricsMap, etfSym, btGross, btHedgeRatio, btEveryN, btDriftPct, btHedgeBackPct,
     btFloorBps, btImpactBps, btCostCapBps, avgBorrowFromHistory, r.borrow_avg_annual, r,
+    r?.beta,
   ]);
   const tradeBorrowBySymbol = useMemo(() => ({ [etfSym]: annualCarryDrag }), [etfSym, annualCarryDrag]);
   const defaultIvBySymbol = useMemo(() => ({
@@ -5134,12 +5140,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
       {activePanel === 'backtest' && showBacktestPanel && (
         <div className="chart-section">
-          <div className="scenario-title">Pair backtest — long / short hedge replay</div>
+          <div className="scenario-title">Pair backtest — ETF vs underlying replay</div>
           <div className="scenario-sub" style={{ marginBottom: 10 }}>
-            Long <strong>{etfSym}</strong> vs short <strong>{String(undSym || '').toUpperCase()}</strong> (underlying from the screener row — not editable).
-            Notional hedge <strong>h = short MV / long MV</strong> (default <strong>|β|</strong>); gross <strong>G</strong> split as <code>longMV = G/(1+h)</code>, <code>shortMV = h·G/(1+h)</code> on each rebalance.
-            Uses every <strong>ok</strong> metrics day from inception (ETF close or NAV + underlying adj. close).
-            Borrow: <strong>historical average fee-only annual</strong> (same priority as the Borrow tab) as <code>shortMV × avg / 252</code> per day.
+            Strategy from screener <strong>β</strong>: {pairBtShortEtfLongUnd
+              ? <>short <strong>{etfSym}</strong>, long <strong>{String(undSym || '').toUpperCase()}</strong> (borrow on ETF short only).</>
+              : <>short <strong>{etfSym}</strong> and short <strong>{String(undSym || '').toUpperCase()}</strong> (borrow on both shorts).</>}
+            {' '}Notional <strong>h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>|</strong> (default <strong>|β|</strong>); gross <strong>G</strong> at rebalance: <code>MV<sub>ETF</sub> = h·G/(1+h)</code>, <code>MV<sub>und</sub> = G/(1+h)</code>.
+            Uses every <strong>ok</strong> metrics day (ETF close or NAV + underlying adj. close).
+            Borrow: same <strong>avg annual fee</strong> as the Borrow tab, charged daily on the short notional(s).
           </div>
 
           <div className="trade-card" style={{ marginBottom: 12 }}>
@@ -5147,12 +5155,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="scenario-title">Parameters</div>
             </div>
             <div className="backtest-controls">
-              <div className="backtest-control"><label>Long leg</label><input type="text" value={etfSym} readOnly disabled style={{ opacity: 0.85 }} /></div>
-              <div className="backtest-control"><label>Short leg</label><input type="text" value={String(undSym || '').toUpperCase()} readOnly disabled style={{ opacity: 0.85 }} /></div>
+              <div className="backtest-control"><label>ETF (short)</label><input type="text" value={etfSym} readOnly disabled style={{ opacity: 0.85 }} /></div>
+              <div className="backtest-control"><label>{pairBtShortEtfLongUnd ? 'Underlying (long)' : 'Underlying (short)'}</label><input type="text" value={String(undSym || '').toUpperCase()} readOnly disabled style={{ opacity: 0.85 }} /></div>
               <div className="backtest-control"><label>Gross $</label><input type="number" min={1000} step={1000} value={btGross} onChange={(e) => setBtGross(Number(e.target.value) || 0)} /></div>
-              <div className="backtest-control"><label>Hedge h ($ short / $ long)</label><input type="number" min={0.01} step={0.01} value={btHedgeRatio} onChange={(e) => setBtHedgeRatio(Number(e.target.value) || 1)} title="Notional ratio at rebalance: short market value = h × long market value. Default |β| from this row." /></div>
+              <div className="backtest-control"><label>Hedge h (|MV<sub>ETF</sub>| / |MV<sub>und</sub>|)</label><input type="number" min={0.01} step={0.01} value={btHedgeRatio} onChange={(e) => setBtHedgeRatio(Number(e.target.value) || 1)} title="At rebalance: ETF dollar exposure divided by underlying dollar exposure. Default |β| from this row." /></div>
               <div className="backtest-control"><label>Every N days</label><input type="number" min={1} step={1} value={btEveryN} onChange={(e) => setBtEveryN(Number(e.target.value) || 1)} /></div>
-              <div className="backtest-control"><label>Drift % (weight)</label><input type="number" min={0} step={0.5} value={btDriftPct} onChange={(e) => setBtDriftPct(Number(e.target.value) || 0)} title="Rebalance when short weight drifts vs target h/(1+h)" /></div>
+              <div className="backtest-control"><label>Drift % (weight)</label><input type="number" min={0} step={0.5} value={btDriftPct} onChange={(e) => setBtDriftPct(Number(e.target.value) || 0)} title="Rebalance when ETF abs MV / gross drifts vs target h/(1+h)" /></div>
               <div className="backtest-control"><label>Max net/gross %</label><input type="number" min={0.1} step={0.5} value={btHedgeBackPct} onChange={(e) => setBtHedgeBackPct(Number(e.target.value) || 1)} title="Rebalance when |long$−short$| / gross exceeds this" /></div>
               <div className="backtest-control"><label>Floor bps</label><input type="number" min={0} step={1} value={btFloorBps} onChange={(e) => setBtFloorBps(Number(e.target.value) || 0)} /></div>
               <div className="backtest-control"><label>Impact bps @ 100% ADV</label><input type="number" min={0} step={1} value={btImpactBps} onChange={(e) => setBtImpactBps(Number(e.target.value) || 0)} /></div>
@@ -5177,16 +5185,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   <div className="cs-sub">{pairBacktestResult.inception} → {pairBacktestResult.end}</div>
                 </div>
                 <div className="chart-stat">
-                  <div className="cs-label">Long / Short PnL</div>
+                  <div className="cs-label">ETF leg / Und leg</div>
                   <div className="cs-value">
                     {fmtMoney(pairBacktestResult.summary.longPnl)} / {fmtMoney(pairBacktestResult.summary.shortPnl)}
                   </div>
-                  <div className="cs-sub">Mark-to-market (before borrow &amp; costs)</div>
+                  <div className="cs-sub">Cumulative mark-to-market (before borrow &amp; costs)</div>
                 </div>
                 <div className="chart-stat">
                   <div className="cs-label">Borrow paid</div>
                   <div className="cs-value">{fmtMoney(pairBacktestResult.summary.borrowPaid)}</div>
-                  <div className="cs-sub">Avg annual × short MV / 252</div>
+                  <div className="cs-sub">Avg annual × borrow base / 252</div>
                 </div>
                 <div className="chart-stat">
                   <div className="cs-label">T-costs</div>
@@ -5198,7 +5206,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="trade-head">
                   <div>
                     <div className="scenario-title">{etfSym} vs {String(undSym || '').toUpperCase()} — PnL breakdown</div>
-                    <div className="scenario-sub">Net = long PnL + short PnL − borrow − transaction costs (same chart style as bucket pair backtest).</div>
+                    <div className="scenario-sub">Net = ETF leg + und leg − borrow − transaction costs (legend matches leg directions).</div>
                   </div>
                 </div>
                 <PairBacktestChart result={pairBacktestResult} />
@@ -5209,8 +5217,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     <tr>
                       <th>Date</th>
                       <th>Net PnL</th>
-                      <th>Long</th>
-                      <th>Short</th>
+                      <th>{pairBacktestResult?.legChartLabels?.etf || 'ETF'}</th>
+                      <th>{pairBacktestResult?.legChartLabels?.und || 'Und'}</th>
                       <th>Borrow</th>
                       <th>T-costs</th>
                       <th>Net/gross</th>
