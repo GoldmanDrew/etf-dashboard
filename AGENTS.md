@@ -494,7 +494,7 @@ index.html
 │   ├── assets/expected_decay.js     (standalone Itô calculator)
 │   ├── assets/scenario_returns.js   (vol/shock grid + LETF model)
 │   ├── assets/trade_lab.js          (Black-Scholes + leg builder)
-│   ├── assets/pair_backtest.js      (`simulateInversePairBacktest` long ETF vs short underlying; legacy `runPairBacktest` two-ETF bucket pair)
+│   ├── assets/pair_backtest.js      (`simulateInversePairBacktest`: h = |MV_ETF|/|MV_und|, gross MV_ETF = h·G/(1+h), MV_und = G/(1+h); β≥0 short ETF + long und, β<0 short both; legacy `runPairBacktest`)
 │   ├── assets/options_data.js       (options cache helpers)
 │   ├── babel-standalone CDN
 │   └── <script type="text/babel">                                (lines 1248–end)
@@ -558,9 +558,9 @@ index.html
 │       │   │   ├── Scenarios tab (heatmap of 5 vols × 7 shocks × 4 horizons)
 │       │   │   ├── Stats tab (NAV/AUM, distributions)
 │       │   │   ├── Trade Lab tab (option leg builder)
-│       │   │   └── Options chains tab
+│       │   │   ├── Options chains tab
+│       │   │   └── Backtest tab (`PairBacktestChart`, `simulateInversePairBacktest`; `#/chart/SYM/backtest`)
 │       │   ├── InfoPage                        // hash route #/info
-│       │   ├── PairBacktestSparkline + Backtest tab // long ETF vs short underlying (fixed legs), |β| hedge h, avg borrow; `simulateInversePairBacktest`; optional #/chart/SYM/backtest
 │       │   ├── NewsPage                        // hash route #/news
 │       │   └── App                             // top-level router
 │       └── ReactDOM.createRoot(...).render(<App/>)

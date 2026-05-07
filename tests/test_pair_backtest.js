@@ -116,7 +116,7 @@ test("inverse pair: flat prices only borrow drag on short leg", () => {
   assert.equal(out.summary.tCosts, 0);
 });
 
-test("inverse pair: rising ETF flat und long leg positive", () => {
+test("inverse pair (β≥0): rising ETF flat und — short ETF leg loses", () => {
   const rows = [];
   for (let i = 0; i < 5; i += 1) {
     rows.push({
@@ -128,6 +128,7 @@ test("inverse pair: rising ETF flat und long leg positive", () => {
   const out = simulateInversePairBacktest(rows, {
     gross: 50000,
     hedgeRatio: 1,
+    beta: 2,
     everyNDays: 100,
     driftPct: 50,
     hedgeBackPct: 99,
@@ -137,5 +138,34 @@ test("inverse pair: rising ETF flat und long leg positive", () => {
     avgBorrowAnnual: 0,
   });
   assert.equal(out.ok, true);
-  assert.ok(out.summary.longPnl > 0);
+  assert.equal(out.strategy, "short_etf_long_und");
+  assert.ok(out.summary.longPnl < 0);
+  assert.equal(out.summary.shortPnl, 0);
+});
+
+test("inverse pair (β<0): rising und flat ETF — short underlying leg loses", () => {
+  const rows = [];
+  for (let i = 0; i < 5; i += 1) {
+    rows.push({
+      date: `2024-03-${String(i + 1).padStart(2, "0")}`,
+      close_price: 10,
+      underlying_adj_close: 50 + i,
+    });
+  }
+  const out = simulateInversePairBacktest(rows, {
+    gross: 50000,
+    hedgeRatio: 1,
+    beta: -1,
+    everyNDays: 100,
+    driftPct: 50,
+    hedgeBackPct: 99,
+    floorBps: 0,
+    impactBps: 0,
+    costCapBps: 0,
+    avgBorrowAnnual: 0,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.strategy, "short_both");
+  assert.equal(out.summary.longPnl, 0);
+  assert.ok(out.summary.shortPnl < 0);
 });
