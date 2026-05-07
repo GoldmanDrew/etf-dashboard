@@ -5,6 +5,7 @@ const {
   runPairBacktest,
   exposureRatio,
   slippageCost,
+  simulateInversePairBacktest,
 } = require("../assets/pair_backtest.js");
 
 function row(date, value, extra = {}) {
@@ -89,4 +90,52 @@ test("slippage increases with participation and exposure ratio is net over gross
   const low = slippageCost(10_000, 1_000_000, { floorBps: 1, impactBps: 20, capBps: 100 });
   const high = slippageCost(100_000, 1_000_000, { floorBps: 1, impactBps: 20, capBps: 100 });
   assert.ok(high > low);
+});
+
+test("inverse pair: flat prices only borrow drag on short leg", () => {
+  const rows = [];
+  for (let d = 1; d <= 10; d += 1) {
+    const day = `2024-01-${String(d).padStart(2, "0")}`;
+    rows.push({ date: day, close_price: 10, underlying_adj_close: 20 });
+  }
+  const out = simulateInversePairBacktest(rows, {
+    gross: 10000,
+    hedgeRatio: 2,
+    everyNDays: 100,
+    driftPct: 50,
+    hedgeBackPct: 99,
+    floorBps: 0,
+    impactBps: 0,
+    costCapBps: 0,
+    avgBorrowAnnual: 0.1,
+  });
+  assert.equal(out.ok, true);
+  assert.ok(out.summary.borrowPaid > 0);
+  assert.equal(out.summary.longPnl, 0);
+  assert.equal(out.summary.shortPnl, 0);
+  assert.equal(out.summary.tCosts, 0);
+});
+
+test("inverse pair: rising ETF flat und long leg positive", () => {
+  const rows = [];
+  for (let i = 0; i < 5; i += 1) {
+    rows.push({
+      date: `2024-02-${String(i + 1).padStart(2, "0")}`,
+      close_price: 10 + i,
+      underlying_adj_close: 50,
+    });
+  }
+  const out = simulateInversePairBacktest(rows, {
+    gross: 50000,
+    hedgeRatio: 1,
+    everyNDays: 100,
+    driftPct: 50,
+    hedgeBackPct: 99,
+    floorBps: 0,
+    impactBps: 0,
+    costCapBps: 0,
+    avgBorrowAnnual: 0,
+  });
+  assert.equal(out.ok, true);
+  assert.ok(out.summary.longPnl > 0);
 });
