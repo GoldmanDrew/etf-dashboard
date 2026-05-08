@@ -325,7 +325,7 @@
    * `netGrossTolerancePct` (percentage points), rebalance to target notionals and reset the anchor.
    * Anchor is snapshotted at inception and after each rebalance.
    *
-   * Pass `opts.beta` (screener β). `opts.hedgeRatio` is the magnitude h (default |β| in UI).
+   * Pass `opts.beta` (screener β). `opts.hedgeRatio` is the magnitude h (UI default 1/|β|).
    * `opts.slippageBps`: per-rebalance t-cost = slippageBps/10000 × traded notional.
    */
   function simulateInversePairBacktest(rows, opts) {
