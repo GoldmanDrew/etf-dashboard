@@ -3817,6 +3817,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     return buildTotalReturnMetricsSeries(raw, etfDistributionsSeries);
   }, [etfMetricsMap, etfSym, etfDistributionsSeries]);
+  // Pair Backtest: joint days (ETF px + underlying_adj_close) from etf_metrics_daily.
+  // When Yahoo listing predates issuer rows, CI prepends yahoo_bootstrap rows via
+  // scripts/bootstrap_metrics_yahoo_history.py so inception can align with listing.
   const etfBacktestSeries = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     return buildTotalReturnBacktestSeries(raw, etfDistributionsSeries);

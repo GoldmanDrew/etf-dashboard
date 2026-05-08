@@ -110,6 +110,12 @@ jobs:
         continue-on-error: true
         run: python scripts/backfill_close_prices.py --chunk 50
 
+      - name: Bootstrap Yahoo prices before first stored metrics row
+        # Pair backtest needs joint ETF+underlying history from listing. Fills
+        # the gap when Yahoo first trade predates the earliest issuer row in the store.
+        continue-on-error: true
+        run: python scripts/bootstrap_metrics_yahoo_history.py --max-tickers 500
+
       - name: Ingest ETF distribution history
         # Used by the frontend to render a distribution-adjusted ("total return") NAV
         # series alongside raw NAV on the Stats tab -- critical for YieldMax-class
