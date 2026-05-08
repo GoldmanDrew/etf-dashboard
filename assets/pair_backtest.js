@@ -1,9 +1,11 @@
-/* global window, module */
+/* global globalThis, module */
 (function initPairBacktest(globalObj) {
   function toNum(v) {
     if (typeof v === "number") return Number.isFinite(v) ? v : NaN;
     if (typeof v === "string") {
-      const n = Number(v.trim().replace(/,/g, ""));
+      const s = v.trim();
+      if (!s) return NaN;
+      const n = Number(s.replace(/,/g, ""));
       return Number.isFinite(n) ? n : NaN;
     }
     return NaN;
@@ -326,7 +328,7 @@
    * Anchor is snapshotted at inception and after each rebalance.
    *
    * Pass `opts.beta` (screener β). `opts.hedgeRatio` is the magnitude h (UI default 1/|β|).
-   * `opts.slippageBps`: per-rebalance t-cost = slippageBps/10000 × traded notional.
+   * `opts.slippageBps`: per-rebalance t-cost = `Math.max(0, slippageBps) / 10000` × traded notional (Diamond-Creek-Quant parity; no floor/impact fallback).
    */
   function simulateInversePairBacktest(rows, opts) {
     const gross = Math.max(0, toNum(opts && opts.gross));
@@ -336,12 +338,7 @@
     const everyN = Math.max(1, Math.floor(toNum(opts && opts.everyNDays) || 5));
     const tolPct = toNum(opts && opts.netGrossTolerancePct);
     const tolerance = Number.isFinite(tolPct) && tolPct >= 0 ? Math.min(tolPct / 100, 0.999) : 0.05;
-    const slippageBpsRaw = toNum(opts && opts.slippageBps);
-    const floorBps = Math.max(0, toNum(opts && opts.floorBps));
-    const impactBps = Math.max(0, toNum(opts && opts.impactBps));
-    const slippageBps = Number.isFinite(slippageBpsRaw) && slippageBpsRaw >= 0
-      ? slippageBpsRaw
-      : floorBps + impactBps;
+    const slippageBps = Math.max(0, toNum(opts && opts.slippageBps));
     const borrowAnnualFallback = toNum(opts && opts.avgBorrowAnnual);
     const betaAbs = Number.isFinite(betaRow) && Math.abs(betaRow) > 1e-12
       ? Math.abs(betaRow)
@@ -555,4 +552,4 @@
 
   if (typeof module !== "undefined" && module.exports) module.exports = exported;
   if (globalObj) globalObj.PairBacktest = exported;
-})(typeof window !== "undefined" ? window : globalThis);
+})(typeof globalThis !== "undefined" ? globalThis : typeof window !== "undefined" ? window : globalThis);

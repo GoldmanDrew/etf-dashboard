@@ -1350,7 +1350,7 @@
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
 <script src="assets/trade_lab.js?v=tl-v1"></script>
-<script src="assets/pair_backtest.js?v=pb-v6"></script>
+<script src="assets/pair_backtest.js?v=pb-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
@@ -3832,8 +3832,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (!dated.length || !etfBacktestSeries.length) return null;
     const firstEtf = String(dated[0]?.date || '').trim();
     const firstJoint = String(etfBacktestSeries[0]?.date || '').trim();
-    if (!firstEtf || !firstJoint || firstEtf === firstJoint) return null;
-    return { firstEtf, firstJoint };
+    if (firstEtf && firstJoint && firstJoint.localeCompare(firstEtf) > 0) {
+      return { firstEtf, firstJoint };
+    }
+    return null;
   }, [etfMetricsMap, etfSym, etfBacktestSeries]);
   const latestEtfMetric = useMemo(
     () => (etfMetricsSeries.length ? etfMetricsSeries[etfMetricsSeries.length - 1] : null),
@@ -3911,9 +3913,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       ? Number(r.borrow_avg_annual)
       : Number(getBorrowRate(r)));
   const annualCarryDrag = Number.isFinite(annualCarryDragRaw) ? Math.max(0, annualCarryDragRaw) : 0;
-  const pairBacktestResult = useMemo(() => {
-    const sim = window.PairBacktest?.simulateInversePairBacktest;
-    if (typeof sim !== 'function') {
+  /** Recompute each render (Diamond-Creek-Quant parity) so control edits always refresh without useMemo dep churn. */
+  const pairBacktestResult = (() => {
+    const sim = typeof window !== 'undefined' && window.PairBacktest
+      && typeof window.PairBacktest.simulateInversePairBacktest === 'function'
+      ? window.PairBacktest.simulateInversePairBacktest
+      : null;
+    if (!sim) {
       return { ok: false, error: 'Pair backtest module unavailable', daily: [], rebalanceMarks: [], summary: {} };
     }
     const bAnn = Number.isFinite(avgBorrowFromHistory)
@@ -3931,15 +3937,15 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       avgBorrowAnnual: Number.isFinite(bAnn) ? bAnn : 0,
       borrowHistory: etfBorrowSeries,
     });
-  }, [
-    etfBacktestSeries, etfBorrowSeries, btGross, btHedgeRatio, btEveryN, btNetGrossTol, btSlippageBps,
-    avgBorrowFromHistory, r.borrow_avg_annual, r, r?.beta,
-  ]);
-  const pairRiskSeries = useMemo(() => {
-    const fn = window.PairBacktest?.computePairBacktestRiskSeries;
-    if (typeof fn !== 'function' || !pairBacktestResult?.ok || !Array.isArray(pairBacktestResult.rows)) return [];
+  })();
+  const pairRiskSeries = (() => {
+    const fn = typeof window !== 'undefined' && window.PairBacktest
+      && typeof window.PairBacktest.computePairBacktestRiskSeries === 'function'
+      ? window.PairBacktest.computePairBacktestRiskSeries
+      : null;
+    if (!fn || !pairBacktestResult?.ok || !Array.isArray(pairBacktestResult.rows)) return [];
     return fn(pairBacktestResult.rows, Number(btGross) || 0);
-  }, [pairBacktestResult, btGross]);
+  })();
   const tradeBorrowBySymbol = useMemo(() => ({ [etfSym]: annualCarryDrag }), [etfSym, annualCarryDrag]);
   const defaultIvBySymbol = useMemo(() => ({
     [undSym]: Number.isFinite(Number(realizedUnd)) && Number(realizedUnd) > 0 ? Number(realizedUnd) : 0.8,
