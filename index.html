@@ -1350,7 +1350,7 @@
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
 <script src="assets/trade_lab.js?v=tl-v1"></script>
-<script src="assets/pair_backtest.js?v=pb-v4"></script>
+<script src="assets/pair_backtest.js?v=pb-v5"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
@@ -1394,6 +1394,30 @@ const fmtTime = iso => {
   const d = new Date(iso);
   return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
 };
+/** Pair backtest SVG x-axis: include day + year and avoid duplicate tick strings. */
+function formatBacktestAxisDate(raw) {
+  if (raw == null || raw === '') return '';
+  const d = new Date(`${String(raw).trim()}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? String(raw) : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function pickDistinctBacktestDateTickIndices(dateStrings) {
+  const n = dateStrings.length;
+  if (n < 2) return n === 1 ? [0] : [];
+  const lab = (i) => formatBacktestAxisDate(dateStrings[i]);
+  const cand = [0, Math.round(0.25 * (n - 1)), Math.round(0.5 * (n - 1)), Math.round(0.75 * (n - 1)), n - 1];
+  const ordered = [...new Set(cand)].sort((a, b) => a - b);
+  const out = [];
+  const seen = new Set();
+  for (const i of ordered) {
+    const force = i === 0 || i === n - 1;
+    const s = lab(i);
+    if (force || !seen.has(s)) {
+      out.push(i);
+      seen.add(s);
+    }
+  }
+  return [...new Set(out)].sort((a, b) => a - b);
+}
 const cls = (...c) => c.filter(Boolean).join(' ');
 const toFiniteNum = (v) => {
   if (typeof v === 'string') {
@@ -1425,6 +1449,7 @@ const optionMidFromContract = (c) => {
   if (ask != null && ask > 0) return ask;
   return null;
 };
+/** Canonical short_favorable_positive: negative = borrow fee (cost to short); positive = rebate / short-favorable. */
 const getBorrowRate = r => (r?.borrow_current ?? r?.borrow_net_annual ?? null);
 /** Match scripts/build_data.py:_borrow_history_point_for_avg — exclude ~0% fee when no positive locates. */
 const borrowHistoryPointForAvg = (pt) => {
@@ -1440,6 +1465,14 @@ const borrowHistoryPointForAvg = (pt) => {
   if (!Number.isFinite(si)) return false;
   return Math.trunc(si) > 0;
 };
+/** Default max β-adj imbalance (percentage points) for pair backtest tolerance control. */
+function defaultNetGrossTolerancePct(record) {
+  const b = String(record?.bucket || '').trim();
+  const pc = String(record?.product_class || '').trim().toLowerCase();
+  if (b === 'bucket_3_inverse' || pc === 'inverse') return 10;
+  if (pc === 'income_yieldboost' || pc.includes('yieldboost')) return 2;
+  return 5;
+}
 const getFreshness = (data) => {
   const built = data?.build_time ? new Date(data.build_time) : null;
   if (!built || Number.isNaN(built.getTime())) {
@@ -3259,11 +3292,11 @@ function PairBacktestChart({ result }) {
   const yMin = minRaw - pad;
   const yMax = maxRaw + pad;
   const W = 980;
-  const H = 320;
-  const L = 78;
-  const R = 14;
+  const H = 328;
+  const L = 82;
+  const R = 16;
   const T = 14;
-  const B = 40;
+  const B = 46;
   const PW = W - L - R;
   const PH = H - T - B;
   const x = (i) => L + (i / Math.max(1, series.length - 1)) * PW;
@@ -3274,30 +3307,25 @@ function PairBacktestChart({ result }) {
     return Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : '';
   }).filter(Boolean).join(' ');
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((q) => yMin + (yMax - yMin) * q).reverse();
-  const dateLabel = (idx) => {
-    const raw = series[idx]?.date;
-    if (!raw) return '';
-    const d = new Date(`${raw}T00:00:00Z`);
-    return Number.isNaN(d.getTime()) ? String(raw) : d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
-  };
-  const xTicks = Array.from(new Set([0, Math.floor((series.length - 1) / 2), series.length - 1]));
+  const dateStrs = series.map((r) => r.date);
+  const xTicks = pickDistinctBacktestDateTickIndices(dateStrs);
   return (
     <div>
-      <div className="mc-plot" style={{ height: 320, marginBottom: 0 }}>
+      <div className="mc-plot" style={{ height: 328, marginBottom: 0 }}>
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
-          <rect x={L} y={T} width={PW} height={PH} fill="rgba(11,19,34,0.2)" stroke="rgba(56,72,96,0.5)" />
+          <rect x={L} y={T} width={PW} height={PH} fill="rgba(11,19,34,0.16)" stroke="rgba(56,72,96,0.42)" />
           {ticks.map((tick, i) => (
             <g key={i}>
-              <line x1={L} y1={y(tick)} x2={W - R} y2={y(tick)} stroke="rgba(56,72,96,0.35)" />
+              <line x1={L} y1={y(tick)} x2={W - R} y2={y(tick)} stroke="rgba(56,72,96,0.22)" />
               <text x={L - 8} y={y(tick) + 4} textAnchor="end" fontSize="11" fill="#9db0d2" fontFamily="DM Sans">{fmtMoney(tick)}</text>
             </g>
           ))}
-          <line x1={L} y1={y(0)} x2={W - R} y2={y(0)} stroke="rgba(255,255,255,0.5)" strokeDasharray="6 5" />
+          <line x1={L} y1={y(0)} x2={W - R} y2={y(0)} stroke="rgba(255,255,255,0.42)" strokeDasharray="6 5" />
           {xTicks.map((idx) => (
-            <text key={idx} x={x(idx)} y={H - 12} textAnchor={idx === 0 ? 'start' : idx === series.length - 1 ? 'end' : 'middle'} fontSize="11" fill="#7f8ea8" fontFamily="DM Sans">{dateLabel(idx)}</text>
+            <text key={idx} x={x(idx)} y={H - 10} textAnchor={idx === 0 ? 'start' : idx === series.length - 1 ? 'end' : 'middle'} fontSize="11" fill="#8b9cbb" fontFamily="DM Sans">{formatBacktestAxisDate(dateStrs[idx])}</text>
           ))}
           {keys.map(([k, _label, color]) => (
-            <path key={k} d={pathFor(k)} fill="none" stroke={color} strokeWidth={k === 'netPnl' ? 2.6 : 1.7} strokeDasharray={(k === 'borrow' || k === 'transactionCosts') ? '5 4' : ''} />
+            <path key={k} d={pathFor(k)} fill="none" stroke={color} strokeWidth={k === 'netPnl' ? 3 : 2.2} strokeLinejoin="round" strokeLinecap="round" strokeDasharray={(k === 'borrow' || k === 'transactionCosts') ? '5 4' : ''} />
           ))}
           {series.map((r, i) => (r.rebalance ? (
             <line key={`rb-${i}`} x1={x(i)} x2={x(i)} y1={T} y2={H - B} stroke="rgba(148,163,184,0.18)" />
@@ -3308,6 +3336,127 @@ function PairBacktestChart({ result }) {
         {keys.map(([k, label, color]) => (
           <span key={k}><span className="backtest-legend-dot" style={{ background: color }} />{label}{(k === 'borrow' || k === 'transactionCosts') ? ' (cost plotted negative)' : ''}</span>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/** Expanding-window risk stats — last point of `computePairBacktestRiskSeries`. */
+function PairBacktestRiskMetricsStats({ riskSeries, pairResult }) {
+  if (!pairResult?.ok) return null;
+  if (!Array.isArray(riskSeries) || riskSeries.length === 0) {
+    return (
+      <div style={{ marginTop: 18 }}>
+        <div className="scenario-title" style={{ marginBottom: 6 }}>Risk metrics (expanding window)</div>
+        <div className="scenario-sub">
+          Warm-up: expanding-window statistics need enough simulated chart days. Extend ETF metrics history or check back shortly.
+        </div>
+      </div>
+    );
+  }
+  const last = riskSeries[riskSeries.length - 1] || {};
+  const asOf = last.date || '—';
+  const inc = pairResult.inception || '—';
+  const end = pairResult.end || '—';
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div className="scenario-title" style={{ marginBottom: 6 }}>Risk metrics (expanding window)</div>
+      <div className="scenario-sub" style={{ marginBottom: 10 }}>
+        Through <strong>{asOf}</strong> on equity = gross + cumulative net PnL: vol and Sharpe use daily simple returns; max drawdown is peak-to-trough on that equity path from {inc} onward.
+      </div>
+      <div className="scenario-sub" style={{ marginBottom: 10 }}>
+        <strong>CAGR</strong> stays <strong>—</strong> until at least <strong>63 trading days</strong> and <strong>3 calendar months</strong> of history.
+      </div>
+      <div className="chart-stats" style={{ marginTop: 4 }}>
+        <div className="chart-stat">
+          <div className="cs-label">CAGR (expanding)</div>
+          <div className="cs-value">{Number.isFinite(last.cagr) ? fmt(last.cagr) : '—'}</div>
+          <div className="cs-sub">{inc} → {end}</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Volatility (ann.)</div>
+          <div className="cs-value">{Number.isFinite(last.annVol) ? fmt(last.annVol) : '—'}</div>
+          <div className="cs-sub">As of {asOf}</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Max drawdown</div>
+          <div className="cs-value">{Number.isFinite(last.maxDrawdown) ? fmt(last.maxDrawdown) : '—'}</div>
+          <div className="cs-sub">Peak-to-trough on equity</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Sharpe (rf = 0)</div>
+          <div className="cs-value">{Number.isFinite(last.sharpe) ? Number(last.sharpe).toFixed(2) : '—'}</div>
+          <div className="cs-sub">From daily equity returns</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Dollar MV per leg + |β|×ETF MV (breach metric). */
+function PairBacktestExposureChart({ result }) {
+  if (!result?.ok || !Array.isArray(result.rows) || result.rows.length < 2) return null;
+  const series = result.rows;
+  const labEtf = result?.legChartLabels?.etf || 'ETF';
+  const labUnd = result?.legChartLabels?.und || 'Und';
+  const vals = [];
+  series.forEach((row) => {
+    vals.push(Number(row.mvEtfAbs), Number(row.mvUndAbs), Number(row.mvEtfBetaAdj));
+  });
+  const minRaw = Math.min(...vals, 0);
+  const maxRaw = Math.max(...vals, 0);
+  const pad = (maxRaw - minRaw || Math.max(1, Math.abs(maxRaw))) * 0.1;
+  const yMin = minRaw - pad;
+  const yMax = maxRaw + pad;
+  const W = 980;
+  const H = 272;
+  const L = 82;
+  const R = 16;
+  const T = 14;
+  const B = 44;
+  const PW = W - L - R;
+  const PH = H - T - B;
+  const x = (i) => L + (i / Math.max(1, series.length - 1)) * PW;
+  const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, yMax - yMin))) * PH;
+  const pathFor = (key) => series.map((r, i) => {
+    const v = Number(r?.[key]);
+    return Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : '';
+  }).filter(Boolean).join(' ');
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((q) => yMin + (yMax - yMin) * q).reverse();
+  const dateStrs = series.map((r) => r.date);
+  const xTicks = pickDistinctBacktestDateTickIndices(dateStrs);
+  const tol = result?.breachTolerancePct != null ? Number(result.breachTolerancePct).toFixed(1) : '—';
+  return (
+    <div style={{ marginTop: 20 }}>
+      <div className="scenario-title" style={{ marginBottom: 4 }}>Leg exposure ($)</div>
+      <div className="scenario-sub" style={{ marginBottom: 8 }}>
+        Abs dollar MV per leg; <strong>|β| × ETF MV</strong> (teal dashed) is the β-scaled ETF side used in the breach ratio. On each <strong>Every N</strong> day, rebalance if <strong>|ratio − anchor|</strong> exceeds your max drift (defaults: inverse 10 / regular 5 / YieldBOOST 2 <strong>pp</strong>). Current limit: <strong>{tol} pp</strong> (vs anchor at last rebalance).
+      </div>
+      <div className="mc-plot" style={{ height: H, marginBottom: 0 }}>
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
+          <rect x={L} y={T} width={PW} height={PH} fill="rgba(11,19,34,0.14)" stroke="rgba(56,72,96,0.4)" />
+          {ticks.map((tick, i) => (
+            <g key={i}>
+              <line x1={L} y1={y(tick)} x2={W - R} y2={y(tick)} stroke="rgba(56,72,96,0.2)" />
+              <text x={L - 8} y={y(tick) + 4} textAnchor="end" fontSize="11" fill="#9db0d2" fontFamily="DM Sans">{fmtMoney(tick)}</text>
+            </g>
+          ))}
+          <line x1={L} y1={y(0)} x2={W - R} y2={y(0)} stroke="rgba(255,255,255,0.35)" strokeDasharray="6 5" />
+          {xTicks.map((idx) => (
+            <text key={idx} x={x(idx)} y={H - 10} textAnchor={idx === 0 ? 'start' : idx === series.length - 1 ? 'end' : 'middle'} fontSize="11" fill="#8b9cbb" fontFamily="DM Sans">{formatBacktestAxisDate(dateStrs[idx])}</text>
+          ))}
+          <path d={pathFor('mvEtfAbs')} fill="none" stroke="rgba(16,185,129,0.95)" strokeWidth={2.3} strokeLinejoin="round" strokeLinecap="round" />
+          <path d={pathFor('mvUndAbs')} fill="none" stroke="rgba(139,92,246,0.95)" strokeWidth={2.3} strokeLinejoin="round" strokeLinecap="round" />
+          <path d={pathFor('mvEtfBetaAdj')} fill="none" stroke="rgba(6,182,212,0.85)" strokeWidth={2} strokeDasharray="6 4" strokeLinejoin="round" strokeLinecap="round" />
+          {series.map((r, i) => (r.rebalance ? (
+            <line key={`ex-rb-${i}`} x1={x(i)} x2={x(i)} y1={T} y2={H - B} stroke="rgba(148,163,184,0.22)" />
+          ) : null))}
+        </svg>
+      </div>
+      <div className="backtest-chart-legend">
+        <span><span className="backtest-legend-dot" style={{ background: 'rgba(16,185,129,0.95)' }} />{labEtf} MV ($)</span>
+        <span><span className="backtest-legend-dot" style={{ background: 'rgba(139,92,246,0.95)' }} />{labUnd} MV ($)</span>
+        <span><span className="backtest-legend-dot" style={{ background: 'rgba(6,182,212,0.85)' }} />|β| × ETF MV ($)</span>
       </div>
     </div>
   );
@@ -3349,10 +3498,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [tradeShortProceedsPct, setTradeShortProceedsPct] = useState(1.0);
   const [btGross, setBtGross] = useState(100000);
   const [btEveryN, setBtEveryN] = useState(5);
-  const [btDriftPct, setBtDriftPct] = useState(5);
-  const [btHedgeBackPct, setBtHedgeBackPct] = useState(1);
-  const [btFloorBps, setBtFloorBps] = useState(2);
-  const [btImpactBps, setBtImpactBps] = useState(25);
+  const [btSlippageBps, setBtSlippageBps] = useState(27);
+  const [btNetGrossTol, setBtNetGrossTol] = useState(5);
   const [btHedgeRatio, setBtHedgeRatio] = useState(1);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
@@ -3413,6 +3560,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (Number.isFinite(b) && b > 0) setBtHedgeRatio(b);
     else setBtHedgeRatio(1);
   }, [etfSym, r?.beta]);
+  useEffect(() => {
+    setBtNetGrossTol(defaultNetGrossTolerancePct(r));
+  }, [etfSym, r?.bucket, r?.product_class]);
 
   const widgetHtml = useMemo(() => {
     keyRef.current++;
@@ -3672,6 +3822,20 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     return buildTotalReturnBacktestSeries(raw, etfDistributionsSeries);
   }, [etfMetricsMap, etfSym, etfDistributionsSeries]);
+  const pairBacktestCoverageHint = useMemo(() => {
+    const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
+    const hasEtfPx = (row) => {
+      const pl = Number(row?.close_price) || Number(row?.nav);
+      const ds = String(row?.date || '').trim();
+      return Boolean(ds) && Number.isFinite(pl) && pl > 0;
+    };
+    const dated = raw.filter(hasEtfPx).sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
+    if (!dated.length || !etfBacktestSeries.length) return null;
+    const firstEtf = String(dated[0]?.date || '').trim();
+    const firstJoint = String(etfBacktestSeries[0]?.date || '').trim();
+    if (!firstEtf || !firstJoint || firstEtf === firstJoint) return null;
+    return { firstEtf, firstJoint };
+  }, [etfMetricsMap, etfSym, etfBacktestSeries]);
   const latestEtfMetric = useMemo(
     () => (etfMetricsSeries.length ? etfMetricsSeries[etfMetricsSeries.length - 1] : null),
     [etfMetricsSeries],
@@ -3763,17 +3927,20 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       hedgeRatio: Number(btHedgeRatio) || 1,
       beta: Number(r?.beta),
       everyNDays: Number(btEveryN) || 5,
-      driftPct: Number(btDriftPct) || 0,
-      hedgeBackPct: Number(btHedgeBackPct) || 1,
-      floorBps: Number(btFloorBps) || 0,
-      impactBps: Number(btImpactBps) || 0,
-      avgBorrowAnnual: Number.isFinite(bAnn) && bAnn > 0 ? bAnn : 0,
+      netGrossTolerancePct: Number(btNetGrossTol),
+      slippageBps: Number(btSlippageBps) || 0,
+      avgBorrowAnnual: Number.isFinite(bAnn) ? bAnn : 0,
+      borrowHistory: etfBorrowSeries,
     });
   }, [
-    etfBacktestSeries, btGross, btHedgeRatio, btEveryN, btDriftPct, btHedgeBackPct,
-    btFloorBps, btImpactBps, avgBorrowFromHistory, r.borrow_avg_annual, r,
-    r?.beta,
+    etfBacktestSeries, etfBorrowSeries, btGross, btHedgeRatio, btEveryN, btNetGrossTol, btSlippageBps,
+    avgBorrowFromHistory, r.borrow_avg_annual, r, r?.beta,
   ]);
+  const pairRiskSeries = useMemo(() => {
+    const fn = window.PairBacktest?.computePairBacktestRiskSeries;
+    if (typeof fn !== 'function' || !pairBacktestResult?.ok || !Array.isArray(pairBacktestResult.rows)) return [];
+    return fn(pairBacktestResult.rows, Number(btGross) || 0);
+  }, [pairBacktestResult, btGross]);
   const tradeBorrowBySymbol = useMemo(() => ({ [etfSym]: annualCarryDrag }), [etfSym, annualCarryDrag]);
   const defaultIvBySymbol = useMemo(() => ({
     [undSym]: Number.isFinite(Number(realizedUnd)) && Number(realizedUnd) > 0 ? Number(realizedUnd) : 0.8,
@@ -5180,7 +5347,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               : <>short <strong>{etfSym}</strong> and short <strong>{String(undSym || '').toUpperCase()}</strong> (ETF short borrow only; underlying short treated as 0% borrow).</>}
             {' '}Notional <strong>h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>|</strong> (default <strong>|β|</strong>); gross <strong>G</strong> at rebalance: <code>MV<sub>ETF</sub> = h·G/(1+h)</code>, <code>MV<sub>und</sub> = G/(1+h)</code>.
             Uses every day with both legs priced (same total-return NAV reinvestment as Stats; includes rows before status=ok when data exists).
-            Borrow: same <strong>avg annual fee</strong> as the Borrow tab, applied to the ETF short notional only.
+            Borrow: <strong>short_favorable_positive</strong> — <code>borrow_current</code> from history by date (forward-filled), else hist. avg / spot from this row; negative = fee, positive = rebate. Daily drag <code>−rate/252 ×</code> trapezoid ETF short MV (underlying short borrow 0%).
           </div>
 
           <div className="trade-card" style={{ marginBottom: 12 }}>
@@ -5192,14 +5359,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="backtest-control"><label>{pairBtShortEtfLongUnd ? 'Underlying (long)' : 'Underlying (short)'}</label><input type="text" value={String(undSym || '').toUpperCase()} readOnly disabled style={{ opacity: 0.85 }} /></div>
               <div className="backtest-control"><label>Gross $</label><input type="number" min={1000} step={1000} value={btGross} onChange={(e) => setBtGross(Number(e.target.value) || 0)} /></div>
               <div className="backtest-control"><label>Hedge h (|MV<sub>ETF</sub>| / |MV<sub>und</sub>|)</label><input type="number" min={0.01} step={0.01} value={btHedgeRatio} onChange={(e) => setBtHedgeRatio(Number(e.target.value) || 1)} title="At rebalance: ETF dollar exposure divided by underlying dollar exposure. Default |β| from this row." /></div>
-              <div className="backtest-control"><label>Every N days</label><input type="number" min={1} step={1} value={btEveryN} onChange={(e) => setBtEveryN(Number(e.target.value) || 1)} /></div>
-              <div className="backtest-control"><label>Drift % (weight)</label><input type="number" min={0} step={0.5} value={btDriftPct} onChange={(e) => setBtDriftPct(Number(e.target.value) || 0)} title="Rebalance when ETF abs MV / gross drifts vs target h/(1+h)" /></div>
-              <div className="backtest-control"><label>Max net/gross %</label><input type="number" min={0.1} step={0.5} value={btHedgeBackPct} onChange={(e) => setBtHedgeBackPct(Number(e.target.value) || 1)} title="Rebalance when |MV_ETF − MV_und| / (MV_ETF + MV_und) exceeds this" /></div>
-              <div className="backtest-control"><label>Floor bps</label><input type="number" min={0} step={1} value={btFloorBps} onChange={(e) => setBtFloorBps(Number(e.target.value) || 0)} /></div>
-              <div className="backtest-control"><label>Impact bps @ 100% ADV</label><input type="number" min={0} step={1} value={btImpactBps} onChange={(e) => setBtImpactBps(Number(e.target.value) || 0)} /></div>
+              <div className="backtest-control"><label>Every N days</label><input type="number" min={1} step={1} value={btEveryN} onChange={(e) => setBtEveryN(Number(e.target.value) || 1)} title="Check β-adj net/gross vs anchor on this cadence (trading days since last rebalance)." /></div>
+              <div className="backtest-control"><label>Max |β-adj drift| (pp)</label><input type="number" min={0.1} step={0.5} value={btNetGrossTol} onChange={(e) => setBtNetGrossTol(Number(e.target.value) || 0)} title="Breach if |β-adj net/gross ratio minus anchor| exceeds this (percentage points on 0–100 scale). Defaults: inverse 10, regular 5, YieldBOOST 2." /></div>
+              <div className="backtest-control"><label>Slippage (bps)</label><input type="number" min={0} step={1} value={btSlippageBps} onChange={(e) => setBtSlippageBps(Number(e.target.value) || 0)} title="Per-rebalance transaction cost: slippage × traded notional / 10 000." /></div>
             </div>
             <div className="trade-note">
-              Rebalance at close: calendar <strong>N</strong>, ETF-weight drift vs <code>h/(1+h)</code>, or net/gross breach. T-cost: <code>(floor + impact)</code> bps on traded notional per rebalance.
+              Rebalance at close on each <strong>N</strong>th day when <strong>|β-adj net/gross − anchor|</strong> exceeds your tolerance; anchor resets at inception and after each rebalance. T-cost: slippage bps × traded notional.
             </div>
           </div>
 
@@ -5210,6 +5375,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           )}
           {!etfMetricsLoading && !etfMetricsError && pairBacktestResult?.ok && (
             <>
+              {pairBacktestCoverageHint ? (
+                <div className="scenario-warning" style={{ marginTop: 10 }}>
+                  <strong>Data range note:</strong> ETF prices exist from <code>{pairBacktestCoverageHint.firstEtf}</code>, but <code>underlying_adj_close</code> is missing before <code>{pairBacktestCoverageHint.firstJoint}</code>, so the replay starts on the first <strong>joint</strong> day.
+                </div>
+              ) : null}
               <div className="chart-stats" style={{ marginTop: 12 }}>
                 <div className="chart-stat">
                   <div className="cs-label">Net PnL</div>
@@ -5226,7 +5396,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="chart-stat">
                   <div className="cs-label">Borrow paid</div>
                   <div className="cs-value">{fmtMoney(pairBacktestResult.summary.borrowPaid)}</div>
-                  <div className="cs-sub">Avg annual × ETF short MV / 252</div>
+                  <div className="cs-sub">−rate/252 × trapezoid ETF short MV</div>
                 </div>
                 <div className="chart-stat">
                   <div className="cs-label">T-costs</div>
@@ -5242,6 +5412,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   </div>
                 </div>
                 <PairBacktestChart result={pairBacktestResult} />
+                <PairBacktestExposureChart result={pairBacktestResult} />
+                <PairBacktestRiskMetricsStats riskSeries={pairRiskSeries} pairResult={pairBacktestResult} />
               </div>
               <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 280, overflow: 'auto' }}>
                 <table className="scenario-table">

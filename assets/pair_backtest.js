@@ -222,6 +222,92 @@
     };
   }
 
+  /** Minimum span before CAGR is meaningful (short windows annualize pathologically). */
+  const MIN_TRADING_DAYS_FOR_CAGR = 63;
+  /** ~one quarter; paired with MIN_TRADING_DAYS_FOR_CAGR so both must pass. */
+  const MIN_CALENDAR_YEARS_FOR_CAGR = 0.25;
+
+  /**
+   * Expanding-window risk metrics on **mark-to-market equity** = gross + cumulative net PnL.
+   * @param {Array<{date:string, netPnl:number}>} rows `result.rows` sorted ascending by date
+   */
+  function computePairBacktestRiskSeries(rows, gross) {
+    const G = typeof gross === "number" && Number.isFinite(gross) && gross > 0 ? gross : 0;
+    if (!Array.isArray(rows) || rows.length < 3 || !(G > 0)) return [];
+    const sorted = [...rows].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    const equity = [];
+    for (const r of sorted) {
+      const np = toNum(r.netPnl);
+      if (!Number.isFinite(np)) return [];
+      equity.push(G + np);
+    }
+    const parseD = (ds) => {
+      const d = new Date(`${String(ds || "").trim()}T00:00:00Z`);
+      return Number.isNaN(d.getTime()) ? null : d;
+    };
+    const MIN_I = 5;
+    const out = [];
+    const eq0abs = Math.abs(equity[0]);
+    if (!(eq0abs > 1e-9)) return [];
+
+    for (let i = MIN_I; i < sorted.length; i += 1) {
+      const d0 = parseD(sorted[0].date);
+      const di = parseD(sorted[i].date);
+      const eq0 = equity[0];
+      const eqI = equity[i];
+      if (!d0 || !di) continue;
+
+      const rets = [];
+      for (let j = 1; j <= i; j += 1) {
+        const prev = equity[j - 1];
+        const cur = equity[j];
+        const denom = Math.abs(prev) > 1e-9 ? Math.abs(prev) : 1e-9;
+        rets.push((cur - prev) / denom);
+      }
+      const n = rets.length;
+      if (n < 2) continue;
+      const mean = rets.reduce((a, b) => a + b, 0) / n;
+      let varSum = 0;
+      for (let k = 0; k < rets.length; k += 1) varSum += (rets[k] - mean) ** 2;
+      const std = Math.sqrt(varSum / (n - 1));
+      const annVol = Number.isFinite(std) && std > 1e-12 ? std * Math.sqrt(252) : 0;
+      const sharpe = std > 1e-12 ? (mean / std) * Math.sqrt(252) : 0;
+
+      let peak = equity[0];
+      let maxDd = 0;
+      for (let k = 0; k <= i; k += 1) {
+        const e = equity[k];
+        if (e > peak) peak = e;
+        if (peak > 1e-9) {
+          const dd = (peak - e) / peak;
+          if (dd > maxDd) maxDd = dd;
+        }
+      }
+
+      const msPerYear = 365.25 * 86400000;
+      const years = (di.getTime() - d0.getTime()) / msPerYear;
+      const tradingSpan = i + 1;
+      let cagr = NaN;
+      if (
+        years >= MIN_CALENDAR_YEARS_FOR_CAGR
+        && tradingSpan >= MIN_TRADING_DAYS_FOR_CAGR
+        && eq0 > 0
+        && eqI > 0
+      ) {
+        cagr = (eqI / eq0) ** (1 / years) - 1;
+      }
+
+      out.push({
+        date: sorted[i].date,
+        cagr,
+        annVol,
+        maxDrawdown: maxDd,
+        sharpe,
+      });
+    }
+    return out;
+  }
+
   /**
    * Two-leg hedge vs ETF close (or NAV) and underlying adj. close, with **notional** hedge ratio h = |MV_etf| / |MV_und|
    * on the two risk legs (split: MV_etf = h·G/(1+h), MV_und = G/(1+h) at rebalance).
@@ -229,9 +315,18 @@
    * - **β ≥ 0**: short ETF, long underlying (borrow on ETF short only).
    * - **β < 0**: short ETF, short underlying (borrow on ETF short only; underlying short borrow 0%).
    *
+   * **Borrow (etf-dashboard / short_favorable_positive):** `borrow_current` from `opts.borrowHistory`
+   * is the canonical annual rate where **negative = fee (cost to short)**, **positive = rebate**.
+   * Daily cash drag per $ ETF short at EOD is **−rate / 252** (trapezoid on ETF price). Forward-fill
+   * the latest history point with `date <= row date`, then fall back to `opts.avgBorrowAnnual`
+   * (same convention) when unknown.
+   *
+   * **Rebalancing:** Every **N** trading days, if **|β-adj net/gross − anchor|** exceeds
+   * `netGrossTolerancePct` (percentage points), rebalance to target notionals and reset the anchor.
+   * Anchor is snapshotted at inception and after each rebalance.
+   *
    * Pass `opts.beta` (screener β). `opts.hedgeRatio` is the magnitude h (default |β| in UI).
-   * T-cost per rebalance: `(floorBps + impactBps) / 10000` × traded notional (no separate cap).
-   * Rows: per-day objects with close_price (or nav), underlying_adj_close, date.
+   * `opts.slippageBps`: per-rebalance t-cost = slippageBps/10000 × traded notional.
    */
   function simulateInversePairBacktest(rows, opts) {
     const gross = Math.max(0, toNum(opts && opts.gross));
@@ -239,11 +334,25 @@
     const betaRow = toNum(opts && opts.beta);
     const shortEtfLongUnd = !(Number.isFinite(betaRow) && betaRow < 0);
     const everyN = Math.max(1, Math.floor(toNum(opts && opts.everyNDays) || 5));
-    const driftFrac = Math.max(0, toNum(opts && opts.driftPct) / 100);
-    const maxNetGross = Math.max(0.0001, toNum(opts && opts.hedgeBackPct) / 100);
+    const tolPct = toNum(opts && opts.netGrossTolerancePct);
+    const tolerance = Number.isFinite(tolPct) && tolPct >= 0 ? Math.min(tolPct / 100, 0.999) : 0.05;
+    const slippageBpsRaw = toNum(opts && opts.slippageBps);
     const floorBps = Math.max(0, toNum(opts && opts.floorBps));
     const impactBps = Math.max(0, toNum(opts && opts.impactBps));
-    const avgBorrowAnnual = Math.max(0, toNum(opts && opts.avgBorrowAnnual));
+    const slippageBps = Number.isFinite(slippageBpsRaw) && slippageBpsRaw >= 0
+      ? slippageBpsRaw
+      : floorBps + impactBps;
+    const borrowAnnualFallback = toNum(opts && opts.avgBorrowAnnual);
+    const betaAbs = Number.isFinite(betaRow) && Math.abs(betaRow) > 1e-12
+      ? Math.abs(betaRow)
+      : hedgeRatioH;
+
+    const borrowHist = Array.isArray(opts && opts.borrowHistory)
+      ? [...opts.borrowHistory]
+        .map((x) => ({ d: String((x && x.date) || "").trim(), b: toNum(x && x.borrow_current) }))
+        .filter((x) => x.d && Number.isFinite(x.b))
+        .sort((a, b) => a.d.localeCompare(b.d))
+      : [];
 
     if (!Array.isArray(rows) || rows.length < 2 || !Number.isFinite(gross) || gross <= 0) {
       return { ok: false, error: "Invalid rows or gross capital.", daily: [], rebalanceMarks: [], summary: {} };
@@ -267,10 +376,18 @@
       };
     }
 
-    /** Target fraction of gross in the **ETF** leg (short ETF notional / G). */
     function targetEtfWeightInGross(h) {
       const hh = Math.max(1e-12, h);
       return hh / (1 + hh);
+    }
+
+    let borrowWalk = 0;
+    let lastBorrowCanon = NaN;
+    function advanceBorrowForDate(ds) {
+      while (borrowWalk < borrowHist.length && borrowHist[borrowWalk].d <= ds) {
+        lastBorrowCanon = borrowHist[borrowWalk].b;
+        borrowWalk += 1;
+      }
     }
 
     let qE = 0;
@@ -284,6 +401,21 @@
     const daily = [];
     const rebalanceMarks = [];
 
+    function computeBetaNetGrossRatio(mvEtfAbs, mvUndAbs) {
+      const adj = mvEtfAbs * betaAbs;
+      const g = adj + mvUndAbs;
+      return g > 1e-12 ? Math.abs(adj - mvUndAbs) / g : 0;
+    }
+
+    let anchorBetaNetGross = 0;
+
+    function snapshotAnchor(i) {
+      const p = pts[i];
+      const mE = qE * p.pl;
+      const mU = qU * p.ps;
+      anchorBetaNetGross = computeBetaNetGrossRatio(mE, mU);
+    }
+
     function rebalanceAt(i, reason) {
       const { pl, ps, date } = pts[i];
       const h = hedgeRatioH;
@@ -294,18 +426,19 @@
       const qUNew = mvUnd / ps;
       if (lastRebal >= 0) {
         const tradeNotional = Math.abs(qENew - qE) * pl + Math.abs(qUNew - qU) * ps;
-        const feeBps = floorBps + impactBps;
-        cumTc += (tradeNotional * feeBps) / 10000;
+        cumTc += (tradeNotional * slippageBps) / 10000;
       }
       qE = qENew;
       qU = qUNew;
       lastRebal = i;
       daysSinceRebal = 0;
       rebalanceMarks.push({ date, reason });
+      snapshotAnchor(i);
       return true;
     }
 
     rebalanceAt(0, "inception");
+    advanceBorrowForDate(pts[0].date);
 
     for (let i = 1; i < pts.length; i += 1) {
       const cur = pts[i];
@@ -317,28 +450,35 @@
       cumEtf += dEtf;
       cumUnd += dUnd;
 
-      /** Borrow: ETF short leg only (underlying short assumed 0% borrow). */
-      const borrowBase = qE * prev.pl;
-      const borrowDay = borrowBase * (avgBorrowAnnual / 252);
+      advanceBorrowForDate(cur.date);
+      const canon = Number.isFinite(lastBorrowCanon) ? lastBorrowCanon : borrowAnnualFallback;
+      const annualDragPerShortDollar = Number.isFinite(canon) ? -canon : 0;
+      const borrowBase = qE * 0.5 * (prev.pl + cur.pl);
+      const borrowDay = borrowBase * (annualDragPerShortDollar / 252);
       cumBorrow += borrowDay;
 
-      /** Dollar notionals (positive magnitudes) for drift / net–gross (avoids signed-MV net/gross bug when short both). */
       const mvEtfAbs = qE * cur.pl;
       const mvUndAbs = qU * cur.ps;
-      const grossMv = mvEtfAbs + mvUndAbs;
-      const netMv = Math.abs(mvEtfAbs - mvUndAbs);
-      const netGross = grossMv > 1e-9 ? netMv / grossMv : 0;
-      const wEtfInGross = grossMv > 1e-9 ? mvEtfAbs / grossMv : 0;
+      const mvEtfBetaAdj = mvEtfAbs * betaAbs;
+      const grossBeta = mvEtfBetaAdj + mvUndAbs;
+      const netBeta = Math.abs(mvEtfBetaAdj - mvUndAbs);
+      const netGrossBeta = grossBeta > 1e-12 ? netBeta / grossBeta : 0;
+      const grossMvRaw = mvEtfAbs + mvUndAbs;
+      const netMvRaw = Math.abs(mvEtfAbs - mvUndAbs);
+      const netGrossRaw = grossMvRaw > 1e-12 ? netMvRaw / grossMvRaw : 0;
+      const wEtfInGross = grossMvRaw > 1e-9 ? mvEtfAbs / grossMvRaw : 0;
       const wTarget = targetEtfWeightInGross(hedgeRatioH);
       daysSinceRebal += 1;
 
       let rebalReason = "";
-      if (daysSinceRebal >= everyN) rebalReason = "calendar";
-      else if (Number.isFinite(driftFrac) && driftFrac > 0 && Math.abs(wEtfInGross - wTarget) > driftFrac) {
-        rebalReason = "drift";
-      } else if (netGross > maxNetGross) rebalReason = "net/gross";
-
-      if (rebalReason) rebalanceAt(i, rebalReason);
+      if (daysSinceRebal >= everyN) {
+        if (Math.abs(netGrossBeta - anchorBetaNetGross) > tolerance) {
+          rebalReason = "beta_net_gross";
+          rebalanceAt(i, rebalReason);
+        } else {
+          daysSinceRebal = 0;
+        }
+      }
 
       const netPnl = cumEtf + cumUnd - cumBorrow - cumTc;
       daily.push({
@@ -348,7 +488,14 @@
         shortPnl: cumUnd,
         borrow: -cumBorrow,
         tCosts: -cumTc,
-        netGross,
+        netGross: netGrossBeta,
+        netGrossRaw,
+        netGrossBeta,
+        mvEtfAbs,
+        mvUndAbs,
+        mvEtfBetaAdj,
+        wEtfInGross,
+        wTarget,
         rebal: rebalReason || "",
       });
     }
@@ -369,7 +516,10 @@
       shortPnl: d.shortPnl,
       borrow: d.borrow,
       transactionCosts: d.tCosts,
-      exposureRatio: d.netGross,
+      exposureRatio: d.netGrossBeta,
+      mvEtfAbs: d.mvEtfAbs,
+      mvUndAbs: d.mvUndAbs,
+      mvEtfBetaAdj: d.mvEtfBetaAdj,
       rebalance: Boolean(d.rebal),
       rebalanceReason: d.rebal || "",
     }));
@@ -387,6 +537,7 @@
       strategy: shortEtfLongUnd ? "short_etf_long_und" : "short_both",
       betaUsed: Number.isFinite(betaRow) ? betaRow : null,
       legChartLabels,
+      breachTolerancePct: tolerance * 100,
     };
   }
 
@@ -397,6 +548,9 @@
     slippageCost,
     exposureRatio,
     simulateInversePairBacktest,
+    computePairBacktestRiskSeries,
+    MIN_TRADING_DAYS_FOR_CAGR,
+    MIN_CALENDAR_YEARS_FOR_CAGR,
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = exported;
