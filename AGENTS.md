@@ -494,7 +494,7 @@ index.html
 │   ├── assets/expected_decay.js     (standalone Itô calculator)
 │   ├── assets/scenario_returns.js   (vol/shock grid + LETF model)
 │   ├── assets/trade_lab.js          (Black-Scholes + leg builder)
-│   ├── assets/pair_backtest.js      (`simulateInversePairBacktest`: h = |MV_ETF|/|MV_und|, gross split at rebalance; β≥0 short ETF + long und, β<0 short both; borrow on ETF short only; net/gross = |MV_ETF−MV_und|/(MV_ETF+MV_und); t-cost floor+impact bps; Chart backtest uses `buildTotalReturnBacktestSeries` for full two-leg history; legacy `runPairBacktest`)
+│   ├── assets/pair_backtest.js      (`simulateInversePairBacktest`: h = |MV_ETF|/|MV_und|, gross split; β≥0 short ETF + long und, β<0 short both; **borrow** = ETF short only, `borrow_current` time series (forward-filled) or fallback avg/spot — **short_favorable_positive** (−fee / +rebate), daily **−rate/252** × trapezoid ETF short MV; **rebalance** every N days if |β-adj net/gross − anchor| > tolerance; **t-cost** = `slippageBps` × traded notional; `computePairBacktestRiskSeries`; Chart tab uses `buildTotalReturnBacktestSeries`; legacy `runPairBacktest`)
 │   ├── assets/options_data.js       (options cache helpers)
 │   ├── babel-standalone CDN
 │   └── <script type="text/babel">                                (lines 1248–end)
@@ -559,7 +559,7 @@ index.html
 │       │   │   ├── Stats tab (NAV/AUM, distributions)
 │       │   │   ├── Trade Lab tab (option leg builder)
 │       │   │   ├── Options chains tab
-│       │   │   └── Backtest tab (`PairBacktestChart`, `simulateInversePairBacktest`; `#/chart/SYM/backtest`)
+│       │   │   └── Backtest tab (`PairBacktestChart`, `PairBacktestExposureChart`, risk metrics, `simulateInversePairBacktest`; `#/chart/SYM/backtest`)
 │       │   ├── InfoPage                        // hash route #/info
 │       │   ├── NewsPage                        // hash route #/news
 │       │   └── App                             // top-level router
