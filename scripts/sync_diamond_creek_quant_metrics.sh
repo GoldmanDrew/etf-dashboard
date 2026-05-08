@@ -33,7 +33,9 @@ fetch() {
 echo "==> Fetching Python + test from ${UPSTREAM} (${BRANCH})"
 fetch "scripts/ingest_etf_metrics.py" "${DCQ_ROOT}/scripts/ingest_etf_metrics.py"
 fetch "scripts/backfill_underlying_adj_close.py" "${DCQ_ROOT}/scripts/backfill_underlying_adj_close.py"
+fetch "scripts/bootstrap_metrics_yahoo_history.py" "${DCQ_ROOT}/scripts/bootstrap_metrics_yahoo_history.py"
 fetch "tests/test_backfill_underlying_adj_close_script.py" "${DCQ_ROOT}/tests/test_backfill_underlying_adj_close_script.py"
+fetch "tests/test_bootstrap_metrics_yahoo_history.py" "${DCQ_ROOT}/tests/test_bootstrap_metrics_yahoo_history.py"
 
 WF="${DCQ_ROOT}/.github/workflows/update-etf-metrics.yml"
 [[ -f "$WF" ]] || die "missing ${WF}"
@@ -96,5 +98,5 @@ fi
 echo ""
 echo "Done. Next in ${DCQ_ROOT}:"
 echo "  git status"
-echo "  python3 -m pytest tests/test_backfill_underlying_adj_close_script.py tests/test_etf_metrics_shares_repair.py -v"
+echo "  python3 -m pytest tests/test_backfill_underlying_adj_close_script.py tests/test_bootstrap_metrics_yahoo_history.py tests/test_etf_metrics_shares_repair.py -v"
 echo "  git add -A && git commit -m 'sync: etf-dashboard ETF metrics + underlying adj close pipeline' && git push"
