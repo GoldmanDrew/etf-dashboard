@@ -494,7 +494,7 @@ index.html
 │   ├── assets/expected_decay.js     (standalone Itô calculator)
 │   ├── assets/scenario_returns.js   (vol/shock grid + LETF model)
 │   ├── assets/trade_lab.js          (Black-Scholes + leg builder)
-│   ├── assets/pair_backtest.js      (`simulateInversePairBacktest`: h = |MV_ETF|/|MV_und| (Chart tab prefills **h = 1/|β|**), gross split; β≥0 short ETF + long und, β<0 short both; **borrow** = ETF short only, `borrow_current` time series (forward-filled) or fallback avg/spot — **short_favorable_positive** (−fee / +rebate), daily **−rate/252** × trapezoid ETF short MV; **rebalance** every N days if |β-adj net/gross − anchor| > tolerance; **t-cost** = `slippageBps` × traded notional; `computePairBacktestRiskSeries`; Chart tab uses `buildTotalReturnBacktestSeries`; legacy `runPairBacktest`)
+│   ├── assets/pair_backtest.js      (`simulateInversePairBacktest`: **Diamond-Creek-Quant parity** on sizing, β-adj rebalance, trapezoid borrow drag, and `Math.max(0, slippageBps)` t-cost only — no inverse floor/impact fallback; `toNum`/IIFE global match DCQ. h = |MV_ETF|/|MV_und| (Chart prefills **1/|β|**); **borrow** stays **etf-dashboard / IBKR**: `borrow_current` forward-fill + `borrowHistoryPointForAvg` / row fallbacks, **short_favorable_positive**. Chart `Backtest` recomputes sim each render via IIFE like DCQ. `buildTotalReturnBacktestSeries`; legacy `runPairBacktest`)
 │   ├── assets/options_data.js       (options cache helpers)
 │   ├── babel-standalone CDN
 │   └── <script type="text/babel">                                (lines 1248–end)
