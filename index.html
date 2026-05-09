@@ -1387,6 +1387,14 @@ const fmtNum = v => v == null ? '—' : Number(v).toLocaleString();
 const fmtSharesCount = v => (
   v == null || !Number.isFinite(Number(v)) ? '—' : Math.round(Number(v)).toLocaleString('en-US')
 );
+/** Yahoo daily volume on Stats tab: null/blank is absent data, not zero (avoid Number(null) → 0). */
+const fmtSharesTradedStat = (raw) => {
+  if (raw == null) return 'N/A';
+  if (typeof raw === 'string' && !raw.trim()) return 'N/A';
+  const n = typeof raw === 'string' ? Number(raw.trim().replace(/,/g, '')) : Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 'N/A';
+  return Math.round(n).toLocaleString('en-US');
+};
 const fmtUsd = v => (v == null || !Number.isFinite(Number(v))) ? '—' : `$${Number(v).toFixed(2)}`;
 const fmtMoney = v => (v == null || !Number.isFinite(Number(v))) ? '—' : `$${Math.round(Number(v)).toLocaleString()}`;
 const fmtTime = iso => {
@@ -2383,16 +2391,32 @@ function SimpleSeriesPlot({
   overlayValueKey,
   overlayColor,
   overlayLabel,
+  /** When true, null/blank primary values stay missing (do not coerce via Number(null) → 0). */
+  strictNullPrimary = false,
 }) {
   if (!Array.isArray(series) || !series.length) {
     return <div className="scenario-warning">No data available.</div>;
   }
-  const primaryVals = series.map(p => toFiniteNum(p?.[valueKey])).filter(v => v != null);
+  const readPrimary = (p) => {
+    const raw = p?.[valueKey];
+    if (strictNullPrimary) {
+      if (raw == null) return null;
+      if (typeof raw === 'string' && !raw.trim()) return null;
+    }
+    return toFiniteNum(raw);
+  };
+  const primaryVals = series.map(readPrimary).filter(v => v != null);
   const overlayVals = overlayValueKey
     ? series.map(p => toFiniteNum(p?.[overlayValueKey])).filter(v => v != null)
     : [];
   if (!primaryVals.length && !overlayVals.length) {
-    return <div className="scenario-warning">No finite values available.</div>;
+    return (
+      <div className="scenario-warning">
+        {strictNullPrimary
+          ? 'No daily volume in this window (missing rows show N/A in the table).'
+          : 'No finite values available.'}
+      </div>
+    );
   }
 
   const W = 980;
@@ -2421,7 +2445,7 @@ function SimpleSeriesPlot({
     .filter(Boolean)
     .join(' ');
 
-  const lineVals = series.map(p => toFiniteNum(p?.[valueKey]));
+  const lineVals = series.map(readPrimary);
   const linePath = buildPath(lineVals);
   const overlayLineVals = overlayValueKey ? series.map(p => toFiniteNum(p?.[overlayValueKey])) : [];
   const overlayPath = overlayValueKey ? buildPath(overlayLineVals) : '';
@@ -3255,10 +3279,16 @@ function buildTotalReturnBacktestSeries(rawRows, distributions) {
 }
 
 function medianSharesTraded(rows, lookback = 60) {
-  const vals = (Array.isArray(rows) ? rows : [])
-    .slice(Math.max(0, (rows || []).length - lookback))
-    .map((r) => Number(r?.shares_traded))
-    .filter((v) => Number.isFinite(v) && v > 0)
+  const slice = (Array.isArray(rows) ? rows : []).slice(Math.max(0, (rows || []).length - lookback));
+  const vals = slice
+    .map((r) => {
+      const raw = r?.shares_traded;
+      if (raw == null) return null;
+      if (typeof raw === 'string' && !raw.trim()) return null;
+      const n = typeof raw === 'string' ? Number(raw.trim().replace(/,/g, '')) : Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })
+    .filter((v) => v != null)
     .sort((a, b) => a - b);
   if (!vals.length) return null;
   const mid = Math.floor(vals.length / 2);
@@ -4576,7 +4606,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             </div>
             <div className="chart-stat" title="Median daily exchange volume in shares over the latest 60 metrics observations from Yahoo Finance Volume. Used by Pair Backtest slippage.">
               <div className="cs-label">Median Shares Traded</div>
-              <div className="cs-value">{etfMedianSharesTraded60d != null ? fmtSharesCount(etfMedianSharesTraded60d) : '—'}</div>
+              <div className="cs-value">{etfMedianSharesTraded60d != null ? fmtSharesCount(etfMedianSharesTraded60d) : 'N/A'}</div>
               <div className="cs-sub">latest 60 obs · Yahoo volume</div>
             </div>
             <div className="chart-stat">
@@ -4799,6 +4829,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   label={`${etfSym} Shares Traded Daily`}
                   formatValue={(v) => fmtSharesCount(v)}
                   zeroLabel="0"
+                  strictNullPrimary
                 />
                 {navForecastSeries.length > 0 && (
                   <SimpleSeriesPlot
@@ -4847,7 +4878,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <td>{toFiniteNum(m.underlying_adj_close) != null ? fmtUsd(toFiniteNum(m.underlying_adj_close)) : '—'}</td>
                           <td>{fmtMoney(Number(m.aum))}</td>
                           <td>{fmtSharesCount(Number(m.shares_outstanding))}</td>
-                          <td>{fmtSharesCount(Number(m.shares_traded))}</td>
+                          <td>{fmtSharesTradedStat(m.shares_traded)}</td>
                           <td className={String(m.status || '').includes('repaired') ? 'val-warning' : ''}>{m.status || '—'}</td>
                         </tr>
                       );
