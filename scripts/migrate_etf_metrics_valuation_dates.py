@@ -11,7 +11,7 @@ That paired Yahoo ``close_price`` one session off. This script:
 4. Re-fetches Yahoo closes / underlyings for affected windows and runs the same
    post-process chain as ``ingest_etf_metrics.main()`` (minus holdings).
 
-Default is **dry-run** (no write). Pass ``--apply`` to persist.
+Default is **dry-run**: applies URL/carry-forward logic in memory and can write ``--report`` only — **no Yahoo calls, postprocess, or disk writes**. Pass ``--apply`` to refresh closes, run the ingest postprocess chain, and ``save_outputs``.
 
 Examples::
 
@@ -307,24 +307,27 @@ def main() -> None:
         d_max,
     )
 
-    if n_cf + n_rel + n_md > 0 and y_tickers:
-        df = yahoo_refresh_window(df, y_tickers, d_min, d_max)
-    else:
-        LOGGER.info("Skipping Yahoo batch (no mutations or no tickers).")
-    underlying_map = load_universe_underlying_map()
-    df = postprocess_like_ingest(df, underlying_map)
-
     if args.report:
         Path(args.report).parent.mkdir(parents=True, exist_ok=True)
         with open(args.report, "w", encoding="utf-8") as f:
             json.dump({"rows": report, "summary": {"carry_forward": n_cf, "relabel": n_rel, "merge_drop": n_md}}, f, indent=2)
             f.write("\n")
 
-    if args.apply:
-        save_outputs(df)
-        LOGGER.info("Wrote store to %s", PARQUET_PATH)
+    if not args.apply:
+        LOGGER.info(
+            "Dry-run: in-memory mutations only (no Yahoo refresh, postprocess, or save). "
+            "Re-run with --apply to refresh closes, validate, and write parquet/json/csv.",
+        )
+        return
+
+    if n_cf + n_rel + n_md > 0 and y_tickers:
+        df = yahoo_refresh_window(df, y_tickers, d_min, d_max)
     else:
-        LOGGER.info("Dry-run: no files written. Re-run with --apply to persist.")
+        LOGGER.info("Skipping Yahoo batch (no mutations or no tickers).")
+    underlying_map = load_universe_underlying_map()
+    df = postprocess_like_ingest(df, underlying_map)
+    save_outputs(df)
+    LOGGER.info("Wrote store to %s", PARQUET_PATH)
 
 
 if __name__ == "__main__":
