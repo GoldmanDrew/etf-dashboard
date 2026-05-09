@@ -599,8 +599,12 @@ def apply_stale_carry_forward(
         out.at[idx, "nav"] = float(last["nav"])
         out.at[idx, "aum"] = float(last["aum"])
         out.at[idx, "shares_outstanding"] = float(last["shares_outstanding"])
-        if "shares_traded" in out.columns and "shares_traded" in last.index:
-            out.at[idx, "shares_traded"] = last.get("shares_traded")
+        # Do not pair stale issuer NAV with a fresh Yahoo close on the ingest calendar day
+        # (avoids bogus prem/disc until the next full merge).
+        if "close_price" in out.columns:
+            out.at[idx, "close_price"] = None
+        if "shares_traded" in out.columns:
+            out.at[idx, "shares_traded"] = None
         out.at[idx, "status"] = "ok"
         out.at[idx, "stale"] = True
         out.at[idx, "stale_age_bdays"] = int(age_bdays)
@@ -1142,6 +1146,7 @@ def ingest(
         GraniteSharesProvider,
         DefianceProvider,
         YFinanceProvider, PolygonProvider,
+        SKIP_SESSION_DATE_ANCHOR_PROVIDERS,
     )
 
     rows: list[ProviderResult] = []
@@ -1206,7 +1211,8 @@ def ingest(
                     elif isinstance(provider, single_shot_types):
                         if provider.supports_ticker(t, end_date):
                             r = provider.fetch_for_date(t, end_date)
-                            r = _anchor(r, end_date)
+                            if r.source_provider not in SKIP_SESSION_DATE_ANCHOR_PROVIDERS:
+                                r = _anchor(r, end_date)
                             attempts.append(r)
                             if r.status == "ok":
                                 best = r

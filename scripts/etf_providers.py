@@ -88,6 +88,18 @@ PROVIDER_MERGE_PRIORITY: tuple[str, ...] = (
     "polygon",
 )
 
+# Ingest must not ``_anchor`` these to ``end_date``: ``ProviderResult.date`` is the
+# issuer/session valuation date so Yahoo ``close_price`` joins on the same calendar row.
+SKIP_SESSION_DATE_ANCHOR_PROVIDERS: frozenset[str] = frozenset({
+    "rex_shares",
+    "yieldmax",
+    "proshares",
+    "roundhill",
+    "direxion",
+    "granite_shares",
+    "merged",
+})
+
 
 def merge_provider_attempts(
     attempts: list[ProviderResult],
@@ -145,8 +157,22 @@ def merge_provider_attempts(
     if not stale:
         stale_age = None
 
+    # Row ``date`` must match the valuation session of the NAV we kept (highest-priority
+    # issuer with a positive NAV), not the ingest calendar day — otherwise Yahoo close
+    # is joined one session off (see NAV vs close prem/disc bugs on REX / YieldMax).
+    valuation_date = end_date
+    for r in attempts_sorted:
+        if r.nav is None or pd.isna(r.nav):
+            continue
+        try:
+            if float(r.nav) > 0:
+                valuation_date = r.date
+                break
+        except (TypeError, ValueError):
+            continue
+
     return ProviderResult(
-        date=end_date,
+        date=valuation_date,
         ticker=ticker.upper(),
         nav=nav,
         aum=aum,
@@ -360,8 +386,10 @@ class ProSharesProvider:
         aum_f = float(aum) if pd.notna(aum) else None
         sh_f = float(shares) if shares is not None and shares > 0 else None
         status = _classify_status(nav_f, aum_f, sh_f)
+        ts = pd.to_datetime(row.get("Date"), errors="coerce")
+        row_d = ts.date() if pd.notna(ts) else as_of
         return ProviderResult(
-            date=as_of, ticker=t, nav=nav_f, aum=aum_f, shares_outstanding=sh_f,
+            date=row_d, ticker=t, nav=nav_f, aum=aum_f, shares_outstanding=sh_f,
             source_provider=self.name, source_url=self.URL + f"#ticker={t}&date={row['Date']}",
             status=status, stale=stale, stale_age_bdays=age_b,
         )
@@ -493,8 +521,9 @@ class DirexionProvider:
             except Exception:
                 age_b = None
         status = _classify_status(nav, aum, shares)
+        valuation_date = trade_date if trade_date is not None else as_of
         return ProviderResult(
-            date=as_of, ticker=ticker.upper(),
+            date=valuation_date, ticker=ticker.upper(),
             nav=nav, aum=aum, shares_outstanding=shares,
             source_provider=self.name, source_url=src,
             status=status, stale=stale, stale_age_bdays=age_b,
@@ -578,16 +607,20 @@ class RoundhillProvider:
 
         stale = False
         age_b = None
-        if isinstance(row_date, date) and row_date != as_of:
+        rd = pd.to_datetime(row_date, errors="coerce").date() if row_date is not None and not isinstance(row_date, date) else row_date
+        if isinstance(rd, date) and rd != as_of:
             stale = True
             try:
-                age_b = int(np.busday_count(str(row_date), str(as_of)))
+                age_b = int(np.busday_count(str(rd), str(as_of)))
             except Exception:
                 age_b = None
+        elif not isinstance(rd, date):
+            rd = as_of
 
         status = _classify_status(nav_f, aum_f, sh_f)
+        valuation_date = rd if isinstance(rd, date) else as_of
         return ProviderResult(
-            date=as_of, ticker=t, nav=nav_f, aum=aum_f, shares_outstanding=sh_f,
+            date=valuation_date, ticker=t, nav=nav_f, aum=aum_f, shares_outstanding=sh_f,
             source_provider=self.name,
             source_url=self.URL + f"#ticker={t}&date={row_date}",
             status=status, stale=stale, stale_age_bdays=age_b,
@@ -629,7 +662,7 @@ class YieldMaxProvider:
 
     def __init__(self, session: requests.Session | None = None):
         self.session = session or _build_session()
-        self._cache: dict[str, ProviderResult] = {}
+        self._cache: dict[tuple[str, date], ProviderResult] = {}
 
     def supports_ticker(self, ticker: str, as_of: date) -> bool:
         return ticker.upper() in self.KNOWN_TICKERS
@@ -672,21 +705,15 @@ class YieldMaxProvider:
     def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
         t = ticker.upper()
         url = self.URL.format(t=t.lower())
-        if t in self._cache:
-            cached = self._cache[t]
-            return ProviderResult(
-                date=as_of, ticker=t, nav=cached.nav, aum=cached.aum,
-                shares_outstanding=cached.shares_outstanding,
-                source_provider=self.name, source_url=cached.source_url,
-                status=cached.status, stale=cached.stale,
-                stale_age_bdays=cached.stale_age_bdays,
-            )
+        ck = (t, as_of)
+        if ck in self._cache:
+            return self._cache[ck]
         try:
             r = _get(self.session, url)
             if r.status_code != 200 or not r.text or "fund-label" not in r.text:
                 res = ProviderResult(as_of, ticker, None, None, None, self.name,
                                      url + f"?status={r.status_code}", "missing")
-                self._cache[t] = res
+                self._cache[ck] = res
                 return res
             html = r.text
             row_re = lambda label: re.search(
@@ -703,6 +730,7 @@ class YieldMaxProvider:
             aum = self._parse_currency(aum_str)
             shares = self._parse_int(shares_str)
             row_date = self._parse_date(as_of_str)
+            valuation_date = row_date if row_date is not None else as_of
 
             stale = False
             age_b = None
@@ -714,16 +742,16 @@ class YieldMaxProvider:
                     age_b = None
             status = _classify_status(nav, aum, shares)
             res = ProviderResult(
-                date=as_of, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
+                date=valuation_date, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
                 source_provider=self.name, source_url=url + f"#as_of={row_date}",
                 status=status, stale=stale, stale_age_bdays=age_b,
             )
-            self._cache[t] = res
+            self._cache[ck] = res
             return res
         except Exception as e:
             res = ProviderResult(as_of, ticker, None, None, None, self.name,
                                  url + f"?exc={type(e).__name__}", "missing")
-            self._cache[t] = res
+            self._cache[ck] = res
             return res
 
 
@@ -773,7 +801,7 @@ class REXSharesProvider:
 
     def __init__(self, session: requests.Session | None = None):
         self.session = session or _build_session()
-        self._cache: dict[str, ProviderResult] = {}
+        self._cache: dict[tuple[str, date], ProviderResult] = {}
 
     def supports_ticker(self, ticker: str, as_of: date) -> bool:
         return ticker.upper() in self.KNOWN_TICKERS
@@ -798,21 +826,15 @@ class REXSharesProvider:
     def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
         t = ticker.upper()
         url = self.URL.format(t=t)
-        if t in self._cache:
-            cached = self._cache[t]
-            return ProviderResult(
-                date=as_of, ticker=t, nav=cached.nav, aum=cached.aum,
-                shares_outstanding=cached.shares_outstanding,
-                source_provider=self.name, source_url=cached.source_url,
-                status=cached.status, stale=cached.stale,
-                stale_age_bdays=cached.stale_age_bdays,
-            )
+        ck = (t, as_of)
+        if ck in self._cache:
+            return self._cache[ck]
         try:
             r = _get(self.session, url)
             if r.status_code != 200 or not r.text or "Fund Assets" not in r.text:
                 res = ProviderResult(as_of, ticker, None, None, None, self.name,
                                      url + f"?status={r.status_code}", "missing")
-                self._cache[t] = res
+                self._cache[ck] = res
                 return res
             html = r.text
             aum = self._to_float(self._row_match(html, "Fund Assets"))
@@ -836,6 +858,7 @@ class REXSharesProvider:
                     except Exception:
                         continue
 
+            valuation_date = row_date if row_date is not None else as_of
             stale = False
             age_b = None
             if row_date and row_date != as_of:
@@ -847,16 +870,16 @@ class REXSharesProvider:
 
             status = _classify_status(nav, aum, shares)
             res = ProviderResult(
-                date=as_of, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
+                date=valuation_date, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
                 source_provider=self.name, source_url=url + f"#as_of={row_date}",
                 status=status, stale=stale, stale_age_bdays=age_b,
             )
-            self._cache[t] = res
+            self._cache[ck] = res
             return res
         except Exception as e:
             res = ProviderResult(as_of, ticker, None, None, None, self.name,
                                  url + f"?exc={type(e).__name__}", "missing")
-            self._cache[t] = res
+            self._cache[ck] = res
             return res
 
 
@@ -887,7 +910,7 @@ class GraniteSharesProvider:
         # fetch uses a fresh session for the detail page + product JSON pair.
         _ = session
         self._catalog: set[str] | None = None
-        self._cache: dict[str, ProviderResult] = {}
+        self._cache: dict[tuple[str, date], ProviderResult] = {}
         # Raw ``/product/{id}/en-us/`` JSON cache — used by ``load_product_json`` for
         # holdings ingestion without colliding with the NAV ``ProviderResult`` cache.
         self._product_json_cache: dict[str, tuple[str, dict] | None] = {}
@@ -1006,16 +1029,10 @@ class GraniteSharesProvider:
         slug = self._slug_for_ticker(ticker)
         page_url = f"{self.BASE}/etfs/{slug}/"
         api_url = None
+        ck = (t, as_of)
 
-        if t in self._cache:
-            cached = self._cache[t]
-            return ProviderResult(
-                date=as_of, ticker=t, nav=cached.nav, aum=cached.aum,
-                shares_outstanding=cached.shares_outstanding,
-                source_provider=self.name, source_url=cached.source_url,
-                status=cached.status, stale=cached.stale,
-                stale_age_bdays=cached.stale_age_bdays,
-            )
+        if ck in self._cache:
+            return self._cache[ck]
 
         try:
             sess = _build_session()
@@ -1027,13 +1044,13 @@ class GraniteSharesProvider:
                     as_of, ticker, None, None, None, self.name,
                     page_url + f"?status={pr.status_code}", "missing",
                 )
-                self._cache[t] = res
+                self._cache[ck] = res
                 return res
 
             product_id = self._product_id_from_page(pr.text, slug, t)
             if not product_id:
                 res = ProviderResult(as_of, ticker, None, None, None, self.name, page_url + "?err=no-product-id", "missing")
-                self._cache[t] = res
+                self._cache[ck] = res
                 return res
 
             api_url = f"{self.BASE}/product/{product_id}/en-us/"
@@ -1051,19 +1068,19 @@ class GraniteSharesProvider:
                     as_of, ticker, None, None, None, self.name,
                     api_url + f"?status={jr.status_code}", "missing",
                 )
-                self._cache[t] = res
+                self._cache[ck] = res
                 return res
             ctype = jr.headers.get("content-type", "")
             if "application/json" not in ctype:
                 res = ProviderResult(as_of, ticker, None, None, None, self.name, api_url + "?err=not-json", "missing")
-                self._cache[t] = res
+                self._cache[ck] = res
                 return res
 
             try:
                 payload = jr.json()
             except ValueError:
                 res = ProviderResult(as_of, ticker, None, None, None, self.name, api_url + "?err=json", "missing")
-                self._cache[t] = res
+                self._cache[ck] = res
                 return res
 
             nav = pd.to_numeric(payload.get("Nav"), errors="coerce")
@@ -1080,6 +1097,7 @@ class GraniteSharesProvider:
                 shares_f = float(aum_f / nav_f)
 
             nav_date = self._parse_nav_date(payload.get("NavDate"))
+            valuation_date = nav_date if nav_date is not None else as_of
             stale = False
             age_b = None
             if nav_date and nav_date != as_of:
@@ -1091,20 +1109,20 @@ class GraniteSharesProvider:
 
             status = _classify_status(nav_f, aum_f, shares_f)
             res = ProviderResult(
-                date=as_of, ticker=t,
+                date=valuation_date, ticker=t,
                 nav=nav_f, aum=aum_f, shares_outstanding=shares_f,
                 source_provider=self.name,
                 source_url=api_url + f"#nav_date={nav_date}",
                 status=status, stale=stale, stale_age_bdays=age_b,
             )
-            self._cache[t] = res
+            self._cache[ck] = res
             return res
         except Exception as e:
             res = ProviderResult(
                 as_of, ticker, None, None, None, self.name,
                 (api_url or page_url) + f"?exc={type(e).__name__}", "missing",
             )
-            self._cache[t] = res
+            self._cache[ck] = res
             return res
 
 
