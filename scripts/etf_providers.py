@@ -773,6 +773,10 @@ class REXSharesProvider:
         <div class="t-col t-data">$8.41</div>
 
     NAV is not a distinct field on most REX pages; we compute nav = aum / shares.
+
+    The HTML **As of** date is the valuation session: ``ProviderResult.date`` uses that
+    (not the ingest calendar day) so ``merge_close_prices`` aligns Yahoo close on the
+    same row as NAV.
     """
 
     name = "rex_shares"
