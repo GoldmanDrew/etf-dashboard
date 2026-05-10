@@ -808,8 +808,111 @@ def fetch_underlying_adj_close_batch(
     return out.drop_duplicates(subset=["date", "ticker"], keep="last")
 
 
+def yahoo_join_dates_series(dates: pd.Series, urls: pd.Series | None) -> pd.Series:
+    """Yahoo session date for (ETF close, underlying close) joins vs issuer ``#as_of=`` / carry-forward.
+
+    REX and similar feeds stamp ``#as_of=YYYY-MM-DD`` when the printed NAV is still the
+    prior session while our row ``date`` is the ingest calendar day. Pairing that NAV
+    with Yahoo's *same* calendar close produced bogus prem/disc (EOSU-style lag).
+    """
+    u = urls.fillna("").astype(str) if urls is not None else pd.Series("", index=dates.index)
+    is_cf = u.str.startswith("carry_forward://", na=False)
+    from_ex = u.str.extract(r"(?:\?|&)from=(\d{4}-\d{2}-\d{2})\b")
+    asof_ex = u.str.extract(r"#as_of=(\d{4}-\d{2}-\d{2})\b")
+    from_s = from_ex[0] if not from_ex.empty else pd.Series(index=u.index, dtype=object)
+    asof_s = asof_ex[0] if not asof_ex.empty else pd.Series(index=u.index, dtype=object)
+    raw = np.where(is_cf & from_s.notna() & (from_s.astype(str) != ""), from_s, asof_s)
+    sess = pd.to_datetime(pd.Series(raw, index=dates.index), errors="coerce")
+    rdt = pd.to_datetime(dates, errors="coerce")
+    out_list: list[date | None] = []
+    for r_ts, st in zip(rdt.tolist(), sess.tolist()):
+        if pd.isna(r_ts):
+            out_list.append(None)
+            continue
+        r_dd = r_ts.date() if hasattr(r_ts, "date") else r_ts
+        if pd.notna(st):
+            sd = st.date() if hasattr(st, "date") else st
+            if isinstance(sd, date) and isinstance(r_dd, date) and sd < r_dd:
+                out_list.append(sd)
+                continue
+        out_list.append(r_dd if isinstance(r_dd, date) else None)
+    return pd.Series(out_list, index=dates.index, dtype=object)
+
+
+def repair_close_price_vs_issuer_session(
+    df: pd.DataFrame,
+    etf_to_underlying: dict[str, str],
+    *,
+    lookback_calendar_days: int | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """Re-fetch Yahoo close / underlying for tail rows where ``#as_of`` predates ``date``."""
+    if df.empty:
+        return df, 0
+    if os.getenv("ETF_METRICS_DISABLE_SESSION_CLOSE_REPAIR", "").lower() in ("1", "true", "yes"):
+        return df, 0
+    lb = lookback_calendar_days or int(os.getenv("ETF_METRICS_SESSION_CLOSE_REPAIR_LOOKBACK_DAYS", "45"))
+    work = df.copy()
+    work["date"] = pd.to_datetime(work["date"], errors="coerce").dt.date
+    max_d = work["date"].max()
+    if max_d is None or (isinstance(max_d, float) and math.isnan(max_d)):
+        return df, 0
+    tail = work[work["date"] >= (max_d - timedelta(days=max(7, lb)))].copy()
+    if tail.empty:
+        return df, 0
+    jd = yahoo_join_dates_series(tail["date"], tail.get("source_url"))
+    mis = jd.notna() & tail["date"].notna() & (jd < tail["date"])
+    if not mis.any():
+        return df, 0
+    idx = tail.index[mis]
+    tickers = sorted({str(tail.at[i, "ticker"]).strip().upper() for i in idx})
+    d_min = min(jd.loc[idx].tolist())
+    d_max = max(tail.loc[idx, "date"].tolist())
+    close_df = fetch_close_prices_batch(tickers, d_min, d_max)
+    if close_df.empty:
+        return df, 0
+    close_df = close_df.copy()
+    close_df["date"] = pd.to_datetime(close_df["date"], errors="coerce").dt.date
+    close_df["ticker"] = close_df["ticker"].astype(str).str.upper()
+    sub = tail.loc[idx].copy()
+    sub["_jd"] = jd.loc[idx].values
+    hit = sub.merge(
+        close_df.rename(columns={"close_price": "_rc", "shares_traded": "_rv"}),
+        left_on=["ticker", "_jd"],
+        right_on=["ticker", "date"],
+        how="left",
+    )
+    work.loc[idx, "close_price"] = pd.to_numeric(hit["_rc"], errors="coerce").values
+    if "shares_traded" in work.columns and "_rv" in hit.columns:
+        work.loc[idx, "shares_traded"] = pd.to_numeric(hit["_rv"], errors="coerce").values
+
+    und_syms: set[str] = set()
+    for sym in tickers:
+        u = etf_to_underlying.get(sym) or etf_to_underlying.get(sym.upper())
+        if u and str(u).strip():
+            und_syms.add(_normalize_symbol(str(u).strip()))
+    if und_syms and etf_to_underlying:
+        und_df = fetch_underlying_adj_close_batch(sorted(und_syms), d_min, d_max)
+        if not und_df.empty:
+            und_df = und_df.copy()
+            und_df["date"] = pd.to_datetime(und_df["date"], errors="coerce").dt.date
+            und_df["ticker"] = und_df["ticker"].astype(str).str.upper()
+            sub_u = sub.copy()
+            sub_u["_und"] = sub_u["ticker"].astype(str).str.upper().map(
+                lambda s: _normalize_symbol(str(etf_to_underlying.get(s, "") or "").strip()) or None
+            )
+            hit_u = sub_u.merge(
+                und_df.rename(columns={"ticker": "_und", "underlying_adj_close": "_ua", "date": "_udate"}),
+                left_on=["_und", "_jd"],
+                right_on=["_und", "_udate"],
+                how="left",
+            )
+            work.loc[idx, "underlying_adj_close"] = pd.to_numeric(hit_u["_ua"], errors="coerce").values
+
+    return work, int(mis.sum())
+
+
 def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame:
-    """Left-join close prices and exchange-reported share volume on (date, ticker)."""
+    """Left-join close prices and exchange-reported share volume on (session date, ticker)."""
     if close_df.empty:
         if "close_price" not in df.columns:
             df = df.copy()
@@ -821,11 +924,17 @@ def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame
     out = df.copy()
     out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
     out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["_jd"] = yahoo_join_dates_series(out["date"], out.get("source_url"))
+    c2 = close_df.copy()
+    c2["date"] = pd.to_datetime(c2["date"], errors="coerce").dt.date
+    c2["ticker"] = c2["ticker"].astype(str).str.upper()
     merged = out.merge(
-        close_df.rename(columns={"close_price": "_close_new", "shares_traded": "_shares_traded_new"}),
-        on=["date", "ticker"],
+        c2.rename(columns={"close_price": "_close_new", "shares_traded": "_shares_traded_new", "date": "_yf_date"}),
+        left_on=["ticker", "_jd"],
+        right_on=["ticker", "_yf_date"],
         how="left",
     )
+    merged = merged.drop(columns=["_jd", "_yf_date"])
     if "close_price" not in merged.columns:
         merged["close_price"] = None
     if "shares_traded" not in merged.columns:
@@ -867,15 +976,18 @@ def merge_underlying_adj_close(
         return _normalize_symbol(us) if us else None
 
     out["_und_ticker"] = out["ticker"].map(_etf_und)
-    und_side = und_close_df.rename(columns={"ticker": "_und_ticker", "underlying_adj_close": "_und_adj_new"})
-    und_side["date"] = pd.to_datetime(und_side["date"], errors="coerce").dt.date
+    out["_jd"] = yahoo_join_dates_series(out["date"], out.get("source_url"))
+    und_side = und_close_df.rename(
+        columns={"ticker": "_und_ticker", "underlying_adj_close": "_und_adj_new", "date": "_und_yf_date"},
+    )
+    und_side["_und_yf_date"] = pd.to_datetime(und_side["_und_yf_date"], errors="coerce").dt.date
     merged = out.merge(
         und_side,
-        left_on=["date", "_und_ticker"],
-        right_on=["date", "_und_ticker"],
+        left_on=["_jd", "_und_ticker"],
+        right_on=["_und_yf_date", "_und_ticker"],
         how="left",
     )
-    merged = merged.drop(columns=["_und_ticker"])
+    merged = merged.drop(columns=["_jd", "_und_ticker", "_und_yf_date"])
     if "underlying_adj_close" not in merged.columns:
         merged["underlying_adj_close"] = None
     merged["underlying_adj_close"] = pd.to_numeric(merged["_und_adj_new"], errors="coerce").combine_first(
@@ -1473,6 +1585,12 @@ def main() -> None:
         max_stale_business_days=max_stale_business_days,
     )
     merged = upsert(existing, incoming)
+    merged, n_sess = repair_close_price_vs_issuer_session(merged, underlying_map)
+    if n_sess:
+        LOGGER.info(
+            "Re-aligned Yahoo close / underlying to issuer valuation session on %d tail row(s)",
+            n_sess,
+        )
     merged, n_collapse = collapse_redundant_consecutive_rows(merged)
     if n_collapse:
         LOGGER.info("Collapsed %d redundant consecutive (nav,aum,shares) rows", n_collapse)

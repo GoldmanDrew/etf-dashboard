@@ -158,3 +158,95 @@ def test_repair_shares_decimal_shift():
     assert n == 1
     fixed = float(out.iloc[0]["shares_outstanding"])
     assert abs(fixed - (574_477.0 / 6.58)) < 1.0
+
+
+def test_merge_close_prices_aligns_yahoo_to_rex_as_of_before_calendar_date():
+    """When ``#as_of`` lags the row calendar date, Yahoo close must match that session (EOSU)."""
+    df = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 5, 8),
+                "ticker": "EOSU",
+                "nav": 33.52,
+                "aum": 1.0,
+                "shares_outstanding": 1.0,
+                "close_price": None,
+                "underlying_adj_close": None,
+                "stale": True,
+                "stale_age_bdays": 1,
+                "source_provider": "rex_shares",
+                "source_url": "https://www.rexshares.com/EOSU/#as_of=2026-05-07",
+                "ingested_at_utc": "2026-05-10T00:00:00Z",
+                "status": "ok",
+            }
+        ]
+    )
+    close_df = pd.DataFrame(
+        [
+            {"date": date(2026, 5, 7), "ticker": "EOSU", "close_price": 33.52, "shares_traded": 100.0},
+            {"date": date(2026, 5, 8), "ticker": "EOSU", "close_price": 50.4, "shares_traded": 200.0},
+        ]
+    )
+    out = iem.merge_close_prices(df, close_df)
+    assert float(out.iloc[0]["close_price"]) == 33.52
+    assert float(out.iloc[0]["shares_traded"]) == 100.0
+
+
+def test_merge_underlying_adj_close_aligns_to_as_of_session():
+    df = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 5, 8),
+                "ticker": "EOSU",
+                "nav": 33.52,
+                "aum": 1.0,
+                "shares_outstanding": 1.0,
+                "close_price": None,
+                "underlying_adj_close": None,
+                "stale": True,
+                "stale_age_bdays": 1,
+                "source_provider": "rex_shares",
+                "source_url": "https://www.rexshares.com/EOSU/#as_of=2026-05-07",
+                "ingested_at_utc": "2026-05-10T00:00:00Z",
+                "status": "ok",
+            }
+        ]
+    )
+    und_df = pd.DataFrame(
+        [
+            {"date": date(2026, 5, 7), "ticker": "EOSE", "underlying_adj_close": 6.36},
+            {"date": date(2026, 5, 8), "ticker": "EOSE", "underlying_adj_close": 8.01},
+        ]
+    )
+    out = iem.merge_underlying_adj_close(df, und_df, {"EOSU": "EOSE"})
+    assert abs(float(out.iloc[0]["underlying_adj_close"]) - 6.36) < 1e-9
+
+
+def test_merge_close_prices_carry_forward_from_session():
+    df = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 5, 9),
+                "ticker": "ZZZ",
+                "nav": 10.0,
+                "aum": 1e6,
+                "shares_outstanding": 100_000.0,
+                "close_price": None,
+                "underlying_adj_close": None,
+                "stale": True,
+                "stale_age_bdays": 1,
+                "source_provider": "carry_forward",
+                "source_url": "carry_forward://ZZZ?from=2026-05-08",
+                "ingested_at_utc": "2026-05-10T00:00:00Z",
+                "status": "ok",
+            }
+        ]
+    )
+    close_df = pd.DataFrame(
+        [
+            {"date": date(2026, 5, 8), "ticker": "ZZZ", "close_price": 10.05, "shares_traded": 50.0},
+            {"date": date(2026, 5, 9), "ticker": "ZZZ", "close_price": 11.0, "shares_traded": 60.0},
+        ]
+    )
+    out = iem.merge_close_prices(df, close_df)
+    assert float(out.iloc[0]["close_price"]) == 10.05
