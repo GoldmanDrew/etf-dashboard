@@ -33,6 +33,25 @@ def test_fetch_underlying_adj_close_batch_chunks_yfinance_calls(monkeypatch):
     assert [len(c) for c in captured] == [2, 2, 1]
 
 
+def test_fetch_close_prices_batch_chunks_yfinance_calls(monkeypatch):
+    """ETF close/volume batch must not rely on a single yfinance bulk download."""
+    captured: list[list[str]] = []
+
+    def fake_download(tickers, start, end, *, auto_adjust):
+        captured.append(list(tickers))
+        return None
+
+    monkeypatch.setenv("ETF_METRICS_CLOSE_YF_CHUNK_SIZE", "2")
+    monkeypatch.setattr(iem, "_yf_download_ohlcv", fake_download)
+    syms = ["SPY", "QQQ", "IWM", "DIA", "VOO"]
+    out = iem.fetch_close_prices_batch(
+        syms, date(2026, 1, 1), date(2026, 1, 5),
+    )
+    assert out.empty
+    assert len(captured) == 3
+    assert [len(c) for c in captured] == [2, 2, 1]
+
+
 def test_backfill_underlying_adj_close_gaps_fetches_per_underlying(monkeypatch):
     df = pd.DataFrame(
         [

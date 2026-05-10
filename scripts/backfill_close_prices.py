@@ -218,7 +218,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill close_price on etf_metrics_daily.")
     parser.add_argument("--start", default=None, help="YYYY-MM-DD lower bound (default: earliest date in file)")
     parser.add_argument("--end", default=None, help="YYYY-MM-DD upper bound (default: latest date in file)")
-    parser.add_argument("--chunk", type=int, default=100, help="Ticker batch size for yfinance calls")
+    parser.add_argument("--chunk", type=int, default=50, help="Ticker batch size for yfinance calls")
     parser.add_argument("--force", action="store_true", help="Overwrite existing close_price values")
     parser.add_argument("--dry-run", action="store_true", help="Do not write outputs")
     args = parser.parse_args()

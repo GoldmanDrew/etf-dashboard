@@ -2440,10 +2440,25 @@ function SimpleSeriesPlot({
   const x = (i) => L + (i / Math.max(1, series.length - 1)) * PW;
   const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, yMax - yMin))) * PH;
 
-  const buildPath = (vals) => vals
-    .map((v, i) => (Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : ''))
-    .filter(Boolean)
-    .join(' ');
+  /** Per-index series; skip non-finite points and start a new stroke after gaps (no diagonal across missing days). */
+  const buildPath = (vals) => {
+    let out = '';
+    let penUp = true;
+    for (let i = 0; i < vals.length; i += 1) {
+      const v = vals[i];
+      if (!Number.isFinite(v)) {
+        penUp = true;
+        continue;
+      }
+      if (penUp) {
+        out += (out ? ' ' : '') + `M ${x(i).toFixed(2)} ${y(v).toFixed(2)}`;
+        penUp = false;
+      } else {
+        out += ` L ${x(i).toFixed(2)} ${y(v).toFixed(2)}`;
+      }
+    }
+    return out;
+  };
 
   const lineVals = series.map(readPrimary);
   const linePath = buildPath(lineVals);
@@ -2452,7 +2467,7 @@ function SimpleSeriesPlot({
 
   const findLatestIdx = (vals) => {
     for (let i = vals.length - 1; i >= 0; i -= 1) {
-      if (Number.isFinite(vals[i])) return i;
+      if (vals[i] != null && Number.isFinite(vals[i])) return i;
     }
     return -1;
   };
@@ -4863,16 +4878,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   </thead>
                   <tbody>
                     {[...etfMetricsSeries].slice(-15).reverse().map((m, idx) => {
-                      const nav = Number(m.nav);
-                      const close = Number(m.close_price);
-                      const premPct = (Number.isFinite(nav) && nav > 0 && Number.isFinite(close))
+                      const nav = toFiniteNum(m.nav);
+                      const close = toFiniteNum(m.close_price);
+                      const premPct = (nav != null && nav > 0 && close != null)
                         ? ((close - nav) / nav) * 100
                         : null;
                       return (
                         <tr key={`${m.date}-${idx}`}>
                           <td>{m.date || '—'}</td>
-                          <td>{fmtUsd(nav)}</td>
-                          <td>{Number.isFinite(close) ? fmtUsd(close) : '—'}</td>
+                          <td>{nav != null ? fmtUsd(nav) : '—'}</td>
+                          <td>{close != null ? fmtUsd(close) : '—'}</td>
                           <td>{premPct == null ? '—' : `${premPct >= 0 ? '+' : ''}${premPct.toFixed(2)}%`}</td>
                           <td>{toFiniteNum(m.nav_total_return) != null ? fmtUsd(toFiniteNum(m.nav_total_return)) : '—'}</td>
                           <td>{toFiniteNum(m.underlying_adj_close) != null ? fmtUsd(toFiniteNum(m.underlying_adj_close)) : '—'}</td>

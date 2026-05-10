@@ -726,34 +726,47 @@ def fetch_close_prices_batch(
 ) -> pd.DataFrame:
     """Return long-form DataFrame (date, ticker, close_price, shares_traded) from yfinance.
 
-    Uses ``yf.download`` with a ticker list; that issues a single multi-symbol
-    request rather than one GET per ticker, which is ~20x faster and stays
-    well under Yahoo's rate ceiling for cloud IPs.
-
-    An empty DataFrame is returned on any failure so the caller can proceed
-    without close-prices rather than blow up the whole ingest.
+    Yahoo's multi-symbol ``download`` can omit symbols when too many tickers are
+    requested at once. Chunk the ETF universe (default 50 per request, tunable
+    via ``ETF_METRICS_CLOSE_YF_CHUNK_SIZE``), merge Close + Volume per chunk, then
+    concatenate — same pattern as ``fetch_underlying_adj_close_batch``.
     """
     cols = ["date", "ticker", "close_price", "shares_traded"]
     if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
         LOGGER.info("close-price fetch disabled (ETF_METRICS_DISABLE_YFINANCE)")
         return pd.DataFrame(columns=cols)
-    raw = _yf_download_ohlcv(tickers, start, end, auto_adjust=False)
-    close = _extract_yf_series_to_long(raw, tickers, "Close", "close_price")
-    volume = _extract_yf_series_to_long(raw, tickers, "Volume", "shares_traded")
-    if close.empty and volume.empty:
+    uniq = sorted({_normalize_symbol(s) for s in tickers if s and str(s).strip()})
+    if not uniq:
         return pd.DataFrame(columns=cols)
-    if close.empty:
-        out = volume.copy()
-        out["close_price"] = None
-    elif volume.empty:
-        out = close.copy()
-        out["shares_traded"] = None
-    else:
-        out = close.merge(volume, on=["date", "ticker"], how="outer")
-    for c in cols:
-        if c not in out.columns:
-            out[c] = None
-    return out[cols].drop_duplicates(subset=["date", "ticker"], keep="last")
+    chunk_sz = max(1, int(os.getenv("ETF_METRICS_CLOSE_YF_CHUNK_SIZE", "50")))
+    parts: list[pd.DataFrame] = []
+    for i in range(0, len(uniq), chunk_sz):
+        chunk = uniq[i : i + chunk_sz]
+        raw = _yf_download_ohlcv(chunk, start, end, auto_adjust=False)
+        close = _extract_yf_series_to_long(raw, chunk, "Close", "close_price")
+        volume = _extract_yf_series_to_long(raw, chunk, "Volume", "shares_traded")
+        if close.empty and volume.empty:
+            LOGGER.warning(
+                "close_price chunk empty (%d tickers, offset %d)",
+                len(chunk), i,
+            )
+            continue
+        if close.empty:
+            out = volume.copy()
+            out["close_price"] = None
+        elif volume.empty:
+            out = close.copy()
+            out["shares_traded"] = None
+        else:
+            out = close.merge(volume, on=["date", "ticker"], how="outer")
+        for c in cols:
+            if c not in out.columns:
+                out[c] = None
+        parts.append(out[cols])
+    if not parts:
+        return pd.DataFrame(columns=cols)
+    merged = pd.concat(parts, ignore_index=True)
+    return merged.drop_duplicates(subset=["date", "ticker"], keep="last")
 
 
 def fetch_underlying_adj_close_batch(
