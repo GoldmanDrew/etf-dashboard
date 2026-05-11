@@ -129,7 +129,12 @@ jobs:
         # call for the underlying closes). Non-fatal -- if scoring fails we
         # still ship the metrics commit; the next run will catch up.
         continue-on-error: true
-        run: python scripts/score_nav_forecasts.py
+        run: |
+          python scripts/score_nav_forecasts.py
+          # Historical snapshots can contain stale options-cache spots. Keep the
+          # committed history panel repaired if this workflow re-scores an old
+          # target date (manual reruns, weekend reruns, or skipped forecast runs).
+          python scripts/repair_nav_forecast_stale_spots.py --apply
 
       - name: Score borrow spike predictions (rollup)
         continue-on-error: true
@@ -229,7 +234,12 @@ jobs:
               for f in ${EXISTING_FILES}; do
                 if [ -e "${TMP_DIR}/$f" ]; then
                   mkdir -p "$(dirname "$f")"
-                  cp -r "${TMP_DIR}/$f" "$f"
+                  # If f is a directory and already exists after rebasing onto
+                  # latest origin, plain "cp -r src dest" creates dest/basename
+                  # (e.g. data/nav_forecasts/realized/realized), which can make
+                  # stale nested JSONL files survive and poison rollups.
+                  rm -rf "$f"
+                  cp -a "${TMP_DIR}/$f" "$f"
                   ROUND_FILES="${ROUND_FILES} $f"
                 fi
               done

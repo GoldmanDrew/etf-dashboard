@@ -153,6 +153,32 @@ def test_walk_realized_collects_nested_yyyy_mm_dd_jsonl(tmp_path: Path):
     assert rows[0]["date"] == "2026-04-26"
 
 
+def test_flatten_nested_realized_removes_duplicate_even_when_top_level_exists(tmp_path: Path):
+    rdir = tmp_path / "realized"
+    top = rdir / "2026-05-08.jsonl"
+    nested = rdir / "realized" / "2026-05-08.jsonl"
+    _write_realized_jsonl(top, [{
+        "date": "2026-05-08", "symbol": "EOSU", "model": "delta_v2_ito",
+        "product_class": "letf", "nav_hat_close": 33.33, "nav_actual": 33.52,
+        "err_bp": -55.0, "abs_err_bp": 55.0,
+    }])
+    _write_realized_jsonl(nested, [{
+        "date": "2026-05-08", "symbol": "EOSU", "model": "delta_v2_ito",
+        "product_class": "letf", "nav_hat_close": 16.78, "nav_actual": 33.52,
+        "err_bp": -4991.0, "abs_err_bp": 4991.0,
+    }])
+
+    moved = sc.flatten_nested_realized_jsonl(rdir)
+    assert moved == 1
+    assert top.exists()
+    assert not nested.exists()
+
+    by_key = sc._walk_realized(rdir, max_files=50)
+    rows = by_key[("EOSU", "delta_v2_ito")]
+    assert len(rows) == 1
+    assert rows[0]["nav_hat_close"] == 33.33
+
+
 def test_history_panel_per_model_default(tmp_path: Path):
     rdir = tmp_path / "realized"
     _write_realized_jsonl(rdir / "2026-04-28.jsonl", [
