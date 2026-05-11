@@ -58,6 +58,12 @@ nearby snapshots — true to first order over a single trading day.
 | `_metrics_daily.json` | `score_nav_forecasts.py` | `index.html` accuracy stat | daily |
 | `_history_panel.json` | `score_nav_forecasts.py` | `index.html` NAV-vs-model chart | daily |
 
+Historical repairs that do not need live APIs should use
+`scripts/repair_nav_forecast_stale_spots.py`.  It rebuilds beta-model realized
+rows (`delta_v1` / `delta_v2_ito`) from stored snapshots plus
+`etf_metrics_daily.json`, then refreshes `_metrics_daily.json` and
+`_history_panel.json`.
+
 ## Schemas
 
 ### `_anchors.json`

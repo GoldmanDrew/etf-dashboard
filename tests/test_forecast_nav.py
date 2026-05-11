@@ -391,7 +391,7 @@ def test_metrics_row_covers_anchor_iso_compare():
 
 
 def test_build_forecasts_stale_underlying_uses_metrics_fallback():
-    """Zombie EOSE spot (EOSU-style) must not halve delta_v1 when metrics has the underlier."""
+    """Zombie EOSE spot must not halve delta_v1 when metrics has the underlier."""
     rec = {
         "symbol": "EOSU", "underlying": "EOSE", "beta": 2.0, "product_class": "letf",
         "forecast_vol_underlying_annual": 0.6,
@@ -408,10 +408,19 @@ def test_build_forecasts_stale_underlying_uses_metrics_fallback():
         "underlying_adj_close": 6.36,
         "close_price": 33.52,
     }
-    rows, _ = fn.build_forecasts_for_symbol(rec, anchor, options, None, _ts(), None, metrics)
+    rows, _ = fn.build_forecasts_for_symbol(
+        rec,
+        anchor,
+        options,
+        None,
+        _ts(),
+        None,
+        metrics,
+    )
     v1 = next(r for r in rows if r.model == "delta_v1")
     assert v1.confidence != "na"
-    assert v1.und_spot_t is not None and abs(float(v1.und_spot_t) - 6.36) < 1e-3
+    assert v1.und_spot_t is not None
+    assert abs(float(v1.und_spot_t) - 6.36) < 1e-3
     assert v1.nav_hat is not None
     assert 35.0 < v1.nav_hat < 35.5
     assert v1.notes and "underlying_spot_via_etf_metrics" in v1.notes
@@ -425,7 +434,15 @@ def test_build_forecasts_stale_underlying_no_usable_metrics_is_na():
     anchor = _anchor(nav=35.32, und=6.36, asof="2026-05-07")
     options = {"symbols": {"EOSE": _stale_options_entry(4.505)}}
     metrics = {"date": "2026-05-06", "underlying_adj_close": 6.50}
-    rows, _ = fn.build_forecasts_for_symbol(rec, anchor, options, None, _ts(), None, metrics)
+    rows, _ = fn.build_forecasts_for_symbol(
+        rec,
+        anchor,
+        options,
+        None,
+        _ts(),
+        None,
+        metrics,
+    )
     v1 = next(r for r in rows if r.model == "delta_v1")
     assert v1.confidence == "na"
 
@@ -452,8 +469,22 @@ def test_build_forecasts_stale_underlying_same_day_prefers_anchor_und():
             "EOSU": {"spot": 33.5, "cache_age_seconds": 30.0, "stale": False},
         }
     }
-    metrics = {"date": "2026-05-08", "underlying_adj_close": 6.36, "close_price": 33.52}
-    rows, _ = fn.build_forecasts_for_symbol(rec, anchor, options, None, _ts(), None, metrics)
+    metrics = {
+        "date": "2026-05-08",
+        "underlying_adj_close": 6.36,
+        "close_price": 33.52,
+    }
+    rows, _ = fn.build_forecasts_for_symbol(
+        rec,
+        anchor,
+        options,
+        None,
+        _ts(),
+        None,
+        metrics,
+    )
     v1 = next(r for r in rows if r.model == "delta_v1")
-    assert v1.und_spot_t is not None and abs(float(v1.und_spot_t) - 8.01) < 1e-6
-    assert v1.nav_hat is not None and 33.0 < v1.nav_hat < 34.0
+    assert v1.und_spot_t is not None
+    assert abs(float(v1.und_spot_t) - 8.01) < 1e-6
+    assert v1.nav_hat is not None
+    assert 33.0 < v1.nav_hat < 34.0
