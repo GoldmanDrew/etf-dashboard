@@ -244,8 +244,19 @@ def flatten_nested_realized_jsonl(realized_dir: Path) -> int:
     if not realized_dir.exists():
         return 0
     moved = 0
-    for p in _iter_realized_jsonl_paths(realized_dir):
+    # Do not use _iter_realized_jsonl_paths() here: it de-duplicates by
+    # basename, which can hide nested duplicates when a canonical top-level
+    # file already exists.  Flattening must inspect every nested file so stale
+    # realized/realized/... copies cannot survive and later win a size-based
+    # tie in rollups.
+    paths = sorted(
+        p for p in realized_dir.rglob("*.jsonl")
+        if _REALIZED_JSONL_NAME.match(p.name)
+    )
+    for p in paths:
         if p.parent.resolve() == realized_dir.resolve():
+            continue
+        if not p.exists():
             continue
         dest = realized_dir / p.name
         realized_dir.mkdir(parents=True, exist_ok=True)
