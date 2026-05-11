@@ -587,14 +587,18 @@ def _options_quote_unreliable(entry: dict | None, cache_age_sec: float | None) -
 
     Ancient placeholder rows (``stale: true``, multi-day ``cache_age_seconds``)
     previously still flowed into ``log(und_spot_t / und_anchor)`` while only
-    downgrading confidence — producing half-NAV style glitches for thin
+    downgrading confidence, producing half-NAV style glitches for thin
     options-shard names.
     """
     if not entry:
         return False
     if entry.get("stale") is True:
         return True
-    if cache_age_sec is not None and _isfin(cache_age_sec) and float(cache_age_sec) > SPOT_FRESH_SECONDS:
+    if (
+        cache_age_sec is not None
+        and _isfin(cache_age_sec)
+        and float(cache_age_sec) > SPOT_FRESH_SECONDS
+    ):
         return True
     return False
 
