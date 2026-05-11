@@ -364,3 +364,96 @@ def test_dt_years_overnight_is_one_business_day():
     # 2026-04-27 (Mon) to 2026-04-28 (Tue) = 1 business day.
     dt = fn._dt_years("2026-04-27", ts)
     assert abs(dt - 1.0 / 252.0) < 1e-9
+
+
+def _stale_options_entry(spot: float) -> dict:
+    return {
+        "spot": spot,
+        "cache_age_seconds": 9_999_999.0,
+        "stale": True,
+        "source": "cache",
+        "updated_at": "2026-04-08T00:00:00Z",
+    }
+
+
+def test_options_quote_unreliable():
+    assert fn._options_quote_unreliable(None, 10.0) is False
+    assert fn._options_quote_unreliable({"stale": True}, 10.0) is True
+    assert fn._options_quote_unreliable({"stale": False}, float(fn.SPOT_FRESH_SECONDS) + 1.0) is True
+    assert fn._options_quote_unreliable({"stale": False}, 60.0) is False
+
+
+def test_metrics_row_covers_anchor_iso_compare():
+    assert fn._metrics_row_covers_anchor({"date": "2026-05-08"}, "2026-05-07") is True
+    assert fn._metrics_row_covers_anchor({"date": "2026-05-06"}, "2026-05-07") is False
+    assert fn._metrics_row_covers_anchor({"date": "2026-05-07"}, "2026-05-07") is True
+    assert fn._metrics_row_covers_anchor(None, "2026-05-07") is False
+
+
+def test_build_forecasts_stale_underlying_uses_metrics_fallback():
+    """Zombie EOSE spot (EOSU-style) must not halve delta_v1 when metrics has the underlier."""
+    rec = {
+        "symbol": "EOSU", "underlying": "EOSE", "beta": 2.0, "product_class": "letf",
+        "forecast_vol_underlying_annual": 0.6,
+    }
+    anchor = _anchor(nav=35.32, und=6.36, asof="2026-05-07")
+    options = {
+        "symbols": {
+            "EOSE": _stale_options_entry(4.505),
+            "EOSU": {"spot": 33.5, "cache_age_seconds": 30.0, "stale": False},
+        }
+    }
+    metrics = {
+        "date": "2026-05-08",
+        "underlying_adj_close": 6.36,
+        "close_price": 33.52,
+    }
+    rows, _ = fn.build_forecasts_for_symbol(rec, anchor, options, None, _ts(), None, metrics)
+    v1 = next(r for r in rows if r.model == "delta_v1")
+    assert v1.confidence != "na"
+    assert v1.und_spot_t is not None and abs(float(v1.und_spot_t) - 6.36) < 1e-3
+    assert v1.nav_hat is not None
+    assert 35.0 < v1.nav_hat < 35.5
+    assert v1.notes and "underlying_spot_via_etf_metrics" in v1.notes
+
+
+def test_build_forecasts_stale_underlying_no_usable_metrics_is_na():
+    rec = {
+        "symbol": "EOSU", "underlying": "EOSE", "beta": 2.0, "product_class": "letf",
+        "forecast_vol_underlying_annual": 0.6,
+    }
+    anchor = _anchor(nav=35.32, und=6.36, asof="2026-05-07")
+    options = {"symbols": {"EOSE": _stale_options_entry(4.505)}}
+    metrics = {"date": "2026-05-06", "underlying_adj_close": 6.50}
+    rows, _ = fn.build_forecasts_for_symbol(rec, anchor, options, None, _ts(), None, metrics)
+    v1 = next(r for r in rows if r.model == "delta_v1")
+    assert v1.confidence == "na"
+
+
+def test_metrics_fallback_underlying_same_session_uses_anchor():
+    """Same ``date`` as anchor: never substitute a conflicting metrics underlier."""
+    fb = fn._metrics_fallback_underlying_price(
+        {"date": "2026-05-08", "underlying_adj_close": 6.36},
+        "2026-05-08",
+        8.01,
+    )
+    assert fb == 8.01
+
+
+def test_build_forecasts_stale_underlying_same_day_prefers_anchor_und():
+    rec = {
+        "symbol": "EOSU", "underlying": "EOSE", "beta": 2.0, "product_class": "letf",
+        "forecast_vol_underlying_annual": 0.6,
+    }
+    anchor = _anchor(nav=33.52, und=8.01, asof="2026-05-08")
+    options = {
+        "symbols": {
+            "EOSE": _stale_options_entry(4.505),
+            "EOSU": {"spot": 33.5, "cache_age_seconds": 30.0, "stale": False},
+        }
+    }
+    metrics = {"date": "2026-05-08", "underlying_adj_close": 6.36, "close_price": 33.52}
+    rows, _ = fn.build_forecasts_for_symbol(rec, anchor, options, None, _ts(), None, metrics)
+    v1 = next(r for r in rows if r.model == "delta_v1")
+    assert v1.und_spot_t is not None and abs(float(v1.und_spot_t) - 8.01) < 1e-6
+    assert v1.nav_hat is not None and 33.0 < v1.nav_hat < 34.0

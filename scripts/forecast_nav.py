@@ -579,6 +579,68 @@ def mark_holdings(
 
 
 # ---------------------------------------------------------------------------
+# Options-cache quote hygiene (beta models)
+# ---------------------------------------------------------------------------
+
+def _options_quote_unreliable(entry: dict | None, cache_age_sec: float | None) -> bool:
+    """True when ``options_cache.symbols[*]`` should not drive v1/v2 underlying math.
+
+    Ancient placeholder rows (``stale: true``, multi-day ``cache_age_seconds``)
+    previously still flowed into ``log(und_spot_t / und_anchor)`` while only
+    downgrading confidence — producing half-NAV style glitches for thin
+    options-shard names.
+    """
+    if not entry:
+        return False
+    if entry.get("stale") is True:
+        return True
+    if cache_age_sec is not None and _isfin(cache_age_sec) and float(cache_age_sec) > SPOT_FRESH_SECONDS:
+        return True
+    return False
+
+
+def _metrics_row_covers_anchor(metrics_row: dict | None, anchor_date_str: str | None) -> bool:
+    """True if ``etf_metrics_latest`` row is dated on/after anchor ``as_of_date`` (ISO)."""
+    if not metrics_row:
+        return False
+    if not anchor_date_str:
+        return True
+    md = metrics_row.get("date")
+    if md is None:
+        return False
+    try:
+        return str(md) >= str(anchor_date_str)
+    except Exception:
+        return False
+
+
+def _metrics_fallback_underlying_price(
+    metrics_row: dict | None,
+    nav_anchor_date: str | None,
+    und_anchor: float | None,
+) -> float | None:
+    """Underlying spot for v1/v2 when ``options_cache`` is stale.
+
+    If the metrics row is for the **same** session as ``und_anchor`` (anchor
+    ``as_of_date``), return ``und_anchor`` itself so we never mix Yahoo-ingest
+    ``underlying_adj_close`` with scorer yfinance ``und_close`` on the same
+    calendar row (they can disagree by splits/providers). For a **later**
+    metrics ``date``, use ``underlying_adj_close`` as the next-session close.
+    """
+    if not _metrics_row_covers_anchor(metrics_row, nav_anchor_date):
+        return None
+    md = str(metrics_row.get("date") or "")
+    if (
+        und_anchor is not None
+        and und_anchor > 0
+        and nav_anchor_date
+        and md == str(nav_anchor_date)
+    ):
+        return float(und_anchor)
+    return _f(metrics_row.get("underlying_adj_close"))
+
+
+# ---------------------------------------------------------------------------
 # ForecastRecord + per-model builders
 # ---------------------------------------------------------------------------
 
@@ -628,6 +690,7 @@ def _gather_inputs(
     anchor: dict | None,
     options_cache: dict,
     distributions_today: dict[str, float] | None = None,
+    metrics_row: dict | None = None,
 ) -> dict:
     """Resolve everything the per-model builders need. ``anchor`` may be None."""
     sym = str(record.get("symbol") or "").upper()
@@ -635,6 +698,11 @@ def _gather_inputs(
     is_yb = bool(record.get("is_yieldboost"))
     und = str(record.get("underlying") or "").upper() or None
     distributions_today = distributions_today or {}
+
+    nav_anchor = _f(anchor.get("nav_close")) if anchor else None
+    und_anchor = _f(anchor.get("und_close")) if anchor else None
+    nav_anchor_date = anchor.get("as_of_date") if anchor else None
+    shares_out = _f(anchor.get("shares_outstanding")) if anchor else None
 
     syms = options_cache.get("symbols") or {}
     und_entry = syms.get(und) if und else None
@@ -647,19 +715,40 @@ def _gather_inputs(
             und_spot_t = s
             und_spot_age = a
 
+    gather_notes: list[str] = []
+    if und_entry and und_spot_t is not None and _options_quote_unreliable(und_entry, und_spot_age):
+        fb_u = _metrics_fallback_underlying_price(metrics_row, nav_anchor_date, und_anchor)
+        if fb_u is not None and fb_u > 0:
+            und_spot_t = fb_u
+            und_spot_age = 0.0
+            gather_notes.append("underlying_spot_via_etf_metrics_underlying_adj_close")
+        else:
+            und_spot_t = None
+            und_spot_age = None
+            gather_notes.append("underlying_spot_stale_options_no_metrics_fallback")
+
     etf_entry = syms.get(sym)
     etf_last = None
     etf_last_ts = None
+    etf_cache_age = None
     if etf_entry:
         s = _f(etf_entry.get("spot"))
+        etf_cache_age = _f(etf_entry.get("cache_age_seconds"))
         if s is not None and s > 0:
             etf_last = s
             etf_last_ts = etf_entry.get("updated_at")
-
-    nav_anchor = _f(anchor.get("nav_close")) if anchor else None
-    und_anchor = _f(anchor.get("und_close")) if anchor else None
-    nav_anchor_date = anchor.get("as_of_date") if anchor else None
-    shares_out = _f(anchor.get("shares_outstanding")) if anchor else None
+    if etf_entry and etf_last is not None and _options_quote_unreliable(etf_entry, etf_cache_age):
+        fb_e = None
+        if _metrics_row_covers_anchor(metrics_row, nav_anchor_date):
+            fb_e = _f(metrics_row.get("close_price"))
+        if fb_e is not None and fb_e > 0:
+            etf_last = fb_e
+            etf_last_ts = "etf_metrics_latest:close_price"
+            gather_notes.append("etf_last_via_etf_metrics_close_price")
+        else:
+            etf_last = None
+            etf_last_ts = None
+            gather_notes.append("etf_last_stale_options_no_metrics_fallback")
 
     # Optional pre-trade adjustment for ETFs that go ex-distribution today.
     nav_anchor, distribution_applied = _adjust_anchor_for_ex_distribution(
@@ -694,6 +783,7 @@ def _gather_inputs(
         "sigma_source": sigma_source,
         "beta": beta,
         "distribution_applied": distribution_applied,
+        "gather_notes": gather_notes,
     }
 
 
@@ -784,6 +874,8 @@ def _classify_beta_model_confidence(inputs: dict, model: str) -> tuple[str, list
 
 def build_v1(inputs: dict, ts_iso: str, ter_daily: float) -> ForecastRecord | None:
     confidence, notes = _classify_beta_model_confidence(inputs, "delta_v1")
+    notes = list(notes)
+    notes.extend(x for x in (inputs.get("gather_notes") or []) if x)
     nav_hat = None
     if confidence != "na":
         try:
@@ -803,6 +895,8 @@ def build_v2_ito(
     inputs: dict, ts_iso: str, ter_daily: float, ts_utc: datetime,
 ) -> ForecastRecord | None:
     confidence, notes = _classify_beta_model_confidence(inputs, "delta_v2_ito")
+    notes = list(notes)
+    notes.extend(x for x in (inputs.get("gather_notes") or []) if x)
     sigma = inputs["sigma_annual"]
     if confidence != "na" and (sigma is None or sigma <= 0):
         confidence = "na"
@@ -977,6 +1071,7 @@ def build_forecasts_for_symbol(
     holdings_legs: list[dict] | None,
     ts_utc: datetime,
     distributions_today: dict[str, float] | None = None,
+    metrics_row: dict | None = None,
 ) -> tuple[list[ForecastRecord], str | None]:
     """Compute every applicable model for a single screener row.
 
@@ -987,7 +1082,7 @@ def build_forecasts_for_symbol(
     sym = str(record.get("symbol") or "").upper()
     if not sym:
         return [], None
-    inputs = _gather_inputs(record, anchor, options_cache, distributions_today)
+    inputs = _gather_inputs(record, anchor, options_cache, distributions_today, metrics_row)
     ter_daily = _ter_daily_for(sym)
     ts_iso = ts_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -1024,12 +1119,23 @@ def main() -> None:
     parser.add_argument("--holdings", default=str(HOLDINGS_LATEST_PATH))
     parser.add_argument("--out-snapshot", default=None)
     parser.add_argument("--out-latest", default=str(LATEST_PATH))
+    parser.add_argument(
+        "--etf-metrics-latest",
+        default=str(ETF_METRICS_LATEST_PATH),
+        help="Latest ETF metrics JSON (underlying_adj_close / close for stale-quote fallback).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     dashboard = _load_json(Path(args.dashboard_data))
     options_cache = _load_json(Path(args.options_cache))
+    mpath = Path(args.etf_metrics_latest)
+    metrics_by_sym: dict[str, dict] = {}
+    if mpath.exists():
+        mp = _load_json(mpath)
+        raw = mp.get("by_symbol") or {}
+        metrics_by_sym = {str(k).upper(): v for k, v in raw.items() if isinstance(v, dict)}
     anchors = _load_json(Path(args.anchors))
     holdings_payload = _load_json(Path(args.holdings))
     holdings_by_sym = (holdings_payload.get("by_symbol") or {}) if holdings_payload else {}
@@ -1068,6 +1174,7 @@ def main() -> None:
                 holdings_by_sym.get(sym),
                 ts,
                 distributions_today,
+                metrics_by_sym.get(sym),
             )
         except Exception as e:  # pragma: no cover - defensive
             LOGGER.warning("forecast %s failed: %s", sym, e)
