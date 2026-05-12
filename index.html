@@ -903,7 +903,7 @@
     display: block; margin-bottom: 4px; font-size: 10px; font-weight: 700;
     text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted);
   }
-  .backtest-control input, .backtest-control select {
+  .backtest-control input, .backtest-control select, .backtest-control button {
     width: 100%; padding: 8px 10px; border-radius: 7px;
     border: 1px solid var(--border); background: var(--bg-card);
     color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 12px;
@@ -3546,6 +3546,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [btSlippageBps, setBtSlippageBps] = useState(27);
   const [btNetGrossTol, setBtNetGrossTol] = useState(5);
   const [btHedgeRatio, setBtHedgeRatio] = useState(1);
+  /** Backtest window start (YYYY-MM-DD); empty means full joint-price history. */
+  const [btStartDate, setBtStartDate] = useState('');
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -3607,6 +3609,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   useEffect(() => {
     setBtNetGrossTol(defaultNetGrossTolerancePct(r));
   }, [etfSym, r?.bucket, r?.product_class]);
+  useEffect(() => {
+    setBtStartDate('');
+  }, [etfSym]);
 
   const widgetHtml = useMemo(() => {
     keyRef.current++;
@@ -3885,6 +3890,46 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     }
     return null;
   }, [etfMetricsMap, etfSym, etfBacktestSeries]);
+
+  const pairBacktestBounds = useMemo(() => {
+    const s = etfBacktestSeries;
+    if (!Array.isArray(s) || !s.length) return { first: '', last: '' };
+    return {
+      first: String(s[0]?.date || '').trim(),
+      last: String(s[s.length - 1]?.date || '').trim(),
+    };
+  }, [etfBacktestSeries]);
+
+  /** Slice of joint-price rows for optional window start (inception + anchor reset at first kept day). */
+  const pairBacktestWindow = useMemo(() => {
+    const full = etfBacktestSeries;
+    if (!Array.isArray(full) || !full.length) {
+      return { series: [], startHint: null, startError: null };
+    }
+    const first = String(full[0]?.date || '').trim();
+    const last = String(full[full.length - 1]?.date || '').trim();
+    const raw = String(btStartDate || '').trim();
+    if (!raw) {
+      return { series: full, startHint: null, startError: null };
+    }
+    if (raw > last) {
+      return {
+        series: [],
+        startHint: null,
+        startError: `Start date is after the last data day (${last}).`,
+      };
+    }
+    const effective = raw < first ? first : raw;
+    const series = full.filter((row) => String(row?.date || '').trim() >= effective);
+    return {
+      series,
+      startHint: raw < first
+        ? `Underlying series begins ${first}; window clamped to the first joint day.`
+        : null,
+      startError: null,
+    };
+  }, [etfBacktestSeries, btStartDate]);
+
   const latestEtfMetric = useMemo(
     () => (etfMetricsSeries.length ? etfMetricsSeries[etfMetricsSeries.length - 1] : null),
     [etfMetricsSeries],
@@ -3970,12 +4015,21 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (!sim) {
       return { ok: false, error: 'Pair backtest module unavailable', daily: [], rebalanceMarks: [], summary: {} };
     }
+    if (pairBacktestWindow.startError) {
+      return {
+        ok: false,
+        error: pairBacktestWindow.startError,
+        daily: [],
+        rebalanceMarks: [],
+        summary: {},
+      };
+    }
     const bAnn = Number.isFinite(avgBorrowFromHistory)
       ? avgBorrowFromHistory
       : (Number.isFinite(Number(r.borrow_avg_annual))
         ? Number(r.borrow_avg_annual)
         : Number(getBorrowRate(r)));
-    return sim(etfBacktestSeries, {
+    return sim(pairBacktestWindow.series, {
       gross: Number(btGross) || 0,
       hedgeRatio: Number(btHedgeRatio) || 1,
       beta: Number(r?.beta),
@@ -5416,7 +5470,25 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="backtest-control"><label>Every N days</label><input type="number" min={1} step={1} value={btEveryN} onChange={(e) => setBtEveryN(Number(e.target.value) || 1)} title="Check β-adj net/gross vs anchor on this cadence (trading days since last rebalance)." /></div>
               <div className="backtest-control"><label>Max |β-adj drift| (pp)</label><input type="number" min={0.1} step={0.5} value={btNetGrossTol} onChange={(e) => setBtNetGrossTol(Number(e.target.value) || 0)} title="Breach if |β-adj net/gross ratio minus anchor| exceeds this (percentage points on 0–100 scale). Defaults: inverse 10, regular 5, YieldBOOST 2." /></div>
               <div className="backtest-control"><label>Slippage (bps)</label><input type="number" min={0} step={1} value={btSlippageBps} onChange={(e) => setBtSlippageBps(Number(e.target.value) || 0)} title="Per-rebalance transaction cost: slippage × traded notional / 10 000." /></div>
+              <div className="backtest-control">
+                <label>Start date</label>
+                <input
+                  type="date"
+                  value={btStartDate}
+                  min={pairBacktestBounds.first || undefined}
+                  max={pairBacktestBounds.last || undefined}
+                  onChange={(e) => setBtStartDate(e.target.value)}
+                  title="Replay begins on this calendar day (first row ≥ date). Gross is redeployed at inception; β-adj anchor resets. Leave empty for full history."
+                />
+              </div>
+              <div className="backtest-control" style={{ alignSelf: 'end' }}>
+                <label style={{ visibility: 'hidden' }}>Range</label>
+                <button type="button" className="chart-view-btn" onClick={() => setBtStartDate('')} disabled={!btStartDate}>Full history</button>
+              </div>
             </div>
+            {pairBacktestWindow.startHint ? (
+              <div className="scenario-warning" style={{ marginTop: 8 }}>{pairBacktestWindow.startHint}</div>
+            ) : null}
             <div className="trade-note">
               Rebalance at close on each <strong>N</strong>th day when <strong>|β-adj net/gross − anchor|</strong> exceeds your tolerance; anchor resets at inception and after each rebalance. T-cost: slippage bps × traded notional.
             </div>
