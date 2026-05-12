@@ -318,6 +318,34 @@ test("daily rows include leg MVs for exposure chart", () => {
   assert.ok(Number.isFinite(row0.mvEtfBetaAdj));
 });
 
+test("windowed row slice: inception and day count match UI start-date filter", () => {
+  const rows = [];
+  for (let i = 0; i < 8; i += 1) {
+    rows.push({
+      date: `2024-08-${String(i + 1).padStart(2, "0")}`,
+      close_price: 10 + i * 0.5,
+      underlying_adj_close: 50,
+    });
+  }
+  const opts = {
+    gross: 50000,
+    hedgeRatio: 1,
+    beta: 2,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0,
+  };
+  const full = simulateInversePairBacktest(rows, opts);
+  const startIdx = 3;
+  const windowed = simulateInversePairBacktest(rows.slice(startIdx), opts);
+  assert.equal(full.ok, true);
+  assert.equal(windowed.ok, true);
+  assert.equal(windowed.inception, rows[startIdx].date);
+  assert.notEqual(windowed.inception, full.inception);
+  assert.ok(windowed.summary.nDays < full.summary.nDays);
+});
+
 test("short both flat prices: raw net/gross is ~0 (balanced notionals)", () => {
   const rows = [];
   for (let d = 1; d <= 10; d += 1) {
