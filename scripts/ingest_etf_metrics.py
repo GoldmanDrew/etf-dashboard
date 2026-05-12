@@ -466,6 +466,36 @@ def validate_df(df: pd.DataFrame) -> None:
             sample.to_dict("records"),
         )
 
+    # Guard against the EOSU/T-REX "stored 1-day-off" pattern: row stamped on the
+    # ingest calendar day while ``source_url`` carries an older ``#as_of=`` session.
+    # ``SKIP_SESSION_DATE_ANCHOR_PROVIDERS`` plus ``merge_provider_attempts`` should
+    # prevent this; warn loudly if it ever reappears so it gets repaired before
+    # downstream Yahoo joins attach the wrong session's close / volume (shares_traded).
+    su = df.get("source_url")
+    if su is not None and not su.dropna().empty:
+        s_str = su.fillna("").astype(str)
+        asof_ex = s_str.str.extract(r"#as_of=(\d{4}-\d{2}-\d{2})\b")[0]
+        asof_dt = pd.to_datetime(asof_ex, errors="coerce").dt.date
+        row_dt = pd.to_datetime(df["date"], errors="coerce").dt.date
+        misalign = asof_dt.notna() & row_dt.notna() & (asof_dt != row_dt)
+        # Allow ``carry_forward`` rows since those legitimately stamp a calendar day
+        # that lags the ``from=`` session — they never carry ``#as_of=``.
+        if misalign.any():
+            sp = df.get("source_provider")
+            sp_str = sp.fillna("").astype(str) if sp is not None else pd.Series([""] * len(df))
+            misalign &= ~sp_str.str.startswith("carry_forward")
+        if misalign.any():
+            sample = df.loc[
+                misalign, ["date", "ticker", "source_url", "source_provider"]
+            ].head(8).copy()
+            sample["as_of"] = asof_dt[misalign].head(8).values
+            LOGGER.warning(
+                "validate_df: %d row(s) misaligned to #as_of vs date; "
+                "downstream Yahoo join will lag. sample=%s",
+                int(misalign.sum()),
+                sample.to_dict("records"),
+            )
+
 
 # ---------------------------------------------------------------------------
 # Persistence

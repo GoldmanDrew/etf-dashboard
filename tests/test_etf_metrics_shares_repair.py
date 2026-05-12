@@ -222,6 +222,66 @@ def test_merge_underlying_adj_close_aligns_to_as_of_session():
     assert abs(float(out.iloc[0]["underlying_adj_close"]) - 6.36) < 1e-9
 
 
+def test_validate_df_warns_on_misaligned_as_of(caplog):
+    """Going-forward guard: warn (not raise) when row.date != #as_of session."""
+    import logging
+
+    df = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 5, 6),
+                "ticker": "EOSU",
+                "nav": 31.69,
+                "aum": 7_757_141.58,
+                "shares_outstanding": 244_782.0,
+                "shares_traded": 20_300.0,
+                "close_price": 31.689,
+                "underlying_adj_close": 6.23,
+                "stale": True,
+                "stale_age_bdays": 1,
+                "source_provider": "rex_shares",
+                "source_url": "https://www.rexshares.com/EOSU/#as_of=2026-05-05",
+                "ingested_at_utc": "2026-05-07T00:00:00Z",
+                "status": "ok",
+            },
+        ]
+    )
+    caplog.set_level(logging.WARNING, logger=iem.LOGGER.name)
+    iem.validate_df(df)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("misaligned to #as_of" in m for m in msgs), msgs
+
+
+def test_validate_df_skips_carry_forward_for_misalignment_warning(caplog):
+    """``carry_forward://...?from=`` rows are not flagged as misaligned."""
+    import logging
+
+    df = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 5, 9),
+                "ticker": "ZZZ",
+                "nav": 10.0,
+                "aum": 1e6,
+                "shares_outstanding": 100_000.0,
+                "shares_traded": 50.0,
+                "close_price": None,
+                "underlying_adj_close": None,
+                "stale": True,
+                "stale_age_bdays": 1,
+                "source_provider": "carry_forward",
+                "source_url": "carry_forward://ZZZ?from=2026-05-08",
+                "ingested_at_utc": "2026-05-10T00:00:00Z",
+                "status": "ok",
+            },
+        ]
+    )
+    caplog.set_level(logging.WARNING, logger=iem.LOGGER.name)
+    iem.validate_df(df)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("misaligned to #as_of" in m for m in msgs), msgs
+
+
 def test_merge_close_prices_carry_forward_from_session():
     df = pd.DataFrame(
         [
