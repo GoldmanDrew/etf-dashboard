@@ -698,12 +698,20 @@ def _extract_yf_series_to_long(
     tickers: list[str],
     price_col: str,
     out_value_key: str,
+    *,
+    allow_zero: bool = False,
 ) -> pd.DataFrame:
     """Pull ``price_col`` per ticker from yfinance download into long-form rows."""
     cols = ["date", "ticker", out_value_key]
     if raw is None or raw.empty:
         return pd.DataFrame(columns=cols)
     records: list[dict] = []
+
+    def _accept(c: float) -> bool:
+        if not math.isfinite(c):
+            return False
+        return c >= 0 if allow_zero else c > 0
+
     if isinstance(raw.columns, pd.MultiIndex):
         for t in tickers:
             up = t.upper()
@@ -721,7 +729,7 @@ def _extract_yf_series_to_long(
                     c = float(v)
                 except (TypeError, ValueError):
                     continue
-                if c > 0:
+                if _accept(c):
                     records.append({
                         "date": idx.date() if hasattr(idx, "date") else idx,
                         "ticker": up,
@@ -735,7 +743,7 @@ def _extract_yf_series_to_long(
                     c = float(v)
                 except (TypeError, ValueError):
                     continue
-                if c > 0:
+                if _accept(c):
                     records.append({
                         "date": idx.date() if hasattr(idx, "date") else idx,
                         "ticker": up,
@@ -774,7 +782,7 @@ def fetch_close_prices_batch(
         chunk = uniq[i : i + chunk_sz]
         raw = _yf_download_ohlcv(chunk, start, end, auto_adjust=False)
         close = _extract_yf_series_to_long(raw, chunk, "Close", "close_price")
-        volume = _extract_yf_series_to_long(raw, chunk, "Volume", "shares_traded")
+        volume = _extract_yf_series_to_long(raw, chunk, "Volume", "shares_traded", allow_zero=True)
         if close.empty and volume.empty:
             LOGGER.warning(
                 "close_price chunk empty (%d tickers, offset %d)",
@@ -1090,6 +1098,85 @@ def backfill_underlying_adj_close_gaps(
     if n_new > 0:
         LOGGER.info("backfill underlying_adj_close: +%d non-null row(s) after gap fetch", n_new)
     return out.drop(columns=["_bf_und"], errors="ignore")
+
+
+def backfill_shares_traded_gaps(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Fill ``shares_traded`` where Yahoo ``close_price`` exists but volume stayed null.
+
+    Routine ingest merges yfinance onto **only** the single ``end_date`` slice of
+    ``incoming``. A flaky multi-symbol ``yfinance.download`` can return ``Close`` for a
+    symbol while omitting ``Volume`` for that session; ``merge_close_prices`` then leaves
+    ``shares_traded`` null while ``close_price`` is present. Later single-day runs never
+    revisit that calendar row, so the gap persists until this full-store pass on
+    ``status == 'ok'`` rows (partial/missing rows are skipped so we do not bulk-touch
+    legacy bootstrap closes without a reliable Yahoo volume slot).
+
+    Rows are matched on the same ``#as_of=`` / carry-forward session date used by
+    :func:`merge_close_prices` via :func:`yahoo_join_dates_series`.
+    """
+    if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
+        return df, 0
+    if df.empty:
+        return df, 0
+    if "close_price" not in df.columns or "shares_traded" not in df.columns:
+        return df, 0
+
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+
+    close_f = pd.to_numeric(out["close_price"], errors="coerce")
+    vol_f = pd.to_numeric(out["shares_traded"], errors="coerce")
+    status_ok = out["status"].astype(str) == "ok"
+    # Only ``ok`` rows: partial/missing rows often lack a reliable Yahoo session, and
+    # bulk-filling their volume would touch hundreds of thousands of legacy bootstrap rows.
+    need = close_f.notna() & (close_f > 0) & vol_f.isna() & status_ok
+    if not bool(need.any()):
+        return df, 0
+
+    sub = out.loc[need].copy()
+    sub["_jd"] = yahoo_join_dates_series(sub["date"], sub.get("source_url"))
+    ok_jd = sub["_jd"].notna()
+    if not bool(ok_jd.any()):
+        return df, 0
+    sub = sub.loc[ok_jd]
+
+    filled = 0
+    tickers_sorted = sorted(sub["ticker"].unique().tolist())
+    chunk_sz = max(1, int(os.getenv("ETF_METRICS_CLOSE_YF_CHUNK_SIZE", "50")))
+    for i in range(0, len(tickers_sorted), chunk_sz):
+        tchunk = tickers_sorted[i : i + chunk_sz]
+        part = sub[sub["ticker"].isin(tchunk)].copy()
+        d_min = min(part["_jd"].tolist())
+        d_max = max(part["_jd"].tolist())
+        close_df = fetch_close_prices_batch(tchunk, d_min, d_max)
+        if close_df.empty:
+            LOGGER.warning(
+                "backfill shares_traded: yfinance returned no rows for %d ticker(s) (%s..%s)",
+                len(tchunk), d_min, d_max,
+            )
+            continue
+        cdf = close_df.copy()
+        cdf["date"] = pd.to_datetime(cdf["date"], errors="coerce").dt.date
+        cdf["ticker"] = cdf["ticker"].astype(str).str.upper()
+        # Column-merge drops the original index (RangeIndex); keep row labels for writes.
+        part["_orig_idx"] = part.index.to_numpy()
+        mrg = part.merge(
+            cdf.rename(columns={"shares_traded": "_rv", "date": "_yf"}),
+            left_on=["ticker", "_jd"],
+            right_on=["ticker", "_yf"],
+            how="left",
+        )
+        rv_ser = pd.to_numeric(mrg["_rv"], errors="coerce")
+        for orig_idx, rv in zip(mrg["_orig_idx"].to_numpy(), rv_ser.to_numpy()):
+            if pd.isna(rv) or float(rv) < 0:
+                continue
+            out.at[int(orig_idx), "shares_traded"] = float(rv)
+            filled += 1
+
+    if filled:
+        LOGGER.info("backfill shares_traded: filled %d row(s) with Yahoo volume", filled)
+    return out, filled
 
 
 def save_holdings_outputs(
@@ -1535,14 +1622,16 @@ def main() -> None:
         )
         underlying_map = load_universe_underlying_map()
         merged = backfill_underlying_adj_close_gaps(existing.copy(), underlying_map)
+        merged, n_vol_skip = backfill_shares_traded_gaps(merged)
         before = int(pd.to_numeric(existing["underlying_adj_close"], errors="coerce").notna().sum())
         after = int(pd.to_numeric(merged["underlying_adj_close"], errors="coerce").notna().sum())
-        if after > before:
+        if after > before or n_vol_skip > 0:
             validate_df(merged)
             save_outputs(merged)
             LOGGER.info(
-                "Saved metrics after skip-path backfill (+ %d non-null underlying_adj_close rows)",
+                "Saved metrics after skip-path backfill (+ %d non-null underlying_adj_close rows, %d volume row(s))",
                 after - before,
+                n_vol_skip,
             )
         else:
             LOGGER.info("Skip path: no new underlying_adj_close fills (%d non-null)", after)
@@ -1640,6 +1729,9 @@ def main() -> None:
     # Must run on full merged history: ``incoming`` is usually one trading day,
     # so an earlier backfill never saw legacy null rows in the parquet store.
     merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
+    merged, n_vol_bf = backfill_shares_traded_gaps(merged)
+    if n_vol_bf:
+        LOGGER.info("Backfilled Yahoo shares_traded on %d historical row(s)", n_vol_bf)
     validate_df(merged)
     save_outputs(merged)
     LOGGER.info("Saved merged summary: %s", get_summary(merged))

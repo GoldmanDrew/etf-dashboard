@@ -310,3 +310,71 @@ def test_merge_close_prices_carry_forward_from_session():
     )
     out = iem.merge_close_prices(df, close_df)
     assert float(out.iloc[0]["close_price"]) == 10.05
+
+
+def test_backfill_shares_traded_gaps_fetches_volume(monkeypatch):
+    df = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 5, 11),
+                "ticker": "EOSU",
+                "nav": 57.5,
+                "aum": 1e8,
+                "shares_outstanding": 1.7e6,
+                "close_price": 57.62,
+                "shares_traded": None,
+                "underlying_adj_close": 100.0,
+                "stale": False,
+                "stale_age_bdays": None,
+                "source_provider": "rex",
+                "source_url": "https://www.rexshares.com/EOSU/#as_of=2026-05-11",
+                "ingested_at_utc": "2026-05-12T00:00:00Z",
+                "status": "ok",
+            },
+        ]
+    )
+
+    def fake_fetch(tickers, start, end):
+        assert "EOSU" in tickers
+        return pd.DataFrame(
+            [
+                {
+                    "date": date(2026, 5, 11),
+                    "ticker": "EOSU",
+                    "close_price": 57.62,
+                    "shares_traded": 147_100.0,
+                },
+            ]
+        )
+
+    monkeypatch.setattr(iem, "fetch_close_prices_batch", fake_fetch)
+    out, n = iem.backfill_shares_traded_gaps(df)
+    assert n == 1
+    assert float(out.iloc[0]["shares_traded"]) == 147_100.0
+
+
+def test_backfill_shares_traded_gaps_skips_when_disabled(monkeypatch):
+    monkeypatch.setenv("ETF_METRICS_DISABLE_YFINANCE", "1")
+    df = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 5, 11),
+                "ticker": "EOSU",
+                "nav": 1.0,
+                "aum": 1.0,
+                "shares_outstanding": 1.0,
+                "close_price": 2.0,
+                "shares_traded": None,
+                "underlying_adj_close": None,
+                "stale": False,
+                "stale_age_bdays": None,
+                "source_provider": "x",
+                "source_url": "",
+                "ingested_at_utc": "2026-05-12T00:00:00Z",
+                "status": "ok",
+            },
+        ]
+    )
+    out, n = iem.backfill_shares_traded_gaps(df)
+    assert n == 0
+    assert out.iloc[0]["shares_traded"] is None or pd.isna(out.iloc[0]["shares_traded"])
