@@ -13,6 +13,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from etf_providers import (
+    GraniteSharesProvider,
     REXSharesProvider,
     YieldMaxProvider,
     merge_provider_attempts,
@@ -24,6 +25,52 @@ from etf_providers import (
 def test_skip_anchor_provider_set_includes_merged():
     assert "merged" in SKIP_SESSION_DATE_ANCHOR_PROVIDERS
     assert "rex_shares" in SKIP_SESSION_DATE_ANCHOR_PROVIDERS
+
+
+def test_granite_product_id_from_catalog_table_row():
+    html = """
+    <span data-id="1159" data-type="leveraged" class="etf-table-cell pId">
+        <a href="/etfs/gou/" title="GOU"><span>GOU</span></a>
+    </span>
+    <span data-id="1122" data-type="leveraged" data-underlying="Intel Corp"
+          class="etf-table-cell pId">
+        <a href="/etfs/intw/" title="INTW">
+            <span class="etf-table-cell--ticker__symbol">INTW</span>
+        </a>
+    </span>
+    """
+    assert GraniteSharesProvider._product_id_from_page(html, "intw", "INTW") == "1122"
+
+
+def test_merge_provider_attempts_prefers_polygon_when_yfinance_nav_diverges():
+    """INTW-style bug: stale yfinance totalAssets + last_price must not beat polygon close."""
+    yfin = ProviderResult(
+        date=date(2026, 5, 7),
+        ticker="INTW",
+        nav=366.20,
+        aum=431_105_568.0,
+        shares_outstanding=1_990_001.0,
+        source_provider="yfinance",
+        source_url="yfinance://INTW",
+        status="ok",
+        stale=False,
+        stale_age_bdays=None,
+    )
+    poly = ProviderResult(
+        date=date(2026, 5, 7),
+        ticker="INTW",
+        nav=285.72,
+        aum=285.72 * 1_177_225.0,
+        shares_outstanding=1_177_225.0,
+        source_provider="polygon",
+        source_url="polygon://INTW",
+        status="ok",
+        stale=False,
+        stale_age_bdays=None,
+    )
+    m = merge_provider_attempts([yfin, poly], "INTW", date(2026, 5, 7))
+    assert abs(m.nav - 285.72) < 0.02
+    assert m.aum is not None and abs(m.aum - 431_105_568.0) > 1e6
 
 
 def test_merge_provider_attempts_uses_nav_source_row_date():

@@ -100,13 +100,63 @@ SKIP_SESSION_DATE_ANCHOR_PROVIDERS: frozenset[str] = frozenset({
     "merged",
 })
 
+# Providers before broad market fallbacks — merged rows should not mix fields across these + yfinance/polygon.
+_ISSUER_MERGE_PROVIDERS: frozenset[str] = frozenset(
+    PROVIDER_MERGE_PRIORITY[: PROVIDER_MERGE_PRIORITY.index("yfinance")]
+)
+_MARKET_FALLBACK_PROVIDERS: frozenset[str] = frozenset({"yfinance", "polygon"})
+_MERGE_IDENTITY_MAX_REL_ERR = float(os.getenv("ETF_METRICS_MERGE_IDENTITY_MAX_REL_ERR", "0.05"))
+
+
+def _positive_float(v: object) -> float | None:
+    if v is None or pd.isna(v):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
+
+
+def _identity_rel_err(nav: float, aum: float, shares: float) -> float | None:
+    if nav <= 0 or aum <= 0 or shares <= 0:
+        return None
+    implied = nav * shares
+    return abs(implied - aum) / aum
+
+
+def _coherent_triple(
+    nav: object,
+    aum: object,
+    shares: object,
+) -> tuple[float | None, float | None, float | None]:
+    """Return (nav, aum, shares) with AUM = NAV x shares when two legs agree."""
+    n = _positive_float(nav)
+    a = _positive_float(aum)
+    s = _positive_float(shares)
+    if n and a and s:
+        err = _identity_rel_err(n, a, s)
+        if err is not None and err <= _MERGE_IDENTITY_MAX_REL_ERR:
+            return n, a, s
+    if n and s:
+        return n, float(n * s), s
+    if n and a and n > 0:
+        return n, a, float(a / n)
+    if a and s and s > 0:
+        return float(a / s), a, s
+    return n, a, s
+
+
+def _coherent_from_result(r: ProviderResult) -> tuple[float | None, float | None, float | None]:
+    return _coherent_triple(r.nav, r.aum, r.shares_outstanding)
+
 
 def merge_provider_attempts(
     attempts: list[ProviderResult],
     ticker: str,
     end_date: date,
 ) -> ProviderResult:
-    """Combine non-null fields from all partial/ok attempts; prefer issuer feeds over Yahoo/Polygon."""
+    """Combine provider attempts; prefer a single coherent issuer row over mixed Yahoo/Polygon fields."""
     if not attempts:
         return ProviderResult(
             end_date, ticker, None, None, None, "none", "none://no-providers", "missing",
@@ -114,29 +164,78 @@ def merge_provider_attempts(
     pri = {n: i for i, n in enumerate(PROVIDER_MERGE_PRIORITY)}
     attempts_sorted = sorted(attempts, key=lambda r: pri.get(r.source_provider, 99))
 
-    def _pick_first_positive(attr: str) -> float | None:
+    nav: float | None = None
+    aum: float | None = None
+    shares: float | None = None
+    nav_valuation_date = end_date
+
+    def _apply_triple(
+        n: float | None,
+        a: float | None,
+        s: float | None,
+        src: ProviderResult,
+    ) -> bool:
+        nonlocal nav, aum, shares, nav_valuation_date
+        nc, ac, sc = _coherent_triple(n, a, s)
+        if nc is None:
+            return False
+        nav, aum, shares = nc, ac, sc
+        nav_valuation_date = src.date
+        return True
+
+    # 1) Issuer row with a coherent ok triple (Granite, REX, …).
+    for r in attempts_sorted:
+        if r.source_provider not in _ISSUER_MERGE_PROVIDERS or r.status != "ok":
+            continue
+        if _apply_triple(r.nav, r.aum, r.shares_outstanding, r) and aum and shares:
+            break
+
+    # 2) Issuer partial: keep nav/aum/shares from the same provider only.
+    if nav is None:
         for r in attempts_sorted:
-            v = getattr(r, attr)
-            if v is None or pd.isna(v):
+            if r.source_provider not in _ISSUER_MERGE_PROVIDERS:
                 continue
-            try:
-                f = float(v)
-            except (TypeError, ValueError):
-                continue
-            if f > 0:
-                return f
-        return None
+            if _apply_triple(r.nav, r.aum, r.shares_outstanding, r):
+                break
 
-    nav = _pick_first_positive("nav")
-    aum = _pick_first_positive("aum")
-    shares = _pick_first_positive("shares_outstanding")
+    # 3) No issuer: prefer one market fallback — polygon close as NAV, not yfinance last_price + stale AUM.
+    if nav is None:
+        poly = next((r for r in attempts_sorted if r.source_provider == "polygon"), None)
+        yfin = next((r for r in attempts_sorted if r.source_provider == "yfinance"), None)
+        if poly and _positive_float(poly.nav):
+            p_n, p_a, p_s = _coherent_from_result(poly)
+            y_n = _positive_float(yfin.nav) if yfin else None
+            if y_n and p_n and abs(y_n - p_n) / p_n > 0.03:
+                _apply_triple(p_n, p_a, p_s, poly)
+            elif yfin and yfin.status == "ok":
+                _apply_triple(yfin.nav, yfin.aum, yfin.shares_outstanding, yfin)
+            else:
+                _apply_triple(p_n, p_a, p_s, poly)
+        elif yfin:
+            _apply_triple(yfin.nav, yfin.aum, yfin.shares_outstanding, yfin)
 
-    if (aum is None or aum <= 0) and nav and shares:
-        aum = float(nav * shares)
-    if (shares is None or shares <= 0) and aum and nav and float(nav) > 0:
-        shares = float(aum / nav)
-    if (nav is None or nav <= 0) and aum and shares and float(shares) > 0:
-        nav = float(aum / shares)
+    # 4) Last resort: field-wise pick, then force identity from nav + shares.
+    if nav is None:
+        def _pick_first_positive(attr: str) -> float | None:
+            for r in attempts_sorted:
+                v = _positive_float(getattr(r, attr))
+                if v is not None:
+                    return v
+            return None
+
+        nav = _pick_first_positive("nav")
+        aum = _pick_first_positive("aum")
+        shares = _pick_first_positive("shares_outstanding")
+        nav, aum, shares = _coherent_triple(nav, aum, shares)
+        for r in attempts_sorted:
+            if _positive_float(r.nav) == nav:
+                nav_valuation_date = r.date
+                break
+
+    if nav and aum and shares:
+        err = _identity_rel_err(nav, aum, shares)
+        if err is not None and err > _MERGE_IDENTITY_MAX_REL_ERR:
+            nav, aum, shares = _coherent_triple(nav, None, shares if shares else aum / nav if nav else None)
 
     status = _classify_status(nav, aum, shares)
 
@@ -157,19 +256,7 @@ def merge_provider_attempts(
     if not stale:
         stale_age = None
 
-    # Row ``date`` must match the valuation session of the NAV we kept (highest-priority
-    # issuer with a positive NAV), not the ingest calendar day — otherwise Yahoo close
-    # is joined one session off (see NAV vs close prem/disc bugs on REX / YieldMax).
-    valuation_date = end_date
-    for r in attempts_sorted:
-        if r.nav is None or pd.isna(r.nav):
-            continue
-        try:
-            if float(r.nav) > 0:
-                valuation_date = r.date
-                break
-        except (TypeError, ValueError):
-            continue
+    valuation_date = nav_valuation_date
 
     return ProviderResult(
         date=valuation_date,
@@ -914,6 +1001,7 @@ class GraniteSharesProvider:
         # fetch uses a fresh session for the detail page + product JSON pair.
         _ = session
         self._catalog: set[str] | None = None
+        self._product_id_by_ticker: dict[str, str] | None = None
         self._cache: dict[tuple[str, date], ProviderResult] = {}
         # Raw ``/product/{id}/en-us/`` JSON cache — used by ``load_product_json`` for
         # holdings ingestion without colliding with the NAV ``ProviderResult`` cache.
@@ -923,6 +1011,7 @@ class GraniteSharesProvider:
         if self._catalog is not None:
             return
         self._catalog = set()
+        self._product_id_by_ticker = {}
         # Use a one-off request, not ``self.session``. The GraniteShares CDN returns a
         # full HTML document on the first request in a session, but a slim shell (~360KB)
         # on subsequent navigations—so loading /etfs/ on the same session as /etfs/{slug}/
@@ -934,7 +1023,18 @@ class GraniteSharesProvider:
                 return
             for m in re.finditer(r'href="/etfs/([a-z0-9.-]+)/"', r.text, re.I):
                 self._catalog.add(m.group(1).upper())
-            LOGGER.info("GraniteShares ETF catalog: %d symbols", len(self._catalog))
+            for m in re.finditer(r'href="/etfs/([a-z0-9.-]+)/"', r.text, re.I):
+                sym = m.group(1).upper()
+                self._catalog.add(sym)
+                chunk = r.text[max(0, m.start() - 800) : m.start()]
+                ids = re.findall(r'data-id="(\d+)"', chunk)
+                if ids:
+                    self._product_id_by_ticker[sym] = ids[-1]
+            LOGGER.info(
+                "GraniteShares ETF catalog: %d symbols, %d product ids",
+                len(self._catalog),
+                len(self._product_id_by_ticker),
+            )
         except Exception as e:
             LOGGER.warning("GraniteShares catalog load failed: %s", e)
 
@@ -948,13 +1048,19 @@ class GraniteSharesProvider:
 
     @staticmethod
     def _product_id_from_page(html: str, slug: str, ticker_upper: str) -> str | None:
-        m = re.search(
+        anchor = re.search(rf'href="/etfs/{re.escape(slug)}/"', html, re.I)
+        if anchor:
+            chunk = html[max(0, anchor.start() - 800) : anchor.start()]
+            ids = re.findall(r'data-id="(\d+)"', chunk)
+            if ids:
+                return ids[-1]
+        m_legacy = re.search(
             rf'data-id="(\d+)"[^>]*>\s*<a[^>]*href="/etfs/{re.escape(slug)}/"',
             html,
             re.I | re.DOTALL,
         )
-        if m:
-            return m.group(1)
+        if m_legacy:
+            return m_legacy.group(1)
         m2 = re.search(
             rf'class="stocks-scrolling-ticker pId"\s+data-id="(\d+)"[\s\S]{{0,520}}?'
             rf'{re.escape(ticker_upper)}</span>',
@@ -963,6 +1069,19 @@ class GraniteSharesProvider:
         )
         if m2:
             return m2.group(1)
+        return None
+
+    def _product_id_for(self, ticker: str, detail_html: str | None = None) -> str | None:
+        """Resolve Granite ``productId`` from ETF page HTML or the full /etfs/ catalog table."""
+        slug = self._slug_for_ticker(ticker)
+        t = ticker.upper()
+        if detail_html:
+            pid = self._product_id_from_page(detail_html, slug, t)
+            if pid:
+                return pid
+        self._load_catalog()
+        if self._product_id_by_ticker:
+            return self._product_id_by_ticker.get(t)
         return None
 
     @staticmethod
@@ -999,7 +1118,7 @@ class GraniteSharesProvider:
             if pr.status_code != 200 or not pr.text:
                 self._product_json_cache[t] = None
                 return None
-            product_id = self._product_id_from_page(pr.text, slug, t)
+            product_id = self._product_id_for(ticker, pr.text)
             if not product_id:
                 self._product_json_cache[t] = None
                 return None
@@ -1051,7 +1170,7 @@ class GraniteSharesProvider:
                 self._cache[ck] = res
                 return res
 
-            product_id = self._product_id_from_page(pr.text, slug, t)
+            product_id = self._product_id_for(ticker, pr.text)
             if not product_id:
                 res = ProviderResult(as_of, ticker, None, None, None, self.name, page_url + "?err=no-product-id", "missing")
                 self._cache[ck] = res
@@ -1360,35 +1479,40 @@ class YFinanceProvider:
         try:
             self._throttle()
             tk = self._yf.Ticker(ticker)
-            try:
-                fi = tk.fast_info
-                shares = getattr(fi, "shares", None)
-                last = getattr(fi, "last_price", None)
-                nav = float(last) if last and last > 0 else None
-                shares = float(shares) if shares and shares > 0 else None
-            except Exception:
-                pass
-            if nav is None:
-                nav = self._fetch_close_on(ticker, as_of)
+            nav = self._fetch_close_on(ticker, as_of)
             try:
                 self._throttle()
                 info = tk.info or {}
-                aum = info.get("totalAssets")
-                if aum is not None:
-                    aum = float(aum)
+                nav_px = info.get("navPrice")
+                if nav_px is not None and float(nav_px) > 0:
+                    nav = float(nav_px)
+                elif nav is None:
+                    for key in ("regularMarketPrice", "previousClose"):
+                        p = info.get(key)
+                        if p is not None and float(p) > 0:
+                            nav = float(p)
+                            break
                 if shares is None:
                     so = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
                     if so and so > 0:
                         shares = float(so)
-                if nav is None:
-                    p = info.get("navPrice") or info.get("regularMarketPrice") or info.get("previousClose")
-                    if p and p > 0:
-                        nav = float(p)
             except Exception:
                 pass
-            # Derive AUM if possible
+            try:
+                fi = tk.fast_info
+                if shares is None:
+                    sh = getattr(fi, "shares", None)
+                    if sh and sh > 0:
+                        shares = float(sh)
+            except Exception:
+                pass
+            nav, aum, shares = _coherent_triple(nav, aum, shares)
             if (aum is None or aum <= 0) and nav and shares:
                 aum = float(nav * shares)
+            elif nav and aum and shares:
+                err = _identity_rel_err(nav, aum, shares)
+                if err is not None and err > _MERGE_IDENTITY_MAX_REL_ERR:
+                    aum = float(nav * shares)
             status = _classify_status(nav, aum, shares)
             return ProviderResult(as_of, ticker.upper(), nav, aum, shares, self.name, src, status)
         except Exception as e:
