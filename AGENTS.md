@@ -423,6 +423,12 @@ The high-importance fields, grouped by purpose:
 - `high_intraday_risk`, `regime_autocorr_und_21d_proxy`, `regime_warning`
 - `decomposition_note` (strings like `income_dist_missing`, `low_beta_realized_only`)
 - `copula_note`, `copula_type`
+- 20d underlying volatility shape from `ls-algo`: `und_rv_20d_daily_annual`,
+  `und_rv_20d_weekly_annual`, `und_trend_ratio_20d`, `und_vcr_20d`,
+  `und_return_20d`, percentile context (`und_abs_return_20d_pctile`,
+  `und_rv_20d_pctile`, `und_trend_ratio_20d_pctile`, `und_vcr_20d_pctile`),
+  and `und_vol_shape_20d` (`boiling_trend`, `jumpy_trend`,
+  `choppy_volatile`, etc.).
 - `schema_v` (currently `2`), `edge_sign_convention` (`short_favorable_positive`)
 
 ### Algo flags

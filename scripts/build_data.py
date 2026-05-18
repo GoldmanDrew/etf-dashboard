@@ -3226,6 +3226,21 @@ def build():
             "net_decay": net_decay,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
+            "und_rv_20d_daily_annual": _safe_float(rdict, "und_rv_20d_daily_annual"),
+            "und_rv_20d_weekly_annual": _safe_float(rdict, "und_rv_20d_weekly_annual"),
+            "und_trend_ratio_20d": _safe_float(rdict, "und_trend_ratio_20d"),
+            "und_vcr_20d": _safe_float(rdict, "und_vcr_20d"),
+            "und_return_20d": _safe_float(rdict, "und_return_20d"),
+            "und_abs_return_20d_pctile": _safe_float(rdict, "und_abs_return_20d_pctile"),
+            "und_rv_20d_pctile": _safe_float(rdict, "und_rv_20d_pctile"),
+            "und_trend_ratio_20d_pctile": _safe_float(rdict, "und_trend_ratio_20d_pctile"),
+            "und_vcr_20d_pctile": _safe_float(rdict, "und_vcr_20d_pctile"),
+            "und_vol_shape_20d": (
+                str(rdict["und_vol_shape_20d"]).strip()
+                if rdict.get("und_vol_shape_20d")
+                and str(rdict.get("und_vol_shape_20d") or "").strip() not in ("", "nan", "None")
+                else None
+            ),
             "realized_vol": realized_vol,
             **forecast_vol_fields,
             "dividend_adjustment": dividend_adjustment,
