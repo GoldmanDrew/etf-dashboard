@@ -72,7 +72,8 @@ class ETFRecord(BaseModel):
     forecast_vol_event_adjusted: Optional[bool] = None
     forecast_vol_note: Optional[str] = None
 
-    # 20d underlying volatility shape from ls-algo.
+    # Underlying volatility shape from ls-algo. 60d is the primary display
+    # window (aligned with risk_dashboard/beta_loader.DEFAULT_WINDOW_DAYS=60).
     und_rv_20d_daily_annual: Optional[float] = None
     und_rv_20d_weekly_annual: Optional[float] = None
     und_trend_ratio_20d: Optional[float] = None
@@ -82,7 +83,19 @@ class ETFRecord(BaseModel):
     und_rv_20d_pctile: Optional[float] = None
     und_trend_ratio_20d_pctile: Optional[float] = None
     und_vcr_20d_pctile: Optional[float] = None
+    und_vcr_20d_median: Optional[float] = None
     und_vol_shape_20d: Optional[str] = None
+    und_rv_60d_daily_annual: Optional[float] = None
+    und_rv_60d_weekly_annual: Optional[float] = None
+    und_trend_ratio_60d: Optional[float] = None
+    und_vcr_60d: Optional[float] = None
+    und_return_60d: Optional[float] = None
+    und_abs_return_60d_pctile: Optional[float] = None
+    und_rv_60d_pctile: Optional[float] = None
+    und_trend_ratio_60d_pctile: Optional[float] = None
+    und_vcr_60d_pctile: Optional[float] = None
+    und_vcr_60d_median: Optional[float] = None
+    und_vol_shape_60d: Optional[str] = None
 
     spread: Optional[float] = None  # gross_decay - borrow_net
     decay_3m: Optional[float] = None

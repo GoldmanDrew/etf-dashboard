@@ -1422,17 +1422,44 @@ function volShapeCls(v) {
   if (key === 'jumpy_trend' || key === 'choppy_volatile' || key === 'volatile_mixed') return 'val-warning';
   return 'val-muted';
 }
-function volShapeTooltip(r) {
+// Window the dashboard treats as primary for trend/VCR. 60d matches
+// risk_dashboard/beta_loader.DEFAULT_WINDOW_DAYS so the same clock drives
+// betas and shape diagnostics.
+const VOL_SHAPE_PRIMARY_WINDOW = 60;
+function volShapeFields(r, w = VOL_SHAPE_PRIMARY_WINDOW) {
+  if (!r) return {};
+  return {
+    label: r[`und_vol_shape_${w}d`],
+    tr: r[`und_trend_ratio_${w}d`],
+    vcr: r[`und_vcr_${w}d`],
+    ret: r[`und_return_${w}d`],
+    rvDaily: r[`und_rv_${w}d_daily_annual`],
+    rvWeekly: r[`und_rv_${w}d_weekly_annual`],
+    rvPctile: r[`und_rv_${w}d_pctile`],
+    absRetPctile: r[`und_abs_return_${w}d_pctile`],
+    vcrPctile: r[`und_vcr_${w}d_pctile`],
+    vcrMedian: r[`und_vcr_${w}d_median`],
+    trPctile: r[`und_trend_ratio_${w}d_pctile`],
+  };
+}
+function volShapeTooltip(r, w = VOL_SHAPE_PRIMARY_WINDOW) {
+  const f = volShapeFields(r, w);
   const lines = [
-    '20d underlying volatility shape.',
-    `TR = weekly-sampled RV / daily-sampled RV: ${fmtRatio(r?.und_trend_ratio_20d)}`,
-    `VCR = max daily r^2 / sum daily r^2: ${fmtRatio(r?.und_vcr_20d)}`,
-    `20d underlying return: ${fmt(r?.und_return_20d)}`,
-    `20d RV daily / weekly: ${fmt(r?.und_rv_20d_daily_annual)} / ${fmt(r?.und_rv_20d_weekly_annual)}`,
+    `${w}d underlying volatility shape.`,
+    `TR = weekly-sampled RV / daily-sampled RV (iid≈1, perfect drift≈${Math.sqrt(5).toFixed(2)}): ${fmtRatio(f.tr)}`,
+    `VCR = max daily r^2 / sum daily r^2: ${fmtRatio(f.vcr)}`,
+    `${w}d underlying return: ${fmt(f.ret)}`,
+    `${w}d RV daily / weekly: ${fmt(f.rvDaily)} / ${fmt(f.rvWeekly)}`,
   ];
-  if (Number.isFinite(Number(r?.und_rv_20d_pctile))) lines.push(`RV percentile: ${fmt(r.und_rv_20d_pctile)}`);
-  if (Number.isFinite(Number(r?.und_abs_return_20d_pctile))) lines.push(`Abs-return percentile: ${fmt(r.und_abs_return_20d_pctile)}`);
-  if (Number.isFinite(Number(r?.und_vcr_20d_pctile))) lines.push(`VCR percentile: ${fmt(r.und_vcr_20d_pctile)}`);
+  if (Number.isFinite(Number(f.rvPctile))) lines.push(`RV percentile: ${fmt(f.rvPctile)}`);
+  if (Number.isFinite(Number(f.absRetPctile))) lines.push(`Abs-return percentile: ${fmt(f.absRetPctile)}`);
+  if (Number.isFinite(Number(f.vcrPctile))) lines.push(`VCR percentile: ${fmt(f.vcrPctile)}`);
+  if (Number.isFinite(Number(f.trPctile))) lines.push(`TR percentile: ${fmt(f.trPctile)}`);
+  const alt = w === 60 ? 20 : 60;
+  const af = volShapeFields(r, alt);
+  if (Number.isFinite(Number(af.tr)) || Number.isFinite(Number(af.vcr))) {
+    lines.push(`Also ${alt}d: TR ${fmtRatio(af.tr)} · VCR ${fmtRatio(af.vcr)}`);
+  }
   return lines.join('\n');
 }
 /** Pair backtest SVG x-axis: include day + year and avoid duplicate tick strings. */
@@ -3135,17 +3162,17 @@ function DetailRow({ r, chartVolLookbackRange }) {
             <div className="detail-item-hint">{fv?.source || ''}{fv?.eventAdjusted ? ' · EWMA clipped for gaps' : ''}</div>
           </div>
           <div className="detail-item" title={volShapeTooltip(r)}>
-            <div className="dlabel">Vol shape (20d)</div>
-            <div className={cls('dval', volShapeCls(r.und_vol_shape_20d))}>{volShapeLabel(r.und_vol_shape_20d)}</div>
+            <div className="dlabel">Vol shape (60d)</div>
+            <div className={cls('dval', volShapeCls(r.und_vol_shape_60d))}>{volShapeLabel(r.und_vol_shape_60d)}</div>
             <div className="detail-item-hint">
-              TR {fmtRatio(r.und_trend_ratio_20d)} · VCR {fmtRatio(r.und_vcr_20d)}
+              TR {fmtRatio(r.und_trend_ratio_60d)} · VCR {fmtRatio(r.und_vcr_60d)}
             </div>
           </div>
           <div className="detail-item" title={volShapeTooltip(r)}>
-            <div className="dlabel">20d und. move / RV</div>
-            <div className="dval">{fmt(r.und_return_20d)} / {fmt(r.und_rv_20d_daily_annual)}</div>
+            <div className="dlabel">60d und. move / RV</div>
+            <div className="dval">{fmt(r.und_return_60d)} / {fmt(r.und_rv_60d_daily_annual)}</div>
             <div className="detail-item-hint">
-              |move| pctile {fmt(r.und_abs_return_20d_pctile)}
+              |move| pctile {fmt(r.und_abs_return_60d_pctile)}
             </div>
           </div>
           <div className="detail-item">
@@ -3357,7 +3384,16 @@ function buildTotalReturnBacktestSeries(rawRows, distributions) {
   });
 }
 
-function buildUnderlyingVolShapeHistory(rows, window = 20) {
+/**
+ * Rolling underlying vol-shape history. Mirrors
+ * `_underlying_vol_shape` in ls-algo/screener_v2_fields.py — annualizes
+ * weekly RV from the 5-day chunk size (not the window), so the trend
+ * ratio is window-independent (iid ≈ 1, perfect drift ≈ sqrt(5)).
+ */
+function buildUnderlyingVolShapeHistory(rows, window = VOL_SHAPE_PRIMARY_WINDOW) {
+  if (!Number.isInteger(window) || window <= 0 || window % 5 !== 0) {
+    return { series: [], vcrMedian: null, window };
+  }
   const clean = (Array.isArray(rows) ? rows : [])
     .map((row) => ({
       date: String(row?.date || '').trim(),
@@ -3365,7 +3401,7 @@ function buildUnderlyingVolShapeHistory(rows, window = 20) {
     }))
     .filter((row) => row.date && Number.isFinite(row.px) && row.px > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
-  if (clean.length < window + 1) return { series: [], vcrMedian: null };
+  if (clean.length < window + 1) return { series: [], vcrMedian: null, window };
 
   const rets = [];
   for (let i = 1; i < clean.length; i += 1) {
@@ -3383,24 +3419,26 @@ function buildUnderlyingVolShapeHistory(rows, window = 20) {
     for (let j = 0; j < window; j += 5) {
       weekly.push(tail.slice(j, j + 5).reduce((a, r) => a + r, 0));
     }
-    const rvWeekly = Math.sqrt((weekly.reduce((a, r) => a + r * r, 0) / weekly.length) * (252 / window));
+    const meanWeeklySq = weekly.reduce((a, r) => a + r * r, 0) / weekly.length;
+    const rvWeekly = Math.sqrt(meanWeeklySq * (252 / 5));
     const trendRatio = rvDaily > 0 ? rvWeekly / rvDaily : null;
     const vcr = Math.max(...tail.map(r => r * r)) / sumSq;
     out.push({
       date: rets[end - 1].date,
-      rv20_daily: rvDaily,
-      rv20_weekly: rvWeekly,
-      trend_ratio_20d: trendRatio,
-      vcr20: vcr,
+      rv_daily: rvDaily,
+      rv_weekly: rvWeekly,
+      trend_ratio: trendRatio,
+      vcr,
     });
   }
 
-  const vcrVals = out.map(x => Number(x.vcr20)).filter(Number.isFinite).sort((a, b) => a - b);
+  const vcrVals = out.map(x => Number(x.vcr)).filter(Number.isFinite).sort((a, b) => a - b);
   const mid = Math.floor(vcrVals.length / 2);
   const vcrMedian = vcrVals.length ? (vcrVals.length % 2 ? vcrVals[mid] : 0.5 * (vcrVals[mid - 1] + vcrVals[mid])) : null;
   return {
-    series: out.map(row => ({ ...row, vcr20_median: vcrMedian })),
+    series: out.map(row => ({ ...row, vcr_median: vcrMedian })),
     vcrMedian,
+    window,
   };
 }
 
@@ -4756,9 +4794,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             </div>
             <div className="chart-stat" title={volShapeTooltip(r)}>
               <div className="cs-label">Vol shape</div>
-              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>20d underlying</div>
-              <div className={cls('cs-value', volShapeCls(r.und_vol_shape_20d))}>{volShapeLabel(r.und_vol_shape_20d)}</div>
-              <div className="cs-sub">TR {fmtRatio(r.und_trend_ratio_20d)} · VCR {fmtRatio(r.und_vcr_20d)}</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>60d underlying</div>
+              <div className={cls('cs-value', volShapeCls(r.und_vol_shape_60d))}>{volShapeLabel(r.und_vol_shape_60d)}</div>
+              <div className="cs-sub">TR {fmtRatio(r.und_trend_ratio_60d)} · VCR {fmtRatio(r.und_vcr_60d)}</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">NAV (Daily)</div>
@@ -4966,37 +5004,37 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
             <div className="scenario-title" style={{ marginTop: 18 }}>Volatility shape history — {undSym || 'underlying'}</div>
             <div className="scenario-sub">
-              Rolling 20 trading-day windows from the stored underlying adjusted close. Trend Ratio = weekly-sampled RV / daily-sampled RV; VCR = largest daily variance share inside the window.
+              Rolling {volShapeHistory.window || VOL_SHAPE_PRIMARY_WINDOW} trading-day windows from the stored underlying adjusted close (same clock as risk_dashboard betas). Trend Ratio = weekly-sampled RV / daily-sampled RV (iid≈1, perfect drift≈{Math.sqrt(5).toFixed(2)}); VCR = largest daily variance share inside the window.
             </div>
             {volShapeHistory.series.length > 0 ? (
               <div className="metrics-stack" style={{ marginTop: 8 }}>
                 <SimpleSeriesPlot
                   series={volShapeHistory.series}
-                  valueKey="rv20_daily"
+                  valueKey="rv_daily"
                   color="rgba(6,182,212,0.95)"
-                  label={`${undSym || 'Underlying'} RV20 — daily vs weekly sampled`}
+                  label={`${undSym || 'Underlying'} RV${volShapeHistory.window} — daily vs weekly sampled`}
                   formatValue={(v) => fmt(v)}
                   zeroLabel="0%"
-                  overlayValueKey="rv20_weekly"
+                  overlayValueKey="rv_weekly"
                   overlayColor="rgba(245,158,11,0.95)"
-                  overlayLabel="RV20 weekly sampled"
+                  overlayLabel={`RV${volShapeHistory.window} weekly sampled`}
                 />
                 <SimpleSeriesPlot
                   series={volShapeHistory.series}
-                  valueKey="trend_ratio_20d"
+                  valueKey="trend_ratio"
                   color="rgba(148,163,184,0.95)"
-                  label={`${undSym || 'Underlying'} Trend Ratio (TR20)`}
+                  label={`${undSym || 'Underlying'} Trend Ratio (TR${volShapeHistory.window})`}
                   formatValue={(v) => fmtRatio(v)}
                   zeroLabel="0"
                   referenceValue={1}
-                  referenceLabel="TR = 1"
+                  referenceLabel="TR = 1 (iid baseline)"
                   includeZero={false}
                 />
                 <SimpleSeriesPlot
                   series={volShapeHistory.series}
-                  valueKey="vcr20"
+                  valueKey="vcr"
                   color="rgba(234,179,8,0.95)"
-                  label={`${undSym || 'Underlying'} Variance Contribution Ratio (VCR20)`}
+                  label={`${undSym || 'Underlying'} Variance Contribution Ratio (VCR${volShapeHistory.window})`}
                   formatValue={(v) => fmt(v)}
                   zeroLabel="0%"
                   referenceValue={volShapeHistory.vcrMedian}
@@ -5005,7 +5043,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               </div>
             ) : (
               <div className="scenario-warning" style={{ marginTop: 8 }}>
-                Need at least 21 underlying adjusted-close observations to draw volatility-shape history.
+                Need at least {(volShapeHistory.window || VOL_SHAPE_PRIMARY_WINDOW) + 1} underlying adjusted-close observations to draw volatility-shape history.
               </div>
             )}
           </div>

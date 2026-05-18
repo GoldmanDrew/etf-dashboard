@@ -423,12 +423,20 @@ The high-importance fields, grouped by purpose:
 - `high_intraday_risk`, `regime_autocorr_und_21d_proxy`, `regime_warning`
 - `decomposition_note` (strings like `income_dist_missing`, `low_beta_realized_only`)
 - `copula_note`, `copula_type`
-- 20d underlying volatility shape from `ls-algo`: `und_rv_20d_daily_annual`,
-  `und_rv_20d_weekly_annual`, `und_trend_ratio_20d`, `und_vcr_20d`,
-  `und_return_20d`, percentile context (`und_abs_return_20d_pctile`,
-  `und_rv_20d_pctile`, `und_trend_ratio_20d_pctile`, `und_vcr_20d_pctile`),
-  and `und_vol_shape_20d` (`boiling_trend`, `jumpy_trend`,
-  `choppy_volatile`, etc.).
+- Underlying volatility-shape diagnostics from `ls-algo` at two horizons.
+  **60d is the primary display window** (aligned with
+  `risk_dashboard/beta_loader.DEFAULT_WINDOW_DAYS = 60` so trend, VCR, and
+  betas share the same clock); 20d is retained for short-term context.
+  For each window `W ∈ {20, 60}` the screener exports:
+  `und_rv_Wd_daily_annual`, `und_rv_Wd_weekly_annual`, `und_trend_ratio_Wd`,
+  `und_vcr_Wd`, `und_return_Wd`, percentile context
+  (`und_abs_return_Wd_pctile`, `und_rv_Wd_pctile`,
+  `und_trend_ratio_Wd_pctile`, `und_vcr_Wd_pctile`),
+  the rolling-history `und_vcr_Wd_median`, and `und_vol_shape_Wd`
+  (`boiling_trend`, `jumpy_trend`, `choppy_volatile`, etc.). The Trend
+  Ratio is the ratio of weekly-sampled to daily-sampled realized vol,
+  annualized from the 5-day chunk size so it is window-independent
+  (iid ≈ 1, perfect daily drift ≈ √5).
 - `schema_v` (currently `2`), `edge_sign_convention` (`short_favorable_positive`)
 
 ### Algo flags
