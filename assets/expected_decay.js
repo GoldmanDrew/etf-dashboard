@@ -36,24 +36,33 @@
     return NaN;
   }
 
+  function hedgeDeltaFromParams(params) {
+    if (!params) return NaN;
+    if (params.delta !== undefined && params.delta !== null && params.delta !== "") {
+      return toFiniteNumber(params.delta);
+    }
+    return toFiniteNumber(params.beta);
+  }
+
   function computeExpectedDecay(params) {
-    const beta = toFiniteNumber(params && params.beta);
+    const delta = hedgeDeltaFromParams(params);
     const sigmaAnnual = parseSigmaAnnual(params && params.sigmaAnnual);
     const years = periodToYears(params && params.periodValue, params && params.periodUnit);
 
-    if (!Number.isFinite(beta) || !Number.isFinite(sigmaAnnual) || !Number.isFinite(years)) {
+    if (!Number.isFinite(delta) || !Number.isFinite(sigmaAnnual) || !Number.isFinite(years)) {
       return {
         ok: false,
         error: "Invalid input(s).",
       };
     }
 
-    const annualExpectedDecay = 0.5 * Math.abs(beta) * Math.abs(beta - 1) * (sigmaAnnual ** 2);
+    const annualExpectedDecay = 0.5 * Math.abs(delta) * Math.abs(delta - 1) * (sigmaAnnual ** 2);
     const periodExpectedDecay = annualExpectedDecay * years;
 
     return {
       ok: true,
-      beta,
+      delta,
+      beta: delta,
       sigmaAnnual,
       periodYears: years,
       annualExpectedDecay,
