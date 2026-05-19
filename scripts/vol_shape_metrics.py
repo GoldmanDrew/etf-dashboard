@@ -1,4 +1,7 @@
-"""Underlying vol-shape from joint ETF metrics (matches index.html charts)."""
+"""Underlying vol-shape from joint ETF metrics (matches index.html charts).
+
+Keep in sync with ls-algo/vol_shape.py. Parity: tests/test_vol_shape_ls_algo_parity.py
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,6 +14,8 @@ TRADING_DAYS = 252
 VOL_SHAPE_WINDOWS: tuple[int, ...] = (20, 60)
 VOL_SHAPE_PRIMARY_WINDOW = 60
 VOL_SHAPE_HISTORY_MAX_POINTS = 252
+PRICE_BASIS_JOINT_METRICS = "joint_etf_metrics"
+PRICE_BASIS_UNDERLYING_TR = "underlying_total_return"
 
 
 def _vol_shape_columns_for_window(window: int) -> tuple[str, ...]:
@@ -307,6 +312,7 @@ def load_vol_shape_from_metrics(
         if primary_tr is None:
             continue
         panel["und_vol_shape_source"] = "etf_metrics_daily"
+        panel["und_vol_shape_price_basis"] = PRICE_BASIS_JOINT_METRICS
         panel["und_vol_shape_metrics_asof"] = str(px.index[-1]) if len(px.index) else None
         panel["und_vol_shape_joint_days"] = int(len(px))
         out[sym] = panel
@@ -341,6 +347,8 @@ def apply_vol_shape_to_record(rec: dict[str, Any], panel: dict[str, Any] | None)
         if key in panel and panel[key] is not None:
             rec[key] = panel[key]
     rec["und_vol_shape_source"] = panel.get("und_vol_shape_source", "etf_metrics_daily")
+    if panel.get("und_vol_shape_price_basis"):
+        rec["und_vol_shape_price_basis"] = panel["und_vol_shape_price_basis"]
     if panel.get("und_vol_shape_metrics_asof"):
         rec["und_vol_shape_metrics_asof"] = panel["und_vol_shape_metrics_asof"]
     if panel.get("und_vol_shape_joint_days") is not None:

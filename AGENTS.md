@@ -453,6 +453,15 @@ The high-importance fields, grouped by purpose:
   metrics are fresh. Rolling TR/VCR/RV series (last ~252 points per
   symbol) ship in `data/vol_shape_history.json`; charts prefer that
   file over browser recomputation.
+
+- **Tier 3 (ls-algo alignment):** Canonical math lives in
+  `ls-algo/vol_shape.py`. `daily_screener` / `enrich_screener_v2_fields`
+  prefer **per-ETF joint** `etf_metrics_daily` underlying prices when
+  that CSV is present (`und_vol_shape_price_basis` =
+  `joint_etf_metrics`), else full underlying total-return
+  (`underlying_total_return`). `etf-dashboard/scripts/vol_shape_metrics.py`
+  must stay in sync; `tests/test_vol_shape_ls_algo_parity.py` golden-tests
+  APLX/APLZ (same underlying) when the sibling `ls-algo` checkout exists.
 - `schema_v` (currently `2`), `edge_sign_convention` (`short_favorable_positive`)
 
 ### Algo flags
