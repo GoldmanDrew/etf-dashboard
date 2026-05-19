@@ -1376,6 +1376,7 @@ const NAV_FORECAST_LATEST_URL = "data/nav_forecasts/_latest.json";
 const NAV_FORECAST_METRICS_URL = "data/nav_forecasts/_metrics_daily.json";
 const NAV_FORECAST_HISTORY_URL = "data/nav_forecasts/_history_panel.json";
 let BORROW_HISTORY_CACHE = null;
+let BORROW_HISTORY_BUILD_TIME = null;
 let BORROW_SPIKE_RISK_CACHE = null;
 /** @type {{ bySymbol: Record<string, object[]>, buildTime: string|null }|null} */
 let ETF_METRICS_CACHE = null;
@@ -1597,6 +1598,150 @@ function volShapeSourceHint(display) {
     parts.push('dashboard vs metrics clocks differ by >6h');
   }
   return parts.join(' · ');
+}
+
+const REALIZED_VOL_WINDOW_LABELS = { '1M': '1M', '3M': '3M', '6M': '6M', 'YTD': 'YTD', '12M': '12M', 'ALL': 'ALL' };
+
+function realizedVolHeadlineMeta(r, leg = 'underlying') {
+  const headline = leg === 'etf' ? r?.vol_etf_annual : r?.vol_underlying_annual;
+  const screener = leg === 'etf' ? r?.vol_etf_annual_screener : r?.vol_underlying_annual_screener;
+  const source = leg === 'etf' ? r?.vol_etf_annual_source : r?.vol_underlying_annual_source;
+  const window = leg === 'etf' ? r?.vol_etf_annual_window : r?.vol_underlying_annual_window;
+  const winLabel = window ? (REALIZED_VOL_WINDOW_LABELS[window] || window) : null;
+  const fromYahoo = source === 'yahoo_realized_vol';
+  const screenerDiffers = fromYahoo
+    && Number.isFinite(Number(screener))
+    && Number.isFinite(Number(headline))
+    && Math.abs(Number(screener) - Number(headline)) > 0.01;
+  return {
+    leg,
+    headline,
+    screener,
+    source: source || (fromYahoo ? 'yahoo_realized_vol' : 'screener_csv'),
+    window,
+    winLabel,
+    role: 'realized',
+    screenerDiffers,
+  };
+}
+
+function realizedVolSublabel(r, leg = 'underlying') {
+  const m = realizedVolHeadlineMeta(r, leg);
+  if (m.source === 'yahoo_realized_vol' && m.winLabel) {
+    return `${m.winLabel} · Yahoo build`;
+  }
+  if (m.source === 'screener_csv') return 'screener CSV';
+  return '12M realized';
+}
+
+function realizedVolTooltip(r, leg = 'underlying') {
+  const m = realizedVolHeadlineMeta(r, leg);
+  const name = leg === 'etf' ? 'ETF' : 'underlying';
+  const lines = [
+    `Backward-looking realized σ (${name}), not scenario / forecast σ.`,
+    m.source === 'yahoo_realized_vol'
+      ? `Headline: build_data Yahoo panel (${m.winLabel || 'ladder'} window when both legs present).`
+      : 'Headline: ls-algo screener CSV (Yahoo panel unavailable for this symbol).',
+    `Displayed: ${Number.isFinite(Number(m.headline)) ? fmt(Number(m.headline)) : '—'}`,
+  ];
+  if (m.screenerDiffers) {
+    lines.push(`Screener CSV had: ${fmt(Number(m.screener))}`);
+  }
+  const rv = r?.realized_vol;
+  if (rv && typeof rv === 'object') {
+    const bits = STATS_VOL_LADDER_KEYS.map((wk) => {
+      const slot = rv[wk];
+      const v = leg === 'etf' ? slot?.etf : slot?.underlying;
+      return Number.isFinite(Number(v)) ? `${STATS_VOL_LADDER_LABELS[wk] || wk} ${fmt(Number(v))}` : null;
+    }).filter(Boolean);
+    if (bits.length) lines.push(`Ladder: ${bits.join(' · ')}`);
+  }
+  lines.push('Chart window σ (Stats tab) follows the timeframe pill, not necessarily this headline window.');
+  return lines.join('\n');
+}
+
+function borrowHistoryTailPoint(series) {
+  const rows = Array.isArray(series) ? series : [];
+  if (!rows.length) return null;
+  const last = rows[rows.length - 1];
+  const rate = Number(last?.borrow_current);
+  if (!Number.isFinite(rate)) return null;
+  return { date: String(last?.date || '').trim() || null, rate };
+}
+
+function borrowDisplay(r, borrowSeries, opts = {}) {
+  const spot = Number(getBorrowRate(r));
+  const tail = borrowHistoryTailPoint(borrowSeries);
+  const tailRate = tail?.rate;
+  const spotOk = Number.isFinite(spot);
+  const tailOk = Number.isFinite(tailRate);
+  const differs = spotOk && tailOk && Math.abs(spot - tailRate) > 0.005;
+  return {
+    spot: spotOk ? spot : null,
+    tailRate: tailOk ? tailRate : null,
+    tailDate: tail?.date || null,
+    source: r?.borrow_source || 'csv',
+    avg: Number.isFinite(Number(r?.borrow_avg_annual)) ? Number(r.borrow_avg_annual) : null,
+    differs,
+    dashboardBuildTime: opts.dashboardBuildTime || null,
+    historyBuildTime: opts.historyBuildTime || BORROW_HISTORY_BUILD_TIME || null,
+  };
+}
+
+function borrowSourceHint(display) {
+  if (!display) return '';
+  const parts = [];
+  parts.push(
+    display.source === 'ibkr_ftp'
+      ? 'Spot: IBKR FTP (same feed as full build)'
+      : 'Spot: screener CSV snapshot',
+  );
+  if (display.tailDate && Number.isFinite(display.tailRate)) {
+    parts.push(`History tail ${display.tailDate}: ${fmt(display.tailRate)}`);
+  }
+  if (display.differs) {
+    parts.push(`Grid spot ${fmt(display.spot)} ≠ history tail ${fmt(display.tailRate)} (borrow-only may not have run yet)`);
+  } else if (display.tailDate && Number.isFinite(display.tailRate)) {
+    parts.push('Grid spot matches borrow_history tail');
+  }
+  if (display.historyBuildTime) parts.push(`borrow_history ${fmtTime(display.historyBuildTime)}`);
+  if (display.dashboardBuildTime) parts.push(`dashboard ${fmtTime(display.dashboardBuildTime)}`);
+  return parts.join(' · ');
+}
+
+function decayRoleSummary(r) {
+  const dist = expectedDecayDistribution(r);
+  return {
+    gross: {
+      role: 'realized',
+      label: 'Gross (realized)',
+      detail: 'Trailing β-hedged log-drag × 252 from ls-algo screener history.',
+    },
+    expected: {
+      role: 'forward',
+      label: expectedDecayDisplayLabel(r),
+      detail: dist
+        ? `Forward band (${DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || 'model'}, before borrow).`
+        : 'Forward point estimate from screener (Itô / vol-ETP adj.).',
+    },
+    netSpot: {
+      role: 'realized',
+      label: 'Net (spot)',
+      detail: 'gross_decay_annual − borrow_current on this row.',
+    },
+    netEdge: {
+      role: 'forward',
+      label: 'Net edge (p50)',
+      detail: 'Bootstrap fan; level anchored to forward Exp. decay p50 when available.',
+    },
+  };
+}
+
+function navForecastAsOfLabel(navForecastRow) {
+  if (!navForecastRow) return null;
+  const ts = String(navForecastRow.ts || navForecastRow.as_of || '').trim();
+  if (!ts) return null;
+  return fmtTime(ts);
 }
 
 function volShapeTooltip(r, opts = {}) {
@@ -2203,6 +2348,7 @@ function decayDistTooltip(r) {
     }
   }
   const lines = [
+    'Forward (ls-algo screener export, before borrow).',
     `Decay band (${horizon}, before borrow)`,
     `${modelLabel}` + (nObsRounded != null ? ` · n=${nObsRounded}` : ''),
     `p50: ${fmt(dist.p50)}`,
@@ -2846,10 +2992,10 @@ const COLS = [
   { key: 'symbol', label: 'Symbol', w: 100, hint: 'BL = strategy blacklist (shown for context; not sized in trade plan / rebalancer).' },
   { key: 'underlying', label: 'Underlying', w: 85 },
   { key: 'delta', label: 'Delta', w: 65, hint: 'ls-algo hedge δ: OLS on aligned daily simple returns vs underlying TR, shrunk toward listed leverage (AR(1)-adjusted n_eff).' },
-  { key: 'borrow_current', label: 'Borrow Rate', w: 105 },
+  { key: 'borrow_current', label: 'Borrow Rate', w: 105, hint: 'Spot fee-only borrow on this row (IBKR FTP on full build, else screener CSV). Compare to borrow_history.json tail on chart Borrow tab.' },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
-  { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, hint: 'Trailing annualized hedge drag: mean daily (β·r_U − r_ETF) on log returns × 252. See Decay math.' },
-  { key: 'expected_gross_decay_p50_annual', label: 'Exp. decay', sublabel: 'median · band', w: 110, hint: 'Forward gross decay (annual, before borrow). Main number = forecast median; band = p10/p90. LETF/inverse: HARQ-Log on variance; vol-ETP: + roll/tracking; YieldBOOST: weekly 95/88 put-spread on 2× sleeve (MC or single-σ if short history). Decay math for detail.' },
+  { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, sublabel: 'trailing', hint: 'Realized: trailing annualized hedge drag from ls-algo screener (β·r_U − r_ETF) × 252. Not the forward Exp. decay column.' },
+  { key: 'expected_gross_decay_p50_annual', label: 'Exp. decay', sublabel: 'forward · median', w: 110, hint: 'Forward (screener): gross decay before borrow. Median = HARQ-Log / put-spread MC p50; band = p10/p90. Scenarios use separate forecast σ.' },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
@@ -2868,16 +3014,16 @@ const COLS = [
   {
     key: 'vol_underlying_annual',
     label: 'Vol Und',
-    sublabel: '12M realized',
+    sublabel: 'realized σ',
     w: 88,
-    hint: 'Trailing realized σ on underlying (12M window if data allow). Not scenario σ.',
+    hint: 'Realized σ headline from build_data Yahoo ladder (prefers 12M); falls back to screener CSV. Not forecast_vol / scenario σ.',
   },
   {
     key: 'vol_etf_annual',
     label: 'Vol ETF',
-    sublabel: '12M realized',
+    sublabel: 'realized σ',
     w: 88,
-    hint: 'Trailing realized σ on ETF (same ladder as Vol Und). Not scenario σ.',
+    hint: 'Realized σ on ETF; same ladder policy as Vol Und. Chart timeframe pill may show a different window.',
   },
 ];
 
@@ -3293,7 +3439,7 @@ function NetEdgeQuantileTable({ r }) {
 }
 
 // ── Detail Row ──────────────────────────────
-function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheTick = 0 }) {
+function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheTick = 0, borrowHistoryMap = {} }) {
   const fv = forecastVolForScenario(r, chartVolLookbackRange);
   const fSig = fv?.sigma;
   const gR = Number(r?.gross_decay_annual);
@@ -3319,9 +3465,10 @@ function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheT
     <tr className="detail-row">
       <td colSpan={COLS.length + 1}>
         <div className="detail-grid">
-          <div className="detail-item">
+          <div className="detail-item" title={borrowSourceHint(borrowDisplay(r, borrowHistoryMap?.[r.symbol], { dashboardBuildTime }))}>
             <div className="dlabel">Borrow (spot, fee-only)</div>
             <div className={cls('dval', borrowCls(getBorrowRate(r)))}>{fmt(getBorrowRate(r))}</div>
+            <div className="detail-item-hint">{r.borrow_source === 'ibkr_ftp' ? 'IBKR FTP · realized snapshot' : 'CSV · screener snapshot'}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Borrow (hist. avg)</div>
@@ -3376,12 +3523,14 @@ function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheT
             </div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Und. vol (12M realized)</div>
-            <div className="dval">{fmt(r.vol_underlying_annual)}</div>
+            <div className="dlabel">Und. vol (realized)</div>
+            <div className="dval" title={realizedVolTooltip(r, 'underlying')}>{fmt(r.vol_underlying_annual)}</div>
+            <div className="detail-item-hint">{realizedVolSublabel(r, 'underlying')}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">ETF vol (12M realized)</div>
-            <div className="dval">{fmt(r.vol_etf_annual)}</div>
+            <div className="dlabel">ETF vol (realized)</div>
+            <div className="dval" title={realizedVolTooltip(r, 'etf')}>{fmt(r.vol_etf_annual)}</div>
+            <div className="detail-item-hint">{realizedVolSublabel(r, 'etf')}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Borrow feed</div>
@@ -3984,6 +4133,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         const payload = await res.json();
         const symbols = payload?.symbols && typeof payload.symbols === 'object' ? payload.symbols : {};
         BORROW_HISTORY_CACHE = symbols;
+        BORROW_HISTORY_BUILD_TIME = payload?.meta?.build_time || null;
         if (!cancelled) setBorrowHistoryMap(symbols);
       } catch (e) {
         if (!cancelled) setBorrowHistoryError(e?.message || 'borrow history unavailable');
@@ -4348,6 +4498,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       ? Number(r.borrow_avg_annual)
       : Number(getBorrowRate(r)));
   const annualCarryDrag = Number.isFinite(annualCarryDragRaw) ? Math.max(0, annualCarryDragRaw) : 0;
+  const borrowDisp = useMemo(
+    () => borrowDisplay(r, etfBorrowSeries, { dashboardBuildTime }),
+    [r, etfBorrowSeries, dashboardBuildTime],
+  );
   /** Recompute each render (Diamond-Creek-Quant parity) so control edits always refresh without useMemo dep churn. */
   const pairBacktestResult = (() => {
     const sim = typeof window !== 'undefined' && window.PairBacktest
@@ -4843,29 +4997,17 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-value">{r.delta?.toFixed(3) ?? '—'}</div>
               <div className="cs-sub">{fmtNum(r.delta_n_obs)} obs</div>
             </div>
-            <div
-              className="chart-stat"
-              title={(() => {
-                const spot = getBorrowRate(r);
-                const avg = Number(r?.borrow_avg_annual);
-                const sOk = spot != null && Number.isFinite(Number(spot));
-                const aOk = Number.isFinite(avg);
-                const s = sOk ? fmt(Number(spot)) : '—';
-                const a = aOk ? fmt(avg) : '—';
-                return `Spot borrow (fee-only): ${s}. Historical mean on quoted borrow days (0% / no-locate dropped): ${a}.`;
-              })()}
-            >
+            <div className="chart-stat" title={borrowSourceHint(borrowDisp)}>
               <div className="cs-label">Borrow Rate</div>
-              <div className={cls('cs-value', borrowCls(getBorrowRate(r)))}>
+              <div className={cls('cs-value', borrowCls(borrowDisp.spot))}>
                 {(() => {
-                  const spot = getBorrowRate(r);
-                  const avg = Number(r?.borrow_avg_annual);
-                  const spotTxt = spot != null && Number.isFinite(Number(spot)) ? fmt(Number(spot)) : '—';
-                  return Number.isFinite(avg) ? `${spotTxt} · ${fmt(avg)}` : spotTxt;
+                  const spotTxt = borrowDisp.spot != null ? fmt(borrowDisp.spot) : '—';
+                  return borrowDisp.avg != null ? `${spotTxt} · ${fmt(borrowDisp.avg)}` : spotTxt;
                 })()}
               </div>
               <div className="cs-sub">
-                {Number.isFinite(Number(r?.borrow_avg_annual)) ? 'spot · hist. avg (annual)' : 'spot · hist. avg unavailable'}
+                {borrowDisp.avg != null ? 'spot · hist. avg' : 'spot only'}
+                {borrowDisp.differs ? ' · tail ≠ grid' : ''}
               </div>
             </div>
             <div className="chart-stat">
@@ -4876,11 +5018,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="chart-stat">
               <div className="cs-label">Gross (realiz.)</div>
               <div className="cs-value">{fmt(r.gross_decay_annual)}</div>
-              <div className="cs-sub">last screener run · annual</div>
+              <div className="cs-sub">realized · ls-algo screener</div>
             </div>
             <div className="chart-stat" title={decayDistTooltip(r)}>
               <div className="cs-label">Exp. decay</div>
-              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>median · band</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>forward · median · band</div>
               {(() => {
                 if (!expectedDecayAvailableForRow(r)) {
                   return (
@@ -4925,7 +5067,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             </div>
             <div className="chart-stat" style={{ minWidth: 140 }}>
               <div className="cs-label">Net edge</div>
-              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>median · range</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>forward · median · range</div>
               {isPassiveLowBetaRow(r) ? (
                 <span title={PASSIVE_LOW_BETA_POLICY_TOOLTIP} style={{ color: 'var(--text-muted)' }}>—</span>
               ) : (
@@ -4971,14 +5113,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 </div>
               );
             })()}
-            <div className="chart-stat" title="Backward-looking realized σ (underlying); builder prefers 12M when available. Not forecast_vol.">
+            <div className="chart-stat" title={realizedVolTooltip(r, 'underlying')}>
               <div className="cs-label">Vol Und</div>
-              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>12M realized</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>{realizedVolSublabel(r, 'underlying')}</div>
               <div className="cs-value">{fmt(r.vol_underlying_annual)}</div>
             </div>
-            <div className="chart-stat" title="Backward-looking realized σ (ETF); same window ladder as Vol Und.">
+            <div className="chart-stat" title={realizedVolTooltip(r, 'etf')}>
               <div className="cs-label">Vol ETF</div>
-              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>12M realized</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>{realizedVolSublabel(r, 'etf')}</div>
               <div className="cs-value">{fmt(r.vol_etf_annual)}</div>
             </div>
             <div className="chart-stat" title={volShapeTooltip(r, { volShapeHistory, metricsBuildTime: ETF_METRICS_CACHE?.buildTime, dashboardBuildTime })}>
@@ -5072,7 +5214,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   const premStr = Number.isFinite(prem)
                     ? `${prem >= 0 ? '+' : ''}${prem.toFixed(1)} bp`
                     : '—';
-                  return `${conf} · ${navForecastRow.model || 'delta_v1'} · prem ${premStr}`;
+                  const asOf = navForecastAsOfLabel(navForecastRow);
+                  return `${conf} · ${navForecastRow.model || 'delta_v1'} · prem ${premStr}${asOf ? ` · as of ${asOf}` : ''}`;
                 })()}
               </div>
             </div>
@@ -7151,11 +7294,11 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         </td>
                         <td className="underlying-cell">{r.underlying}</td>
                         <td>{r.delta?.toFixed(2) ?? '—'}</td>
-                        <td className={borrowCls(getBorrowRate(r))}>
+                        <td className={borrowCls(getBorrowRate(r))} title={borrowSourceHint(borrowDisplay(r, borrowHistoryMap?.[r.symbol], { dashboardBuildTime: data.build_time }))}>
                           {fmt(getBorrowRate(r))} {borrowBadge(getBorrowRate(r))}
                         </td>
                         <td>{fmtNum(r.shares_available)}</td>
-                        <td>{fmt(r.gross_decay_annual)}</td>
+                        <td title="Realized trailing hedge drag (ls-algo screener)">{fmt(r.gross_decay_annual)}</td>
                         <td title={decayDistTooltip(r)}>
                           {(() => {
                             if (!expectedDecayAvailableForRow(r)) {
@@ -7228,10 +7371,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         >
                           {expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}
                         </td>
-                        <td title="Backward-looking realized σ (underlying); builder prefers 12M when available. Not forecast_vol.">{fmt(r.vol_underlying_annual)}</td>
-                        <td title="Backward-looking realized σ (ETF); same window ladder as Vol Und.">{fmt(r.vol_etf_annual)}</td>
+                        <td title={realizedVolTooltip(r, "underlying")}>{fmt(r.vol_underlying_annual)}</td>
+                        <td title={realizedVolTooltip(r, "etf")}>{fmt(r.vol_etf_annual)}</td>
                       </tr>
-                      {expanded && <DetailRow r={r} chartVolLookbackRange={chartVolLookbackRange} dashboardBuildTime={data.build_time} metricsCacheTick={metricsCacheTick} />}
+                      {expanded && <DetailRow r={r} chartVolLookbackRange={chartVolLookbackRange} dashboardBuildTime={data.build_time} metricsCacheTick={metricsCacheTick} borrowHistoryMap={borrowHistoryMap} />}
                     </React.Fragment>
                   );
                 })}

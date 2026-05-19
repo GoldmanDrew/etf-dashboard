@@ -462,6 +462,18 @@ The high-importance fields, grouped by purpose:
   (`underlying_total_return`). `etf-dashboard/scripts/vol_shape_metrics.py`
   must stay in sync; `tests/test_vol_shape_ls_algo_parity.py` golden-tests
   APLX/APLZ (same underlying) when the sibling `ls-algo` checkout exists.
+
+- **Tier 4 (metadata / UI clarity):** `build_data.py` exports provenance for
+  headline realized σ: `vol_*_annual_source` (`yahoo_realized_vol` |
+  `screener_csv`), `vol_*_annual_window` (ladder key, e.g. `12M`), and
+  `vol_*_annual_screener` (CSV value when Yahoo overwrote it). The SPA
+  (`index.html`) labels **realized vs forward** consistently: Gross /
+  net-spot decay = trailing screener; Exp. decay / net-edge fan = forward
+  ls-algo export. Borrow tooltips compare grid spot to
+  `borrow_history.json` tail (`borrowDisplay` / `borrowSourceHint`). NAV
+  fair-value sublabel includes forecast `ts` / `as_of` when present
+  (`navForecastAsOfLabel`). Rebuild `dashboard_data.json` after pulling
+  Tier 4 builder changes so grid rows carry the new fields.
 - `schema_v` (currently `2`), `edge_sign_convention` (`short_favorable_positive`)
 
 ### Algo flags
@@ -469,6 +481,7 @@ The high-importance fields, grouped by purpose:
 
 ### Trailing volatility (computed in `build_data.py`, not in CSV)
 - `vol_underlying_annual`, `vol_etf_annual` (and shorter-horizon variants)
+- Tier 4: `vol_*_annual_source`, `vol_*_annual_window`, `vol_*_annual_screener`
 
 When you add a field to ls-algo's CSV, the typical path is: CSV → `build_data.py` rec dict → `dashboard_data.json` → `index.html`. If you also want it to flow through the FastAPI dev server, add it to `backend/models.py::ETFRecord` and `backend/main.py::_build_records_from_csv`.
 

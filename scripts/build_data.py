@@ -247,6 +247,19 @@ def _truthy(v) -> bool:
     return str(v).strip().lower() in {"1", "true", "yes", "y", "t"}
 
 
+def _vol_annual_source(
+    from_builder: bool, csv_val: float | None, final_val: float | None
+) -> str | None:
+    """Provenance for headline realized σ on dashboard rows."""
+    if final_val is None or not np.isfinite(final_val):
+        return None
+    if from_builder:
+        return "yahoo_realized_vol"
+    if csv_val is not None and np.isfinite(csv_val):
+        return "screener_csv"
+    return None
+
+
 def is_volatility_etp(symbol: object, underlying: object) -> bool:
     sym = norm_sym(symbol or "")
     und = norm_sym(underlying or "")
@@ -3087,23 +3100,35 @@ def build():
         vol_etf_csv = _safe_float(row, "vol_etf_annual")
         vol_und = None
         vol_etf = None
+        vol_und_window = None
+        vol_etf_window = None
+        vol_und_from_builder = False
+        vol_etf_from_builder = False
         for _win in ("12M", "6M", "3M", "1M"):
             u = realized_vol.get(_win, {}).get("underlying")
             e = realized_vol.get(_win, {}).get("etf")
             if u is not None and e is not None:
                 vol_und, vol_etf = u, e
+                vol_und_window = _win
+                vol_etf_window = _win
+                vol_und_from_builder = True
+                vol_etf_from_builder = True
                 break
         if vol_und is None:
             for _win in ("12M", "6M", "3M", "1M"):
                 u = realized_vol.get(_win, {}).get("underlying")
                 if u is not None:
                     vol_und = u
+                    vol_und_window = _win
+                    vol_und_from_builder = True
                     break
         if vol_etf is None:
             for _win in ("12M", "6M", "3M", "1M"):
                 e = realized_vol.get(_win, {}).get("etf")
                 if e is not None:
                     vol_etf = e
+                    vol_etf_window = _win
+                    vol_etf_from_builder = True
                     break
         if vol_und is None:
             vol_und = vol_und_csv
@@ -3243,6 +3268,12 @@ def build():
             "net_decay": net_decay,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
+            "vol_underlying_annual_source": _vol_annual_source(vol_und_from_builder, vol_und_csv, vol_und),
+            "vol_etf_annual_source": _vol_annual_source(vol_etf_from_builder, vol_etf_csv, vol_etf),
+            "vol_underlying_annual_window": vol_und_window,
+            "vol_etf_annual_window": vol_etf_window,
+            "vol_underlying_annual_screener": vol_und_csv,
+            "vol_etf_annual_screener": vol_etf_csv,
             "und_rv_20d_daily_annual": _safe_float(rdict, "und_rv_20d_daily_annual"),
             "und_rv_20d_weekly_annual": _safe_float(rdict, "und_rv_20d_weekly_annual"),
             "und_trend_ratio_20d": _safe_float(rdict, "und_trend_ratio_20d"),
