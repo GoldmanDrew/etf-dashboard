@@ -426,13 +426,13 @@ def fetch_csv_from_github() -> pd.DataFrame:
 
 
 def _validate_universe_schema(df: pd.DataFrame) -> None:
-    required = ("ETF", "Underlying", "Beta")
+    required = ("ETF", "Underlying", "Delta")
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
             "Universe CSV missing required columns: "
             + ", ".join(missing)
-            + ". Expected at least: ETF, Underlying, Beta."
+            + ". Expected at least: ETF, Underlying, Delta."
         )
 
 
@@ -3168,12 +3168,12 @@ def build():
         rec = {
             "symbol": sym,
             "underlying": row["underlying_sym"],
-            "beta": (
+            "delta": (
                 round(float(beta), 6)
                 if beta is not None and pd.notna(beta) and np.isfinite(float(beta))
                 else None
             ),
-            "beta_n_obs": int(row["Beta_n_obs"]) if pd.notna(row.get("Beta_n_obs")) else None,
+            "delta_n_obs": int(row["Delta_n_obs"]) if pd.notna(row.get("Delta_n_obs")) else None,
             "bucket": bucket,
             "is_yieldboost": bool(is_yieldboost),
             "scenario_style": scenario_style,
@@ -3226,38 +3226,6 @@ def build():
             "net_decay": net_decay,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
-            "und_rv_20d_daily_annual": _safe_float(rdict, "und_rv_20d_daily_annual"),
-            "und_rv_20d_weekly_annual": _safe_float(rdict, "und_rv_20d_weekly_annual"),
-            "und_trend_ratio_20d": _safe_float(rdict, "und_trend_ratio_20d"),
-            "und_vcr_20d": _safe_float(rdict, "und_vcr_20d"),
-            "und_return_20d": _safe_float(rdict, "und_return_20d"),
-            "und_abs_return_20d_pctile": _safe_float(rdict, "und_abs_return_20d_pctile"),
-            "und_rv_20d_pctile": _safe_float(rdict, "und_rv_20d_pctile"),
-            "und_trend_ratio_20d_pctile": _safe_float(rdict, "und_trend_ratio_20d_pctile"),
-            "und_vcr_20d_pctile": _safe_float(rdict, "und_vcr_20d_pctile"),
-            "und_vcr_20d_median": _safe_float(rdict, "und_vcr_20d_median"),
-            "und_vol_shape_20d": (
-                str(rdict["und_vol_shape_20d"]).strip()
-                if rdict.get("und_vol_shape_20d")
-                and str(rdict.get("und_vol_shape_20d") or "").strip() not in ("", "nan", "None")
-                else None
-            ),
-            "und_rv_60d_daily_annual": _safe_float(rdict, "und_rv_60d_daily_annual"),
-            "und_rv_60d_weekly_annual": _safe_float(rdict, "und_rv_60d_weekly_annual"),
-            "und_trend_ratio_60d": _safe_float(rdict, "und_trend_ratio_60d"),
-            "und_vcr_60d": _safe_float(rdict, "und_vcr_60d"),
-            "und_return_60d": _safe_float(rdict, "und_return_60d"),
-            "und_abs_return_60d_pctile": _safe_float(rdict, "und_abs_return_60d_pctile"),
-            "und_rv_60d_pctile": _safe_float(rdict, "und_rv_60d_pctile"),
-            "und_trend_ratio_60d_pctile": _safe_float(rdict, "und_trend_ratio_60d_pctile"),
-            "und_vcr_60d_pctile": _safe_float(rdict, "und_vcr_60d_pctile"),
-            "und_vcr_60d_median": _safe_float(rdict, "und_vcr_60d_median"),
-            "und_vol_shape_60d": (
-                str(rdict["und_vol_shape_60d"]).strip()
-                if rdict.get("und_vol_shape_60d")
-                and str(rdict.get("und_vol_shape_60d") or "").strip() not in ("", "nan", "None")
-                else None
-            ),
             "realized_vol": realized_vol,
             **forecast_vol_fields,
             "dividend_adjustment": dividend_adjustment,

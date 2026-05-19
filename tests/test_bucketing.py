@@ -41,7 +41,7 @@ class TestBucketAssignment:
             "ETF": ["TQQQ", "SSO", "SQQQ", "QLD", "LABD"],
             "Underlying": ["QQQ", "SPY", "QQQ", "QQQ", "XBI"],
             "Leverage": [3.0, 2.0, -3.0, 2.0, -3.0],
-            "Beta": [2.8, 1.3, -2.9, 1.4, -2.7],
+            "Delta": [2.8, 1.3, -2.9, 1.4, -2.7],
             "symbol": ["TQQQ", "SSO", "SQQQ", "QLD", "LABD"],
             "underlying": ["QQQ", "SPY", "QQQ", "QQQ", "XBI"],
         })
@@ -51,19 +51,19 @@ class TestBucketAssignment:
         return {"SQQQ", "LABD", "SDS", "FAZ"}
 
     def test_inverse_etfs_go_to_bucket_3(self, sample_universe, inverse_set):
-        df = assign_buckets(sample_universe, inverse_set, high_beta_threshold=1.5)
+        df = assign_buckets(sample_universe, inverse_set, high_delta_threshold=1.5)
         sqqq = df[df["symbol"] == "SQQQ"].iloc[0]
         labd = df[df["symbol"] == "LABD"].iloc[0]
         assert sqqq["bucket"] == Bucket.INVERSE.value
         assert labd["bucket"] == Bucket.INVERSE.value
 
-    def test_high_beta_goes_to_bucket_1(self, sample_universe, inverse_set):
-        df = assign_buckets(sample_universe, inverse_set, high_beta_threshold=1.5)
+    def test_high_delta_goes_to_bucket_1(self, sample_universe, inverse_set):
+        df = assign_buckets(sample_universe, inverse_set, high_delta_threshold=1.5)
         tqqq = df[df["symbol"] == "TQQQ"].iloc[0]
         assert tqqq["bucket"] == Bucket.HIGH_BETA.value
 
-    def test_low_beta_goes_to_bucket_2(self, sample_universe, inverse_set):
-        df = assign_buckets(sample_universe, inverse_set, high_beta_threshold=1.5)
+    def test_low_delta_goes_to_bucket_2(self, sample_universe, inverse_set):
+        df = assign_buckets(sample_universe, inverse_set, high_delta_threshold=1.5)
         sso = df[df["symbol"] == "SSO"].iloc[0]
         qld = df[df["symbol"] == "QLD"].iloc[0]
         assert sso["bucket"] == Bucket.LOW_BETA.value
@@ -75,16 +75,16 @@ class TestBucketAssignment:
             "ETF": ["NVDQ"],
             "Underlying": ["NVDA"],
             "Leverage": [-2.0],
-            "Beta": [-1.9],
+            "Delta": [-1.9],
             "symbol": ["NVDQ"],
             "underlying": ["NVDA"],
         })
-        out = assign_buckets(df, inverse_set, high_beta_threshold=1.5)
+        out = assign_buckets(df, inverse_set, high_delta_threshold=1.5)
         assert out.iloc[0]["bucket"] == Bucket.INVERSE.value
 
     def test_inverse_overrides_beta(self, sample_universe, inverse_set):
         """Even if an inverse ETF has high absolute beta, it goes to Bucket 3."""
-        df = assign_buckets(sample_universe, inverse_set, high_beta_threshold=1.5)
+        df = assign_buckets(sample_universe, inverse_set, high_delta_threshold=1.5)
         # SQQQ has beta=-2.9 (absolute > 1.5) but should still be Bucket 3
         sqqq = df[df["symbol"] == "SQQQ"].iloc[0]
         assert sqqq["bucket"] == Bucket.INVERSE.value
@@ -101,11 +101,11 @@ class TestBucketAssignment:
             "ETF": ["MYSTERY"],
             "Underlying": ["SPY"],
             "Leverage": [2.0],
-            "Beta": [np.nan],
+            "Delta": [np.nan],
             "symbol": ["MYSTERY"],
             "underlying": ["SPY"],
         })
-        result = assign_buckets(df, inverse_set, high_beta_threshold=1.5)
+        result = assign_buckets(df, inverse_set, high_delta_threshold=1.5)
         assert result.iloc[0]["bucket"] == Bucket.LOW_BETA.value
 
     def test_threshold_boundary(self, inverse_set):
@@ -114,11 +114,11 @@ class TestBucketAssignment:
             "ETF": ["EXACT"],
             "Underlying": ["SPY"],
             "Leverage": [2.0],
-            "Beta": [1.5],
+            "Delta": [1.5],
             "symbol": ["EXACT"],
             "underlying": ["SPY"],
         })
-        result = assign_buckets(df, inverse_set, high_beta_threshold=1.5)
+        result = assign_buckets(df, inverse_set, high_delta_threshold=1.5)
         assert result.iloc[0]["bucket"] == Bucket.LOW_BETA.value
 
 
@@ -178,7 +178,7 @@ class TestMockFetcher:
             "ETF": ["TQQQ", "SSO", "SQQQ"],
             "Underlying": ["QQQ", "SPY", "QQQ"],
             "Leverage": [3.0, 2.0, -3.0],
-            "Beta": [2.8, 1.3, -2.9],
+            "Delta": [2.8, 1.3, -2.9],
             "borrow_fee_annual": [0.05, 0.03, 0.08],
             "borrow_rebate_annual": [-0.01, 0.01, -0.02],
             "shares_available": [100000, 500000, 50000],
@@ -225,7 +225,7 @@ class TestDecay:
         universe = pd.DataFrame({
             "symbol": ["TQQQ"],
             "Leverage": [3.0],
-            "Beta": [2.8],
+            "Delta": [2.8],
         })
         borrow_map = {"TQQQ": 0.05}
         result = compute_mock_decay_for_universe(universe, borrow_map)
@@ -251,7 +251,7 @@ class TestLoadRealData:
         assert len(df) > 100
         assert "symbol" in df.columns
         assert "underlying" in df.columns
-        assert "Beta" in df.columns
+        assert "Delta" in df.columns
 
     def test_full_bucketing_pipeline(self, data_dir):
         csv = data_dir / "etf_screened_today.csv"
@@ -261,7 +261,7 @@ class TestLoadRealData:
 
         df = load_universe(csv)
         inv_set = load_inverse_etfs(inv_csv)
-        bucketed = assign_buckets(df, inv_set, high_beta_threshold=1.5)
+        bucketed = assign_buckets(df, inv_set, high_delta_threshold=1.5)
 
         b1 = bucketed[bucketed["bucket"] == Bucket.HIGH_BETA.value]
         b2 = bucketed[bucketed["bucket"] == Bucket.LOW_BETA.value]

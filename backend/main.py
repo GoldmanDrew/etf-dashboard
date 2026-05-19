@@ -138,7 +138,7 @@ def _reload_universe():
     INVERSE_SET = load_inverse_etfs(inverse_path)
 
     bucket_cfg = CONFIG.get("buckets", {})
-    threshold = bucket_cfg.get("high_beta_threshold", 1.5)
+    threshold = bucket_cfg.get("high_delta_threshold", 1.5)
     blacklist = CONFIG.get("blacklist", [])
     UNIVERSE_DF = assign_buckets(UNIVERSE_DF, INVERSE_SET, threshold, blacklist)
 
@@ -177,7 +177,7 @@ def init_data():
 
     # Assign buckets
     bucket_cfg = cfg.get("buckets", {})
-    threshold = bucket_cfg.get("high_beta_threshold", 1.5)
+    threshold = bucket_cfg.get("high_delta_threshold", 1.5)
     blacklist = cfg.get("blacklist", [])
     UNIVERSE_DF = assign_buckets(UNIVERSE_DF, INVERSE_SET, threshold, blacklist)
 
@@ -235,7 +235,7 @@ def _build_records_from_csv():
         scenario_style = _v2s(row, "scenario_style") or (
             "income_style"
             if is_yieldboost
-            else ("hidden_low_beta" if bkt == Bucket.LOW_BETA.value else "letf_vol_drag")
+            else ("hidden_low_delta" if bkt == Bucket.LOW_BETA.value else "letf_vol_drag")
         )
         vol_etp = norm_sym(sym) in VOLATILITY_ETP_SYMBOLS or norm_sym(row.get("Underlying") or row.get("underlying") or "") in VOLATILITY_ETP_SYMBOLS
         expected_simple_ito = _v2f(row, "expected_gross_decay_simple_ito_annual")
@@ -261,8 +261,8 @@ def _build_records_from_csv():
             underlying=str(row.get("underlying", "")),
             leverage=float(row.get("Leverage", 0) or 0),
             expected_leverage=float(row["ExpectedLeverage"]) if "ExpectedLeverage" in row and not _isnan(row.get("ExpectedLeverage")) else None,
-            beta=float(row["Beta"]) if not _isnan(row.get("Beta")) else None,
-            beta_n_obs=int(row["Beta_n_obs"]) if not _isnan(row.get("Beta_n_obs")) else None,
+            beta=float(row["Delta"]) if not _isnan(row.get("Delta")) else None,
+            delta_n_obs=int(row["Delta_n_obs"]) if not _isnan(row.get("Delta_n_obs")) else None,
             bucket=bkt,
             borrow_fee_annual=float(row["borrow_fee_annual"]) if not _isnan(row.get("borrow_fee_annual")) else None,
             borrow_rebate_annual=float(row["borrow_rebate_annual"]) if not _isnan(row.get("borrow_rebate_annual")) else None,
@@ -326,7 +326,7 @@ def _build_records_from_csv():
             expected_decay_available=(
                 _v2bool(row, "expected_decay_available")
                 if "expected_decay_available" in row
-                else (product_class not in ("passive_low_beta", "other_structured"))
+                else (product_class not in ("passive_low_delta", "other_structured"))
             ),
             is_yieldboost=is_yieldboost,
             scenario_style=scenario_style,

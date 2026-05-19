@@ -16,11 +16,11 @@ _SPEC.loader.exec_module(mod)
 
 def _maps():
     bucket_map = {
-        "TOPW": "bucket_2_low_beta",
-        "BTFL": "bucket_1_high_beta",
-        "XRPK": "bucket_1_high_beta",
-        "SOLX": "bucket_1_high_beta",
-        "NNEX": "bucket_1_high_beta",
+        "TOPW": "bucket_2_low_delta",
+        "BTFL": "bucket_1_high_delta",
+        "XRPK": "bucket_1_high_delta",
+        "SOLX": "bucket_1_high_delta",
+        "NNEX": "bucket_1_high_delta",
     }
     underlying_map = {
         "TOPW": "TOP",
@@ -319,7 +319,7 @@ def test_gnews_opinion_drops_cramer_ticker_suggestion(monkeypatch):
 def test_title_anchor_prefers_parens_bmax_in_universe(monkeypatch):
     """Headline (BMAX) in universe should emit BMAX, not a weak sidebar guess."""
     bucket_map, underlying_map = _maps()
-    bmap = {**dict(bucket_map), "BMAX": "bucket_1_high_beta", "BTFL": "bucket_1_high_beta"}
+    bmap = {**dict(bucket_map), "BMAX": "bucket_1_high_delta", "BTFL": "bucket_1_high_delta"}
     umap = {**dict(underlying_map), "BMAX": "BMXX"}
     monkeypatch.setattr(mod, "GOOGLE_NEWS_QUERIES", [('"to liquidate"', "delisting")])
     monkeypatch.setattr(

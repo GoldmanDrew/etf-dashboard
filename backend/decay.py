@@ -180,7 +180,7 @@ def compute_mock_decay_for_universe(
             continue
 
         lev = float(row.get("Leverage", 2.0) or 2.0)
-        beta = float(row.get("Beta", lev) or lev)
+        beta = float(row.get("Delta", lev) or lev)
 
         # Estimate underlying vol from beta magnitude
         underlying_vol = 0.18 + 0.03 * np.random.randn()

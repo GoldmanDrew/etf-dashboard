@@ -446,7 +446,7 @@ function SummaryCard({ label, value, sub, color }) {
 const COLUMNS = [
   { key: 'symbol', label: 'Symbol', w: 90 },
   { key: 'underlying', label: 'Underlying', w: 90 },
-  { key: 'beta', label: 'Beta', w: 70, numeric: true, hint: 'OLS beta (ETF vs underlying total return)' },
+  { key: 'beta', label: 'Delta', w: 70, numeric: true, hint: 'OLS beta (ETF vs underlying total return)' },
   { key: 'leverage', label: 'Lev', w: 55, numeric: true },
   { key: 'borrow_net_annual', label: 'Borrow', w: 88, numeric: true },
   { key: 'borrow_median_60d', label: 'Borrow 60d med', w: 100, numeric: true, hint: 'Median of last up to 60 daily borrow points (fee-only, annualized)' },
@@ -644,7 +644,7 @@ function DetailRow({ record, history }) {
             <div className="dval">{fmtNum(record.shares_available)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Beta (obs: {fmtNum(record.beta_n_obs)})</div>
+            <div className="dlabel">Beta (obs: {fmtNum(record.delta_n_obs)})</div>
             <div className="dval">{record.beta?.toFixed(3) ?? '—'}</div>
           </div>
           <div className="detail-item">
@@ -918,8 +918,8 @@ function App() {
   // Filter + sort
   const bucketMap = {
     all: null,
-    bucket_1: 'bucket_1_high_beta',
-    bucket_2: 'bucket_2_low_beta',
+    bucket_1: 'bucket_1_high_delta',
+    bucket_2: 'bucket_2_low_delta',
     bucket_3: 'bucket_3_inverse',
   };
 
@@ -970,8 +970,8 @@ function App() {
   const tabCounts = useMemo(() => {
     const c = { all: records.length, bucket_1: 0, bucket_2: 0, bucket_3: 0 };
     records.forEach(r => {
-      if (r.bucket === 'bucket_1_high_beta') c.bucket_1++;
-      if (r.bucket === 'bucket_2_low_beta') c.bucket_2++;
+      if (r.bucket === 'bucket_1_high_delta') c.bucket_1++;
+      if (r.bucket === 'bucket_2_low_delta') c.bucket_2++;
       if (r.bucket === 'bucket_3_inverse') c.bucket_3++;
     });
     return c;

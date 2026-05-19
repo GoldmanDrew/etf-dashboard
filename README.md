@@ -59,7 +59,7 @@ Real-time IBKR short stock borrow rate monitoring with **distributional decay fo
 | `volatility_etp` | UVIX/SVIX/VXX/VIXY/etc. | Simple Itô + empirical roll/tracking adjustment | Bootstrap, **anchor-shifted** to expected p50 | LETF vol-drag grid |
 | `income_yieldboost` | `is_yieldboost = true` | **Put-spread Monte-Carlo p50** (server-side, `yieldboost_decay.py`) | Bootstrap, **anchor-shifted** to put-spread p50 | Income put-spread grid |
 | `income_put_spread` | Lev ≈ 1.0 (legacy) | HARQ-Log p50 (fallback: simple Itô) | Bootstrap, anchor-shifted when expected p50 available | LETF grid |
-| `passive_low_beta` | 0 < β ≤ 1.5 (no income overlay) | **`—` (N/A by policy)** | Realized-only bootstrap (no anchor-shift) | Hidden |
+| `passive_low_delta` | 0 < β ≤ 1.5 (no income overlay) | **`—` (N/A by policy)** | Realized-only bootstrap (no anchor-shift) | Hidden |
 | `other_structured` | Fallback | `—` | Realized fallback | Hidden |
 
 The CSV also ships a boolean `expected_decay_available` flag derived from this taxonomy. The dashboard front-end uses it (with a graceful fallback for older builds) to drive the `—`-rendering policy in the Exp. decay / Net edge / Exp. ETF return (3M) columns.
@@ -72,7 +72,7 @@ sigma_forecast^2 = 0.5 * sigma_model^2 + 0.5 * sigma_robust_ewma^2
 
 `sigma_model` is implied from `expected_gross_decay_p50_annual` (or inverted from the YieldBOOST put-spread p50). `sigma_robust_ewma` is a 6M EWMA on underlying total-return log returns after clipping unusually large one-day moves, so recent earnings/news gaps influence the forecast but do not dominate it. Raw EWMA and realized volatility remain visible as diagnostics in `realized_vol`.
 
-**Why passive low-β is `—`:** the simple Itô identity says expected gross decay ≈ `(β² − β)/2 · σ²`, which collapses to noise around β ≈ 1. We ship the realized gross drag in the `Gross (realized)` column instead — that's the only honest signal for these products. See `daily_screener.py` Step 5d ("passive_low_beta policy") and `screener_v2_fields._expected_decay_available`.
+**Why passive low-β is `—`:** the simple Itô identity says expected gross decay ≈ `(β² − β)/2 · σ²`, which collapses to noise around β ≈ 1. We ship the realized gross drag in the `Gross (realized)` column instead — that's the only honest signal for these products. See `daily_screener.py` Step 5d ("passive_low_delta policy") and `screener_v2_fields._expected_decay_available`.
 
 **Why YieldBOOST gets a dedicated decay model:** YieldBOOST income ETFs (AMYY, AZYY, BBYY, COYY, …) have β ≈ 0.4–0.6 because the 2× LETF NAV is sleeved with a weekly 95/88 SPX-style put-spread. A vanilla HARQ-Log vol-drag p50 of ~2–3% badly understates the actual NAV decay mechanism, which is dominated by the put-spread premium. As of the YB-unification refactor (`ls-algo/yieldboost_decay.py`), the screener now ships a **put-spread Monte-Carlo distribution** for YieldBOOST rows: the underlying's HARQ-Log lognormal moments are sampled, fed through the same `expectedPutSpreadLossWeekly` mechanics that the Scenarios tab uses, compounded 52× minus the 0.99% expense ratio, and exported as `expected_gross_decay_p10/p50/p90/mean_annual` with `expected_gross_decay_dist_model = yieldboost_put_spread` (or `yieldboost_put_spread_point` when the underlying TR history is too short for a full HARQ-Log fit). This means YieldBOOST `Exp. decay` and Net edge ride through the **same column shape** as every other product class — the dashboard simply reads `dist.p50` for the headline and the Net-edge bootstrap is anchor-shifted to that p50 so the pair-trade P&L reflects the put-spread forecast, not just realized noise. The client-side `yieldBoostIntrinsicAnnualDecay` helper survives only as a fallback for rows where the server didn't ship the distribution.
 
@@ -258,7 +258,7 @@ This is the same model as the simple Itô fallback in `decay_distribution.py`. F
 | `UNIVERSE_REPO` | `GoldmanDrew/ls-algo` | Source repo for universe CSV |
 | `UNIVERSE_BRANCH` | `main` | Branch to fetch from |
 | `UNIVERSE_PATH` | `data/etf_screened_today.csv` | Source CSV path in repo |
-| `HIGH_BETA_THRESHOLD` | `1.5` | Beta cutoff for Bucket 1 vs 2 |
+| `HIGH_DELTA_THRESHOLD` | `1.5` | Beta cutoff for Bucket 1 vs 2 |
 | `GITHUB_TOKEN` | (from Actions) | Auto-set in CI; needed locally for private repos |
 | `POLYGON_API_KEY` | *(none)* | Polygon key for options snapshots/contracts |
 | `TRADIER_TOKEN` | *(none)* | Tradier token for primary spot quotes |

@@ -101,7 +101,7 @@ Steps 4–7 are the "etf-dashboard sweep". You will do this often. There is a re
 │                                ├─ enrich w/ schema v2 + bootstrap net_edge_*   │
 │                                │     (screener_v2_fields.enrich_…)             │
 │                                ├─ tag product_class + expected_decay_available │
-│                                ├─ Step 5d: passive_low_beta nulling policy     │
+│                                ├─ Step 5d: passive_low_delta nulling policy     │
 │                                └─ write data/etf_screened_today.csv            │
 │                                                                                │
 │   git push to GoldmanDrew/ls-algo:main                                         │
@@ -162,7 +162,7 @@ gross_decay_annual = mean(daily_drag_t) · 252
 ```
 
 - Lives in `gross_decay_annual` (CSV) → `Gross (realized)` column on the main table.
-- This is **always** shown if available. It is the only number we ship for `passive_low_beta` and `other_structured` rows where the model-based expected decay is meaningless.
+- This is **always** shown if available. It is the only number we ship for `passive_low_delta` and `other_structured` rows where the model-based expected decay is meaningless.
 
 ### 4.2 Simple Itô identity (legacy fallback)
 
@@ -172,7 +172,7 @@ expected_gross_decay_simple_ito = (β² − β)/2 · σ²_annual
 
 - Lives in `expected_gross_decay_simple_ito_annual`.
 - This is the **fallback** when the distributional model is unavailable.
-- It is **deliberately suppressed** for `passive_low_beta` because (β² − β)/2 collapses near β ≈ 1, producing near-zero decay that misleadingly suggests free money. See `daily_screener.py` Step 5d.
+- It is **deliberately suppressed** for `passive_low_delta` because (β² − β)/2 collapses near β ≈ 1, producing near-zero decay that misleadingly suggests free money. See `daily_screener.py` Step 5d.
 
 ### 4.3 Volatility-ETP empirical roll/tracking adjustment
 
@@ -246,13 +246,13 @@ Routing logic: `index.html` → `expectedDecayHeadlineValue(r)` → `expectedDec
 gross_draws_shifted = gross_draws − mean(gross_draws) + expected_gross_decay_p50_annual
 ```
 
-The result: dispersion (block autocorrelation, regime mixing, vol clustering) is preserved from history, but the *location* of the distribution is the forecast. For LETF / inverse / volatility_etp the anchor is the HARQ-Log p50; for `income_yieldboost` it is the put-spread MC p50. The shift is gated on `expected_decay_available = True` AND a finite anchor — so `passive_low_beta` rows are deliberately left realized-only ("expected decay is N/A → don't pretend we have a structural edge").
+The result: dispersion (block autocorrelation, regime mixing, vol clustering) is preserved from history, but the *location* of the distribution is the forecast. For LETF / inverse / volatility_etp the anchor is the HARQ-Log p50; for `income_yieldboost` it is the put-spread MC p50. The shift is gated on `expected_decay_available = True` AND a finite anchor — so `passive_low_delta` rows are deliberately left realized-only ("expected decay is N/A → don't pretend we have a structural edge").
 
 Diagnostics on every row:
 
 - `gross_anchor_shift_annual` — signed shift applied (NaN if not applied).
 - `gross_anchor_target_annual` — the p50 anchor used (NaN if not applied).
-- `gross_anchor_source` — `harq_log_anchored` / `empirical_lognormal` / `yieldboost_put_spread` / `yieldboost_put_spread_point` / `realized_only_passive_low_beta` / `realized_only_no_anchor`.
+- `gross_anchor_source` — `harq_log_anchored` / `empirical_lognormal` / `yieldboost_put_spread` / `yieldboost_put_spread_point` / `realized_only_passive_low_delta` / `realized_only_no_anchor`.
 - `copula_note` — appends `anchor_shift_to_expected_p50=±X.XXXX` when the shift fired.
 
 Output (always present):
@@ -265,9 +265,9 @@ net_edge_p05_annual / p25 / p50 / p75 / p95 / hist_json
 
 **Sign convention:** **short-favorable positive**. A `net_edge_p50 = +0.10` means a 10% annual structural edge to the short, after borrow.
 
-`gross_edge_definition` per class: `letf` / `inverse` / `volatility_etp` / `income_yieldboost` → `blended_realized_expected`; `passive_low_beta` / `income_put_spread` → `realized_daily_log_drag`.
+`gross_edge_definition` per class: `letf` / `inverse` / `volatility_etp` / `income_yieldboost` → `blended_realized_expected`; `passive_low_delta` / `income_put_spread` → `realized_daily_log_drag`.
 
-For `passive_low_beta`, the front-end **also** masks the headline `Net edge` cell to `—` because the policy is "expected decay is N/A → fall back to realized → don't pretend we have a structural edge".
+For `passive_low_delta`, the front-end **also** masks the headline `Net edge` cell to `—` because the policy is "expected decay is N/A → fall back to realized → don't pretend we have a structural edge".
 
 ---
 
@@ -282,7 +282,7 @@ def _product_class(lev, beta, *, is_yieldboost=False):
     if is_yieldboost:           return "income_yieldboost"
     if beta < 0:                return "inverse"
     if beta > 1.5:              return "letf"
-    if 0 < beta <= 1.5:         return "passive_low_beta"
+    if 0 < beta <= 1.5:         return "passive_low_delta"
     if abs(lev - 1.0) < 0.01:   return "income_put_spread"
     if lev is finite:           return "letf"
     return "other_structured"
@@ -298,7 +298,7 @@ _EXPECTED_DECAY_CLASSES = {"letf", "inverse", "income_yieldboost",
 expected_decay_available = product_class in _EXPECTED_DECAY_CLASSES
 ```
 
-`passive_low_beta` and `other_structured` are deliberately `False`.
+`passive_low_delta` and `other_structured` are deliberately `False`.
 
 ### Full routing matrix
 
@@ -311,15 +311,15 @@ The dashboard reads `product_class` and `expected_decay_available` and routes ev
 | `volatility_etp` | realized | simple Itô + roll/tracking | `vol-adj` | bootstrap fan | LETF vol-drag grid | `Volatility ETP` |
 | `income_yieldboost` | realized | **Put-spread MC p50** | `put-spread · p10/p90` | bootstrap fan, **anchor-shifted to put-spread p50** | **Income put-spread grid** | `YieldBOOST (income)` |
 | `income_put_spread` | realized | HARQ-Log p50 | `p50 · p10/p90` | bootstrap fan (anchor-shifted when expected p50 available) | LETF vol-drag grid | `Income (put-spread)` |
-| `passive_low_beta` | realized | **`—` (N/A)** | `passive low-β: N/A by policy` | **`—` (N/A)** | hidden | `Passive low-β` |
+| `passive_low_delta` | realized | **`—` (N/A)** | `passive low-β: N/A by policy` | **`—` (N/A)** | hidden | `Passive low-β` |
 | `other_structured` | realized | `—` | — | realized fallback | hidden | `Structured` |
 
 The front-end helpers that implement this:
 
-- `expectedDecayAvailableForRow(r)` — checks `expected_decay_available` flag with a fallback for older builds (`product_class !== passive_low_beta && product_class !== other_structured`).
+- `expectedDecayAvailableForRow(r)` — checks `expected_decay_available` flag with a fallback for older builds (`product_class !== passive_low_delta && product_class !== other_structured`).
 - `isYieldBoostIncomeStrategy(r)` — checks `is_yieldboost === true` or the YIELDBOOST_INCOME_PAIRS Set (~25 known sym/und pairs).
 - `isVolatilityEtp(r)` — checks `product_class === "volatility_etp"` or symbol/underlying in VOLATILITY_ETP_SYMBOLS.
-- `isPassiveLowBetaRow(r)` — checks `product_class === "passive_low_beta"` or `expected_decay_available === false` or bucket-2 + non-YieldBOOST + non-volatility-ETP.
+- `isPassiveLowBetaRow(r)` — checks `product_class === "passive_low_delta"` or `expected_decay_available === false` or bucket-2 + non-YieldBOOST + non-volatility-ETP.
 
 `expectedDecayHeadlineValue(r)` is the central decision function. Its order of operations:
 
@@ -377,7 +377,7 @@ This same function is reused for **sorting** the column. If you change the rende
 The high-importance fields, grouped by purpose:
 
 ### Identity
-- `symbol`, `underlying`, `leverage`, `expected_leverage`, `beta`, `beta_n_obs`, `bucket`
+- `symbol`, `underlying`, `leverage`, `expected_leverage`, `beta`, `delta_n_obs`, `bucket`
 - `asof_date`, `last_updated`, `is_stale`
 - `product_class`, `expected_decay_available`, `is_yieldboost`, `scenario_style`
 
@@ -403,7 +403,7 @@ The high-importance fields, grouped by purpose:
 - `expected_gross_decay_dist_model` — one of:
   - `harq_log_anchored_empirical`
   - `simple_ito_fallback` (panel too thin)
-  - `passive_low_beta_na` (policy-suppressed)
+  - `passive_low_delta_na` (policy-suppressed)
 - `expected_gross_decay_dist_n_obs`, `expected_gross_decay_dist_horizon_days`
 
 ### Net edge (bootstrap fan)
@@ -421,7 +421,7 @@ The high-importance fields, grouped by purpose:
 
 ### Diagnostics / regime
 - `high_intraday_risk`, `regime_autocorr_und_21d_proxy`, `regime_warning`
-- `decomposition_note` (strings like `income_dist_missing`, `low_beta_realized_only`)
+- `decomposition_note` (strings like `income_dist_missing`, `low_delta_realized_only`)
 - `copula_note`, `copula_type`
 - Underlying volatility-shape diagnostics from `ls-algo` at two horizons.
   **60d is the primary display window** (aligned with
@@ -469,13 +469,13 @@ This is the single most important file in this repo. ~2840 lines. Don't be intim
 
 8. **`assign_buckets()`**: B1 (β > 1.5), B2 (rest), B3 (curated inverse list or β < 0).
 
-9. **Per-symbol record build**: massive dict comprehension that combines CSV row + borrow snapshot + realized vol + bucket + product_class override (vol ETP). Calls `is_volatility_etp()` to override `product_class` and `expected_decay_model`. Reads `expected_decay_available` from CSV with the fallback `product_class not in ("passive_low_beta", "other_structured")`.
+9. **Per-symbol record build**: massive dict comprehension that combines CSV row + borrow snapshot + realized vol + bucket + product_class override (vol ETP). Calls `is_volatility_etp()` to override `product_class` and `expected_decay_model`. Reads `expected_decay_available` from CSV with the fallback `product_class not in ("passive_low_delta", "other_structured")`.
 
 10. **`build()` writes `dashboard_data.json`** with structure:
     ```json
     {
       "generated_at": "2026-04-26T11:53:47Z",
-      "high_beta_threshold": 1.5,
+      "high_delta_threshold": 1.5,
       "rows": [ { ETFRecord-shaped }, … ],
       "summary": { … },
       "freshness": { … }
@@ -649,7 +649,7 @@ The four refresh workflows do not embed a Pages deploy step; instead **any push 
 
 ### 12.1 Add a new product_class to the taxonomy
 
-1. **In `ls-algo`**: edit `screener_v2_fields.py::_product_class` to recognize the new class. Add it to `_EXPECTED_DECAY_CLASSES` if model-based expected decay is meaningful for it. If not, mirror the `passive_low_beta` policy in `daily_screener.py` Step 5d (null out the expected decay columns for these rows).
+1. **In `ls-algo`**: edit `screener_v2_fields.py::_product_class` to recognize the new class. Add it to `_EXPECTED_DECAY_CLASSES` if model-based expected decay is meaningful for it. If not, mirror the `passive_low_delta` policy in `daily_screener.py` Step 5d (null out the expected decay columns for these rows).
 2. **In `ls-algo`**: add a regression test in `tests/test_product_class_taxonomy.py`.
 3. **In `ls-algo`**: re-run `daily_screener.py`, sanity-check the CSV. Push to `main`.
 4. **In `etf-dashboard`**: re-run `python scripts/build_data.py` (or just wait for the next daily build).
@@ -745,9 +745,9 @@ Then run **Update ETF Metrics** on Diamond-Creek-Quant (or `python scripts/inges
 
 The schema of `etf_screened_today.csv` is the contract between `ls-algo` and `etf-dashboard`. **Renaming a column without coordinating both repos will silently NaN out fields on the dashboard.** Always grep for the column name in both repos before renaming.
 
-### 13.2 `passive_low_beta` is suppressed in *both* the CSV and the SPA
+### 13.2 `passive_low_delta` is suppressed in *both* the CSV and the SPA
 
-`ls-algo/daily_screener.py` Step 5d nulls out the entire `expected_*` family for `passive_low_beta` rows **and** sets `expected_gross_decay_dist_model = "passive_low_beta_na"`. The SPA also has a defensive fallback (`expectedDecayAvailableForRow` checks `product_class` directly when the flag is missing) so an older CSV doesn't accidentally show stale model values. Keep both layers in sync.
+`ls-algo/daily_screener.py` Step 5d nulls out the entire `expected_*` family for `passive_low_delta` rows **and** sets `expected_gross_decay_dist_model = "passive_low_delta_na"`. The SPA also has a defensive fallback (`expectedDecayAvailableForRow` checks `product_class` directly when the flag is missing) so an older CSV doesn't accidentally show stale model values. Keep both layers in sync.
 
 ### 13.3 YieldBOOST is **not** classified as `letf` even if leverage = 2
 

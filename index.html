@@ -903,7 +903,7 @@
     display: block; margin-bottom: 4px; font-size: 10px; font-weight: 700;
     text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted);
   }
-  .backtest-control input, .backtest-control select, .backtest-control button {
+  .backtest-control input, .backtest-control select {
     width: 100%; padding: 8px 10px; border-radius: 7px;
     border: 1px solid var(--border); background: var(--bg-card);
     color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 12px;
@@ -1402,66 +1402,6 @@ const fmtTime = iso => {
   const d = new Date(iso);
   return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
 };
-const fmtRatio = v => (v == null || !Number.isFinite(Number(v))) ? '—' : Number(v).toFixed(2);
-const VOL_SHAPE_LABELS = {
-  boiling_trend: 'Boiling trend',
-  jumpy_trend: 'Jumpy trend',
-  choppy_volatile: 'Choppy volatile',
-  volatile_mixed: 'Volatile mixed',
-  quiet_trend: 'Quiet trend',
-  quiet_chop: 'Quiet chop',
-  quiet_mixed: 'Quiet mixed',
-};
-function volShapeLabel(v) {
-  const key = String(v || '').trim();
-  return VOL_SHAPE_LABELS[key] || (key ? key.replace(/_/g, ' ') : '—');
-}
-function volShapeCls(v) {
-  const key = String(v || '').trim();
-  if (key === 'boiling_trend') return 'val-positive';
-  if (key === 'jumpy_trend' || key === 'choppy_volatile' || key === 'volatile_mixed') return 'val-warning';
-  return 'val-muted';
-}
-// Window the dashboard treats as primary for trend/VCR. 60d matches
-// risk_dashboard/beta_loader.DEFAULT_WINDOW_DAYS so the same clock drives
-// betas and shape diagnostics.
-const VOL_SHAPE_PRIMARY_WINDOW = 60;
-function volShapeFields(r, w = VOL_SHAPE_PRIMARY_WINDOW) {
-  if (!r) return {};
-  return {
-    label: r[`und_vol_shape_${w}d`],
-    tr: r[`und_trend_ratio_${w}d`],
-    vcr: r[`und_vcr_${w}d`],
-    ret: r[`und_return_${w}d`],
-    rvDaily: r[`und_rv_${w}d_daily_annual`],
-    rvWeekly: r[`und_rv_${w}d_weekly_annual`],
-    rvPctile: r[`und_rv_${w}d_pctile`],
-    absRetPctile: r[`und_abs_return_${w}d_pctile`],
-    vcrPctile: r[`und_vcr_${w}d_pctile`],
-    vcrMedian: r[`und_vcr_${w}d_median`],
-    trPctile: r[`und_trend_ratio_${w}d_pctile`],
-  };
-}
-function volShapeTooltip(r, w = VOL_SHAPE_PRIMARY_WINDOW) {
-  const f = volShapeFields(r, w);
-  const lines = [
-    `${w}d underlying volatility shape.`,
-    `TR = weekly-sampled RV / daily-sampled RV (iid≈1, perfect drift≈${Math.sqrt(5).toFixed(2)}): ${fmtRatio(f.tr)}`,
-    `VCR = max daily r^2 / sum daily r^2: ${fmtRatio(f.vcr)}`,
-    `${w}d underlying return: ${fmt(f.ret)}`,
-    `${w}d RV daily / weekly: ${fmt(f.rvDaily)} / ${fmt(f.rvWeekly)}`,
-  ];
-  if (Number.isFinite(Number(f.rvPctile))) lines.push(`RV percentile: ${fmt(f.rvPctile)}`);
-  if (Number.isFinite(Number(f.absRetPctile))) lines.push(`Abs-return percentile: ${fmt(f.absRetPctile)}`);
-  if (Number.isFinite(Number(f.vcrPctile))) lines.push(`VCR percentile: ${fmt(f.vcrPctile)}`);
-  if (Number.isFinite(Number(f.trPctile))) lines.push(`TR percentile: ${fmt(f.trPctile)}`);
-  const alt = w === 60 ? 20 : 60;
-  const af = volShapeFields(r, alt);
-  if (Number.isFinite(Number(af.tr)) || Number.isFinite(Number(af.vcr))) {
-    lines.push(`Also ${alt}d: TR ${fmtRatio(af.tr)} · VCR ${fmtRatio(af.vcr)}`);
-  }
-  return lines.join('\n');
-}
 /** Pair backtest SVG x-axis: include day + year and avoid duplicate tick strings. */
 function formatBacktestAxisDate(raw) {
   if (raw == null || raw === '') return '';
@@ -2451,9 +2391,6 @@ function SimpleSeriesPlot({
   overlayValueKey,
   overlayColor,
   overlayLabel,
-  referenceValue,
-  referenceLabel,
-  includeZero = true,
   /** When true, null/blank primary values stay missing (do not coerce via Number(null) → 0). */
   strictNullPrimary = false,
 }) {
@@ -2492,36 +2429,21 @@ function SimpleSeriesPlot({
   const PH = H - T - B;
 
   const allVals = [...primaryVals, ...overlayVals];
-  if (Number.isFinite(Number(referenceValue))) allVals.push(Number(referenceValue));
   const yMinRaw = Math.min(...allVals);
   const yMaxRaw = Math.max(...allVals);
-  const baseMin = includeZero ? Math.min(yMinRaw, 0) : yMinRaw;
-  const baseMax = includeZero ? Math.max(yMaxRaw, 0) : yMaxRaw;
+  // Always include zero in axis range so the zero-reference line is explicit.
+  const baseMin = Math.min(yMinRaw, 0);
+  const baseMax = Math.max(yMaxRaw, 0);
   const pad = (baseMax - baseMin || Math.max(1, Math.abs(baseMax) * 0.1)) * 0.1;
   const yMin = baseMin - pad;
   const yMax = baseMax + pad;
   const x = (i) => L + (i / Math.max(1, series.length - 1)) * PW;
   const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, yMax - yMin))) * PH;
 
-  /** Per-index series; skip non-finite points and start a new stroke after gaps (no diagonal across missing days). */
-  const buildPath = (vals) => {
-    let out = '';
-    let penUp = true;
-    for (let i = 0; i < vals.length; i += 1) {
-      const v = vals[i];
-      if (!Number.isFinite(v)) {
-        penUp = true;
-        continue;
-      }
-      if (penUp) {
-        out += (out ? ' ' : '') + `M ${x(i).toFixed(2)} ${y(v).toFixed(2)}`;
-        penUp = false;
-      } else {
-        out += ` L ${x(i).toFixed(2)} ${y(v).toFixed(2)}`;
-      }
-    }
-    return out;
-  };
+  const buildPath = (vals) => vals
+    .map((v, i) => (Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : ''))
+    .filter(Boolean)
+    .join(' ');
 
   const lineVals = series.map(readPrimary);
   const linePath = buildPath(lineVals);
@@ -2530,7 +2452,7 @@ function SimpleSeriesPlot({
 
   const findLatestIdx = (vals) => {
     for (let i = vals.length - 1; i >= 0; i -= 1) {
-      if (vals[i] != null && Number.isFinite(vals[i])) return i;
+      if (Number.isFinite(vals[i])) return i;
     }
     return -1;
   };
@@ -2551,8 +2473,6 @@ function SimpleSeriesPlot({
 
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(q => yMin + (yMax - yMin) * q).reverse();
   const yZero = y(0);
-  const refOk = Number.isFinite(Number(referenceValue));
-  const yRef = refOk ? y(Number(referenceValue)) : null;
   const dateForIdx = (idx) => {
     const raw = series[idx]?.date;
     if (!raw) return '';
@@ -2578,30 +2498,18 @@ function SimpleSeriesPlot({
             </text>
           </g>
         ))}
-        {includeZero && yZero >= T && yZero <= H - B && (
-          <>
-            <line
-              x1={L}
-              y1={yZero}
-              x2={W - R}
-              y2={yZero}
-              stroke="rgba(255,255,255,0.45)"
-              strokeWidth="1.3"
-              strokeDasharray="6 5"
-            />
-            <text x={W - R - 4} y={yZero - 5} textAnchor="end" fontSize="11" fill="rgba(255,255,255,0.72)" fontFamily="DM Sans">
-              {zeroLabel}
-            </text>
-          </>
-        )}
-        {refOk && yRef >= T && yRef <= H - B && (
-          <>
-            <line x1={L} y1={yRef} x2={W - R} y2={yRef} stroke="rgba(255,255,255,0.38)" strokeWidth="1.15" strokeDasharray="3 4" />
-            <text x={W - R - 4} y={yRef - 5} textAnchor="end" fontSize="11" fill="rgba(255,255,255,0.68)" fontFamily="DM Sans">
-              {referenceLabel || (formatValue ? formatValue(Number(referenceValue)) : String(referenceValue))}
-            </text>
-          </>
-        )}
+        <line
+          x1={L}
+          y1={yZero}
+          x2={W - R}
+          y2={yZero}
+          stroke="rgba(255,255,255,0.45)"
+          strokeWidth="1.3"
+          strokeDasharray="6 5"
+        />
+        <text x={W - R - 4} y={yZero - 5} textAnchor="end" fontSize="11" fill="rgba(255,255,255,0.72)" fontFamily="DM Sans">
+          {zeroLabel}
+        </text>
         {overlayPath && (
           <path d={overlayPath} fill="none" stroke={ovColor} strokeWidth="1.6" strokeDasharray="5 4" />
         )}
@@ -2708,7 +2616,7 @@ function SummaryCard({ label, value, sub, color }) {
 }
 
 function ExpectedDecayCalculator() {
-  const [beta, setBeta] = useState('2');
+  const [hedgeDelta, setHedgeDelta] = useState('2');
   const [sigmaAnnual, setSigmaAnnual] = useState('130');
   const [periodValue, setPeriodValue] = useState('1');
   const [periodUnit, setPeriodUnit] = useState('months');
@@ -3153,27 +3061,13 @@ function DetailRow({ r, chartVolLookbackRange }) {
             <div className="dval">{fmtNum(r.shares_available)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Beta (n = {fmtNum(r.beta_n_obs)})</div>
-            <div className="dval">{r.beta?.toFixed(3) ?? '—'}</div>
+            <div className="dlabel">Beta (n = {fmtNum(r.delta_n_obs)})</div>
+            <div className="dval">{r.delta?.toFixed(3) ?? '—'}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Forecast σ (und.)</div>
             <div className="dval">{Number.isFinite(Number(fSig)) && Number(fSig) > 0 ? fmt(Number(fSig)) : '—'}</div>
             <div className="detail-item-hint">{fv?.source || ''}{fv?.eventAdjusted ? ' · EWMA clipped for gaps' : ''}</div>
-          </div>
-          <div className="detail-item" title={volShapeTooltip(r)}>
-            <div className="dlabel">Vol shape (60d)</div>
-            <div className={cls('dval', volShapeCls(r.und_vol_shape_60d))}>{volShapeLabel(r.und_vol_shape_60d)}</div>
-            <div className="detail-item-hint">
-              TR {fmtRatio(r.und_trend_ratio_60d)} · VCR {fmtRatio(r.und_vcr_60d)}
-            </div>
-          </div>
-          <div className="detail-item" title={volShapeTooltip(r)}>
-            <div className="dlabel">60d und. move / RV</div>
-            <div className="dval">{fmt(r.und_return_60d)} / {fmt(r.und_rv_60d_daily_annual)}</div>
-            <div className="detail-item-hint">
-              |move| pctile {fmt(r.und_abs_return_60d_pctile)}
-            </div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Und. vol (12M realized)</div>
@@ -3382,64 +3276,6 @@ function buildTotalReturnBacktestSeries(rawRows, distributions) {
     const tr = Number.isFinite(nav) && nav > 0 ? nav * reinvFactor : null;
     return { ...row, nav_total_return: tr, tr_reinvestment_factor: reinvFactor };
   });
-}
-
-/**
- * Rolling underlying vol-shape history. Mirrors
- * `_underlying_vol_shape` in ls-algo/screener_v2_fields.py — annualizes
- * weekly RV from the 5-day chunk size (not the window), so the trend
- * ratio is window-independent (iid ≈ 1, perfect drift ≈ sqrt(5)).
- */
-function buildUnderlyingVolShapeHistory(rows, window = VOL_SHAPE_PRIMARY_WINDOW) {
-  if (!Number.isInteger(window) || window <= 0 || window % 5 !== 0) {
-    return { series: [], vcrMedian: null, window };
-  }
-  const clean = (Array.isArray(rows) ? rows : [])
-    .map((row) => ({
-      date: String(row?.date || '').trim(),
-      px: Number(row?.underlying_adj_close),
-    }))
-    .filter((row) => row.date && Number.isFinite(row.px) && row.px > 0)
-    .sort((a, b) => a.date.localeCompare(b.date));
-  if (clean.length < window + 1) return { series: [], vcrMedian: null, window };
-
-  const rets = [];
-  for (let i = 1; i < clean.length; i += 1) {
-    const r = Math.log(clean[i].px / clean[i - 1].px);
-    if (Number.isFinite(r)) rets.push({ date: clean[i].date, r });
-  }
-
-  const out = [];
-  for (let end = window; end <= rets.length; end += 1) {
-    const tail = rets.slice(end - window, end).map(x => x.r);
-    const sumSq = tail.reduce((a, r) => a + r * r, 0);
-    if (!Number.isFinite(sumSq) || sumSq <= 0) continue;
-    const rvDaily = Math.sqrt((sumSq / window) * 252);
-    const weekly = [];
-    for (let j = 0; j < window; j += 5) {
-      weekly.push(tail.slice(j, j + 5).reduce((a, r) => a + r, 0));
-    }
-    const meanWeeklySq = weekly.reduce((a, r) => a + r * r, 0) / weekly.length;
-    const rvWeekly = Math.sqrt(meanWeeklySq * (252 / 5));
-    const trendRatio = rvDaily > 0 ? rvWeekly / rvDaily : null;
-    const vcr = Math.max(...tail.map(r => r * r)) / sumSq;
-    out.push({
-      date: rets[end - 1].date,
-      rv_daily: rvDaily,
-      rv_weekly: rvWeekly,
-      trend_ratio: trendRatio,
-      vcr,
-    });
-  }
-
-  const vcrVals = out.map(x => Number(x.vcr)).filter(Number.isFinite).sort((a, b) => a - b);
-  const mid = Math.floor(vcrVals.length / 2);
-  const vcrMedian = vcrVals.length ? (vcrVals.length % 2 ? vcrVals[mid] : 0.5 * (vcrVals[mid - 1] + vcrVals[mid])) : null;
-  return {
-    series: out.map(row => ({ ...row, vcr_median: vcrMedian })),
-    vcrMedian,
-    window,
-  };
 }
 
 function medianSharesTraded(rows, lookback = 60) {
@@ -3695,8 +3531,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [btSlippageBps, setBtSlippageBps] = useState(27);
   const [btNetGrossTol, setBtNetGrossTol] = useState(5);
   const [btHedgeRatio, setBtHedgeRatio] = useState(1);
-  /** Backtest window start (YYYY-MM-DD); empty means full joint-price history. */
-  const [btStartDate, setBtStartDate] = useState('');
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -3758,9 +3592,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   useEffect(() => {
     setBtNetGrossTol(defaultNetGrossTolerancePct(r));
   }, [etfSym, r?.bucket, r?.product_class]);
-  useEffect(() => {
-    setBtStartDate('');
-  }, [etfSym]);
 
   const widgetHtml = useMemo(() => {
     keyRef.current++;
@@ -4023,10 +3854,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     return buildTotalReturnBacktestSeries(raw, etfDistributionsSeries);
   }, [etfMetricsMap, etfSym, etfDistributionsSeries]);
-  const volShapeHistory = useMemo(
-    () => buildUnderlyingVolShapeHistory(etfBacktestSeries),
-    [etfBacktestSeries],
-  );
   const pairBacktestCoverageHint = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     const hasEtfPx = (row) => {
@@ -4043,46 +3870,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     }
     return null;
   }, [etfMetricsMap, etfSym, etfBacktestSeries]);
-
-  const pairBacktestBounds = useMemo(() => {
-    const s = etfBacktestSeries;
-    if (!Array.isArray(s) || !s.length) return { first: '', last: '' };
-    return {
-      first: String(s[0]?.date || '').trim(),
-      last: String(s[s.length - 1]?.date || '').trim(),
-    };
-  }, [etfBacktestSeries]);
-
-  /** Slice of joint-price rows for optional window start (inception + anchor reset at first kept day). */
-  const pairBacktestWindow = useMemo(() => {
-    const full = etfBacktestSeries;
-    if (!Array.isArray(full) || !full.length) {
-      return { series: [], startHint: null, startError: null };
-    }
-    const first = String(full[0]?.date || '').trim();
-    const last = String(full[full.length - 1]?.date || '').trim();
-    const raw = String(btStartDate || '').trim();
-    if (!raw) {
-      return { series: full, startHint: null, startError: null };
-    }
-    if (raw > last) {
-      return {
-        series: [],
-        startHint: null,
-        startError: `Start date is after the last data day (${last}).`,
-      };
-    }
-    const effective = raw < first ? first : raw;
-    const series = full.filter((row) => String(row?.date || '').trim() >= effective);
-    return {
-      series,
-      startHint: raw < first
-        ? `Underlying series begins ${first}; window clamped to the first joint day.`
-        : null,
-      startError: null,
-    };
-  }, [etfBacktestSeries, btStartDate]);
-
   const latestEtfMetric = useMemo(
     () => (etfMetricsSeries.length ? etfMetricsSeries[etfMetricsSeries.length - 1] : null),
     [etfMetricsSeries],
@@ -4168,21 +3955,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (!sim) {
       return { ok: false, error: 'Pair backtest module unavailable', daily: [], rebalanceMarks: [], summary: {} };
     }
-    if (pairBacktestWindow.startError) {
-      return {
-        ok: false,
-        error: pairBacktestWindow.startError,
-        daily: [],
-        rebalanceMarks: [],
-        summary: {},
-      };
-    }
     const bAnn = Number.isFinite(avgBorrowFromHistory)
       ? avgBorrowFromHistory
       : (Number.isFinite(Number(r.borrow_avg_annual))
         ? Number(r.borrow_avg_annual)
         : Number(getBorrowRate(r)));
-    return sim(pairBacktestWindow.series, {
+    return sim(etfBacktestSeries, {
       gross: Number(btGross) || 0,
       hedgeRatio: Number(btHedgeRatio) || 1,
       beta: Number(r?.beta),
@@ -4650,9 +4428,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           {/* Stats Grid — vol / decay / edge aligned with main table (COLS) */}
           <div className="chart-stats" style={{ marginTop: 0 }}>
             <div className="chart-stat">
-              <div className="cs-label">Beta</div>
-              <div className="cs-value">{r.beta?.toFixed(3) ?? '—'}</div>
-              <div className="cs-sub">{fmtNum(r.beta_n_obs)} obs</div>
+              <div className="cs-label">Delta</div>
+              <div className="cs-value">{r.delta?.toFixed(3) ?? '—'}</div>
+              <div className="cs-sub">{fmtNum(r.delta_n_obs)} obs</div>
             </div>
             <div
               className="chart-stat"
@@ -4791,12 +4569,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-label">Vol ETF</div>
               <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>12M realized</div>
               <div className="cs-value">{fmt(r.vol_etf_annual)}</div>
-            </div>
-            <div className="chart-stat" title={volShapeTooltip(r)}>
-              <div className="cs-label">Vol shape</div>
-              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>60d underlying</div>
-              <div className={cls('cs-value', volShapeCls(r.und_vol_shape_60d))}>{volShapeLabel(r.und_vol_shape_60d)}</div>
-              <div className="cs-sub">TR {fmtRatio(r.und_trend_ratio_60d)} · VCR {fmtRatio(r.und_vcr_60d)}</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">NAV (Daily)</div>
@@ -5001,51 +4773,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 </tbody>
               </table>
             </div>
-
-            <div className="scenario-title" style={{ marginTop: 18 }}>Volatility shape history — {undSym || 'underlying'}</div>
-            <div className="scenario-sub">
-              Rolling {volShapeHistory.window || VOL_SHAPE_PRIMARY_WINDOW} trading-day windows from the stored underlying adjusted close (same clock as risk_dashboard betas). Trend Ratio = weekly-sampled RV / daily-sampled RV (iid≈1, perfect drift≈{Math.sqrt(5).toFixed(2)}); VCR = largest daily variance share inside the window.
-            </div>
-            {volShapeHistory.series.length > 0 ? (
-              <div className="metrics-stack" style={{ marginTop: 8 }}>
-                <SimpleSeriesPlot
-                  series={volShapeHistory.series}
-                  valueKey="rv_daily"
-                  color="rgba(6,182,212,0.95)"
-                  label={`${undSym || 'Underlying'} RV${volShapeHistory.window} — daily vs weekly sampled`}
-                  formatValue={(v) => fmt(v)}
-                  zeroLabel="0%"
-                  overlayValueKey="rv_weekly"
-                  overlayColor="rgba(245,158,11,0.95)"
-                  overlayLabel={`RV${volShapeHistory.window} weekly sampled`}
-                />
-                <SimpleSeriesPlot
-                  series={volShapeHistory.series}
-                  valueKey="trend_ratio"
-                  color="rgba(148,163,184,0.95)"
-                  label={`${undSym || 'Underlying'} Trend Ratio (TR${volShapeHistory.window})`}
-                  formatValue={(v) => fmtRatio(v)}
-                  zeroLabel="0"
-                  referenceValue={1}
-                  referenceLabel="TR = 1 (iid baseline)"
-                  includeZero={false}
-                />
-                <SimpleSeriesPlot
-                  series={volShapeHistory.series}
-                  valueKey="vcr"
-                  color="rgba(234,179,8,0.95)"
-                  label={`${undSym || 'Underlying'} Variance Contribution Ratio (VCR${volShapeHistory.window})`}
-                  formatValue={(v) => fmt(v)}
-                  zeroLabel="0%"
-                  referenceValue={volShapeHistory.vcrMedian}
-                  referenceLabel={Number.isFinite(Number(volShapeHistory.vcrMedian)) ? `Median ${fmt(volShapeHistory.vcrMedian)}` : undefined}
-                />
-              </div>
-            ) : (
-              <div className="scenario-warning" style={{ marginTop: 8 }}>
-                Need at least {(volShapeHistory.window || VOL_SHAPE_PRIMARY_WINDOW) + 1} underlying adjusted-close observations to draw volatility-shape history.
-              </div>
-            )}
           </div>
 
           {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics panel…</div>}
@@ -5136,16 +4863,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   </thead>
                   <tbody>
                     {[...etfMetricsSeries].slice(-15).reverse().map((m, idx) => {
-                      const nav = toFiniteNum(m.nav);
-                      const close = toFiniteNum(m.close_price);
-                      const premPct = (nav != null && nav > 0 && close != null)
+                      const nav = Number(m.nav);
+                      const close = Number(m.close_price);
+                      const premPct = (Number.isFinite(nav) && nav > 0 && Number.isFinite(close))
                         ? ((close - nav) / nav) * 100
                         : null;
                       return (
                         <tr key={`${m.date}-${idx}`}>
                           <td>{m.date || '—'}</td>
-                          <td>{nav != null ? fmtUsd(nav) : '—'}</td>
-                          <td>{close != null ? fmtUsd(close) : '—'}</td>
+                          <td>{fmtUsd(nav)}</td>
+                          <td>{Number.isFinite(close) ? fmtUsd(close) : '—'}</td>
                           <td>{premPct == null ? '—' : `${premPct >= 0 ? '+' : ''}${premPct.toFixed(2)}%`}</td>
                           <td>{toFiniteNum(m.nav_total_return) != null ? fmtUsd(toFiniteNum(m.nav_total_return)) : '—'}</td>
                           <td>{toFiniteNum(m.underlying_adj_close) != null ? fmtUsd(toFiniteNum(m.underlying_adj_close)) : '—'}</td>
@@ -5674,25 +5401,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="backtest-control"><label>Every N days</label><input type="number" min={1} step={1} value={btEveryN} onChange={(e) => setBtEveryN(Number(e.target.value) || 1)} title="Check β-adj net/gross vs anchor on this cadence (trading days since last rebalance)." /></div>
               <div className="backtest-control"><label>Max |β-adj drift| (pp)</label><input type="number" min={0.1} step={0.5} value={btNetGrossTol} onChange={(e) => setBtNetGrossTol(Number(e.target.value) || 0)} title="Breach if |β-adj net/gross ratio minus anchor| exceeds this (percentage points on 0–100 scale). Defaults: inverse 10, regular 5, YieldBOOST 2." /></div>
               <div className="backtest-control"><label>Slippage (bps)</label><input type="number" min={0} step={1} value={btSlippageBps} onChange={(e) => setBtSlippageBps(Number(e.target.value) || 0)} title="Per-rebalance transaction cost: slippage × traded notional / 10 000." /></div>
-              <div className="backtest-control">
-                <label>Start date</label>
-                <input
-                  type="date"
-                  value={btStartDate}
-                  min={pairBacktestBounds.first || undefined}
-                  max={pairBacktestBounds.last || undefined}
-                  onChange={(e) => setBtStartDate(e.target.value)}
-                  title="Replay begins on this calendar day (first row ≥ date). Gross is redeployed at inception; β-adj anchor resets. Leave empty for full history."
-                />
-              </div>
-              <div className="backtest-control" style={{ alignSelf: 'end' }}>
-                <label style={{ visibility: 'hidden' }}>Range</label>
-                <button type="button" className="chart-view-btn" onClick={() => setBtStartDate('')} disabled={!btStartDate}>Full history</button>
-              </div>
             </div>
-            {pairBacktestWindow.startHint ? (
-              <div className="scenario-warning" style={{ marginTop: 8 }}>{pairBacktestWindow.startHint}</div>
-            ) : null}
             <div className="trade-note">
               Rebalance at close on each <strong>N</strong>th day when <strong>|β-adj net/gross − anchor|</strong> exceeds your tolerance; anchor resets at inception and after each rebalance. T-cost: slippage bps × traded notional.
             </div>
@@ -6949,7 +6658,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                           </span>
                         </td>
                         <td className="underlying-cell">{r.underlying}</td>
-                        <td>{r.beta?.toFixed(2) ?? '—'}</td>
+                        <td>{r.delta?.toFixed(2) ?? '—'}</td>
                         <td className={borrowCls(getBorrowRate(r))}>
                           {fmt(getBorrowRate(r))} {borrowBadge(getBorrowRate(r))}
                         </td>

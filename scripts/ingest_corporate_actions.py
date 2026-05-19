@@ -294,8 +294,8 @@ def _canonical_bucket(raw: object) -> str | None:
     if not s:
         return None
     mapping = {
-        "bucket_1": "bucket_1_high_beta",
-        "bucket_2": "bucket_2_low_beta",
+        "bucket_1": "bucket_1_high_delta",
+        "bucket_2": "bucket_2_low_delta",
         "bucket_3": "bucket_3_inverse",
         "bucket_4": "bucket_4_edge",
     }

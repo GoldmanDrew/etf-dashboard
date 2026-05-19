@@ -41,7 +41,7 @@ def load_universe(csv_path: str | Path) -> pd.DataFrame:
 
     # Ensure numeric types
     for col in [
-        "Beta", "Leverage", "ExpectedLeverage", "Beta_n_obs",
+        "Delta", "Leverage", "ExpectedLeverage", "Delta_n_obs",
         "borrow_fee_annual", "borrow_rebate_annual", "borrow_net_annual",
         "shares_available", "borrow_current",
     ]:
@@ -81,14 +81,14 @@ def load_inverse_etfs(csv_path: str | Path) -> set[str]:
 def assign_buckets(
     universe: pd.DataFrame,
     inverse_set: set[str],
-    high_beta_threshold: float = 1.5,
+    high_delta_threshold: float = 1.5,
     blacklist: Optional[list[str]] = None,
 ) -> pd.DataFrame:
     """
     Assign each ETF to a bucket:
-      Bucket 3: Curated inverse list, or Beta < 0 (inverse / short-beta products;
+      Bucket 3: Curated inverse list, or Beta < 0 (inverse / short-delta products;
                 no separate bucket_4 in the dashboard)
-      Bucket 1: Beta > high_beta_threshold (and not Bucket 3)
+      Bucket 1: Beta > high_delta_threshold (and not Bucket 3)
       Bucket 2: Everyone else
 
     ``blacklist`` only sets ``strategy_blacklisted``; symbols are not removed.
@@ -109,11 +109,11 @@ def assign_buckets(
         sym = row.get("symbol", "")
         if sym in inverse_set:
             return Bucket.INVERSE.value
-        beta = row.get("Beta", np.nan)
-        # All inverse / short-beta products live in bucket 3 (no separate bucket_4)
+        beta = row.get("Delta", np.nan)
+        # All inverse / short-delta products live in bucket 3 (no separate bucket_4)
         if pd.notna(beta) and beta < 0:
             return Bucket.INVERSE.value
-        if pd.notna(beta) and beta > high_beta_threshold:
+        if pd.notna(beta) and beta > high_delta_threshold:
             return Bucket.HIGH_BETA.value
         return Bucket.LOW_BETA.value
 

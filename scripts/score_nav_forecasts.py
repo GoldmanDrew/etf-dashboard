@@ -541,7 +541,9 @@ def build_anchors(
         if str(date_str) != target_iso:
             continue
         und = str(rec.get("underlying") or "").upper() or None
-        beta = float(rec.get("beta")) if _isfin(rec.get("beta")) else None
+        delta = float(rec.get("delta")) if _isfin(rec.get("delta")) else (
+            float(rec.get("beta")) if _isfin(rec.get("beta")) else None
+        )
         out_by_sym[sym] = {
             "as_of_date": str(date_str),
             "nav_close": round(float(nav), 6),
@@ -555,7 +557,7 @@ def build_anchors(
                 if und and _isfin(und_closes.get(und))
                 else None
             ),
-            "beta": beta,
+            "delta": delta,
             "product_class": rec.get("product_class"),
             "is_yieldboost": bool(rec.get("is_yieldboost")),
         }

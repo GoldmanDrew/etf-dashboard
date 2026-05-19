@@ -33,7 +33,7 @@ Default model routing (writes ``by_symbol[SYM]`` in ``_latest.json``):
 
   letf, inverse,           delta_v3_swap_mark
   volatility_etp,       -> delta_v2_ito
-  passive_low_beta,     -> delta_v1
+  passive_low_delta,     -> delta_v1
   other_structured,
   (fallback)
 
@@ -89,7 +89,7 @@ DEFAULT_TER_ANNUAL = 0.0098
 TER_OVERRIDES: dict[str, float] = {}
 
 CLASS_HIGH_CONFIDENCE = {"letf", "inverse"}
-CLASS_MEDIUM_CONFIDENCE = {"volatility_etp", "passive_low_beta"}
+CLASS_MEDIUM_CONFIDENCE = {"volatility_etp", "passive_low_delta"}
 CLASS_INCOME = {"income_yieldboost", "income_put_spread"}
 CLASS_NA_FOR_BETA_MODELS = CLASS_INCOME | {"other_structured"}
 
@@ -661,7 +661,7 @@ class ForecastRecord:
     und_spot_anchor: float | None
     und_anchor_date: str | None
     und_spot_age_sec: float | None
-    beta: float | None
+    delta: float | None
     ter_daily: float
     nav_anchor: float | None
     nav_anchor_date: str | None
@@ -768,7 +768,7 @@ def _gather_inputs(
         sigma_annual = None
         sigma_source = None
 
-    beta = _f(record.get("beta"))
+    delta = _f(record.get("delta")) or _f(record.get("beta"))
 
     return {
         "symbol": sym,
@@ -785,7 +785,7 @@ def _gather_inputs(
         "shares_outstanding": shares_out,
         "sigma_annual": sigma_annual,
         "sigma_source": sigma_source,
-        "beta": beta,
+        "delta": delta,
         "distribution_applied": distribution_applied,
         "gather_notes": gather_notes,
     }
@@ -818,7 +818,7 @@ def _make_record(
         und_spot_anchor=_round(inputs["und_anchor"]),
         und_anchor_date=inputs["nav_anchor_date"],
         und_spot_age_sec=_round(inputs["und_spot_age_sec"], 1),
-        beta=_round(inputs["beta"]),
+        delta=_round(inputs["delta"]),
         ter_daily=round(ter_daily, 8),
         nav_anchor=_round(nav_anchor),
         nav_anchor_date=inputs["nav_anchor_date"],
@@ -855,8 +855,8 @@ def _classify_beta_model_confidence(inputs: dict, model: str) -> tuple[str, list
         return "na", ["yieldboost income product (beta-only model not appropriate)"]
     if pc in CLASS_NA_FOR_BETA_MODELS:
         return "na", [f"product_class={pc} (beta-only model skipped)"]
-    if inputs["beta"] is None:
-        return "na", ["missing beta"]
+    if inputs["delta"] is None:
+        return "na", ["missing delta"]
     if inputs["nav_anchor"] is None or inputs["nav_anchor"] <= 0:
         return "na", ["missing nav_close in anchor"]
     if inputs["und_anchor"] is None or inputs["und_anchor"] <= 0:
@@ -884,7 +884,7 @@ def build_v1(inputs: dict, ts_iso: str, ter_daily: float) -> ForecastRecord | No
     if confidence != "na":
         try:
             r_und = math.log(inputs["und_spot_t"] / inputs["und_anchor"])
-            nav_hat = compute_v1(inputs["nav_anchor"], inputs["beta"], r_und, ter_daily)
+            nav_hat = compute_v1(inputs["nav_anchor"], inputs["delta"], r_und, ter_daily)
         except (ValueError, ZeroDivisionError) as e:
             confidence = "na"
             notes.append(f"v1 math: {e}")
@@ -911,9 +911,9 @@ def build_v2_ito(
     if confidence != "na":
         try:
             r_und = math.log(inputs["und_spot_t"] / inputs["und_anchor"])
-            beta = inputs["beta"]
-            drag_logret = -((beta ** 2 - beta) / 2.0) * (sigma ** 2) * dt_y
-            nav_hat = compute_v1(inputs["nav_anchor"], beta, r_und, ter_daily) * math.exp(drag_logret)
+            delta = inputs["delta"]
+            drag_logret = -((delta ** 2 - delta) / 2.0) * (sigma ** 2) * dt_y
+            nav_hat = compute_v1(inputs["nav_anchor"], delta, r_und, ter_daily) * math.exp(drag_logret)
         except (ValueError, ZeroDivisionError) as e:
             confidence = "na"
             notes.append(f"v2 math: {e}")

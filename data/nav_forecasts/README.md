@@ -26,7 +26,7 @@ income_put_spread      -> delta_v3_swap_mark
 
 letf, inverse,            delta_v3_swap_mark
 volatility_etp,        -> delta_v2_ito
-passive_low_beta,      -> delta_v1
+passive_low_delta,      -> delta_v1
 other_structured,
 (everything else)
 ```
