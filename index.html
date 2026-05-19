@@ -1374,6 +1374,7 @@ const NAV_FORECAST_METRICS_URL = "data/nav_forecasts/_metrics_daily.json";
 const NAV_FORECAST_HISTORY_URL = "data/nav_forecasts/_history_panel.json";
 let BORROW_HISTORY_CACHE = null;
 let BORROW_SPIKE_RISK_CACHE = null;
+/** @type {{ bySymbol: Record<string, object[]>, buildTime: string|null }|null} */
 let ETF_METRICS_CACHE = null;
 let ETF_DISTRIBUTIONS_CACHE = null;
 let NAV_FORECAST_LATEST_CACHE = null;
@@ -1442,25 +1443,158 @@ function volShapeFields(r, w = VOL_SHAPE_PRIMARY_WINDOW) {
     trPctile: r[`und_trend_ratio_${w}d_pctile`],
   };
 }
-function volShapeTooltip(r, w = VOL_SHAPE_PRIMARY_WINDOW) {
-  const f = volShapeFields(r, w);
+/** Joint ETF + underlying price days (same gate as pair backtest / vol-shape charts). */
+function jointMetricsRowsForVolShape(rawRows) {
+  const hasBoth = (row) => {
+    const pl = Number(row?.close_price) || Number(row?.nav);
+    const ps = Number(row?.underlying_adj_close);
+    const ds = String(row?.date || '').trim();
+    return Boolean(ds) && Number.isFinite(pl) && pl > 0 && Number.isFinite(ps) && ps > 0;
+  };
+  return (Array.isArray(rawRows) ? rawRows : [])
+    .filter(hasBoth)
+    .sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
+}
+
+function volShapeHistoryFromMetricsRows(rawRows, window = VOL_SHAPE_PRIMARY_WINDOW) {
+  return buildUnderlyingVolShapeHistory(jointMetricsRowsForVolShape(rawRows), window);
+}
+
+function volShapeLatestFromHistory(volShapeHistory) {
+  const series = volShapeHistory?.series;
+  if (!Array.isArray(series) || !series.length) return null;
+  const last = series[series.length - 1];
+  const tr = Number(last?.trend_ratio);
+  const vcr = Number(last?.vcr);
+  if (!Number.isFinite(tr) && !Number.isFinite(vcr)) return null;
+  return {
+    tr: Number.isFinite(tr) ? tr : null,
+    vcr: Number.isFinite(vcr) ? vcr : null,
+    date: String(last?.date || '').trim() || null,
+    rvDaily: Number(last?.rv_daily),
+    rvWeekly: Number(last?.rv_weekly),
+  };
+}
+
+/**
+ * Prefer metrics-derived TR/VCR (matches history charts); fall back to screener CSV fields.
+ * Classification label stays on screener `und_vol_shape_Wd` until Tier 2 overwrites in build_data.
+ */
+function volShapeDisplay(r, opts = {}) {
+  const w = opts.w ?? VOL_SHAPE_PRIMARY_WINDOW;
+  const screener = volShapeFields(r, w);
+  const histLast = volShapeLatestFromHistory(opts.volShapeHistory);
+  const useMetrics = histLast != null && Number.isFinite(Number(histLast.tr));
+  const tr = useMetrics ? histLast.tr : screener.tr;
+  const vcr = useMetrics ? histLast.vcr : screener.vcr;
+  const trGap = Number.isFinite(Number(screener.tr)) && Number.isFinite(Number(tr))
+    && Math.abs(Number(screener.tr) - Number(tr)) > 0.05;
+  const vcrGap = Number.isFinite(Number(screener.vcr)) && Number.isFinite(Number(vcr))
+    && Math.abs(Number(screener.vcr) - Number(vcr)) > 0.015;
+  return {
+    w,
+    label: screener.label,
+    tr,
+    vcr,
+    source: useMetrics ? 'metrics' : 'screener',
+    asOfDate: useMetrics ? histLast.date : null,
+    screenerTr: screener.tr,
+    screenerVcr: screener.vcr,
+    screenerDiffers: useMetrics && (trGap || vcrGap),
+    metricsBuildTime: opts.metricsBuildTime || null,
+    dashboardBuildTime: opts.dashboardBuildTime || null,
+    ret: screener.ret,
+    rvDaily: useMetrics && Number.isFinite(histLast.rvDaily) ? histLast.rvDaily : screener.rvDaily,
+    rvWeekly: useMetrics && Number.isFinite(histLast.rvWeekly) ? histLast.rvWeekly : screener.rvWeekly,
+    rvPctile: screener.rvPctile,
+    absRetPctile: screener.absRetPctile,
+    vcrPctile: screener.vcrPctile,
+    vcrMedian: screener.vcrMedian,
+    trPctile: screener.trPctile,
+  };
+}
+
+function fmtVolShapeTrVcr(tr, vcr) {
+  const trs = fmtRatio(tr);
+  const vcrS = Number.isFinite(Number(vcr)) ? fmt(Number(vcr)) : '—';
+  return `TR ${trs} · VCR ${vcrS}`;
+}
+
+const VOL_SHAPE_CLOCK_STALE_MS = 6 * 60 * 60 * 1000;
+
+function volShapeClocksDiffer(dashboardBuildTime, metricsBuildTime) {
+  const d = dashboardBuildTime ? new Date(dashboardBuildTime).getTime() : NaN;
+  const m = metricsBuildTime ? new Date(metricsBuildTime).getTime() : NaN;
+  if (!Number.isFinite(d) || !Number.isFinite(m)) return false;
+  return Math.abs(d - m) > VOL_SHAPE_CLOCK_STALE_MS;
+}
+
+function volShapeSourceHint(display) {
+  if (!display) return '';
+  const parts = [];
+  if (display.source === 'metrics') {
+    parts.push(`TR/VCR: metrics underlying adj. close${display.asOfDate ? ` through ${display.asOfDate}` : ''}`);
+    if (display.metricsBuildTime) parts.push(`metrics built ${fmtTime(display.metricsBuildTime)}`);
+  } else {
+    parts.push('TR/VCR: ls-algo screener (full underlying TR series)');
+    if (display.dashboardBuildTime) parts.push(`dashboard ${fmtTime(display.dashboardBuildTime)}`);
+  }
+  if (display.screenerDiffers) {
+    parts.push(`screener ${fmtVolShapeTrVcr(display.screenerTr, display.screenerVcr)}`);
+  }
+  if (volShapeClocksDiffer(display.dashboardBuildTime, display.metricsBuildTime)) {
+    parts.push('dashboard vs metrics clocks differ by >6h');
+  }
+  return parts.join(' · ');
+}
+
+function volShapeTooltip(r, opts = {}) {
+  const resolved = typeof opts === 'number'
+    ? volShapeDisplay(r, { w: opts })
+    : volShapeDisplay(r, opts);
+  const w = resolved.w;
   const lines = [
     `${w}d underlying volatility shape.`,
-    `TR = weekly-sampled RV / daily-sampled RV (iid≈1, perfect drift≈${Math.sqrt(5).toFixed(2)}): ${fmtRatio(f.tr)}`,
-    `VCR = max daily r^2 / sum daily r^2: ${fmtRatio(f.vcr)}`,
-    `${w}d underlying return: ${fmt(f.ret)}`,
-    `${w}d RV daily / weekly: ${fmt(f.rvDaily)} / ${fmt(f.rvWeekly)}`,
-  ];
-  if (Number.isFinite(Number(f.rvPctile))) lines.push(`RV percentile: ${fmt(f.rvPctile)}`);
-  if (Number.isFinite(Number(f.absRetPctile))) lines.push(`Abs-return percentile: ${fmt(f.absRetPctile)}`);
-  if (Number.isFinite(Number(f.vcrPctile))) lines.push(`VCR percentile: ${fmt(f.vcrPctile)}`);
-  if (Number.isFinite(Number(f.trPctile))) lines.push(`TR percentile: ${fmt(f.trPctile)}`);
+    volShapeSourceHint(resolved) || null,
+    `TR = weekly-sampled RV / daily-sampled RV (iid≈1, perfect drift≈${Math.sqrt(5).toFixed(2)}): ${fmtRatio(resolved.tr)}`,
+    `VCR = max daily r² / sum daily r²: ${Number.isFinite(Number(resolved.vcr)) ? fmt(Number(resolved.vcr)) : '—'}`,
+    `${w}d underlying return: ${fmt(resolved.ret)}`,
+    `${w}d RV daily / weekly: ${fmt(resolved.rvDaily)} / ${fmt(resolved.rvWeekly)}`,
+  ].filter(Boolean);
+  if (Number.isFinite(Number(resolved.rvPctile))) lines.push(`RV percentile (screener): ${fmt(resolved.rvPctile)}`);
+  if (Number.isFinite(Number(resolved.absRetPctile))) lines.push(`Abs-return percentile (screener): ${fmt(resolved.absRetPctile)}`);
+  if (Number.isFinite(Number(resolved.vcrPctile))) lines.push(`VCR percentile (screener): ${fmt(resolved.vcrPctile)}`);
+  if (Number.isFinite(Number(resolved.trPctile))) lines.push(`TR percentile (screener): ${fmt(resolved.trPctile)}`);
   const alt = w === 60 ? 20 : 60;
   const af = volShapeFields(r, alt);
   if (Number.isFinite(Number(af.tr)) || Number.isFinite(Number(af.vcr))) {
-    lines.push(`Also ${alt}d: TR ${fmtRatio(af.tr)} · VCR ${fmtRatio(af.vcr)}`);
+    lines.push(`Also ${alt}d (screener): TR ${fmtRatio(af.tr)} · VCR ${Number.isFinite(Number(af.vcr)) ? fmt(Number(af.vcr)) : '—'}`);
   }
   return lines.join('\n');
+}
+
+async function loadEtfMetricsCache() {
+  if (ETF_METRICS_CACHE?.bySymbol) return ETF_METRICS_CACHE;
+  const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+  const res = await fetch(`${ETF_METRICS_DAILY_URL}${cacheBust}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`etf metrics HTTP ${res.status}`);
+  const payload = await res.json();
+  const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+  const bySymbol = {};
+  rows.forEach((row) => {
+    const sym = String(row?.ticker || '').toUpperCase();
+    if (!sym) return;
+    if (!bySymbol[sym]) bySymbol[sym] = [];
+    bySymbol[sym].push(row);
+  });
+  Object.keys(bySymbol).forEach((sym) => {
+    bySymbol[sym].sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
+  });
+  ETF_METRICS_CACHE = {
+    bySymbol,
+    buildTime: payload?.build_time || null,
+  };
+  return ETF_METRICS_CACHE;
 }
 /** Pair backtest SVG x-axis: include day + year and avoid duplicate tick strings. */
 function formatBacktestAxisDate(raw) {
@@ -3108,7 +3242,7 @@ function NetEdgeQuantileTable({ r }) {
 }
 
 // ── Detail Row ──────────────────────────────
-function DetailRow({ r, chartVolLookbackRange }) {
+function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheTick = 0 }) {
   const fv = forecastVolForScenario(r, chartVolLookbackRange);
   const fSig = fv?.sigma;
   const gR = Number(r?.gross_decay_annual);
@@ -3116,6 +3250,20 @@ function DetailRow({ r, chartVolLookbackRange }) {
   const realizedNetVsAvgBorrow = Number.isFinite(gR) && Number.isFinite(bAvg)
     ? gR - bAvg
     : null;
+  const volShapeHistGrid = useMemo(() => {
+    void metricsCacheTick;
+    const rows = ETF_METRICS_CACHE?.bySymbol?.[String(r?.symbol || '').toUpperCase()];
+    return volShapeHistoryFromMetricsRows(rows);
+  }, [r?.symbol, metricsCacheTick]);
+  const volShape = useMemo(
+    () => volShapeDisplay(r, {
+      volShapeHistory: volShapeHistGrid,
+      metricsBuildTime: ETF_METRICS_CACHE?.buildTime,
+      dashboardBuildTime,
+    }),
+    [r, volShapeHistGrid, dashboardBuildTime, metricsCacheTick],
+  );
+  const volShapeHint = volShapeSourceHint(volShape);
   return (
     <tr className="detail-row">
       <td colSpan={COLS.length + 1}>
@@ -3161,14 +3309,15 @@ function DetailRow({ r, chartVolLookbackRange }) {
             <div className="dval">{Number.isFinite(Number(fSig)) && Number(fSig) > 0 ? fmt(Number(fSig)) : '—'}</div>
             <div className="detail-item-hint">{fv?.source || ''}{fv?.eventAdjusted ? ' · EWMA clipped for gaps' : ''}</div>
           </div>
-          <div className="detail-item" title={volShapeTooltip(r)}>
+          <div className="detail-item" title={volShapeTooltip(r, { volShapeHistory: volShapeHistGrid, metricsBuildTime: ETF_METRICS_CACHE?.buildTime, dashboardBuildTime })}>
             <div className="dlabel">Vol shape (60d)</div>
-            <div className={cls('dval', volShapeCls(r.und_vol_shape_60d))}>{volShapeLabel(r.und_vol_shape_60d)}</div>
+            <div className={cls('dval', volShapeCls(volShape.label || r.und_vol_shape_60d))}>{volShapeLabel(volShape.label || r.und_vol_shape_60d)}</div>
             <div className="detail-item-hint">
-              TR {fmtRatio(r.und_trend_ratio_60d)} · VCR {fmtRatio(r.und_vcr_60d)}
+              {fmtVolShapeTrVcr(volShape.tr, volShape.vcr)}
             </div>
+            {volShapeHint ? <div className="detail-item-hint" style={{ marginTop: 4 }}>{volShapeHint}</div> : null}
           </div>
-          <div className="detail-item" title={volShapeTooltip(r)}>
+          <div className="detail-item" title={volShapeTooltip(r, { volShapeHistory: volShapeHistGrid, metricsBuildTime: ETF_METRICS_CACHE?.buildTime, dashboardBuildTime })}>
             <div className="dlabel">60d und. move / RV</div>
             <div className="dval">{fmt(r.und_return_60d)} / {fmt(r.und_rv_60d_daily_annual)}</div>
             <div className="detail-item-hint">
@@ -3655,7 +3804,7 @@ function PairBacktestExposureChart({ result }) {
   );
 }
 
-function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart' }) {
+function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart', dashboardBuildTime = null }) {
   const activeTf = useMemo(
     () => TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2],
     [chartVolLookbackRange],
@@ -3860,25 +4009,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       setEtfMetricsLoading(true);
       setEtfMetricsError(null);
       try {
-        // 1-minute bucket (same as borrow history): metrics workflow can land mid-hour;
-        // hourly bust left users seeing stale underlying_adj_close until the clock turned.
-        const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
-        const res = await fetch(`${ETF_METRICS_DAILY_URL}${cacheBust}`, { cache: 'no-store' });
-        if (!res.ok) throw new Error(`etf metrics HTTP ${res.status}`);
-        const payload = await res.json();
-        const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-        const bySymbol = {};
-        rows.forEach((row) => {
-          const sym = String(row?.ticker || '').toUpperCase();
-          if (!sym) return;
-          if (!bySymbol[sym]) bySymbol[sym] = [];
-          bySymbol[sym].push(row);
-        });
-        Object.keys(bySymbol).forEach((sym) => {
-          bySymbol[sym].sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
-        });
-        ETF_METRICS_CACHE = { bySymbol };
-        if (!cancelled) setEtfMetricsMap(bySymbol);
+        const cache = await loadEtfMetricsCache();
+        if (!cancelled) setEtfMetricsMap(cache.bySymbol);
       } catch (e) {
         if (!cancelled) setEtfMetricsError(e?.message || 'ETF metrics unavailable');
       } finally {
@@ -4025,6 +4157,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const volShapeHistory = useMemo(
     () => buildUnderlyingVolShapeHistory(etfBacktestSeries),
     [etfBacktestSeries],
+  );
+  const volShape = useMemo(
+    () => volShapeDisplay(r, {
+      volShapeHistory,
+      metricsBuildTime: ETF_METRICS_CACHE?.buildTime,
+      dashboardBuildTime,
+    }),
+    [r, volShapeHistory, dashboardBuildTime, etfMetricsMap],
   );
   const pairBacktestCoverageHint = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
@@ -4788,11 +4928,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>12M realized</div>
               <div className="cs-value">{fmt(r.vol_etf_annual)}</div>
             </div>
-            <div className="chart-stat" title={volShapeTooltip(r)}>
+            <div className="chart-stat" title={volShapeTooltip(r, { volShapeHistory, metricsBuildTime: ETF_METRICS_CACHE?.buildTime, dashboardBuildTime })}>
               <div className="cs-label">Vol shape</div>
               <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>60d underlying</div>
-              <div className={cls('cs-value', volShapeCls(r.und_vol_shape_60d))}>{volShapeLabel(r.und_vol_shape_60d)}</div>
-              <div className="cs-sub">TR {fmtRatio(r.und_trend_ratio_60d)} · VCR {fmtRatio(r.und_vcr_60d)}</div>
+              <div className={cls('cs-value', volShapeCls(volShape.label || r.und_vol_shape_60d))}>{volShapeLabel(volShape.label || r.und_vol_shape_60d)}</div>
+              <div className="cs-sub">{fmtVolShapeTrVcr(volShape.tr, volShape.vcr)}</div>
+              {volShapeSourceHint(volShape) ? <div className="cs-sub" style={{ marginTop: 4, textTransform: 'none', letterSpacing: 0 }}>{volShapeSourceHint(volShape)}</div> : null}
             </div>
             <div className="chart-stat">
               <div className="cs-label">NAV (Daily)</div>
@@ -5000,7 +5141,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
             <div className="scenario-title" style={{ marginTop: 18 }}>Volatility shape history — {undSym || 'underlying'}</div>
             <div className="scenario-sub">
-              Rolling {volShapeHistory.window || VOL_SHAPE_PRIMARY_WINDOW} trading-day windows from the stored underlying adjusted close (same clock as risk_dashboard betas). Trend Ratio = weekly-sampled RV / daily-sampled RV (iid≈1, perfect drift≈{Math.sqrt(5).toFixed(2)}); VCR = largest daily variance share inside the window.
+              Rolling {volShapeHistory.window || VOL_SHAPE_PRIMARY_WINDOW} trading-day windows from joint ETF metrics underlying adj. close (headline TR/VCR matches charts). {volShapeSourceHint(volShape) ? volShapeSourceHint(volShape) + '.' : ''} Trend Ratio = weekly-sampled RV / daily-sampled RV (iid≈1, perfect drift≈{Math.sqrt(5).toFixed(2)}); VCR = largest daily variance share inside the window.
             </div>
             {volShapeHistory.series.length > 0 ? (
               <div className="metrics-stack" style={{ marginTop: 8 }}>
@@ -6482,6 +6623,15 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [corporateActions, setCorporateActions] = useState(null);
   const [etfNews, setEtfNews] = useState(null);
   const [newsError, setNewsError] = useState(null);
+  const [metricsCacheTick, setMetricsCacheTick] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadEtfMetricsCache()
+      .then(() => { if (!cancelled) setMetricsCacheTick((n) => n + 1); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -6717,6 +6867,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           chartVolLookbackRange={chartVolLookbackRange}
           setChartVolLookbackRange={setChartVolLookbackRange}
           defaultPanel={chartDefaultPanel}
+          dashboardBuildTime={data.build_time}
         />
       ) : showNews ? (
         <NewsPage
@@ -7026,7 +7177,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         <td title="Backward-looking realized σ (underlying); builder prefers 12M when available. Not forecast_vol.">{fmt(r.vol_underlying_annual)}</td>
                         <td title="Backward-looking realized σ (ETF); same window ladder as Vol Und.">{fmt(r.vol_etf_annual)}</td>
                       </tr>
-                      {expanded && <DetailRow r={r} chartVolLookbackRange={chartVolLookbackRange} />}
+                      {expanded && <DetailRow r={r} chartVolLookbackRange={chartVolLookbackRange} dashboardBuildTime={data.build_time} metricsCacheTick={metricsCacheTick} />}
                     </React.Fragment>
                   );
                 })}
