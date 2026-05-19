@@ -136,7 +136,7 @@ def recompute_beta_nav_hat(
         return None
 
     nav_anchor = _f(snapshot.get("nav_anchor"))
-    beta = _f(snapshot.get("beta"))
+    beta = _f(snapshot.get("delta")) or _f(snapshot.get("beta"))
     und_anchor = _f(snapshot.get("und_spot_anchor"))
     ter_daily = _f(snapshot.get("ter_daily")) or 0.0
     if nav_anchor is None or nav_anchor <= 0:

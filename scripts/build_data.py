@@ -2987,14 +2987,14 @@ def build():
 
     for _, row in df.iterrows():
         sym = row["symbol"]
-        beta = float(row["Beta"]) if pd.notna(row.get("Beta")) else None
+        beta = float(row["Delta"]) if pd.notna(row.get("Delta")) else None
 
         bucket = assign_bucket(sym, beta or 0)
         is_yieldboost = norm_sym(sym) in yieldboost_symbols
         scenario_style = (
             "income_style"
             if is_yieldboost
-            else ("hidden_low_beta" if bucket == "bucket_2_low_beta" else "letf_vol_drag")
+            else ("hidden_low_delta" if bucket == "bucket_2_low_beta" else "letf_vol_drag")
         )
 
         # Borrow data: prefer IBKR FTP, fall back to CSV
@@ -3240,7 +3240,10 @@ def build():
             "expected_decay_available": (
                 _truthy(rdict.get("expected_decay_available"))
                 if rdict.get("expected_decay_available") is not None
-                else (product_class_out not in ("passive_low_beta", "other_structured"))
+                else (
+                    product_class_out
+                    not in ("passive_low_delta", "passive_low_beta", "other_structured")
+                )
             ),
             "gross_edge_definition": (str(rdict["gross_edge_definition"]).strip() if rdict.get("gross_edge_definition") and str(rdict.get("gross_edge_definition") or "").strip() not in ("", "nan") else None),
             "primary_edge_annual": _safe_float(rdict, "primary_edge_annual"),
@@ -3306,7 +3309,7 @@ def build():
         "ibkr_ftp_success": ibkr["success"],
         "ibkr_symbols_fetched": len(ibkr["borrow_map"]) if ibkr["success"] else 0,
         "refresh_type": "full",
-        "decay_method": "linear_daily_pnl_1_over_beta_hedge",
+        "decay_method": "linear_daily_pnl_1_over_delta_hedge",
         "borrow_history_file": "data/borrow_history.json",
         "borrow_spike_risk_file": "data/borrow_spike_risk.json",
         "polygon_api_configured": bool(POLYGON_API_KEY),

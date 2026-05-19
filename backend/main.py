@@ -261,7 +261,7 @@ def _build_records_from_csv():
             underlying=str(row.get("underlying", "")),
             leverage=float(row.get("Leverage", 0) or 0),
             expected_leverage=float(row["ExpectedLeverage"]) if "ExpectedLeverage" in row and not _isnan(row.get("ExpectedLeverage")) else None,
-            beta=float(row["Delta"]) if not _isnan(row.get("Delta")) else None,
+            delta=float(row["Delta"]) if not _isnan(row.get("Delta")) else None,
             delta_n_obs=int(row["Delta_n_obs"]) if not _isnan(row.get("Delta_n_obs")) else None,
             bucket=bkt,
             borrow_fee_annual=float(row["borrow_fee_annual"]) if not _isnan(row.get("borrow_fee_annual")) else None,

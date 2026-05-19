@@ -446,7 +446,7 @@ function SummaryCard({ label, value, sub, color }) {
 const COLUMNS = [
   { key: 'symbol', label: 'Symbol', w: 90 },
   { key: 'underlying', label: 'Underlying', w: 90 },
-  { key: 'beta', label: 'Delta', w: 70, numeric: true, hint: 'OLS beta (ETF vs underlying total return)' },
+  { key: 'delta', label: 'Delta', w: 70, numeric: true, hint: 'OLS delta (ETF vs underlying total return)' },
   { key: 'leverage', label: 'Lev', w: 55, numeric: true },
   { key: 'borrow_net_annual', label: 'Borrow', w: 88, numeric: true },
   { key: 'borrow_median_60d', label: 'Borrow 60d med', w: 100, numeric: true, hint: 'Median of last up to 60 daily borrow points (fee-only, annualized)' },
@@ -645,7 +645,7 @@ function DetailRow({ record, history }) {
           </div>
           <div className="detail-item">
             <div className="dlabel">Beta (obs: {fmtNum(record.delta_n_obs)})</div>
-            <div className="dval">{record.beta?.toFixed(3) ?? '—'}</div>
+            <div className="dval">{record.delta?.toFixed(3) ?? '—'}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">12M Decay</div>
@@ -681,7 +681,7 @@ function TableRow({ record, expanded, onToggle, history }) {
           {stale && <span className="badge badge-stale" style={{ marginLeft: 6 }}>STALE</span>}
         </td>
         <td className="underlying-cell">{record.underlying}</td>
-        <td>{record.beta?.toFixed(2) ?? '—'}</td>
+        <td>{record.delta?.toFixed(2) ?? '—'}</td>
         <td>{record.leverage?.toFixed(0) ?? '—'}x</td>
         <td className={borrowClass(record.borrow_net_annual)}>
           {fmt(record.borrow_net_annual)} {borrowBadge(record.borrow_net_annual)}

@@ -377,7 +377,7 @@ This same function is reused for **sorting** the column. If you change the rende
 The high-importance fields, grouped by purpose:
 
 ### Identity
-- `symbol`, `underlying`, `leverage`, `expected_leverage`, `beta`, `delta_n_obs`, `bucket`
+- `symbol`, `underlying`, `leverage`, `expected_leverage`, `delta` (hedge ratio; legacy JSON may use `beta`), `delta_n_obs`, `bucket`
 - `asof_date`, `last_updated`, `is_stale`
 - `product_class`, `expected_decay_available`, `is_yieldboost`, `scenario_style`
 

@@ -327,13 +327,14 @@
    * `netGrossTolerancePct` (percentage points), rebalance to target notionals and reset the anchor.
    * Anchor is snapshotted at inception and after each rebalance.
    *
-   * Pass `opts.beta` (screener β). `opts.hedgeRatio` is the magnitude h (UI default 1/|β|).
+   * Pass `opts.delta` (screener δ) or legacy `opts.beta`. `opts.hedgeRatio` is the magnitude h (UI default 1/|δ|).
    * `opts.slippageBps`: per-rebalance t-cost = `Math.max(0, slippageBps) / 10000` × traded notional (Diamond-Creek-Quant parity; no floor/impact fallback).
    */
   function simulateInversePairBacktest(rows, opts) {
     const gross = Math.max(0, toNum(opts && opts.gross));
     const hedgeRatioH = Math.max(1e-8, toNum(opts && opts.hedgeRatio));
-    const betaRow = toNum(opts && opts.beta);
+    let betaRow = toNum(opts && opts.delta);
+    if (!Number.isFinite(betaRow)) betaRow = toNum(opts && opts.beta);
     const shortEtfLongUnd = !(Number.isFinite(betaRow) && betaRow < 0);
     const everyN = Math.max(1, Math.floor(toNum(opts && opts.everyNDays) || 5));
     const tolPct = toNum(opts && opts.netGrossTolerancePct);

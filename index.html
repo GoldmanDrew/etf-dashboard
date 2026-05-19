@@ -1839,7 +1839,7 @@ function yieldBoostIntrinsicAnnualDecay(r) {
 // Step 5d ("passive_low_beta policy") and screener_v2_fields
 // _expected_decay_available.
 function isPassiveLowBetaRow(r) {
-  if (r?.product_class === 'passive_low_beta') return true;
+  if (r?.product_class === 'passive_low_delta' || r?.product_class === 'passive_low_beta') return true;
   if (r?.expected_decay_available === false && r?.bucket === 'bucket_2_low_beta') {
     return true;
   }
@@ -2142,7 +2142,7 @@ function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel 
   const SR = typeof window !== 'undefined' ? window.ScenarioReturns : null;
   if (!SR || typeof SR.horizonToYears !== 'function') return null;
   const horizonYears = SR.horizonToYears(horizonLabel);
-  const lev = Number(r?.beta);
+  const lev = Number(r?.delta);
   if (!Number.isFinite(horizonYears) || horizonYears <= 0 || !Number.isFinite(lev)) return null;
   const forecastVol = forecastVolForScenario(r, chartVolLookbackRange);
   const sigma = Number(forecastVol?.sigma);
@@ -2568,7 +2568,7 @@ function SimpleSeriesPlot({
 const COLS = [
   { key: 'symbol', label: 'Symbol', w: 100, hint: 'BL = strategy blacklist (shown for context; not sized in trade plan / rebalancer).' },
   { key: 'underlying', label: 'Underlying', w: 85 },
-  { key: 'beta', label: 'Beta', w: 65, hint: 'ls-algo hedge β: OLS on aligned daily simple returns vs underlying TR, shrunk toward listed leverage (AR(1)-adjusted n_eff).' },
+  { key: 'delta', label: 'Delta', w: 65, hint: 'ls-algo hedge δ: OLS on aligned daily simple returns vs underlying TR, shrunk toward listed leverage (AR(1)-adjusted n_eff).' },
   { key: 'borrow_current', label: 'Borrow Rate', w: 105 },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, hint: 'Trailing annualized hedge drag: mean daily (β·r_U − r_ETF) on log returns × 252. See Decay math.' },
@@ -2952,9 +2952,9 @@ function NetEdgeMergedCell({ r }) {
   if (Number.isFinite(anchorShift) && Math.abs(anchorShift) > 1e-6) {
     anchorTipParts.push(`shift ${anchorShift >= 0 ? '+' : ''}${fmt(anchorShift)}`);
   }
-  if (anchorSource && anchorSource !== 'realized_only_passive_low_beta') {
+  if (anchorSource && anchorSource !== 'realized_only_passive_low_delta' && anchorSource !== 'realized_only_passive_low_beta') {
     anchorTipParts.push(`source: ${anchorSource}`);
-  } else if (anchorSource === 'realized_only_passive_low_beta') {
+  } else if (anchorSource === 'realized_only_passive_low_delta' || anchorSource === 'realized_only_passive_low_beta') {
     anchorTipParts.push('passive low-β: realized-only by policy');
   }
   const tip = anchorTipParts.length
@@ -3061,7 +3061,7 @@ function DetailRow({ r, chartVolLookbackRange }) {
             <div className="dval">{fmtNum(r.shares_available)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Beta (n = {fmtNum(r.delta_n_obs)})</div>
+            <div className="dlabel">Delta (n = {fmtNum(r.delta_n_obs)})</div>
             <div className="dval">{r.delta?.toFixed(3) ?? '—'}</div>
           </div>
           <div className="detail-item">
@@ -3539,7 +3539,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const etfSym = r.symbol;
   const undSym = r.underlying;
   /** β ≥ 0: short ETF + long und; β < 0: short both (matches `simulateInversePairBacktest`). */
-  const pairBtShortEtfLongUnd = !(Number.isFinite(Number(r?.beta)) && Number(r?.beta) < 0);
+  const pairBtShortEtfLongUnd = !(Number.isFinite(Number(r?.delta)) && Number(r?.delta) < 0);
   const tradeFns = window.TradeLab || {};
 
   const isIncomeStrategyScenario = isYieldBoostIncomeStrategy(r);
@@ -3571,7 +3571,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const productClassLabel = productClassRaw && productClassLabelMap[productClassRaw]
     ? productClassLabelMap[productClassRaw]
     : (productClassRaw || null);
-  const productClassTip = productClassRaw === 'passive_low_beta'
+  const productClassTip = productClassRaw === 'passive_low_delta' || productClassRaw === 'passive_low_beta'
     ? PASSIVE_LOW_BETA_POLICY_TOOLTIP
     : productClassRaw === 'income_yieldboost'
       ? 'YieldBOOST income: weekly 95/88 put sleeve — see Scenarios for NAV + cash.'
@@ -3586,9 +3586,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               : 'Screener taxonomy (ls-algo).';
 
   useEffect(() => {
-    const bAbs = Math.abs(Number(r?.beta));
+    const bAbs = Math.abs(Number(r?.delta));
     setBtHedgeRatio(Number.isFinite(bAbs) && bAbs > 0 ? 1 / bAbs : 1);
-  }, [etfSym, r?.beta]);
+  }, [etfSym, r?.delta]);
   useEffect(() => {
     setBtNetGrossTol(defaultNetGrossTolerancePct(r));
   }, [etfSym, r?.bucket, r?.product_class]);
@@ -3838,7 +3838,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const horizonYears = typeof scenarioFns.horizonToYears === 'function'
     ? scenarioFns.horizonToYears(scenarioHorizon)
     : NaN;
-  const scenarioLeverage = Number.isFinite(Number(r.beta)) ? Number(r.beta) : 1;
+  const scenarioLeverage = Number.isFinite(Number(r.delta)) ? Number(r.delta) : 1;
   const etfBorrowSeries = Array.isArray(borrowHistoryMap?.[etfSym]) ? borrowHistoryMap[etfSym] : [];
   const etfDistributionsSeries = useMemo(() => (
     Array.isArray(etfDistributionsMap?.[etfSym]) ? etfDistributionsMap[etfSym] : []
@@ -3963,7 +3963,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return sim(etfBacktestSeries, {
       gross: Number(btGross) || 0,
       hedgeRatio: Number(btHedgeRatio) || 1,
-      beta: Number(r?.beta),
+      delta: Number(r?.delta),
       everyNDays: Number(btEveryN) || 5,
       netGrossTolerancePct: Number(btNetGrossTol),
       slippageBps: Number(btSlippageBps) || 0,
@@ -4218,7 +4218,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     });
     const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
     const tradeHYears = tradeUseScenarioAssumptions ? horizonYears : 1;
-    const tradeLev = tradeUseScenarioAssumptions ? scenarioLeverage : (Number.isFinite(Number(r.beta)) ? Number(r.beta) : scenarioLeverage);
+    const tradeLev = tradeUseScenarioAssumptions ? scenarioLeverage : (Number.isFinite(Number(r.delta)) ? Number(r.delta) : scenarioLeverage);
     return tradeFns.buildTradeScenarioGrid({
       baseLegs: tradeBaseLegs,
       optionLegs,
@@ -4237,7 +4237,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       defaultBorrowAnnual: annualCarryDrag,
       shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
     });
-  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.delta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   const tradeMonteCarlo = useMemo(() => {
     if (typeof tradeFns.evaluateTradeMonteCarlo !== 'function') return { ok: false, error: 'Trade Lab utility unavailable.' };
@@ -4296,7 +4296,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     });
     const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
     const tradeHYears = tradeUseScenarioAssumptions ? horizonYears : 1;
-    const tradeLev = tradeUseScenarioAssumptions ? scenarioLeverage : (Number.isFinite(Number(r.beta)) ? Number(r.beta) : scenarioLeverage);
+    const tradeLev = tradeUseScenarioAssumptions ? scenarioLeverage : (Number.isFinite(Number(r.delta)) ? Number(r.delta) : scenarioLeverage);
     return tradeFns.buildTtxSensitivity({
       baseLegs: tradeBaseLegs,
       optionLegs,
@@ -4315,7 +4315,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       defaultBorrowAnnual: annualCarryDrag,
       shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
     });
-  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.beta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.delta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   return (
     <div className="chart-page">
