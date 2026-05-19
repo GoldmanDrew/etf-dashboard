@@ -1478,6 +1478,18 @@ async function loadVolShapeHistoryCache() {
   return VOL_SHAPE_HISTORY_CACHE;
 }
 
+async function loadBorrowHistoryCache() {
+  if (BORROW_HISTORY_CACHE) return BORROW_HISTORY_CACHE;
+  const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+  const res = await fetch(`${BORROW_HISTORY_URL}${cacheBust}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`borrow history HTTP ${res.status}`);
+  const payload = await res.json();
+  const symbols = payload?.symbols && typeof payload.symbols === 'object' ? payload.symbols : {};
+  BORROW_HISTORY_CACHE = symbols;
+  BORROW_HISTORY_BUILD_TIME = payload?.meta?.build_time || null;
+  return BORROW_HISTORY_CACHE;
+}
+
 /** Prefer CI-built history JSON; fall back to client recompute from metrics rows. */
 function volShapeHistoryForSymbol(sym, metricsRows, window = VOL_SHAPE_PRIMARY_WINDOW) {
   const key = String(sym || '').toUpperCase();
@@ -4127,14 +4139,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       setBorrowHistoryLoading(true);
       setBorrowHistoryError(null);
       try {
-        const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
-        const res = await fetch(`${BORROW_HISTORY_URL}${cacheBust}`, { cache: 'no-store' });
-        if (!res.ok) throw new Error(`borrow history HTTP ${res.status}`);
-        const payload = await res.json();
-        const symbols = payload?.symbols && typeof payload.symbols === 'object' ? payload.symbols : {};
-        BORROW_HISTORY_CACHE = symbols;
-        BORROW_HISTORY_BUILD_TIME = payload?.meta?.build_time || null;
-        if (!cancelled) setBorrowHistoryMap(symbols);
+        await loadBorrowHistoryCache();
+        if (!cancelled) setBorrowHistoryMap(BORROW_HISTORY_CACHE || {});
       } catch (e) {
         if (!cancelled) setBorrowHistoryError(e?.message || 'borrow history unavailable');
       } finally {
@@ -6820,13 +6826,19 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [etfNews, setEtfNews] = useState(null);
   const [newsError, setNewsError] = useState(null);
   const [metricsCacheTick, setMetricsCacheTick] = useState(0);
+  const [borrowHistoryMap, setBorrowHistoryMap] = useState(() => BORROW_HISTORY_CACHE || {});
 
   useEffect(() => {
     let cancelled = false;
     Promise.all([
       loadEtfMetricsCache().catch(() => null),
       loadVolShapeHistoryCache().catch(() => null),
-    ]).then(() => { if (!cancelled) setMetricsCacheTick((n) => n + 1); });
+      loadBorrowHistoryCache().catch(() => null),
+    ]).then(() => {
+      if (cancelled) return;
+      setMetricsCacheTick((n) => n + 1);
+      if (BORROW_HISTORY_CACHE) setBorrowHistoryMap(BORROW_HISTORY_CACHE);
+    });
     return () => { cancelled = true; };
   }, []);
 
