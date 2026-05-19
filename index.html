@@ -1477,12 +1477,35 @@ function volShapeLatestFromHistory(volShapeHistory) {
 }
 
 /**
- * Prefer metrics-derived TR/VCR (matches history charts); fall back to screener CSV fields.
- * Classification label stays on screener `und_vol_shape_Wd` until Tier 2 overwrites in build_data.
+ * Prefer dashboard fields built from etf_metrics_daily (Tier 2), else client metrics history
+ * (matches charts), else ls-algo screener CSV.
  */
 function volShapeDisplay(r, opts = {}) {
   const w = opts.w ?? VOL_SHAPE_PRIMARY_WINDOW;
   const screener = volShapeFields(r, w);
+  if (r?.und_vol_shape_source === 'etf_metrics_daily') {
+    return {
+      w,
+      label: screener.label,
+      tr: screener.tr,
+      vcr: screener.vcr,
+      source: 'etf_metrics_daily',
+      asOfDate: r.und_vol_shape_metrics_asof || null,
+      screenerTr: screener.tr,
+      screenerVcr: screener.vcr,
+      screenerDiffers: false,
+      metricsBuildTime: opts.metricsBuildTime || null,
+      dashboardBuildTime: opts.dashboardBuildTime || null,
+      ret: screener.ret,
+      rvDaily: screener.rvDaily,
+      rvWeekly: screener.rvWeekly,
+      rvPctile: screener.rvPctile,
+      absRetPctile: screener.absRetPctile,
+      vcrPctile: screener.vcrPctile,
+      vcrMedian: screener.vcrMedian,
+      trPctile: screener.trPctile,
+    };
+  }
   const histLast = volShapeLatestFromHistory(opts.volShapeHistory);
   const useMetrics = histLast != null && Number.isFinite(Number(histLast.tr));
   const tr = useMetrics ? histLast.tr : screener.tr;
@@ -1532,7 +1555,10 @@ function volShapeClocksDiffer(dashboardBuildTime, metricsBuildTime) {
 function volShapeSourceHint(display) {
   if (!display) return '';
   const parts = [];
-  if (display.source === 'metrics') {
+  if (display.source === 'etf_metrics_daily') {
+    parts.push(`TR/VCR: dashboard build (joint metrics underlying adj. close${display.asOfDate ? ` through ${display.asOfDate}` : ''})`);
+    if (display.dashboardBuildTime) parts.push(`dashboard ${fmtTime(display.dashboardBuildTime)}`);
+  } else if (display.source === 'metrics') {
     parts.push(`TR/VCR: metrics underlying adj. close${display.asOfDate ? ` through ${display.asOfDate}` : ''}`);
     if (display.metricsBuildTime) parts.push(`metrics built ${fmtTime(display.metricsBuildTime)}`);
   } else {

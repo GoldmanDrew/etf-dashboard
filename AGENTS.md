@@ -437,6 +437,19 @@ The high-importance fields, grouped by purpose:
   Ratio is the ratio of weekly-sampled to daily-sampled realized vol,
   annualized from the 5-day chunk size so it is window-independent
   (iid ≈ 1, perfect daily drift ≈ √5).
+- **Production headline alignment (Tier 2):** `build_data.py` recomputes
+  the vol-shape block above from `data/etf_metrics_daily.csv` on **joint
+  ETF+underlying days** (`underlying_adj_close` with ETF `close_price` or
+  `nav`), using `scripts/vol_shape_metrics.py` (same formulas as
+  `ls-algo/screener_v2_fields.py` and the chart helper in `index.html`).
+  When enough joint history exists, it **overwrites** the screener CSV
+  values and sets `und_vol_shape_source` = `etf_metrics_daily` plus
+  `und_vol_shape_metrics_asof` / `und_vol_shape_joint_days`. Otherwise
+  fields stay on the screener export (`und_vol_shape_source` =
+  `screener`). Percentiles and labels are recomputed on the metrics
+  joint series (may differ slightly from ls-algo's full underlying TR
+  panel). Run `update-etf-metrics.yml` before `build-and-deploy.yml` so
+  metrics are fresh.
 - `schema_v` (currently `2`), `edge_sign_convention` (`short_favorable_positive`)
 
 ### Algo flags
@@ -469,7 +482,7 @@ This is the single most important file in this repo. ~2840 lines. Don't be intim
 
 8. **`assign_buckets()`**: B1 (β > 1.5), B2 (rest), B3 (curated inverse list or β < 0).
 
-9. **Per-symbol record build**: massive dict comprehension that combines CSV row + borrow snapshot + realized vol + bucket + product_class override (vol ETP). Calls `is_volatility_etp()` to override `product_class` and `expected_decay_model`. Reads `expected_decay_available` from CSV with the fallback `product_class not in ("passive_low_delta", "other_structured")`.
+9. **Per-symbol record build**: massive dict comprehension that combines CSV row + borrow snapshot + realized vol + bucket + product_class override (vol ETP). Calls `is_volatility_etp()` to override `product_class` and `expected_decay_model`. Reads `expected_decay_available` from CSV with the fallback `product_class not in ("passive_low_delta", "other_structured")`. After each record dict is built, `apply_vol_shape_to_record()` may replace the `und_*` vol-shape fields from `etf_metrics_daily.csv` (see `scripts/vol_shape_metrics.py`).
 
 10. **`build()` writes `dashboard_data.json`** with structure:
     ```json

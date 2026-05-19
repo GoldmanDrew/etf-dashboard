@@ -28,6 +28,8 @@ import numpy as np
 import pandas as pd
 import requests
 
+from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_by_symbol
+
 # ──────────────────────────────────────────────
 # Config
 # ──────────────────────────────────────────────
@@ -2979,6 +2981,15 @@ def build():
     income_yield_map = load_distribution_income_yields(load_latest_metric_price_map())
     print(f"Income-style scenario symbols: {len(yieldboost_symbols)}")
 
+    universe_symbols = set(df["symbol"].dropna().tolist())
+    vol_shape_by_symbol = load_vol_shape_by_symbol(
+        ETF_METRICS_DAILY_FILE, universe_symbols=universe_symbols,
+    )
+    print(
+        f"Vol-shape from etf_metrics_daily (joint underlying_adj_close): "
+        f"{len(vol_shape_by_symbol)}/{len(universe_symbols)} symbols"
+    )
+
     today_utc = dt.datetime.now(dt.UTC).date().isoformat()
 
     # 5. Build records
@@ -3316,6 +3327,7 @@ def build():
             "schema_v": _int_schema_v(rdict.get("schema_v", 2)),
             "edge_sign_convention": (str(rdict.get("edge_sign_convention", "short_favorable_positive"))),
         }
+        apply_vol_shape_to_record(rec, vol_shape_by_symbol.get(norm_sym(sym)))
         records.append(rec)
 
     # 6. Compute summary
