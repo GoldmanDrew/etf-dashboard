@@ -9,6 +9,12 @@ on:
   push:
     branches: [main]
 
+  # Rebuild after morning ETF metrics ingest lands on main (vol-shape uses metrics).
+  workflow_run:
+    workflows: ["Update ETF Metrics Daily"]
+    types: [completed]
+    branches: [main]
+
   # Allow manual trigger
   workflow_dispatch:
 
@@ -24,6 +30,7 @@ concurrency:
 
 jobs:
   build-and-deploy:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     env:
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
@@ -50,6 +57,9 @@ jobs:
             echo "POLYGON_API_KEY (or POLYGON_IO_API_KEY) is missing in repo secrets."
             exit 1
           fi
+
+      - name: Pull latest main (metrics / corporate-actions commits)
+        run: git pull --ff-only origin main
 
       # build_data.py is Polygon / Tradier quota-sensitive and can transiently
       # fail (rate-limit, API outages, upstream issuer feeds going 503 for an
@@ -125,7 +135,7 @@ jobs:
         if: steps.build_data.outcome == 'success'
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/borrow_spike_risk.json data/borrow_spike_predictions data/borrow_spike_realized.jsonl data/borrow_spike_metrics.json data/options_cache.json"
+          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/borrow_spike_risk.json data/borrow_spike_predictions data/borrow_spike_realized.jsonl data/borrow_spike_metrics.json data/options_cache.json data/vol_shape_history.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ${FILES}

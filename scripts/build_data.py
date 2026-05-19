@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_by_symbol
+from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_metrics
 
 # ──────────────────────────────────────────────
 # Config
@@ -113,6 +113,7 @@ BORROW_HISTORY_FILE = OUTPUT_DIR / "borrow_history.json"
 BORROW_SPIKE_RISK_FILE = OUTPUT_DIR / "borrow_spike_risk.json"
 BORROW_SPIKE_PREDICTIONS_DIR = OUTPUT_DIR / "borrow_spike_predictions"
 OPTIONS_CACHE_FILE = OUTPUT_DIR / "options_cache.json"
+VOL_SHAPE_HISTORY_FILE = OUTPUT_DIR / "vol_shape_history.json"
 ETF_METRICS_DAILY_FILE = OUTPUT_DIR / "etf_metrics_daily.csv"
 ETF_HOLDINGS_LATEST_FILE = OUTPUT_DIR / "etf_holdings_latest.csv"
 ETF_DISTRIBUTIONS_FILE = OUTPUT_DIR / "etf_distributions.json"
@@ -2982,12 +2983,17 @@ def build():
     print(f"Income-style scenario symbols: {len(yieldboost_symbols)}")
 
     universe_symbols = set(df["symbol"].dropna().tolist())
-    vol_shape_by_symbol = load_vol_shape_by_symbol(
+    vol_shape_by_symbol, vol_shape_history_payload = load_vol_shape_from_metrics(
         ETF_METRICS_DAILY_FILE, universe_symbols=universe_symbols,
     )
     print(
         f"Vol-shape from etf_metrics_daily (joint underlying_adj_close): "
         f"{len(vol_shape_by_symbol)}/{len(universe_symbols)} symbols"
+    )
+    print(
+        f"Vol-shape history JSON: "
+        f"{vol_shape_history_payload.get('symbols_count', 0)} symbols "
+        f"({VOL_SHAPE_HISTORY_FILE.name})"
     )
 
     today_utc = dt.datetime.now(dt.UTC).date().isoformat()
@@ -3334,6 +3340,8 @@ def build():
     summary = _calc_summary(records)
 
     build_time = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+    vol_shape_history_payload["build_time"] = build_time
+    vol_shape_history_payload["source_file"] = ETF_METRICS_DAILY_FILE.name
     borrow_spike_risk = build_borrow_spike_risk_payload(
         borrow_history_symbols=borrow_history_symbols,
         as_of_date=today_utc,
@@ -3356,6 +3364,7 @@ def build():
         "decay_method": "linear_daily_pnl_1_over_delta_hedge",
         "borrow_history_file": "data/borrow_history.json",
         "borrow_spike_risk_file": "data/borrow_spike_risk.json",
+        "vol_shape_history_file": "data/vol_shape_history.json",
         "polygon_api_configured": bool(POLYGON_API_KEY),
         "tradier_api_configured": bool(TRADIER_TOKEN),
         "options_cache_file": "data/options_cache.json",
@@ -3367,6 +3376,8 @@ def build():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w") as f:
         json.dump(output, f, indent=None, separators=(",", ":"))
+    with open(VOL_SHAPE_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(vol_shape_history_payload, f, indent=None, separators=(",", ":"))
     with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(borrow_history, f, indent=None, separators=(",", ":"))
     with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
@@ -3383,6 +3394,8 @@ def build():
 
     file_size = OUTPUT_FILE.stat().st_size
     print(f"\n[OK] Wrote {OUTPUT_FILE} ({file_size:,} bytes)")
+    if VOL_SHAPE_HISTORY_FILE.exists():
+        print(f"  [OK] Wrote {VOL_SHAPE_HISTORY_FILE} ({VOL_SHAPE_HISTORY_FILE.stat().st_size:,} bytes)")
     if BORROW_HISTORY_FILE.exists():
         print(f"  [OK] Wrote {BORROW_HISTORY_FILE} ({BORROW_HISTORY_FILE.stat().st_size:,} bytes)")
     if BORROW_SPIKE_RISK_FILE.exists():

@@ -339,6 +339,7 @@ This same function is reused for **sorting** the column. If you change the rende
 | File | Producer | Consumer | Refresh cadence |
 |---|---|---|---|
 | `dashboard_data.json` | `build_data.py` | `index.html` (always loaded) | daily, plus `--borrow-only` every 10 min |
+| `vol_shape_history.json` | `build_data.py` (`vol_shape_metrics.py`) | Chart page vol-shape history plots (prefetched); falls back to client recompute from `etf_metrics_daily` | full `build_data` after metrics ingest |
 | `etf_screened_today.csv` | `ls-algo/daily_screener.py` | `build_data.py` | daily (cached copy of upstream) |
 | `borrow_history.json` | `build_data.py` (walks ls-algo git history) | `ChartPage`, `ls-algo` net-edge bootstrap | daily |
 | `borrow_spike_risk.json` | `build_data.py` (spike model) | `ChartPage`, `BorrowMonitor` | daily |
@@ -448,8 +449,10 @@ The high-importance fields, grouped by purpose:
   fields stay on the screener export (`und_vol_shape_source` =
   `screener`). Percentiles and labels are recomputed on the metrics
   joint series (may differ slightly from ls-algo's full underlying TR
-  panel). Run `update-etf-metrics.yml` before `build-and-deploy.yml` so
-  metrics are fresh.
+  panel).   Run `update-etf-metrics.yml` before `build-and-deploy.yml` so
+  metrics are fresh. Rolling TR/VCR/RV series (last ~252 points per
+  symbol) ship in `data/vol_shape_history.json`; charts prefer that
+  file over browser recomputation.
 - `schema_v` (currently `2`), `edge_sign_convention` (`short_favorable_positive`)
 
 ### Algo flags
@@ -638,7 +641,7 @@ Five workflows, four cron schedules:
 
 | Workflow | Cadence | What it does |
 |---|---|---|
-| `build-and-deploy.yml` | Daily 4:30 PM ET (Mon–Fri) + on every `push` to `main` | Full `build_data.py` rebuild + commit `data/*` + deploy `_site/` to GitHub Pages |
+| `build-and-deploy.yml` | Daily 4:30 PM ET (Mon–Fri) + on every `push` to `main` + after successful `Update ETF Metrics Daily` | `git pull` latest `main`, full `build_data.py` (incl. `vol_shape_history.json`) + commit `data/*` + deploy `_site/` to GitHub Pages |
 | `refresh-borrow.yml` | Every 10 min | `build_data.py --borrow-only` + commit `data/dashboard_data.json` |
 | `refresh-options.yml` | Every 5 min | `build_data.py --options-only` + commit `data/options_cache.json` |
 | `update-etf-metrics.yml` | Daily 5:00 AM ET | `ingest_etf_metrics.py` + backfills + **`bootstrap_metrics_yahoo_history.py`** + `ingest_distributions.py` |

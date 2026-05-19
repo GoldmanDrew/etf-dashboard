@@ -10,6 +10,7 @@ import pandas as pd
 TRADING_DAYS = 252
 VOL_SHAPE_WINDOWS: tuple[int, ...] = (20, 60)
 VOL_SHAPE_PRIMARY_WINDOW = 60
+VOL_SHAPE_HISTORY_MAX_POINTS = 252
 
 
 def _vol_shape_columns_for_window(window: int) -> tuple[str, ...]:
@@ -165,6 +166,79 @@ def underlying_vol_shape_panel_from_prices(prices: pd.Series) -> dict[str, Any]:
     return out
 
 
+def _round_hist(v: float | None) -> float | None:
+    if v is None or not np.isfinite(v):
+        return None
+    return round(float(v), 6)
+
+
+def build_underlying_vol_shape_history(
+    prices: pd.Series,
+    window: int = VOL_SHAPE_PRIMARY_WINDOW,
+    max_points: int = VOL_SHAPE_HISTORY_MAX_POINTS,
+) -> dict[str, Any]:
+    """Rolling TR/VCR/RV series (matches index.html buildUnderlyingVolShapeHistory)."""
+    empty: dict[str, Any] = {"series": [], "vcrMedian": None, "window": window}
+    if window <= 0 or window % 5 != 0:
+        return empty
+    if prices is None:
+        return empty
+
+    s = pd.to_numeric(prices, errors="coerce").dropna()
+    s = s[~s.index.duplicated(keep="last")].sort_index()
+    if len(s) < window + 1:
+        return empty
+
+    log_r = np.log(s / s.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
+    log_r = log_r[np.isfinite(log_r)]
+    if len(log_r) < window:
+        return empty
+
+    rets: list[tuple[str, float]] = [
+        (str(log_r.index[i]), float(log_r.iloc[i])) for i in range(len(log_r))
+    ]
+    n_weeks = window // 5
+    out: list[dict[str, Any]] = []
+    for end in range(window, len(rets) + 1):
+        tail = np.asarray([r for _, r in rets[end - window : end]], dtype=float)
+        sum_sq = float(np.sum(tail**2))
+        if not np.isfinite(sum_sq) or sum_sq <= 0:
+            continue
+        rv_daily = float(np.sqrt((sum_sq / window) * TRADING_DAYS))
+        weekly = tail.reshape(n_weeks, 5).sum(axis=1)
+        rv_weekly = float(np.sqrt(np.mean(weekly**2) * (TRADING_DAYS / 5.0)))
+        trend_ratio = rv_weekly / rv_daily if rv_daily > 0 else None
+        vcr = float(np.max(tail**2) / sum_sq)
+        out.append(
+            {
+                "date": rets[end - 1][0],
+                "rv_daily": _round_hist(rv_daily),
+                "rv_weekly": _round_hist(rv_weekly),
+                "trend_ratio": _round_hist(trend_ratio),
+                "vcr": _round_hist(vcr),
+            }
+        )
+
+    if max_points > 0 and len(out) > max_points:
+        out = out[-max_points:]
+
+    vcr_vals = sorted(
+        float(x["vcr"]) for x in out if x.get("vcr") is not None and np.isfinite(float(x["vcr"]))
+    )
+    if vcr_vals:
+        mid = len(vcr_vals) // 2
+        vcr_median = (
+            vcr_vals[mid]
+            if len(vcr_vals) % 2
+            else 0.5 * (vcr_vals[mid - 1] + vcr_vals[mid])
+        )
+    else:
+        vcr_median = None
+    vcr_median_r = _round_hist(vcr_median)
+    series = [{**row, "vcr_median": vcr_median_r} for row in out]
+    return {"series": series, "vcrMedian": vcr_median_r, "window": window}
+
+
 def _joint_metrics_price_series(rows: pd.DataFrame) -> pd.Series | None:
     if rows is None or rows.empty:
         return None
@@ -190,26 +264,35 @@ def _joint_metrics_price_series(rows: pd.DataFrame) -> pd.Series | None:
     return pd.Series([p[1] for p in prices], index=idx, dtype=float)
 
 
-def load_vol_shape_by_symbol(
+def load_vol_shape_from_metrics(
     metrics_path: Path,
     universe_symbols: set[str] | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Per-ETF vol-shape from joint metrics underlying_adj_close."""
+    *,
+    history_max_points: int = VOL_SHAPE_HISTORY_MAX_POINTS,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Headline vol-shape panels and rolling history keyed by ETF symbol."""
+    empty_history: dict[str, Any] = {
+        "window": VOL_SHAPE_PRIMARY_WINDOW,
+        "history_max_points": history_max_points,
+        "symbols": {},
+        "symbols_count": 0,
+    }
     if not metrics_path.exists():
-        return {}
+        return {}, empty_history
     try:
         df = pd.read_csv(metrics_path)
     except Exception as e:
         print(f"  Warning: could not read ETF metrics for vol-shape: {e}")
-        return {}
+        return {}, empty_history
 
     if "ticker" not in df.columns:
-        return {}
+        return {}, empty_history
 
     if "date" in df.columns:
         df = df.sort_values(["ticker", "date"], kind="stable")
 
     out: dict[str, dict[str, Any]] = {}
+    history_symbols: dict[str, Any] = {}
     for ticker, grp in df.groupby("ticker", sort=False):
         sym = str(ticker or "").strip().upper()
         if not sym:
@@ -227,7 +310,26 @@ def load_vol_shape_by_symbol(
         panel["und_vol_shape_metrics_asof"] = str(px.index[-1]) if len(px.index) else None
         panel["und_vol_shape_joint_days"] = int(len(px))
         out[sym] = panel
-    return out
+        hist = build_underlying_vol_shape_history(
+            px,
+            window=VOL_SHAPE_PRIMARY_WINDOW,
+            max_points=history_max_points,
+        )
+        if hist.get("series"):
+            history_symbols[sym] = hist
+
+    empty_history["symbols"] = history_symbols
+    empty_history["symbols_count"] = len(history_symbols)
+    return out, empty_history
+
+
+def load_vol_shape_by_symbol(
+    metrics_path: Path,
+    universe_symbols: set[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Per-ETF headline vol-shape only (backward-compatible helper)."""
+    panels, _ = load_vol_shape_from_metrics(metrics_path, universe_symbols)
+    return panels
 
 
 def apply_vol_shape_to_record(rec: dict[str, Any], panel: dict[str, Any] | None) -> None:

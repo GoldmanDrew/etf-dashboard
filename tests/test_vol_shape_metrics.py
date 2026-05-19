@@ -12,6 +12,7 @@ if str(_SCRIPTS) not in sys.path:
 
 from vol_shape_metrics import (
     VOL_SHAPE_WINDOWS,
+    build_underlying_vol_shape_history,
     underlying_vol_shape_from_prices,
     underlying_vol_shape_panel_from_prices,
     vol_shape_label,
@@ -40,6 +41,14 @@ def test_vol_shape_single_jump_has_high_vcr():
     px = _prices_from_log_returns(([0.006] * 19) + [0.036277])
     out = underlying_vol_shape_from_prices(px, 20)
     assert out["und_vcr_20d"] > 0.65
+
+
+def test_build_underlying_vol_shape_history_caps_points():
+    px = _prices_from_log_returns([0.004] * 100)
+    hist = build_underlying_vol_shape_history(px, window=20, max_points=10)
+    assert len(hist["series"]) == 10
+    assert hist["series"][-1]["date"]
+    assert np.isfinite(hist["vcrMedian"])
 
 
 def test_vol_shape_panel_covers_both_windows():
