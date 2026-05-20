@@ -1,0 +1,157 @@
+name: Intraday LETF Flow Snapshot
+
+# Estimates today's pending LETF close-rebalance from intraday underlying
+# moves (Avellaneda-Zhang identity applied with return_so_far). Runs every
+# 5 min during the union of EDT and EST trading hours plus a small buffer
+# either side of the close.
+#
+#   13:30 UTC = 09:30 ET (EDT open)  / 08:30 ET (EST open)
+#   14:30 UTC = 10:30 ET (EDT)       / 09:30 ET (EST open)
+#   20:00 UTC = 16:00 ET (EDT close) / 15:00 ET (EST)
+#   21:00 UTC = 17:00 ET (EDT)       / 16:00 ET (EST close)
+#
+# We schedule 13-21 UTC weekdays, which covers both DST regimes. The script
+# no-ops when ``return_d1_so_far`` is null (no intraday data), so weekend /
+# pre-open executions just write a stale snapshot with quality_flag=missing.
+
+on:
+  schedule:
+    - cron: "*/5 13-21 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "intraday-flow-refresh"
+  cancel-in-progress: true
+
+jobs:
+  refresh-intraday-flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh underlying intraday spots
+        # Hard-disable yfinance fallback in CI: the Polygon snapshot covers
+        # all listed US equities in one batched call, and yf.fast_info adds
+        # ~30 s per ticker (rate-limited). Bus errors on yfinance are
+        # tolerable -- we simply skip those underlyings for this snapshot.
+        run: python scripts/refresh_underlying_spots.py --max-yfinance 0
+
+      - name: Build intraday LETF flow estimates
+        run: python scripts/build_letf_intraday_flows.py
+
+      - name: Print intraday flow summary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("data/letf_rebalance_flows_intraday_latest.json")
+          if not p.exists():
+              raise SystemExit("Missing data/letf_rebalance_flows_intraday_latest.json")
+          payload = json.loads(p.read_text(encoding="utf-8"))
+          print(f"build_time={payload.get('build_time')} as_of={payload.get('as_of')}")
+          print(f"funds priced={payload.get('n_funds_priced')}/{payload.get('n_funds_total')} underlyings={payload.get('n_underlyings_priced')}")
+          print(f"minutes_to_close={payload.get('minutes_to_close')} bias_underlyings={payload.get('bias_underlyings_count')}")
+          by = payload.get("by_underlying") or {}
+          ranked = sorted(
+              by.items(),
+              key=lambda kv: -abs(kv[1].get("estimated_net_close_rebalance_dollars") or 0),
+          )[:10]
+          for und, row in ranked:
+              print(
+                  f"  {und:6s} net=${(row.get('estimated_net_close_rebalance_dollars') or 0)/1e6:>+9.1f}M "
+                  f"r={row.get('return_d1_so_far')!s:>10s} "
+                  f"%ADV={row.get('estimated_close_rebalance_pct_adv_20d')} "
+                  f"funds={row.get('n_funds_priced')}"
+              )
+          PY
+
+      - name: Commit intraday flow artifacts
+        run: |
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          ALL_PATHS="data/underlying_intraday_spot.json data/letf_rebalance_flows_intraday_latest.json data/letf_rebalance_flows_intraday_snapshots"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          STAGE=""
+          for p in ${ALL_PATHS}; do
+            if [ -e "$p" ]; then STAGE="${STAGE} $p"; fi
+          done
+          if [ -z "${STAGE# }" ]; then
+            echo "No intraday-flow artifacts present; nothing to commit."
+            exit 0
+          fi
+          git add ${STAGE}
+          if git diff --staged --quiet; then
+            echo "No intraday-flow changes to commit"
+            exit 0
+          fi
+          TMP_DIR="$(mktemp -d)"
+          for p in ${STAGE}; do
+            mkdir -p "${TMP_DIR}/$(dirname "$p")"
+            if [ -d "$p" ]; then
+              mkdir -p "${TMP_DIR}/$p"
+              cp -a "$p"/. "${TMP_DIR}/$p"/
+            else
+              cp -a "$p" "${TMP_DIR}/$p"
+            fi
+          done
+          pushed=0
+          for i in 1 2 3; do
+            git fetch origin "${BRANCH}"
+            git reset --hard || true
+            git clean -fd || true
+            git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
+            ROUND=""
+            for p in ${ALL_PATHS}; do
+              if [ -e "${TMP_DIR}/$p" ]; then
+                mkdir -p "$(dirname "$p")"
+                if [ -d "${TMP_DIR}/$p" ]; then
+                  mkdir -p "$p"
+                  cp -a "${TMP_DIR}/$p"/. "$p"/
+                else
+                  cp -a "${TMP_DIR}/$p" "$p"
+                fi
+                ROUND="${ROUND} $p"
+              fi
+            done
+            if [ -z "${ROUND# }" ]; then
+              echo "No files to stage after rebase"
+              pushed=1
+              break
+            fi
+            git add ${ROUND}
+            if git diff --staged --quiet; then
+              echo "No intraday-flow changes against latest origin"
+              pushed=1
+              break
+            fi
+            git commit -m "chore: refresh intraday LETF flow [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+            if git push origin "HEAD:${BRANCH}"; then
+              pushed=1
+              break
+            fi
+            git reset --hard "origin/${BRANCH}" || true
+            sleep $((i * 5))
+          done
+          rm -rf "${TMP_DIR}"
+          if [ "$pushed" -ne 1 ]; then
+            echo "Push failed after retries"
+            exit 1
+          fi

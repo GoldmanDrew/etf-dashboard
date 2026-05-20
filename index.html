@@ -1367,6 +1367,8 @@ const OPTIONS_CACHE_URL = "data/options_cache.json";
 const ETF_METRICS_DAILY_URL = "data/etf_metrics_daily.json";
 const LETF_REBALANCE_FLOWS_DAILY_URL = "data/letf_rebalance_flows_daily.json";
 const LETF_REBALANCE_FLOWS_LATEST_URL = "data/letf_rebalance_flows_latest.json";
+const LETF_INTRADAY_FLOWS_URL = "data/letf_rebalance_flows_intraday_latest.json";
+const LETF_INTRADAY_METRICS_URL = "data/letf_intraday_flow_metrics.json";
 const VOL_SHAPE_HISTORY_URL = "data/vol_shape_history.json";
 /** @type {{ symbols: Record<string, { series: object[], vcrMedian: number|null, window: number }>, buildTime: string|null }|null} */
 let VOL_SHAPE_HISTORY_CACHE = null;
@@ -1384,6 +1386,8 @@ let BORROW_SPIKE_RISK_CACHE = null;
 let ETF_METRICS_CACHE = null;
 /** @type {{ byTicker: Record<string, object[]>, byUnderlying: Record<string, object>, latestDate: string|null, buildTime: string|null, method: string|null }|null} */
 let LETF_REBALANCE_FLOWS_CACHE = null;
+/** @type {{ byFund: Record<string, object>, byUnderlying: Record<string, object>, asOf: string|null, buildTime: string|null, minutesToClose: number|null, todayHistory: object[], biasMetrics: object|null }|null} */
+let LETF_INTRADAY_FLOWS_CACHE = null;
 let ETF_DISTRIBUTIONS_CACHE = null;
 let NAV_FORECAST_LATEST_CACHE = null;
 let NAV_FORECAST_METRICS_CACHE = null;
@@ -1839,6 +1843,46 @@ async function loadLetfRebalanceFlowsCache() {
     method: latestPayload?.method || null,
   };
   return LETF_REBALANCE_FLOWS_CACHE;
+}
+
+/**
+ * Fetches the intraday LETF flow snapshot. Always cache-busts so the polling
+ * loop sees fresh builds (the workflow rewrites this file every 5 min during
+ * RTH). Bias metrics live in a sibling JSON; loaded lazily and tolerant of
+ * 404 (file may not exist yet pre-first-reconciliation).
+ */
+async function loadLetfIntradayFlowsCache({ force = true } = {}) {
+  if (!force && LETF_INTRADAY_FLOWS_CACHE?.buildTime) return LETF_INTRADAY_FLOWS_CACHE;
+  const cacheBust = `?t=${Math.floor(Date.now() / 30000)}`; // 30 s buckets
+  const [latestRes, metricsRes] = await Promise.all([
+    fetch(`${LETF_INTRADAY_FLOWS_URL}${cacheBust}`, { cache: 'no-store' }),
+    fetch(`${LETF_INTRADAY_METRICS_URL}${cacheBust}`, { cache: 'no-store' }).catch(() => null),
+  ]);
+  if (!latestRes.ok) {
+    LETF_INTRADAY_FLOWS_CACHE = null;
+    throw new Error(`letf intraday flows HTTP ${latestRes.status}`);
+  }
+  const latest = await latestRes.json();
+  let biasMetrics = null;
+  if (metricsRes && metricsRes.ok) {
+    try { biasMetrics = await metricsRes.json(); } catch { biasMetrics = null; }
+  }
+  LETF_INTRADAY_FLOWS_CACHE = {
+    byFund: latest?.by_fund || {},
+    byUnderlying: latest?.by_underlying || {},
+    asOf: latest?.as_of || null,
+    buildTime: latest?.build_time || null,
+    minutesToClose: Number.isFinite(Number(latest?.minutes_to_close)) ? Number(latest.minutes_to_close) : null,
+    spotSources: latest?.spot_sources || null,
+    spotPricedCount: latest?.spot_priced_count ?? null,
+    spotUniverseCount: latest?.spot_universe_count ?? null,
+    nFundsPriced: latest?.n_funds_priced ?? null,
+    nFundsTotal: latest?.n_funds_total ?? null,
+    method: latest?.method || null,
+    todayHistory: Array.isArray(latest?.today_history) ? latest.today_history : [],
+    biasMetrics,
+  };
+  return LETF_INTRADAY_FLOWS_CACHE;
 }
 
 const fmtSignedMoney = (v) => {
@@ -4252,7 +4296,108 @@ function LetfRebalanceFlowChart({ series, title, showReturnOverlay = true }) {
   );
 }
 
-function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart', dashboardBuildTime = null }) {
+/**
+ * Plots today's per-build estimated net close-rebalance for one underlying as
+ * a function of minutes-to-close, with a horizontal reference line for the
+ * realised T-1 close (proxy for "where this might land"). Empty state when
+ * fewer than two snapshots are available -- meaningful only mid-day onward.
+ */
+function LetfIntradayConvergenceChart({ series, underlying, latestRealized, latestRealizedDate }) {
+  const points = (Array.isArray(series) ? series : []).filter(
+    (p) => Number.isFinite(p.net) && Number.isFinite(p.minutes_to_close),
+  );
+  if (points.length < 2) {
+    return (
+      <div className="trade-card" style={{ marginTop: 12 }}>
+        <div className="scenario-title">{underlying} — intraday convergence</div>
+        <div className="scenario-warning">
+          Need ≥ 2 intraday snapshots to plot convergence. {points.length === 1
+            ? `Have 1 so far at ${points[0].minutes_to_close ?? '—'}m to close.`
+            : 'Awaiting today’s first refresh.'}
+        </div>
+      </div>
+    );
+  }
+  // Sort by descending minutes_to_close so the x-axis reads "open → close".
+  const sorted = [...points].sort((a, b) => Number(b.minutes_to_close) - Number(a.minutes_to_close));
+  const W = 920, H = 200;
+  const padL = 76, padR = 28, padT = 16, padB = 36;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const xs = sorted.map((p) => Number(p.minutes_to_close));
+  const ys = sorted.map((p) => Number(p.net));
+  const refY = Number(latestRealized);
+  const allYs = [...ys];
+  if (Number.isFinite(refY)) allYs.push(refY);
+  const yMaxAbs = Math.max(...allYs.map((v) => Math.abs(v)), 1);
+  const xMin = Math.max(...xs);
+  const xMax = Math.min(...xs);
+  const xRange = Math.max(1, xMin - xMax);
+  const xPos = (m) => padL + ((xMin - m) / xRange) * innerW;
+  const yPos = (v) => padT + innerH / 2 - (v / (yMaxAbs * 1.05)) * (innerH / 2 - 4);
+  const polyPoints = sorted.map((p) => `${xPos(p.minutes_to_close).toFixed(2)},${yPos(p.net).toFixed(2)}`).join(' ');
+  const yTicks = [1, 0.5, 0, -0.5, -1];
+  const xTicks = [xMin, Math.round((xMin + xMax) / 2), xMax].filter((v, i, a) => a.indexOf(v) === i);
+  return (
+    <div className="trade-card" style={{ marginTop: 12 }}>
+      <div className="scenario-title">{underlying} — intraday convergence (today)</div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label="Intraday convergence">
+        {yTicks.map((frac) => {
+          const y = padT + innerH / 2 - frac * (innerH / 2 - 4);
+          const dollars = frac * yMaxAbs * 1.05;
+          return (
+            <g key={`gy-${frac}`}>
+              <line x1={padL} x2={W - padR} y1={y} y2={y} stroke={frac === 0 ? 'rgba(139,156,187,0.55)' : 'rgba(139,156,187,0.18)'} strokeDasharray={frac === 0 ? '' : '3 3'} />
+              <text x={padL - 8} y={y + 3} textAnchor="end" fontSize="10" fill="#8b9cbb" fontFamily="DM Sans">
+                {frac === 0 ? '$0' : fmtCompactSignedMoney(dollars, 1)}
+              </text>
+            </g>
+          );
+        })}
+        {Number.isFinite(refY) && (
+          <g>
+            <line
+              x1={padL}
+              x2={W - padR}
+              y1={yPos(refY)}
+              y2={yPos(refY)}
+              stroke="rgba(96,165,250,0.85)"
+              strokeDasharray="4 4"
+            />
+            <text x={W - padR + 4} y={yPos(refY) + 3} textAnchor="start" fontSize="10" fill="rgba(96,165,250,0.85)" fontFamily="DM Sans">
+              prior close ({latestRealizedDate || '—'}): {fmtCompactSignedMoney(refY)}
+            </text>
+          </g>
+        )}
+        <polyline
+          fill="none"
+          stroke="rgba(245,158,11,0.95)"
+          strokeWidth="1.6"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          points={polyPoints}
+        />
+        {sorted.map((p, i) => (
+          <circle key={`pt-${i}`} cx={xPos(p.minutes_to_close)} cy={yPos(p.net)} r={2.4} fill="rgba(245,158,11,0.95)">
+            <title>{`${p.as_of || ''} (${p.minutes_to_close}m to close): ${fmtSignedMoney(p.net)}`}</title>
+          </circle>
+        ))}
+        {xTicks.map((m) => (
+          <text key={`gx-${m}`} x={xPos(m)} y={H - 10} textAnchor="middle" fontSize="11" fill="#8b9cbb" fontFamily="DM Sans">
+            {m}m to close
+          </text>
+        ))}
+      </svg>
+      <div className="backtest-chart-legend">
+        <span><span className="backtest-legend-dot" style={{ background: 'rgba(245,158,11,0.95)' }} />Today’s estimate trajectory</span>
+        {Number.isFinite(refY) && (
+          <span><span className="backtest-legend-dot" style={{ background: 'rgba(96,165,250,0.85)' }} />Prior-close realised</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart', dashboardBuildTime = null, intradayFlows = null, intradayFlowsError = null }) {
   const activeTf = useMemo(
     () => TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2],
     [chartVolLookbackRange],
@@ -4672,6 +4817,32 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     () => fundFlowHistory.filter((row) => row?.included_in_aggregate).length,
     [fundFlowHistory],
   );
+  const intradayFundRow = useMemo(() => (
+    intradayFlows?.byFund?.[String(etfSym || '').toUpperCase()] || null
+  ), [intradayFlows, etfSym]);
+  const intradayUnderlyingRow = useMemo(() => (
+    intradayFlows?.byUnderlying?.[String(undSym || '').toUpperCase()] || null
+  ), [intradayFlows, undSym]);
+  const intradayConvergenceSeries = useMemo(() => {
+    const hist = Array.isArray(intradayFlows?.todayHistory) ? intradayFlows.todayHistory : [];
+    const und = String(undSym || '').toUpperCase();
+    return hist
+      .map((entry) => ({
+        as_of: entry?.as_of,
+        minutes_to_close: entry?.minutes_to_close,
+        net: Number(entry?.net_by_underlying?.[und]),
+      }))
+      .filter((p) => Number.isFinite(p.net));
+  }, [intradayFlows, undSym]);
+  const intradayFreshnessClass = useMemo(() => {
+    if (!intradayFlows?.asOf) return '';
+    const ts = Date.parse(intradayFlows.asOf);
+    if (!Number.isFinite(ts)) return '';
+    const ageMin = (Date.now() - ts) / 60000;
+    if (ageMin <= 8) return 'val-positive';
+    if (ageMin <= 30) return '';
+    return 'val-negative';
+  }, [intradayFlows]);
   const peerFlowRows = useMemo(() => (
     Array.isArray(underlyingFlowLatest?.top_contributors) ? underlyingFlowLatest.top_contributors : []
   ), [underlyingFlowLatest]);
@@ -6429,6 +6600,56 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <>
               <div className="chart-stats" style={{ marginTop: 4 }}>
                 <div className="chart-stat">
+                  <div className="cs-label">
+                    {etfSym} intraday est.
+                    {intradayFlows?.minutesToClose != null
+                      ? <span className="cs-sub" style={{ marginLeft: 6 }}> · {intradayFlows.minutesToClose}m to close</span>
+                      : null}
+                  </div>
+                  <div className={cls('cs-value', flowValClass(intradayFundRow?.estimated_close_rebalance_dollars))}>
+                    {fmtSignedMoney(intradayFundRow?.estimated_close_rebalance_dollars)}
+                  </div>
+                  <div className={cls('cs-sub', intradayFreshnessClass)}>
+                    {intradayFundRow
+                      ? <>
+                          {flowDirectionLabel(intradayFundRow.estimated_close_rebalance_dollars)}
+                          {Number.isFinite(Number(intradayFundRow.return_d1_so_far))
+                            ? <> · und {fmtPctDecimal(intradayFundRow.return_d1_so_far, 2)} so far</>
+                            : null}
+                          {intradayFundRow.spot_stale ? <> · <span className="val-negative">stale spot</span></> : null}
+                          {intradayFundRow.quality_flag && intradayFundRow.quality_flag !== 'ok'
+                            ? <> · <span className="val-negative">{intradayFundRow.quality_flag}</span></>
+                            : null}
+                          {intradayFlows?.asOf
+                            ? <> · {fmtTime(intradayFlows.asOf)}</>
+                            : null}
+                        </>
+                      : intradayFlowsError
+                        ? <span className="val-negative">{intradayFlowsError}</span>
+                        : <>Awaiting first intraday snapshot</>}
+                  </div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">{String(undSym || '').toUpperCase()} remaining-to-close</div>
+                  <div className={cls('cs-value', flowValClass(intradayUnderlyingRow?.remaining_close_rebalance_dollars))}>
+                    {fmtSignedMoney(intradayUnderlyingRow?.remaining_close_rebalance_dollars
+                      ?? intradayUnderlyingRow?.estimated_net_close_rebalance_dollars)}
+                  </div>
+                  <div className="cs-sub">
+                    {intradayUnderlyingRow
+                      ? <>
+                          {fmtNum(intradayUnderlyingRow.n_funds_priced)} fund(s)
+                          {intradayUnderlyingRow.estimated_close_rebalance_pct_adv_20d != null
+                            ? <> · {fmtPctDecimal(intradayUnderlyingRow.estimated_close_rebalance_pct_adv_20d, 2)} of 20d $ ADV</>
+                            : null}
+                          {intradayUnderlyingRow.bias_signed_error_pct != null
+                            ? <> · bias-adj {fmtSignedMoney(intradayUnderlyingRow.estimated_close_rebalance_dollars_bias_adj)}</>
+                            : null}
+                        </>
+                      : <>—</>}
+                  </div>
+                </div>
+                <div className="chart-stat">
                   <div className="cs-label">{etfSym} rebalance (latest)</div>
                   <div className={cls('cs-value', flowValClass(latestFundFlow?.rebalance_signed_dollars))}>
                     {fmtSignedMoney(latestFundFlow?.rebalance_signed_dollars)}
@@ -6496,6 +6717,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <LetfRebalanceFlowChart
                 series={fundFlowHistory}
                 title={`${etfSym} — last ${fundFlowHistory.length} trading days (${fundFlowIncludedCount} included)`}
+              />
+
+              <LetfIntradayConvergenceChart
+                series={intradayConvergenceSeries}
+                underlying={String(undSym || '').toUpperCase()}
+                latestRealized={underlyingFlowLatest?.net_moc_dollars}
+                latestRealizedDate={underlyingFlowLatest?.date}
               />
 
               <div className="trade-card" style={{ marginTop: 12 }}>
@@ -7269,14 +7497,35 @@ function NewsPage({
 }
 
 // ── Top-level Flow page ──────────────────────────────
-function FlowPage({ payload, bucketOf, onNavigateToChart }) {
-  const allRows = useMemo(() => {
+function FlowPage({ payload, intradayPayload = null, intradayError = null, bucketOf, onNavigateToChart }) {
+  const [mode, setMode] = useState(() => (intradayPayload?.byUnderlying ? 'intraday' : 'eod'));
+  // If intraday data lands after first render, jump to it once.
+  useEffect(() => {
+    if (mode === 'eod' && intradayPayload?.byUnderlying && Object.keys(intradayPayload.byUnderlying).length > 0) {
+      // Only auto-switch on the very first time we see a non-empty intraday payload.
+      // Subsequent user toggles win.
+    }
+  }, [intradayPayload]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const eodRows = useMemo(() => {
     const map = payload?.byUnderlying || {};
     return Object.keys(map).map((und) => ({ underlying: und, ...map[und] }));
   }, [payload]);
-  const latestDate = payload?.latestDate || null;
-  const buildTime = payload?.buildTime || null;
-  const method = payload?.method || null;
+  const intradayRows = useMemo(() => {
+    const map = intradayPayload?.byUnderlying || {};
+    return Object.keys(map).map((und) => ({ underlying: und, ...map[und] }));
+  }, [intradayPayload]);
+
+  const allRows = mode === 'intraday' ? intradayRows : eodRows;
+  const latestDate = mode === 'intraday'
+    ? (intradayPayload?.asOf || null)
+    : (payload?.latestDate || null);
+  const buildTime = mode === 'intraday'
+    ? (intradayPayload?.buildTime || null)
+    : (payload?.buildTime || null);
+  const method = mode === 'intraday'
+    ? (intradayPayload?.method || 'L × (L − 1) × prior-close AUM × return so far')
+    : (payload?.method || null);
 
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState('abs_net_moc');
@@ -7287,19 +7536,45 @@ function FlowPage({ payload, bucketOf, onNavigateToChart }) {
   const [hideSingleFund, setHideSingleFund] = useState(false);
   const [minFunds, setMinFunds] = useState(0);
 
+  // Read the "net dollars" field for the current mode.
+  const netDollarsOf = useCallback((row) => (
+    mode === 'intraday'
+      ? Number(row?.estimated_net_close_rebalance_dollars)
+      : Number(row?.net_moc_dollars)
+  ), [mode]);
+  const remainingDollarsOf = useCallback((row) => (
+    mode === 'intraday'
+      ? (Number.isFinite(Number(row?.remaining_close_rebalance_dollars))
+          ? Number(row.remaining_close_rebalance_dollars)
+          : Number(row?.estimated_net_close_rebalance_dollars))
+      : Number(row?.net_moc_dollars)
+  ), [mode]);
+  const fundsOf = useCallback((row) => (
+    mode === 'intraday' ? Number(row?.n_funds_priced || 0) : Number(row?.n_funds || 0)
+  ), [mode]);
+
   const sortValue = useCallback((row, key) => {
+    const net = netDollarsOf(row);
     const v = (
-      key === 'abs_net_moc' ? Math.abs(Number(row.net_moc_dollars)) :
-      key === 'abs_pct_adv' ? Math.abs(Number(row.net_moc_pct_adv_20d)) :
-      key === 'abs_pct_aum' ? Math.abs(Number(row.net_moc_pct_letf_aum)) :
+      key === 'abs_net_moc' ? Math.abs(net) :
+      key === 'abs_remaining' ? Math.abs(remainingDollarsOf(row)) :
+      key === 'abs_pct_adv' ? Math.abs(Number(
+        mode === 'intraday' ? row.estimated_close_rebalance_pct_adv_20d : row.net_moc_pct_adv_20d,
+      )) :
+      key === 'abs_pct_aum' ? Math.abs(Number(
+        mode === 'intraday' ? row.estimated_close_rebalance_pct_aum : row.net_moc_pct_letf_aum,
+      )) :
       key === 'abs_z60' ? Math.abs(Number(row.net_moc_z_60d)) :
       key === 'underlying' ? row.underlying :
+      key === 'n_funds' ? fundsOf(row) :
+      key === 'return' ? Number(mode === 'intraday' ? row.return_d1_so_far : row.underlying_return_d1) :
+      key === 'abs_volume_so_far' ? Math.abs(Number(row.volume_so_far_pct_adv)) :
       row[key]
     );
     if (typeof v === 'string') return v;
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
-  }, []);
+  }, [mode, netDollarsOf, remainingDollarsOf, fundsOf]);
 
   const filtered = useMemo(() => {
     const q = (search || '').trim().toUpperCase();
@@ -7310,12 +7585,13 @@ function FlowPage({ payload, bucketOf, onNavigateToChart }) {
         );
         if (!inContrib) return false;
       }
-      if (direction === 'buy' && !(Number(row.net_moc_dollars) > 0)) return false;
-      if (direction === 'sell' && !(Number(row.net_moc_dollars) < 0)) return false;
+      const net = netDollarsOf(row);
+      if (direction === 'buy' && !(net > 0)) return false;
+      if (direction === 'sell' && !(net < 0)) return false;
       if (hideMissingAdv && !(Number.isFinite(Number(row.underlying_dollar_adv_20d)) && Number(row.underlying_dollar_adv_20d) > 0)) return false;
-      if (hideStaleAggregates && row.is_latest_global === false) return false;
-      if (hideSingleFund && Number(row.n_funds || 0) < 2) return false;
-      if (Number(row.n_funds || 0) < Number(minFunds || 0)) return false;
+      if (mode === 'eod' && hideStaleAggregates && row.is_latest_global === false) return false;
+      if (hideSingleFund && fundsOf(row) < 2) return false;
+      if (fundsOf(row) < Number(minFunds || 0)) return false;
       return true;
     });
     out = [...out].sort((a, b) => {
@@ -7333,17 +7609,17 @@ function FlowPage({ payload, bucketOf, onNavigateToChart }) {
   }, [allRows, search, direction, hideMissingAdv, hideStaleAggregates, hideSingleFund, minFunds, sortKey, sortDesc, sortValue]);
 
   const headline = useMemo(() => {
-    const sortedByAbs = [...allRows].sort(
-      (a, b) => Math.abs(Number(b.net_moc_dollars) || 0) - Math.abs(Number(a.net_moc_dollars) || 0),
+    const netOf = (r) => netDollarsOf(r);
+    const grossOf = (r) => Number(
+      mode === 'intraday' ? r?.estimated_gross_close_rebalance_dollars : r?.gross_moc_dollars,
     );
-    const buys = allRows
-      .filter((r) => Number(r.net_moc_dollars) > 0)
-      .sort((a, b) => Number(b.net_moc_dollars) - Number(a.net_moc_dollars));
-    const sells = allRows
-      .filter((r) => Number(r.net_moc_dollars) < 0)
-      .sort((a, b) => Number(a.net_moc_dollars) - Number(b.net_moc_dollars));
+    const sortedByAbs = [...allRows].sort(
+      (a, b) => Math.abs(netOf(b) || 0) - Math.abs(netOf(a) || 0),
+    );
+    const buys = allRows.filter((r) => netOf(r) > 0).sort((a, b) => netOf(b) - netOf(a));
+    const sells = allRows.filter((r) => netOf(r) < 0).sort((a, b) => netOf(a) - netOf(b));
     const grossMoc = allRows.reduce(
-      (sum, r) => sum + (Number.isFinite(Number(r.gross_moc_dollars)) ? Number(r.gross_moc_dollars) : 0),
+      (sum, r) => sum + (Number.isFinite(grossOf(r)) ? grossOf(r) : 0),
       0,
     );
     return {
@@ -7353,7 +7629,7 @@ function FlowPage({ payload, bucketOf, onNavigateToChart }) {
       topSell: sells[0] || null,
       grossMoc,
     };
-  }, [allRows]);
+  }, [allRows, mode, netDollarsOf]);
 
   const handleSort = useCallback((key) => {
     if (sortKey === key) setSortDesc((d) => !d);
@@ -7363,64 +7639,106 @@ function FlowPage({ payload, bucketOf, onNavigateToChart }) {
   const sortIndicator = useCallback((key) => (sortKey === key ? (sortDesc ? ' ▼' : ' ▲') : ''), [sortKey, sortDesc]);
 
   if (!allRows.length) {
+    const otherMode = mode === 'intraday' ? 'eod' : 'intraday';
+    const otherCount = otherMode === 'intraday' ? intradayRows.length : eodRows.length;
     return (
       <div className="news-content">
         <h2 className="news-title">LETF rebalance flow — by underlying</h2>
-        <div className="news-empty">
+        <div className="news-chip-row" style={{ marginTop: 8 }}>
+          <div className={cls('news-chip', mode === 'eod' && 'active')} onClick={() => setMode('eod')}>▦ EOD ({eodRows.length})</div>
+          <div className={cls('news-chip', mode === 'intraday' && 'active')} onClick={() => setMode('intraday')}>⌁ Intraday (live · {intradayRows.length})</div>
+        </div>
+        <div className="news-empty" style={{ marginTop: 10 }}>
           <div className="news-empty-icon">◉</div>
-          <div className="news-empty-title">Flow data not available yet</div>
-          <div>Run <code>python scripts/build_letf_rebalance_flows.py</code>, then reload.</div>
+          <div className="news-empty-title">
+            {mode === 'intraday' ? 'No intraday snapshot loaded yet' : 'EOD flow data not available'}
+          </div>
+          <div>
+            {mode === 'intraday'
+              ? <>The <code>intraday-flow.yml</code> workflow refreshes every 5 min during US RTH (Mon–Fri 9:30 AM – 5:00 PM ET). {intradayError ? <><br/><span className="val-negative">{intradayError}</span></> : null}</>
+              : <>Run <code>python scripts/build_letf_rebalance_flows.py</code> to build the EOD aggregates.</>}
+            {otherCount > 0 ? <> <a href="#" onClick={(e) => { e.preventDefault(); setMode(otherMode); }}>Switch to {otherMode === 'intraday' ? 'Intraday (live)' : 'EOD'} ({otherCount})</a>.</> : null}
+          </div>
         </div>
       </div>
     );
   }
+
+  const advFieldName = mode === 'intraday' ? 'estimated_close_rebalance_pct_adv_20d' : 'net_moc_pct_adv_20d';
+  const aumFieldName = mode === 'intraday' ? 'estimated_close_rebalance_pct_aum' : 'net_moc_pct_letf_aum';
+  const returnFieldName = mode === 'intraday' ? 'return_d1_so_far' : 'underlying_return_d1';
 
   return (
     <div className="news-content">
       <h2 className="news-title">LETF rebalance flow — by underlying</h2>
       <div className="news-subtitle">
         Mechanical issuer hedge into the close: <code>{method || 'L × (L − 1) × prior-close AUM × underlying return'}</code>.
-        Latest aggregate {latestDate || '—'}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}.
+        {mode === 'intraday'
+          ? <> Snapshot {latestDate ? fmtTime(latestDate) : '—'}{intradayPayload?.minutesToClose != null ? ` · ${intradayPayload.minutesToClose}m to close` : ''}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}.</>
+          : <> Latest aggregate {latestDate || '—'}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}.</>}
+        {mode === 'intraday' && intradayError ? <> · <span className="val-negative">{intradayError}</span></> : null}
+        {mode === 'intraday' && intradayPayload?.spotSources ? (
+          <> · spots: polygon {fmtNum(intradayPayload.spotSources.polygon_snapshot)} · cache {fmtNum(intradayPayload.spotSources.options_cache)} · yf {fmtNum(intradayPayload.spotSources.yfinance_fast_info)}</>
+        ) : null}
+      </div>
+
+      <div className="news-chip-row" style={{ marginTop: 8 }}>
+        <div
+          className={cls('news-chip', mode === 'eod' && 'active')}
+          onClick={() => setMode('eod')}
+          title="Yesterday's realised close-rebalance (issuer NAV/AUM × underlying close)."
+        >
+          ▦ EOD ({eodRows.length})
+        </div>
+        <div
+          className={cls('news-chip', mode === 'intraday' && 'active')}
+          onClick={() => setMode('intraday')}
+          title="Live estimate of today's close-rebalance using intraday underlying moves."
+        >
+          ⌁ Intraday (live · {intradayRows.length})
+        </div>
       </div>
 
       <div className="chart-stats" style={{ marginTop: 6 }}>
         <div className="chart-stat">
-          <div className="cs-label">Underlyings tracked</div>
+          <div className="cs-label">{mode === 'intraday' ? 'Underlyings priced' : 'Underlyings tracked'}</div>
           <div className="cs-value">{fmtNum(headline.total)}</div>
-          <div className="cs-sub">Σ gross MOC {fmtCompactSignedMoney(headline.grossMoc)}</div>
+          <div className="cs-sub">
+            {mode === 'intraday' ? <>Σ |gross est.| {fmtCompactSignedMoney(headline.grossMoc)}</> : <>Σ gross MOC {fmtCompactSignedMoney(headline.grossMoc)}</>}
+          </div>
         </div>
         <div className="chart-stat">
           <div className="cs-label">Top buy pressure</div>
-          <div className={cls('cs-value', flowValClass(headline.topBuy?.net_moc_dollars))}>
-            {fmtSignedMoney(headline.topBuy?.net_moc_dollars)}
+          <div className={cls('cs-value', flowValClass(netDollarsOf(headline.topBuy)))}>
+            {fmtSignedMoney(netDollarsOf(headline.topBuy))}
           </div>
           <div className="cs-sub">
             {headline.topBuy?.underlying || '—'}
-            {headline.topBuy?.net_moc_pct_adv_20d != null
-              ? <> · {fmtPctDecimal(headline.topBuy.net_moc_pct_adv_20d, 2)} of 20d $ ADV</>
+            {Number.isFinite(Number(headline.topBuy?.[advFieldName]))
+              ? <> · {fmtPctDecimal(headline.topBuy[advFieldName], 2)} of 20d $ ADV</>
               : null}
           </div>
         </div>
         <div className="chart-stat">
           <div className="cs-label">Top sell pressure</div>
-          <div className={cls('cs-value', flowValClass(headline.topSell?.net_moc_dollars))}>
-            {fmtSignedMoney(headline.topSell?.net_moc_dollars)}
+          <div className={cls('cs-value', flowValClass(netDollarsOf(headline.topSell)))}>
+            {fmtSignedMoney(netDollarsOf(headline.topSell))}
           </div>
           <div className="cs-sub">
             {headline.topSell?.underlying || '—'}
-            {headline.topSell?.net_moc_pct_adv_20d != null
-              ? <> · {fmtPctDecimal(headline.topSell.net_moc_pct_adv_20d, 2)} of 20d $ ADV</>
+            {Number.isFinite(Number(headline.topSell?.[advFieldName]))
+              ? <> · {fmtPctDecimal(headline.topSell[advFieldName], 2)} of 20d $ ADV</>
               : null}
           </div>
         </div>
         <div className="chart-stat">
-          <div className="cs-label">Largest |net MOC|</div>
-          <div className={cls('cs-value', flowValClass(headline.topByAbs?.net_moc_dollars))}>
-            {fmtSignedMoney(headline.topByAbs?.net_moc_dollars)}
+          <div className="cs-label">Largest |net|</div>
+          <div className={cls('cs-value', flowValClass(netDollarsOf(headline.topByAbs)))}>
+            {fmtSignedMoney(netDollarsOf(headline.topByAbs))}
           </div>
           <div className="cs-sub">
             {headline.topByAbs?.underlying || '—'}
-            {headline.topByAbs?.n_funds != null ? <> · {fmtNum(headline.topByAbs.n_funds)} fund(s)</> : null}
+            {fundsOf(headline.topByAbs) > 0 ? <> · {fmtNum(fundsOf(headline.topByAbs))} fund(s)</> : null}
           </div>
         </div>
       </div>
@@ -7469,47 +7787,85 @@ function FlowPage({ payload, bucketOf, onNavigateToChart }) {
           <thead>
             <tr>
               <th onClick={() => handleSort('underlying')} style={{ cursor: 'pointer' }}>Underlying{sortIndicator('underlying')}</th>
-              <th>Date</th>
-              <th onClick={() => handleSort('abs_net_moc')} style={{ cursor: 'pointer' }} title="Sorted by |net MOC|">Net MOC ${sortIndicator('abs_net_moc')}</th>
+              <th>{mode === 'intraday' ? 'As of' : 'Date'}</th>
+              <th onClick={() => handleSort('abs_net_moc')} style={{ cursor: 'pointer' }} title={mode === 'intraday' ? 'Estimated close net rebalance' : 'Realised net MOC'}>
+                {mode === 'intraday' ? 'Est. close $' : 'Net MOC $'}{sortIndicator('abs_net_moc')}
+              </th>
+              {mode === 'intraday' ? (
+                <th onClick={() => handleSort('abs_remaining')} style={{ cursor: 'pointer' }} title="Estimated remaining-to-close = (1 − vol_so_far/20d_ADV) × est. close $">
+                  Remaining $ {sortIndicator('abs_remaining')}
+                </th>
+              ) : null}
               <th onClick={() => handleSort('abs_pct_aum')} style={{ cursor: 'pointer' }}>% LETF AUM{sortIndicator('abs_pct_aum')}</th>
               <th onClick={() => handleSort('abs_pct_adv')} style={{ cursor: 'pointer' }}>% 20d $ ADV{sortIndicator('abs_pct_adv')}</th>
-              <th onClick={() => handleSort('underlying_return_d1')} style={{ cursor: 'pointer' }}>Und ret{sortIndicator('underlying_return_d1')}</th>
+              {mode === 'intraday' ? (
+                <th onClick={() => handleSort('abs_volume_so_far')} style={{ cursor: 'pointer' }} title="Today's traded $ vol / 20d $ ADV">
+                  Vol so far{sortIndicator('abs_volume_so_far')}
+                </th>
+              ) : null}
+              <th onClick={() => handleSort('return')} style={{ cursor: 'pointer' }}>
+                {mode === 'intraday' ? 'Und ret so far' : 'Und ret'}{sortIndicator('return')}
+              </th>
               <th onClick={() => handleSort('n_funds')} style={{ cursor: 'pointer' }}># Funds{sortIndicator('n_funds')}</th>
-              <th onClick={() => handleSort('net_moc_5d_dollars')} style={{ cursor: 'pointer' }}>5d net{sortIndicator('net_moc_5d_dollars')}</th>
-              <th onClick={() => handleSort('net_moc_20d_dollars')} style={{ cursor: 'pointer' }}>20d net{sortIndicator('net_moc_20d_dollars')}</th>
-              <th onClick={() => handleSort('abs_z60')} style={{ cursor: 'pointer' }}>z60{sortIndicator('abs_z60')}</th>
+              {mode === 'eod' ? (
+                <>
+                  <th onClick={() => handleSort('net_moc_5d_dollars')} style={{ cursor: 'pointer' }}>5d net{sortIndicator('net_moc_5d_dollars')}</th>
+                  <th onClick={() => handleSort('net_moc_20d_dollars')} style={{ cursor: 'pointer' }}>20d net{sortIndicator('net_moc_20d_dollars')}</th>
+                  <th onClick={() => handleSort('abs_z60')} style={{ cursor: 'pointer' }}>z60{sortIndicator('abs_z60')}</th>
+                </>
+              ) : null}
               <th>Top contributor</th>
             </tr>
           </thead>
           <tbody>
             {filtered.slice(0, 500).map((row) => {
-              const stale = row.is_latest_global === false;
+              const stale = row.is_latest_global === false || (mode === 'intraday' && row.spot_stale === true);
               const top = (row.top_contributors || [])[0] || null;
+              const topDollars = mode === 'intraday' ? top?.estimated_close_rebalance_dollars : top?.rebalance_signed_dollars;
+              const dateLabel = mode === 'intraday'
+                ? (row.as_of ? fmtTime(row.as_of) : '—')
+                : (row.date || '—');
+              const netVal = netDollarsOf(row);
+              const remainingVal = remainingDollarsOf(row);
               return (
                 <tr key={row.underlying} style={stale ? { opacity: 0.7 } : undefined}>
                   <td>
                     <strong>{row.underlying}</strong>
-                    {stale ? <span className="cs-sub" style={{ marginLeft: 6 }}>· {row.date || ''}</span> : null}
+                    {stale ? <span className="cs-sub" style={{ marginLeft: 6 }}>· stale</span> : null}
                   </td>
-                  <td>{row.date || '—'}</td>
-                  <td className={flowValClass(row.net_moc_dollars)} title={fmtSignedMoney(row.net_moc_dollars)}>
-                    {fmtCompactSignedMoney(row.net_moc_dollars)}
+                  <td>{dateLabel}</td>
+                  <td className={flowValClass(netVal)} title={fmtSignedMoney(netVal)}>
+                    {fmtCompactSignedMoney(netVal)}
                   </td>
-                  <td className={flowValClass(row.net_moc_pct_letf_aum)}>
-                    {fmtPctDecimal(row.net_moc_pct_letf_aum, 2)}
+                  {mode === 'intraday' ? (
+                    <td className={flowValClass(remainingVal)} title={fmtSignedMoney(remainingVal)}>
+                      {fmtCompactSignedMoney(remainingVal)}
+                    </td>
+                  ) : null}
+                  <td className={flowValClass(row[aumFieldName])}>
+                    {fmtPctDecimal(row[aumFieldName], 2)}
                   </td>
-                  <td className={flowValClass(row.net_moc_pct_adv_20d)}>
-                    {fmtPctDecimal(row.net_moc_pct_adv_20d, 2)}
+                  <td className={flowValClass(row[advFieldName])}>
+                    {fmtPctDecimal(row[advFieldName], 2)}
                   </td>
-                  <td className={flowValClass(row.underlying_return_d1)}>
-                    {fmtPctDecimal(row.underlying_return_d1, 2)}
+                  {mode === 'intraday' ? (
+                    <td className={flowValClass(row.volume_so_far_pct_adv)}>
+                      {fmtPctDecimal(row.volume_so_far_pct_adv, 1)}
+                    </td>
+                  ) : null}
+                  <td className={flowValClass(row[returnFieldName])}>
+                    {fmtPctDecimal(row[returnFieldName], 2)}
                   </td>
-                  <td>{fmtNum(row.n_funds)}</td>
-                  <td className={flowValClass(row.net_moc_5d_dollars)}>{fmtCompactSignedMoney(row.net_moc_5d_dollars)}</td>
-                  <td className={flowValClass(row.net_moc_20d_dollars)}>{fmtCompactSignedMoney(row.net_moc_20d_dollars)}</td>
-                  <td className={flowValClass(row.net_moc_z_60d)}>
-                    {Number.isFinite(Number(row.net_moc_z_60d)) ? Number(row.net_moc_z_60d).toFixed(2) : '—'}
-                  </td>
+                  <td>{fmtNum(fundsOf(row))}</td>
+                  {mode === 'eod' ? (
+                    <>
+                      <td className={flowValClass(row.net_moc_5d_dollars)}>{fmtCompactSignedMoney(row.net_moc_5d_dollars)}</td>
+                      <td className={flowValClass(row.net_moc_20d_dollars)}>{fmtCompactSignedMoney(row.net_moc_20d_dollars)}</td>
+                      <td className={flowValClass(row.net_moc_z_60d)}>
+                        {Number.isFinite(Number(row.net_moc_z_60d)) ? Number(row.net_moc_z_60d).toFixed(2) : '—'}
+                      </td>
+                    </>
+                  ) : null}
                   <td>
                     {top ? (
                       <a
@@ -7524,8 +7880,8 @@ function FlowPage({ payload, bucketOf, onNavigateToChart }) {
                         {top.ticker}
                       </a>
                     ) : '—'}
-                    {top?.rebalance_signed_dollars != null
-                      ? <> · <span className={flowValClass(top.rebalance_signed_dollars)}>{fmtCompactSignedMoney(top.rebalance_signed_dollars)}</span></>
+                    {topDollars != null
+                      ? <> · <span className={flowValClass(topDollars)}>{fmtCompactSignedMoney(topDollars)}</span></>
                       : null}
                   </td>
                 </tr>
@@ -7557,6 +7913,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [showNews, setShowNews] = useState(false);
   const [showFlow, setShowFlow] = useState(false);
   const [letfFlowsCache, setLetfFlowsCache] = useState(LETF_REBALANCE_FLOWS_CACHE);
+  const [letfIntradayCache, setLetfIntradayCache] = useState(LETF_INTRADAY_FLOWS_CACHE);
+  const [letfIntradayError, setLetfIntradayError] = useState(null);
   const [chartRecord, setChartRecord] = useState(null);
   /** When opening a chart from the hash, optionally land on Backtest or Flow (`#/chart/SYM/backtest`, `#/chart/SYM/flow`). */
   const [chartDefaultPanel, setChartDefaultPanel] = useState('chart');
@@ -7575,11 +7933,16 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       loadVolShapeHistoryCache().catch(() => null),
       loadBorrowHistoryCache().catch(() => null),
       loadLetfRebalanceFlowsCache().catch(() => null),
+      loadLetfIntradayFlowsCache({ force: true }).catch((err) => {
+        setLetfIntradayError(err?.message || 'intraday flow data unavailable');
+        return null;
+      }),
     ]).then(() => {
       if (cancelled) return;
       setMetricsCacheTick((n) => n + 1);
       if (BORROW_HISTORY_CACHE) setBorrowHistoryMap(BORROW_HISTORY_CACHE);
       if (LETF_REBALANCE_FLOWS_CACHE) setLetfFlowsCache(LETF_REBALANCE_FLOWS_CACHE);
+      if (LETF_INTRADAY_FLOWS_CACHE) setLetfIntradayCache(LETF_INTRADAY_FLOWS_CACHE);
     });
     return () => { cancelled = true; };
   }, []);
@@ -7649,6 +8012,37 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
     })();
     return () => { cancelled = true; };
   }, [showNews]);
+
+  // Poll the intraday LETF flow snapshot while it's likely visible. Throttled
+  // to 90 s -- the source workflow rebuilds every 5 min, but multiple builds
+  // can race during the close burst, so 90 s catches them quickly without
+  // hammering Pages.
+  useEffect(() => {
+    const shouldPoll = showFlow || !!chartRecord;
+    if (!shouldPoll) return undefined;
+    let cancelled = false;
+    const tick = () => {
+      loadLetfIntradayFlowsCache({ force: true })
+        .then(() => {
+          if (!cancelled && LETF_INTRADAY_FLOWS_CACHE) {
+            setLetfIntradayCache({ ...LETF_INTRADAY_FLOWS_CACHE });
+            setLetfIntradayError(null);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) setLetfIntradayError(err?.message || 'intraday flow data unavailable');
+        });
+    };
+    tick();
+    const handle = setInterval(tick, 90_000);
+    const onVis = () => { if (document.visibilityState === 'visible') tick(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      cancelled = true;
+      clearInterval(handle);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [showFlow, chartRecord]);
 
   // Hash-based routing for chart + news pages.
   useEffect(() => {
@@ -7841,10 +8235,14 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           setChartVolLookbackRange={setChartVolLookbackRange}
           defaultPanel={chartDefaultPanel}
           dashboardBuildTime={data.build_time}
+          intradayFlows={letfIntradayCache}
+          intradayFlowsError={letfIntradayError}
         />
       ) : showFlow ? (
         <FlowPage
           payload={letfFlowsCache}
+          intradayPayload={letfIntradayCache}
+          intradayError={letfIntradayError}
           bucketOf={bucketOf}
           onNavigateToChart={navigateToChart}
         />
