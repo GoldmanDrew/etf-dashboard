@@ -1847,6 +1847,22 @@ const fmtSignedMoney = (v) => {
   const sign = n > 0 ? '+' : n < 0 ? '−' : '';
   return `${sign}$${Math.abs(Math.round(n)).toLocaleString()}`;
 };
+/** Compact "$30M" / "−$3.4B" style for axis ticks and tight columns. */
+const fmtCompactSignedMoney = (v, digits = 1) => {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  const n = Number(v);
+  const a = Math.abs(n);
+  const sign = n > 0 ? '+' : n < 0 ? '−' : '';
+  if (a >= 1e12) return `${sign}$${(a / 1e12).toFixed(digits)}T`;
+  if (a >= 1e9) return `${sign}$${(a / 1e9).toFixed(digits)}B`;
+  if (a >= 1e6) return `${sign}$${(a / 1e6).toFixed(digits)}M`;
+  if (a >= 1e3) return `${sign}$${(a / 1e3).toFixed(digits)}K`;
+  return `${sign}$${a.toFixed(0)}`;
+};
+const fmtCompactMoney = (v, digits = 1) => {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  return fmtCompactSignedMoney(Math.abs(Number(v)), digits).replace(/^[+−]/, '');
+};
 const fmtPctDecimal = (v, digits = 2) => (
   v == null || !Number.isFinite(Number(v)) ? '—' : `${(Number(v) * 100).toFixed(digits)}%`
 );
@@ -4073,35 +4089,79 @@ function PairBacktestExposureChart({ result }) {
   );
 }
 
-function LetfRebalanceFlowChart({ series, title }) {
+function LetfRebalanceFlowChart({ series, title, showReturnOverlay = true }) {
   const points = (Array.isArray(series) ? series : []).filter((r) => Number.isFinite(Number(r?.rebalance_signed_dollars)));
   if (!points.length) {
     return <div className="scenario-warning">No included rebalance-flow history for this fund yet.</div>;
   }
   const W = 920;
-  const H = 220;
-  const padL = 56;
-  const padR = 16;
+  const H = 240;
+  const padL = 76;
+  const padR = 56;
   const padT = 16;
-  const padB = 36;
+  const padB = 38;
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
   const vals = points.map((p) => Number(p.rebalance_signed_dollars));
   const maxAbs = Math.max(...vals.map((v) => Math.abs(v)), 1);
+  const yScaleMax = maxAbs * 1.05;
   const y0 = padT + innerH / 2;
   const barW = Math.max(2, Math.min(18, innerW / points.length - 2));
   const step = innerW / points.length;
   const tickEvery = Math.max(1, Math.ceil(points.length / 6));
+
+  // Optional underlying return overlay (right axis): map underlying_return_d1 to a thin line.
+  const retsRaw = points.map((p) => Number(p?.underlying_return_d1));
+  const haveOverlay = showReturnOverlay && retsRaw.some((r) => Number.isFinite(r));
+  const finiteRets = retsRaw.filter((r) => Number.isFinite(r));
+  const retMaxAbs = haveOverlay ? Math.max(...finiteRets.map((r) => Math.abs(r)), 0.005) : 0;
+  const retScaleMax = haveOverlay ? Math.max(retMaxAbs * 1.1, 0.005) : 0;
+
+  // Y-axis grid + tick labels at +max, +max/2, 0, -max/2, -max.
+  const yTickFractions = [1, 0.5, 0, -0.5, -1];
+
   return (
     <div className="trade-card" style={{ marginTop: 12 }}>
       <div className="scenario-title">{title || 'Fund rebalance flow history'}</div>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label="Fund rebalance flow history">
-        <line x1={padL} y1={y0} x2={W - padR} y2={y0} stroke="rgba(139,156,187,0.35)" />
+        {yTickFractions.map((frac) => {
+          const y = y0 - frac * (innerH / 2 - 4);
+          const dollars = frac * yScaleMax;
+          return (
+            <g key={`grid-${frac}`}>
+              <line
+                x1={padL}
+                x2={W - padR}
+                y1={y}
+                y2={y}
+                stroke={frac === 0 ? 'rgba(139,156,187,0.55)' : 'rgba(139,156,187,0.18)'}
+                strokeDasharray={frac === 0 ? '' : '3 3'}
+              />
+              <text
+                x={padL - 8}
+                y={y + 3}
+                textAnchor="end"
+                fontSize="10"
+                fill="#8b9cbb"
+                fontFamily="DM Sans"
+              >
+                {frac === 0 ? '$0' : fmtCompactSignedMoney(dollars, 1)}
+              </text>
+            </g>
+          );
+        })}
+
         {points.map((p, i) => {
           const v = Number(p.rebalance_signed_dollars);
-          const h = (Math.abs(v) / maxAbs) * (innerH / 2 - 4);
+          const h = (Math.abs(v) / yScaleMax) * (innerH / 2 - 4);
           const x = padL + i * step + (step - barW) / 2;
           const y = v >= 0 ? y0 - h : y0;
+          const excluded = p?.included_in_aggregate === false;
+          const fill = excluded
+            ? 'rgba(139,156,187,0.45)'
+            : v >= 0
+              ? 'rgba(16,185,129,0.85)'
+              : 'rgba(239,68,68,0.85)';
           return (
             <rect
               key={`${p.date}-${i}`}
@@ -4109,12 +4169,61 @@ function LetfRebalanceFlowChart({ series, title }) {
               y={y}
               width={barW}
               height={Math.max(h, v === 0 ? 0 : 1)}
-              fill={v >= 0 ? 'rgba(16,185,129,0.85)' : 'rgba(239,68,68,0.85)'}
+              fill={fill}
             >
-              <title>{`${p.date}: ${fmtSignedMoney(v)}`}</title>
+              <title>{`${p.date}: ${fmtSignedMoney(v)}${excluded ? ` · excluded (${p.quality_flag || 'flagged'})` : ''}`}</title>
             </rect>
           );
         })}
+
+        {haveOverlay && (() => {
+          const segs = [];
+          let cur = [];
+          points.forEach((p, i) => {
+            const r = Number(p?.underlying_return_d1);
+            if (!Number.isFinite(r)) {
+              if (cur.length) { segs.push(cur); cur = []; }
+              return;
+            }
+            const x = padL + i * step + step / 2;
+            const y = y0 - (r / retScaleMax) * (innerH / 2 - 4);
+            cur.push({ x, y });
+          });
+          if (cur.length) segs.push(cur);
+          return (
+            <g>
+              {segs.map((seg, idx) => (
+                <polyline
+                  key={`und-line-${idx}`}
+                  fill="none"
+                  stroke="rgba(96,165,250,0.85)"
+                  strokeWidth="1.4"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  points={seg.map((pt) => `${pt.x.toFixed(2)},${pt.y.toFixed(2)}`).join(' ')}
+                />
+              ))}
+              {/* Right-side axis ticks for underlying return */}
+              {[1, 0.5, 0, -0.5, -1].map((frac) => {
+                const y = y0 - frac * (innerH / 2 - 4);
+                return (
+                  <text
+                    key={`und-axis-${frac}`}
+                    x={W - padR + 6}
+                    y={y + 3}
+                    textAnchor="start"
+                    fontSize="10"
+                    fill="rgba(96,165,250,0.85)"
+                    fontFamily="DM Sans"
+                  >
+                    {frac === 0 ? '0%' : `${(frac * retScaleMax * 100).toFixed(retScaleMax >= 0.05 ? 0 : 1)}%`}
+                  </text>
+                );
+              })}
+            </g>
+          );
+        })()}
+
         {points.map((p, i) => (
           (i === 0 || i === points.length - 1 || i % tickEvery === 0) ? (
             <text
@@ -4134,6 +4243,10 @@ function LetfRebalanceFlowChart({ series, title }) {
       <div className="backtest-chart-legend">
         <span><span className="backtest-legend-dot" style={{ background: 'rgba(16,185,129,0.85)' }} />Buy into close</span>
         <span><span className="backtest-legend-dot" style={{ background: 'rgba(239,68,68,0.85)' }} />Sell into close</span>
+        <span><span className="backtest-legend-dot" style={{ background: 'rgba(139,156,187,0.45)' }} />Excluded (stale / overlay / non-leveraged)</span>
+        {haveOverlay && (
+          <span><span className="backtest-legend-dot" style={{ background: 'rgba(96,165,250,0.85)' }} />Underlying return (right axis)</span>
+        )}
       </div>
     </div>
   );
@@ -4554,9 +4667,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const und = String(undSym || '').toUpperCase();
     return letfFlowsCache?.byUnderlying?.[und] || null;
   }, [letfFlowsCache, undSym]);
-  const fundFlowHistory = useMemo(() => (
-    etfFlowSeries.filter((row) => row?.included_in_aggregate).slice(-20)
-  ), [etfFlowSeries]);
+  const fundFlowHistory = useMemo(() => etfFlowSeries.slice(-20), [etfFlowSeries]);
+  const fundFlowIncludedCount = useMemo(
+    () => fundFlowHistory.filter((row) => row?.included_in_aggregate).length,
+    [fundFlowHistory],
+  );
   const peerFlowRows = useMemo(() => (
     Array.isArray(underlyingFlowLatest?.top_contributors) ? underlyingFlowLatest.top_contributors : []
   ), [underlyingFlowLatest]);
@@ -6333,6 +6448,20 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   <div className="cs-sub">
                     {underlyingFlowLatest?.date || '—'} · {fmtPctDecimal(underlyingFlowLatest?.underlying_return_d1)} und ret
                     · {fmtNum(underlyingFlowLatest?.n_funds)} fund(s)
+                    {underlyingFlowLatest && underlyingFlowLatest.is_latest_global === false ? (
+                      <> · <span title="No fresh aggregate today; showing this underlying's last available row.">stale aggregate</span></>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">% of {String(undSym || '').toUpperCase()} 20d $ ADV</div>
+                  <div className={cls('cs-value', flowValClass(underlyingFlowLatest?.net_moc_pct_adv_20d))}>
+                    {fmtPctDecimal(underlyingFlowLatest?.net_moc_pct_adv_20d, 2)}
+                  </div>
+                  <div className="cs-sub">
+                    {underlyingFlowLatest?.underlying_dollar_adv_20d != null
+                      ? <>20d $ ADV {fmtCompactMoney(underlyingFlowLatest.underlying_dollar_adv_20d)}</>
+                      : <>$ ADV unavailable</>}
                   </div>
                 </div>
                 <div className="chart-stat">
@@ -6366,7 +6495,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
               <LetfRebalanceFlowChart
                 series={fundFlowHistory}
-                title={`${etfSym} — last ${fundFlowHistory.length} included rebalance days`}
+                title={`${etfSym} — last ${fundFlowHistory.length} trading days (${fundFlowIncludedCount} included)`}
               />
 
               <div className="trade-card" style={{ marginTop: 12 }}>
@@ -6420,20 +6549,31 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <th>Prior AUM</th>
                       <th>Rebalance $</th>
                       <th>% prior AUM</th>
+                      <th>% 20d $ ADV</th>
                       <th>Quality</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {[...etfFlowSeries].slice(-20).reverse().map((row) => (
-                      <tr key={row.date}>
-                        <td>{row.date}</td>
-                        <td className={flowValClass(row.underlying_return_d1)}>{fmtPctDecimal(row.underlying_return_d1)}</td>
-                        <td>{fmtMoney(row.aum_prior_close)}</td>
-                        <td className={flowValClass(row.rebalance_signed_dollars)}>{fmtSignedMoney(row.rebalance_signed_dollars)}</td>
-                        <td>{fmtPctDecimal(row.abs_rebalance_pct_prior_aum)}</td>
-                        <td>{row.quality_flag || '—'}</td>
-                      </tr>
-                    ))}
+                    {[...etfFlowSeries].slice(-20).reverse().map((row) => {
+                      const excluded = row?.included_in_aggregate === false;
+                      const rowStyle = excluded
+                        ? { opacity: 0.6, fontStyle: 'italic' }
+                        : undefined;
+                      const flag = row.quality_flag || (excluded ? 'excluded' : 'ok');
+                      return (
+                        <tr key={row.date} style={rowStyle}>
+                          <td>{row.date}</td>
+                          <td className={flowValClass(row.underlying_return_d1)}>{fmtPctDecimal(row.underlying_return_d1)}</td>
+                          <td>{fmtMoney(row.aum_prior_close)}</td>
+                          <td className={flowValClass(row.rebalance_signed_dollars)}>{fmtSignedMoney(row.rebalance_signed_dollars)}</td>
+                          <td>{fmtPctDecimal(row.abs_rebalance_pct_prior_aum)}</td>
+                          <td className={flowValClass(row.rebalance_pct_adv_20d)}>
+                            {fmtPctDecimal(row.rebalance_pct_adv_20d, 2)}
+                          </td>
+                          <td>{flag}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -7128,6 +7268,281 @@ function NewsPage({
   );
 }
 
+// ── Top-level Flow page ──────────────────────────────
+function FlowPage({ payload, bucketOf, onNavigateToChart }) {
+  const allRows = useMemo(() => {
+    const map = payload?.byUnderlying || {};
+    return Object.keys(map).map((und) => ({ underlying: und, ...map[und] }));
+  }, [payload]);
+  const latestDate = payload?.latestDate || null;
+  const buildTime = payload?.buildTime || null;
+  const method = payload?.method || null;
+
+  const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState('abs_net_moc');
+  const [sortDesc, setSortDesc] = useState(true);
+  const [direction, setDirection] = useState('all');
+  const [hideMissingAdv, setHideMissingAdv] = useState(false);
+  const [hideStaleAggregates, setHideStaleAggregates] = useState(false);
+  const [hideSingleFund, setHideSingleFund] = useState(false);
+  const [minFunds, setMinFunds] = useState(0);
+
+  const sortValue = useCallback((row, key) => {
+    const v = (
+      key === 'abs_net_moc' ? Math.abs(Number(row.net_moc_dollars)) :
+      key === 'abs_pct_adv' ? Math.abs(Number(row.net_moc_pct_adv_20d)) :
+      key === 'abs_pct_aum' ? Math.abs(Number(row.net_moc_pct_letf_aum)) :
+      key === 'abs_z60' ? Math.abs(Number(row.net_moc_z_60d)) :
+      key === 'underlying' ? row.underlying :
+      row[key]
+    );
+    if (typeof v === 'string') return v;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = (search || '').trim().toUpperCase();
+    let out = allRows.filter((row) => {
+      if (q && !String(row.underlying || '').toUpperCase().includes(q)) {
+        const inContrib = (row.top_contributors || []).some(
+          (c) => String(c?.ticker || '').toUpperCase().includes(q),
+        );
+        if (!inContrib) return false;
+      }
+      if (direction === 'buy' && !(Number(row.net_moc_dollars) > 0)) return false;
+      if (direction === 'sell' && !(Number(row.net_moc_dollars) < 0)) return false;
+      if (hideMissingAdv && !(Number.isFinite(Number(row.underlying_dollar_adv_20d)) && Number(row.underlying_dollar_adv_20d) > 0)) return false;
+      if (hideStaleAggregates && row.is_latest_global === false) return false;
+      if (hideSingleFund && Number(row.n_funds || 0) < 2) return false;
+      if (Number(row.n_funds || 0) < Number(minFunds || 0)) return false;
+      return true;
+    });
+    out = [...out].sort((a, b) => {
+      const av = sortValue(a, sortKey);
+      const bv = sortValue(b, sortKey);
+      const an = av == null ? (sortDesc ? -Infinity : Infinity) : av;
+      const bn = bv == null ? (sortDesc ? -Infinity : Infinity) : bv;
+      if (typeof an === 'string' || typeof bn === 'string') {
+        const sa = String(an); const sb = String(bn);
+        return sortDesc ? sb.localeCompare(sa) : sa.localeCompare(sb);
+      }
+      return sortDesc ? bn - an : an - bn;
+    });
+    return out;
+  }, [allRows, search, direction, hideMissingAdv, hideStaleAggregates, hideSingleFund, minFunds, sortKey, sortDesc, sortValue]);
+
+  const headline = useMemo(() => {
+    const sortedByAbs = [...allRows].sort(
+      (a, b) => Math.abs(Number(b.net_moc_dollars) || 0) - Math.abs(Number(a.net_moc_dollars) || 0),
+    );
+    const buys = allRows
+      .filter((r) => Number(r.net_moc_dollars) > 0)
+      .sort((a, b) => Number(b.net_moc_dollars) - Number(a.net_moc_dollars));
+    const sells = allRows
+      .filter((r) => Number(r.net_moc_dollars) < 0)
+      .sort((a, b) => Number(a.net_moc_dollars) - Number(b.net_moc_dollars));
+    const grossMoc = allRows.reduce(
+      (sum, r) => sum + (Number.isFinite(Number(r.gross_moc_dollars)) ? Number(r.gross_moc_dollars) : 0),
+      0,
+    );
+    return {
+      total: allRows.length,
+      topByAbs: sortedByAbs[0] || null,
+      topBuy: buys[0] || null,
+      topSell: sells[0] || null,
+      grossMoc,
+    };
+  }, [allRows]);
+
+  const handleSort = useCallback((key) => {
+    if (sortKey === key) setSortDesc((d) => !d);
+    else { setSortKey(key); setSortDesc(true); }
+  }, [sortKey]);
+
+  const sortIndicator = useCallback((key) => (sortKey === key ? (sortDesc ? ' ▼' : ' ▲') : ''), [sortKey, sortDesc]);
+
+  if (!allRows.length) {
+    return (
+      <div className="news-content">
+        <h2 className="news-title">LETF rebalance flow — by underlying</h2>
+        <div className="news-empty">
+          <div className="news-empty-icon">◉</div>
+          <div className="news-empty-title">Flow data not available yet</div>
+          <div>Run <code>python scripts/build_letf_rebalance_flows.py</code>, then reload.</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="news-content">
+      <h2 className="news-title">LETF rebalance flow — by underlying</h2>
+      <div className="news-subtitle">
+        Mechanical issuer hedge into the close: <code>{method || 'L × (L − 1) × prior-close AUM × underlying return'}</code>.
+        Latest aggregate {latestDate || '—'}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}.
+      </div>
+
+      <div className="chart-stats" style={{ marginTop: 6 }}>
+        <div className="chart-stat">
+          <div className="cs-label">Underlyings tracked</div>
+          <div className="cs-value">{fmtNum(headline.total)}</div>
+          <div className="cs-sub">Σ gross MOC {fmtCompactSignedMoney(headline.grossMoc)}</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Top buy pressure</div>
+          <div className={cls('cs-value', flowValClass(headline.topBuy?.net_moc_dollars))}>
+            {fmtSignedMoney(headline.topBuy?.net_moc_dollars)}
+          </div>
+          <div className="cs-sub">
+            {headline.topBuy?.underlying || '—'}
+            {headline.topBuy?.net_moc_pct_adv_20d != null
+              ? <> · {fmtPctDecimal(headline.topBuy.net_moc_pct_adv_20d, 2)} of 20d $ ADV</>
+              : null}
+          </div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Top sell pressure</div>
+          <div className={cls('cs-value', flowValClass(headline.topSell?.net_moc_dollars))}>
+            {fmtSignedMoney(headline.topSell?.net_moc_dollars)}
+          </div>
+          <div className="cs-sub">
+            {headline.topSell?.underlying || '—'}
+            {headline.topSell?.net_moc_pct_adv_20d != null
+              ? <> · {fmtPctDecimal(headline.topSell.net_moc_pct_adv_20d, 2)} of 20d $ ADV</>
+              : null}
+          </div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Largest |net MOC|</div>
+          <div className={cls('cs-value', flowValClass(headline.topByAbs?.net_moc_dollars))}>
+            {fmtSignedMoney(headline.topByAbs?.net_moc_dollars)}
+          </div>
+          <div className="cs-sub">
+            {headline.topByAbs?.underlying || '—'}
+            {headline.topByAbs?.n_funds != null ? <> · {fmtNum(headline.topByAbs.n_funds)} fund(s)</> : null}
+          </div>
+        </div>
+      </div>
+
+      <div className="news-filters" style={{ marginTop: 12 }}>
+        <input
+          type="text"
+          className="news-search"
+          placeholder="Filter by underlying or contributor (e.g. SPY, NVDA, MSTR)…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ minWidth: 280 }}
+        />
+        <div className="news-chip-row">
+          {[
+            { key: 'all', label: `All (${allRows.length})` },
+            { key: 'buy', label: 'Buy' },
+            { key: 'sell', label: 'Sell' },
+          ].map((opt) => (
+            <div
+              key={opt.key}
+              className={cls('news-chip', direction === opt.key && 'active')}
+              onClick={() => setDirection(opt.key)}
+            >
+              {opt.label}
+            </div>
+          ))}
+        </div>
+        <label className="news-toggle" onClick={() => setHideMissingAdv((v) => !v)}>
+          {hideMissingAdv ? '[x]' : '[ ]'} Hide rows without $ ADV
+        </label>
+        <label className="news-toggle" onClick={() => setHideStaleAggregates((v) => !v)}>
+          {hideStaleAggregates ? '[x]' : '[ ]'} Latest build only
+        </label>
+        <label className="news-toggle" onClick={() => setHideSingleFund((v) => !v)}>
+          {hideSingleFund ? '[x]' : '[ ]'} Hide single-fund underlyings
+        </label>
+      </div>
+
+      <div className="news-feed-title" style={{ marginTop: 14 }}>
+        {filtered.length} of {allRows.length} underlyings
+      </div>
+
+      <div className="scenario-table-wrap" style={{ marginTop: 6, maxHeight: '70vh', overflow: 'auto' }}>
+        <table className="scenario-table">
+          <thead>
+            <tr>
+              <th onClick={() => handleSort('underlying')} style={{ cursor: 'pointer' }}>Underlying{sortIndicator('underlying')}</th>
+              <th>Date</th>
+              <th onClick={() => handleSort('abs_net_moc')} style={{ cursor: 'pointer' }} title="Sorted by |net MOC|">Net MOC ${sortIndicator('abs_net_moc')}</th>
+              <th onClick={() => handleSort('abs_pct_aum')} style={{ cursor: 'pointer' }}>% LETF AUM{sortIndicator('abs_pct_aum')}</th>
+              <th onClick={() => handleSort('abs_pct_adv')} style={{ cursor: 'pointer' }}>% 20d $ ADV{sortIndicator('abs_pct_adv')}</th>
+              <th onClick={() => handleSort('underlying_return_d1')} style={{ cursor: 'pointer' }}>Und ret{sortIndicator('underlying_return_d1')}</th>
+              <th onClick={() => handleSort('n_funds')} style={{ cursor: 'pointer' }}># Funds{sortIndicator('n_funds')}</th>
+              <th onClick={() => handleSort('net_moc_5d_dollars')} style={{ cursor: 'pointer' }}>5d net{sortIndicator('net_moc_5d_dollars')}</th>
+              <th onClick={() => handleSort('net_moc_20d_dollars')} style={{ cursor: 'pointer' }}>20d net{sortIndicator('net_moc_20d_dollars')}</th>
+              <th onClick={() => handleSort('abs_z60')} style={{ cursor: 'pointer' }}>z60{sortIndicator('abs_z60')}</th>
+              <th>Top contributor</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.slice(0, 500).map((row) => {
+              const stale = row.is_latest_global === false;
+              const top = (row.top_contributors || [])[0] || null;
+              return (
+                <tr key={row.underlying} style={stale ? { opacity: 0.7 } : undefined}>
+                  <td>
+                    <strong>{row.underlying}</strong>
+                    {stale ? <span className="cs-sub" style={{ marginLeft: 6 }}>· {row.date || ''}</span> : null}
+                  </td>
+                  <td>{row.date || '—'}</td>
+                  <td className={flowValClass(row.net_moc_dollars)} title={fmtSignedMoney(row.net_moc_dollars)}>
+                    {fmtCompactSignedMoney(row.net_moc_dollars)}
+                  </td>
+                  <td className={flowValClass(row.net_moc_pct_letf_aum)}>
+                    {fmtPctDecimal(row.net_moc_pct_letf_aum, 2)}
+                  </td>
+                  <td className={flowValClass(row.net_moc_pct_adv_20d)}>
+                    {fmtPctDecimal(row.net_moc_pct_adv_20d, 2)}
+                  </td>
+                  <td className={flowValClass(row.underlying_return_d1)}>
+                    {fmtPctDecimal(row.underlying_return_d1, 2)}
+                  </td>
+                  <td>{fmtNum(row.n_funds)}</td>
+                  <td className={flowValClass(row.net_moc_5d_dollars)}>{fmtCompactSignedMoney(row.net_moc_5d_dollars)}</td>
+                  <td className={flowValClass(row.net_moc_20d_dollars)}>{fmtCompactSignedMoney(row.net_moc_20d_dollars)}</td>
+                  <td className={flowValClass(row.net_moc_z_60d)}>
+                    {Number.isFinite(Number(row.net_moc_z_60d)) ? Number(row.net_moc_z_60d).toFixed(2) : '—'}
+                  </td>
+                  <td>
+                    {top ? (
+                      <a
+                        href={`#/chart/${encodeURIComponent(top.ticker)}/flow`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          if (typeof onNavigateToChart === 'function') {
+                            window.location.hash = `/chart/${encodeURIComponent(top.ticker)}/flow`;
+                          }
+                        }}
+                      >
+                        {top.ticker}
+                      </a>
+                    ) : '—'}
+                    {top?.rebalance_signed_dollars != null
+                      ? <> · <span className={flowValClass(top.rebalance_signed_dollars)}>{fmtCompactSignedMoney(top.rebalance_signed_dollars)}</span></>
+                      : null}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {filtered.length > 500 ? (
+        <div className="news-empty" style={{ marginTop: 8, padding: '12px' }}>
+          Showing first 500 rows · refine the search or sort to narrow.
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // ── Main App ────────────────────────────────
 function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [data, setData] = useState(null);
@@ -7140,6 +7555,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [expandedSym, setExpandedSym] = useState(null);
   const [showInfo, setShowInfo] = useState(false);
   const [showNews, setShowNews] = useState(false);
+  const [showFlow, setShowFlow] = useState(false);
+  const [letfFlowsCache, setLetfFlowsCache] = useState(LETF_REBALANCE_FLOWS_CACHE);
   const [chartRecord, setChartRecord] = useState(null);
   /** When opening a chart from the hash, optionally land on Backtest or Flow (`#/chart/SYM/backtest`, `#/chart/SYM/flow`). */
   const [chartDefaultPanel, setChartDefaultPanel] = useState('chart');
@@ -7162,6 +7579,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       if (cancelled) return;
       setMetricsCacheTick((n) => n + 1);
       if (BORROW_HISTORY_CACHE) setBorrowHistoryMap(BORROW_HISTORY_CACHE);
+      if (LETF_REBALANCE_FLOWS_CACHE) setLetfFlowsCache(LETF_REBALANCE_FLOWS_CACHE);
     });
     return () => { cancelled = true; };
   }, []);
@@ -7244,6 +7662,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           setChartRecord(rec);
           setShowInfo(false);
           setShowNews(false);
+          setShowFlow(false);
           const panel = String(chartMatch[2] || '').toLowerCase();
           setChartDefaultPanel(panel === 'backtest' ? 'backtest' : panel === 'flow' ? 'flow' : 'chart');
           return;
@@ -7253,6 +7672,14 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setChartRecord(null);
         setShowInfo(false);
         setShowNews(true);
+        setShowFlow(false);
+        return;
+      }
+      if (hash === '#/flow') {
+        setChartRecord(null);
+        setShowInfo(false);
+        setShowNews(false);
+        setShowFlow(true);
         return;
       }
       if (hash === '#/backtest') {
@@ -7261,6 +7688,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       }
       setChartRecord(null);
       setShowNews(false);
+      setShowFlow(false);
       setChartDefaultPanel('chart');
     };
     handleHash();
@@ -7278,6 +7706,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
   const navigateToNews = useCallback(() => {
     window.location.hash = '/news';
+  }, []);
+
+  const navigateToFlow = useCallback(() => {
+    window.location.hash = '/flow';
   }, []);
 
   const navigateBack = useCallback(() => {
@@ -7381,12 +7813,19 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             </>
           )}
           <button
+            className={cls('topbar-btn', showFlow && !chartRecord && 'active')}
+            onClick={() => { if (showFlow) navigateBack(); else navigateToFlow(); }}
+            title="LETF rebalance flow ranked by underlying"
+          >
+            ⌁ Flow
+          </button>
+          <button
             className={cls('topbar-btn', showNews && !chartRecord && 'active')}
             onClick={() => { if (showNews) navigateBack(); else navigateToNews(); }}
           >
             ▦ News
           </button>
-          <button className={cls('topbar-btn', showInfo && !chartRecord && !showNews && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
+          <button className={cls('topbar-btn', showInfo && !chartRecord && !showNews && !showFlow && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
             ◉ Info
           </button>
         </div>
@@ -7402,6 +7841,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           setChartVolLookbackRange={setChartVolLookbackRange}
           defaultPanel={chartDefaultPanel}
           dashboardBuildTime={data.build_time}
+        />
+      ) : showFlow ? (
+        <FlowPage
+          payload={letfFlowsCache}
+          bucketOf={bucketOf}
+          onNavigateToChart={navigateToChart}
         />
       ) : showNews ? (
         <NewsPage

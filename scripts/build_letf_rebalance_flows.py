@@ -33,6 +33,15 @@ METRICS_CSV = DATA_DIR / "etf_metrics_daily.csv"
 DAILY_PARQUET = DATA_DIR / "letf_rebalance_flows_daily.parquet"
 DAILY_JSON = DATA_DIR / "letf_rebalance_flows_daily.json"
 LATEST_JSON = DATA_DIR / "letf_rebalance_flows_latest.json"
+UNDERLYING_VOLUME_PARQUET = DATA_DIR / "underlying_volume_history.parquet"
+
+# Pulled from yfinance once per build with a graceful fallback. We cache the panel so
+# a transient outage in CI keeps the previous trading day's ADV in place.
+_VOLUME_CACHE_FRESH_HOURS = 18
+_ADV_WINDOW_DAYS = 20
+_ADV_LOOKBACK_DAYS = 35
+_ADV_BATCH_SIZE = 50
+_ADV_MIN_PERIODS = 5
 
 INCLUDED_PRODUCT_CLASSES = {"letf", "inverse", "volatility_etp"}
 EXCLUDED_PRODUCT_CLASSES = {
@@ -232,6 +241,181 @@ def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bda
     return out
 
 
+def fetch_underlying_volume_panel(
+    underlyings: list[str],
+    *,
+    lookback_days: int = _ADV_LOOKBACK_DAYS,
+    batch_size: int = _ADV_BATCH_SIZE,
+) -> pd.DataFrame:
+    """Best-effort yfinance batch pull of daily close + volume for each underlying.
+
+    Returns a DataFrame with ``date`` (ISO YYYY-MM-DD), ``underlying``, ``close``,
+    ``volume``, ``dollar_volume``. Empty on any catastrophic failure -- the
+    rest of the pipeline degrades gracefully (``%ADV`` becomes ``NaN``).
+    """
+    syms = sorted({str(u).strip().upper() for u in (underlyings or []) if str(u).strip()})
+    if not syms:
+        return pd.DataFrame(columns=["date", "underlying", "close", "volume", "dollar_volume"])
+    try:
+        import yfinance as yf  # type: ignore
+    except Exception as exc:  # pragma: no cover - import-time failure path
+        LOGGER.warning("yfinance unavailable for ADV pull (%s)", exc)
+        return pd.DataFrame(columns=["date", "underlying", "close", "volume", "dollar_volume"])
+
+    period = f"{int(lookback_days)}d"
+    rows: list[pd.DataFrame] = []
+    for start in range(0, len(syms), batch_size):
+        chunk = syms[start:start + batch_size]
+        try:
+            data = yf.download(
+                chunk,
+                period=period,
+                interval="1d",
+                group_by="ticker",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+        except Exception as exc:
+            LOGGER.warning("yfinance ADV batch failed for %d symbols: %s", len(chunk), exc)
+            continue
+        if data is None or data.empty:
+            continue
+
+        if isinstance(data.columns, pd.MultiIndex):
+            for sym in chunk:
+                if sym not in data.columns.get_level_values(0):
+                    continue
+                sub = data[sym].copy().reset_index()
+                if sub.empty:
+                    continue
+                sub = sub.rename(columns={"Date": "date", "Close": "close", "Volume": "volume"})
+                sub["underlying"] = sym
+                sub["date"] = pd.to_datetime(sub["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                rows.append(sub[["date", "underlying", "close", "volume"]])
+        else:
+            sub = data.copy().reset_index()
+            if sub.empty:
+                continue
+            sub = sub.rename(columns={"Date": "date", "Close": "close", "Volume": "volume"})
+            sub["underlying"] = chunk[0]
+            sub["date"] = pd.to_datetime(sub["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            rows.append(sub[["date", "underlying", "close", "volume"]])
+
+    if not rows:
+        return pd.DataFrame(columns=["date", "underlying", "close", "volume", "dollar_volume"])
+    out = pd.concat(rows, ignore_index=True)
+    out["close"] = pd.to_numeric(out["close"], errors="coerce")
+    out["volume"] = pd.to_numeric(out["volume"], errors="coerce")
+    out["dollar_volume"] = (out["close"] * out["volume"]).clip(lower=0)
+    out = out.dropna(subset=["close", "volume", "dollar_volume"])
+    out = out[(out["close"] > 0) & (out["volume"] > 0)]
+    out = out.drop_duplicates(subset=["underlying", "date"], keep="last")
+    return out.sort_values(["underlying", "date"]).reset_index(drop=True)
+
+
+def load_or_refresh_underlying_volume_panel(
+    underlyings: list[str],
+    *,
+    cache_path: Path = UNDERLYING_VOLUME_PARQUET,
+    lookback_days: int = _ADV_LOOKBACK_DAYS,
+    fresh_hours: float = _VOLUME_CACHE_FRESH_HOURS,
+    skip_fetch: bool = False,
+) -> pd.DataFrame:
+    """Read cached underlying volume; refresh from yfinance when stale or missing."""
+    cached = pd.DataFrame()
+    if cache_path.exists():
+        try:
+            cached = pd.read_parquet(cache_path)
+        except Exception as exc:  # pragma: no cover - cache reload failure
+            LOGGER.warning("failed to load %s (%s); will refresh", cache_path, exc)
+            cached = pd.DataFrame()
+
+    cache_is_fresh = False
+    if not cached.empty and {"date", "underlying", "dollar_volume"}.issubset(cached.columns):
+        try:
+            cache_max = pd.to_datetime(cached["date"]).max()
+        except Exception:
+            cache_max = pd.NaT
+        if pd.notna(cache_max):
+            now = pd.Timestamp.utcnow().tz_localize(None)
+            cache_is_fresh = (now - cache_max).total_seconds() / 3600.0 <= float(fresh_hours)
+
+    if skip_fetch and not cached.empty:
+        LOGGER.info("ADV cache reuse forced via --skip-volume-fetch (rows=%d)", len(cached))
+        return cached
+    if cache_is_fresh:
+        LOGGER.info("ADV cache fresh (rows=%d, max_date=%s)", len(cached), cache_max)
+        return cached
+
+    fresh = fetch_underlying_volume_panel(underlyings, lookback_days=lookback_days)
+    if fresh.empty:
+        if not cached.empty:
+            LOGGER.warning("ADV pull empty; falling back to cached panel (rows=%d)", len(cached))
+            return cached
+        return fresh
+
+    if not cached.empty and {"date", "underlying"}.issubset(cached.columns):
+        merged = pd.concat([cached, fresh], ignore_index=True)
+        merged = merged.drop_duplicates(subset=["underlying", "date"], keep="last")
+        merged = merged.sort_values(["underlying", "date"]).reset_index(drop=True)
+    else:
+        merged = fresh
+
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_parquet(cache_path, index=False)
+    except Exception as exc:  # pragma: no cover - disk write failure
+        LOGGER.warning("failed to persist ADV cache to %s (%s)", cache_path, exc)
+    return merged
+
+
+def compute_adv_panel(volume_panel: pd.DataFrame, *, window: int = _ADV_WINDOW_DAYS) -> pd.DataFrame:
+    """Trailing-window mean dollar volume per (date, underlying)."""
+    if volume_panel.empty:
+        return pd.DataFrame(columns=["date", "underlying", "underlying_dollar_adv_20d"])
+    panel = volume_panel.sort_values(["underlying", "date"]).copy()
+    panel["underlying_dollar_adv_20d"] = (
+        panel.groupby("underlying")["dollar_volume"]
+        .rolling(window=window, min_periods=min(_ADV_MIN_PERIODS, window))
+        .mean()
+        .reset_index(level=0, drop=True)
+    )
+    return panel[["date", "underlying", "underlying_dollar_adv_20d"]]
+
+
+def annotate_with_adv(
+    fund_flows: pd.DataFrame,
+    aggregates: pd.DataFrame,
+    adv_panel: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Add ``underlying_dollar_adv_20d`` and ``%ADV`` ratios to both frames."""
+    if adv_panel.empty:
+        if not fund_flows.empty:
+            fund_flows = fund_flows.copy()
+            fund_flows["underlying_dollar_adv_20d"] = float("nan")
+            fund_flows["rebalance_pct_adv_20d"] = float("nan")
+        if not aggregates.empty:
+            aggregates = aggregates.copy()
+            aggregates["underlying_dollar_adv_20d"] = float("nan")
+            aggregates["net_moc_pct_adv_20d"] = float("nan")
+        return fund_flows, aggregates
+
+    if not fund_flows.empty:
+        fund_flows = fund_flows.merge(adv_panel, on=["date", "underlying"], how="left")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fund_flows["rebalance_pct_adv_20d"] = (
+                fund_flows["rebalance_signed_dollars"] / fund_flows["underlying_dollar_adv_20d"]
+            )
+    if not aggregates.empty:
+        aggregates = aggregates.merge(adv_panel, on=["date", "underlying"], how="left")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            aggregates["net_moc_pct_adv_20d"] = (
+                aggregates["net_moc_dollars"] / aggregates["underlying_dollar_adv_20d"]
+            )
+    return fund_flows, aggregates
+
+
 def build_underlying_aggregates(fund_flows: pd.DataFrame) -> pd.DataFrame:
     if fund_flows.empty:
         return pd.DataFrame()
@@ -296,6 +480,7 @@ def _top_contributors(fund_flows: pd.DataFrame, date_iso: str, underlying: str, 
             "leverage": _round(r.get("leverage"), 4),
             "rebalance_signed_dollars": _round(r.get("rebalance_signed_dollars"), 2),
             "aum_prior_close": _round(r.get("aum_prior_close"), 2),
+            "rebalance_pct_adv_20d": _round(r.get("rebalance_pct_adv_20d"), 8),
         }
         for _, r in rows.iterrows()
     ]
@@ -354,13 +539,22 @@ def write_outputs(
         if aggregates.empty:
             latest_payload = {"build_time": daily_payload["build_time"], "latest_date": dates[-1], "by_underlying": {}}
         else:
-            latest_date = str(aggregates["date"].max())
-            latest_rows = aggregates[aggregates["date"].eq(latest_date)].sort_values("net_moc_dollars", key=lambda s: s.abs(), ascending=False)
+            global_latest_date = str(aggregates["date"].max())
+            # Per-underlying latest aggregate row -- different underlyings have different
+            # publish cadences (issuer feed lag, weekend gaps), so a single global filter
+            # would silently drop hundreds of underlyings. See AGENTS notes for context.
+            idx_per_und = aggregates.groupby("underlying")["date"].idxmax()
+            latest_rows = (
+                aggregates.loc[idx_per_und]
+                .sort_values("net_moc_dollars", key=lambda s: s.abs(), ascending=False)
+            )
             by_underlying: dict[str, Any] = {}
             for _, row in latest_rows.iterrows():
                 und = str(row["underlying"])
+                row_date = str(row.get("date") or "")
                 by_underlying[und] = {
-                    "date": latest_date,
+                    "date": row_date,
+                    "is_latest_global": row_date == global_latest_date,
                     "underlying": und,
                     "net_moc_dollars": _round(row.get("net_moc_dollars"), 2),
                     "gross_moc_dollars": _round(row.get("gross_moc_dollars"), 2),
@@ -368,18 +562,21 @@ def write_outputs(
                     "moc_sell_dollars": _round(row.get("moc_sell_dollars"), 2),
                     "total_letf_aum_prior_close": _round(row.get("total_letf_aum_prior_close"), 2),
                     "net_moc_pct_letf_aum": _round(row.get("net_moc_pct_letf_aum"), 8),
+                    "underlying_dollar_adv_20d": _round(row.get("underlying_dollar_adv_20d"), 2),
+                    "net_moc_pct_adv_20d": _round(row.get("net_moc_pct_adv_20d"), 8),
                     "underlying_return_d1": _round(row.get("underlying_return_d1"), 8),
                     "n_funds": int(row.get("n_funds") or 0),
                     "net_moc_5d_dollars": _round(row.get("net_moc_5d_dollars"), 2),
                     "net_moc_20d_dollars": _round(row.get("net_moc_20d_dollars"), 2),
                     "net_moc_60d_dollars": _round(row.get("net_moc_60d_dollars"), 2),
                     "net_moc_z_60d": _round(row.get("net_moc_z_60d"), 6),
-                    "top_contributors": _top_contributors(fund_flows, latest_date, und),
+                    "top_contributors": _top_contributors(fund_flows, row_date, und),
                 }
             latest_payload = {
                 "build_time": daily_payload["build_time"],
-                "latest_date": latest_date,
+                "latest_date": global_latest_date,
                 "method": "L*(L-1)*prior_close_aum*underlying_return",
+                "adv_window_days": _ADV_WINDOW_DAYS,
                 "by_underlying": by_underlying,
             }
 
@@ -393,11 +590,23 @@ def build_all(
     metrics_parquet: Path = METRICS_PARQUET,
     metrics_csv: Path = METRICS_CSV,
     stale_bdays: int = 3,
+    volume_cache_path: Path = UNDERLYING_VOLUME_PARQUET,
+    skip_volume_fetch: bool = False,
+    adv_window: int = _ADV_WINDOW_DAYS,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     universe = load_universe(universe_path)
     metrics = load_metrics(metrics_parquet, metrics_csv)
     fund_flows = build_fund_flows(universe, metrics, stale_bdays=stale_bdays)
     aggregates = build_underlying_aggregates(fund_flows)
+
+    underlyings = sorted({u for u in universe["underlying"].dropna().tolist() if u})
+    volume_panel = load_or_refresh_underlying_volume_panel(
+        underlyings,
+        cache_path=volume_cache_path,
+        skip_fetch=skip_volume_fetch,
+    )
+    adv_panel = compute_adv_panel(volume_panel, window=adv_window)
+    fund_flows, aggregates = annotate_with_adv(fund_flows, aggregates, adv_panel)
     return fund_flows, aggregates
 
 
@@ -409,6 +618,13 @@ def main() -> int:
     parser.add_argument("--daily-parquet", type=Path, default=DAILY_PARQUET)
     parser.add_argument("--daily-json", type=Path, default=DAILY_JSON)
     parser.add_argument("--latest-json", type=Path, default=LATEST_JSON)
+    parser.add_argument("--volume-cache", type=Path, default=UNDERLYING_VOLUME_PARQUET)
+    parser.add_argument(
+        "--skip-volume-fetch",
+        action="store_true",
+        help="Reuse data/underlying_volume_history.parquet without calling yfinance (offline / unit tests).",
+    )
+    parser.add_argument("--adv-window", type=int, default=_ADV_WINDOW_DAYS)
     parser.add_argument("--json-days", type=int, default=20)
     parser.add_argument("--stale-bdays", type=int, default=3)
     parser.add_argument("--log-level", default="INFO")
@@ -420,6 +636,9 @@ def main() -> int:
         metrics_parquet=args.metrics_parquet,
         metrics_csv=args.metrics_csv,
         stale_bdays=args.stale_bdays,
+        volume_cache_path=args.volume_cache,
+        skip_volume_fetch=bool(args.skip_volume_fetch),
+        adv_window=int(args.adv_window),
     )
     write_outputs(
         fund_flows,
@@ -429,11 +648,16 @@ def main() -> int:
         latest_json=args.latest_json,
         json_days=args.json_days,
     )
+    underlyings_in_latest = (
+        0
+        if aggregates.empty
+        else int(aggregates.groupby("underlying")["date"].max().shape[0])
+    )
     LOGGER.info(
         "wrote LETF rebalance flows: fund_rows=%d aggregate_rows=%d latest_underlyings=%d",
         len(fund_flows),
         len(aggregates),
-        0 if aggregates.empty else int((aggregates["date"] == aggregates["date"].max()).sum()),
+        underlyings_in_latest,
     )
     return 0
 
