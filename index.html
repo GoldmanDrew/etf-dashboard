@@ -1365,6 +1365,8 @@ const BORROW_HISTORY_URL = "data/borrow_history.json";
 const BORROW_SPIKE_RISK_URL = "data/borrow_spike_risk.json";
 const OPTIONS_CACHE_URL = "data/options_cache.json";
 const ETF_METRICS_DAILY_URL = "data/etf_metrics_daily.json";
+const LETF_REBALANCE_FLOWS_DAILY_URL = "data/letf_rebalance_flows_daily.json";
+const LETF_REBALANCE_FLOWS_LATEST_URL = "data/letf_rebalance_flows_latest.json";
 const VOL_SHAPE_HISTORY_URL = "data/vol_shape_history.json";
 /** @type {{ symbols: Record<string, { series: object[], vcrMedian: number|null, window: number }>, buildTime: string|null }|null} */
 let VOL_SHAPE_HISTORY_CACHE = null;
@@ -1380,6 +1382,8 @@ let BORROW_HISTORY_BUILD_TIME = null;
 let BORROW_SPIKE_RISK_CACHE = null;
 /** @type {{ bySymbol: Record<string, object[]>, buildTime: string|null }|null} */
 let ETF_METRICS_CACHE = null;
+/** @type {{ byTicker: Record<string, object[]>, byUnderlying: Record<string, object>, latestDate: string|null, buildTime: string|null, method: string|null }|null} */
+let LETF_REBALANCE_FLOWS_CACHE = null;
 let ETF_DISTRIBUTIONS_CACHE = null;
 let NAV_FORECAST_LATEST_CACHE = null;
 let NAV_FORECAST_METRICS_CACHE = null;
@@ -1804,6 +1808,59 @@ async function loadEtfMetricsCache() {
   };
   return ETF_METRICS_CACHE;
 }
+
+async function loadLetfRebalanceFlowsCache() {
+  if (LETF_REBALANCE_FLOWS_CACHE?.byTicker) return LETF_REBALANCE_FLOWS_CACHE;
+  const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+  const [dailyRes, latestRes] = await Promise.all([
+    fetch(`${LETF_REBALANCE_FLOWS_DAILY_URL}${cacheBust}`, { cache: 'no-store' }),
+    fetch(`${LETF_REBALANCE_FLOWS_LATEST_URL}${cacheBust}`, { cache: 'no-store' }),
+  ]);
+  if (!dailyRes.ok) throw new Error(`letf rebalance flows daily HTTP ${dailyRes.status}`);
+  if (!latestRes.ok) throw new Error(`letf rebalance flows latest HTTP ${latestRes.status}`);
+  const dailyPayload = await dailyRes.json();
+  const latestPayload = await latestRes.json();
+  const rows = Array.isArray(dailyPayload?.rows) ? dailyPayload.rows : [];
+  const byTicker = {};
+  rows.forEach((row) => {
+    const sym = String(row?.ticker || '').toUpperCase();
+    if (!sym) return;
+    if (!byTicker[sym]) byTicker[sym] = [];
+    byTicker[sym].push(row);
+  });
+  Object.keys(byTicker).forEach((sym) => {
+    byTicker[sym].sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
+  });
+  LETF_REBALANCE_FLOWS_CACHE = {
+    byTicker,
+    byUnderlying: latestPayload?.by_underlying || {},
+    latestDate: latestPayload?.latest_date || null,
+    buildTime: latestPayload?.build_time || dailyPayload?.build_time || null,
+    method: latestPayload?.method || null,
+  };
+  return LETF_REBALANCE_FLOWS_CACHE;
+}
+
+const fmtSignedMoney = (v) => {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  const n = Number(v);
+  const sign = n > 0 ? '+' : n < 0 ? '−' : '';
+  return `${sign}$${Math.abs(Math.round(n)).toLocaleString()}`;
+};
+const fmtPctDecimal = (v, digits = 2) => (
+  v == null || !Number.isFinite(Number(v)) ? '—' : `${(Number(v) * 100).toFixed(digits)}%`
+);
+const flowValClass = (v) => {
+  if (v == null || !Number.isFinite(Number(v)) || Number(v) === 0) return '';
+  return Number(v) > 0 ? 'val-positive' : 'val-negative';
+};
+const flowDirectionLabel = (v) => {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  if (Number(v) > 0) return 'Buy into close';
+  if (Number(v) < 0) return 'Sell into close';
+  return 'Neutral';
+};
+
 /** Pair backtest SVG x-axis: include day + year and avoid duplicate tick strings. */
 function formatBacktestAxisDate(raw) {
   if (raw == null || raw === '') return '';
@@ -4016,12 +4073,80 @@ function PairBacktestExposureChart({ result }) {
   );
 }
 
+function LetfRebalanceFlowChart({ series, title }) {
+  const points = (Array.isArray(series) ? series : []).filter((r) => Number.isFinite(Number(r?.rebalance_signed_dollars)));
+  if (!points.length) {
+    return <div className="scenario-warning">No included rebalance-flow history for this fund yet.</div>;
+  }
+  const W = 920;
+  const H = 220;
+  const padL = 56;
+  const padR = 16;
+  const padT = 16;
+  const padB = 36;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+  const vals = points.map((p) => Number(p.rebalance_signed_dollars));
+  const maxAbs = Math.max(...vals.map((v) => Math.abs(v)), 1);
+  const y0 = padT + innerH / 2;
+  const barW = Math.max(2, Math.min(18, innerW / points.length - 2));
+  const step = innerW / points.length;
+  const tickEvery = Math.max(1, Math.ceil(points.length / 6));
+  return (
+    <div className="trade-card" style={{ marginTop: 12 }}>
+      <div className="scenario-title">{title || 'Fund rebalance flow history'}</div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label="Fund rebalance flow history">
+        <line x1={padL} y1={y0} x2={W - padR} y2={y0} stroke="rgba(139,156,187,0.35)" />
+        {points.map((p, i) => {
+          const v = Number(p.rebalance_signed_dollars);
+          const h = (Math.abs(v) / maxAbs) * (innerH / 2 - 4);
+          const x = padL + i * step + (step - barW) / 2;
+          const y = v >= 0 ? y0 - h : y0;
+          return (
+            <rect
+              key={`${p.date}-${i}`}
+              x={x}
+              y={y}
+              width={barW}
+              height={Math.max(h, v === 0 ? 0 : 1)}
+              fill={v >= 0 ? 'rgba(16,185,129,0.85)' : 'rgba(239,68,68,0.85)'}
+            >
+              <title>{`${p.date}: ${fmtSignedMoney(v)}`}</title>
+            </rect>
+          );
+        })}
+        {points.map((p, i) => (
+          (i === 0 || i === points.length - 1 || i % tickEvery === 0) ? (
+            <text
+              key={`lbl-${p.date}-${i}`}
+              x={padL + i * step + step / 2}
+              y={H - 10}
+              textAnchor="middle"
+              fontSize="11"
+              fill="#8b9cbb"
+              fontFamily="DM Sans"
+            >
+              {formatBacktestAxisDate(p.date)}
+            </text>
+          ) : null
+        ))}
+      </svg>
+      <div className="backtest-chart-legend">
+        <span><span className="backtest-legend-dot" style={{ background: 'rgba(16,185,129,0.85)' }} />Buy into close</span>
+        <span><span className="backtest-legend-dot" style={{ background: 'rgba(239,68,68,0.85)' }} />Sell into close</span>
+      </div>
+    </div>
+  );
+}
+
 function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart', dashboardBuildTime = null }) {
   const activeTf = useMemo(
     () => TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2],
     [chartVolLookbackRange],
   );
-  const [activePanel, setActivePanel] = useState(defaultPanel === 'backtest' ? 'backtest' : 'chart');
+  const [activePanel, setActivePanel] = useState(
+    defaultPanel === 'backtest' ? 'backtest' : defaultPanel === 'flow' ? 'flow' : 'chart',
+  );
   const [scenarioHorizon, setScenarioHorizon] = useState('1M');
   const [mcPathCount, setMcPathCount] = useState(500);
   const [mcSeed, setMcSeed] = useState(42);
@@ -4041,6 +4166,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [etfMetricsError, setEtfMetricsError] = useState(null);
   const [etfDistributionsMap, setEtfDistributionsMap] = useState({});
   const [etfDistributionsError, setEtfDistributionsError] = useState(null);
+  const [letfFlowsCache, setLetfFlowsCache] = useState(null);
+  const [letfFlowsLoading, setLetfFlowsLoading] = useState(false);
+  const [letfFlowsError, setLetfFlowsError] = useState(null);
   const [navForecastLatest, setNavForecastLatest] = useState(null);
   const [navForecastMetrics, setNavForecastMetrics] = useState(null);
   const [navForecastHistory, setNavForecastHistory] = useState(null);
@@ -4076,6 +4204,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   }, [hideScenarios, activePanel]);
   useEffect(() => {
     if (!showBacktestPanel && activePanel === 'backtest') setActivePanel('chart');
+  }, [showBacktestPanel, activePanel]);
+  useEffect(() => {
+    if (!showBacktestPanel && activePanel === 'flow') setActivePanel('chart');
   }, [showBacktestPanel, activePanel]);
 
   const bucketLabel = r.bucket === 'bucket_1_high_beta' ? 'Bucket 1 — High β'
@@ -4222,6 +4353,27 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         if (!cancelled) setEtfMetricsError(e?.message || 'ETF metrics unavailable');
       } finally {
         if (!cancelled) setEtfMetricsLoading(false);
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (LETF_REBALANCE_FLOWS_CACHE?.byTicker) {
+        if (!cancelled) setLetfFlowsCache(LETF_REBALANCE_FLOWS_CACHE);
+        return;
+      }
+      setLetfFlowsLoading(true);
+      setLetfFlowsError(null);
+      try {
+        const cache = await loadLetfRebalanceFlowsCache();
+        if (!cancelled) setLetfFlowsCache(cache);
+      } catch (e) {
+        if (!cancelled) setLetfFlowsError(e?.message || 'LETF rebalance flows unavailable');
+      } finally {
+        if (!cancelled) setLetfFlowsLoading(false);
       }
     };
     run();
@@ -4391,6 +4543,29 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     }
     return null;
   }, [etfMetricsMap, etfSym, etfBacktestSeries]);
+  const etfFlowSeries = useMemo(() => {
+    const sym = String(etfSym || '').toUpperCase();
+    return Array.isArray(letfFlowsCache?.byTicker?.[sym]) ? letfFlowsCache.byTicker[sym] : [];
+  }, [letfFlowsCache, etfSym]);
+  const latestFundFlow = useMemo(() => (
+    etfFlowSeries.length ? etfFlowSeries[etfFlowSeries.length - 1] : null
+  ), [etfFlowSeries]);
+  const underlyingFlowLatest = useMemo(() => {
+    const und = String(undSym || '').toUpperCase();
+    return letfFlowsCache?.byUnderlying?.[und] || null;
+  }, [letfFlowsCache, undSym]);
+  const fundFlowHistory = useMemo(() => (
+    etfFlowSeries.filter((row) => row?.included_in_aggregate).slice(-20)
+  ), [etfFlowSeries]);
+  const peerFlowRows = useMemo(() => (
+    Array.isArray(underlyingFlowLatest?.top_contributors) ? underlyingFlowLatest.top_contributors : []
+  ), [underlyingFlowLatest]);
+  const fundShareOfUnderlying = useMemo(() => {
+    const fund = latestFundFlow?.rebalance_signed_dollars;
+    const total = underlyingFlowLatest?.net_moc_dollars;
+    if (!Number.isFinite(Number(fund)) || !Number.isFinite(Number(total)) || Number(total) === 0) return null;
+    return Number(fund) / Number(total);
+  }, [latestFundFlow, underlyingFlowLatest]);
   const pairBacktestBounds = useMemo(() => {
     const s = etfBacktestSeries;
     if (!Array.isArray(s) || !s.length) return { first: '', last: '' };
@@ -4927,6 +5102,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => setActivePanel('borrow')}>Borrow</button>
           {showBacktestPanel && (
             <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => setActivePanel('backtest')}>Backtest</button>
+          )}
+          {showBacktestPanel && (
+            <button className={cls('chart-view-btn', activePanel === 'flow' && 'active')} onClick={() => setActivePanel('flow')}>Flow</button>
           )}
         </div>
 
@@ -6119,6 +6297,151 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         </div>
       )}
 
+      {activePanel === 'flow' && showBacktestPanel && (
+        <div className="chart-section">
+          <div className="scenario-title">LETF close rebalance flow — {etfSym} / {String(undSym || '').toUpperCase()}</div>
+          <div className="scenario-sub" style={{ marginBottom: 10 }}>
+            Mechanical issuer hedge into the close: <code>L × (L − 1) × prior-close AUM × underlying return</code>.
+            Positive = expected buy pressure on <strong>{String(undSym || '').toUpperCase()}</strong>; negative = sell pressure.
+            {letfFlowsCache?.method ? <> Model: <code>{letfFlowsCache.method}</code>.</> : null}
+            {letfFlowsCache?.buildTime ? <> Updated {fmtTime(letfFlowsCache.buildTime)}.</> : null}
+          </div>
+
+          {letfFlowsLoading && <div className="scenario-warning">Loading LETF rebalance flows…</div>}
+          {letfFlowsError && <div className="scenario-warning">{letfFlowsError}</div>}
+
+          {!letfFlowsLoading && !letfFlowsError && (
+            <>
+              <div className="chart-stats" style={{ marginTop: 4 }}>
+                <div className="chart-stat">
+                  <div className="cs-label">{etfSym} rebalance (latest)</div>
+                  <div className={cls('cs-value', flowValClass(latestFundFlow?.rebalance_signed_dollars))}>
+                    {fmtSignedMoney(latestFundFlow?.rebalance_signed_dollars)}
+                  </div>
+                  <div className="cs-sub">
+                    {latestFundFlow?.date || '—'} · {flowDirectionLabel(latestFundFlow?.rebalance_signed_dollars)}
+                    {latestFundFlow?.quality_flag && latestFundFlow.quality_flag !== 'ok'
+                      ? <> · <span className="val-negative">{latestFundFlow.quality_flag}</span></>
+                      : null}
+                  </div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">{String(undSym || '').toUpperCase()} net MOC (all LETFs)</div>
+                  <div className={cls('cs-value', flowValClass(underlyingFlowLatest?.net_moc_dollars))}>
+                    {fmtSignedMoney(underlyingFlowLatest?.net_moc_dollars)}
+                  </div>
+                  <div className="cs-sub">
+                    {underlyingFlowLatest?.date || '—'} · {fmtPctDecimal(underlyingFlowLatest?.underlying_return_d1)} und ret
+                    · {fmtNum(underlyingFlowLatest?.n_funds)} fund(s)
+                  </div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">{etfSym} share of underlying flow</div>
+                  <div className="cs-value">
+                    {fundShareOfUnderlying == null ? '—' : fmtPctDecimal(fundShareOfUnderlying)}
+                  </div>
+                  <div className="cs-sub">
+                    Prior AUM {fmtMoney(latestFundFlow?.aum_prior_close)} · L={Number.isFinite(Number(latestFundFlow?.leverage)) ? Number(latestFundFlow.leverage).toFixed(2) : '—'}
+                  </div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">Underlying rolling net flow</div>
+                  <div className="cs-value">
+                    {fmtSignedMoney(underlyingFlowLatest?.net_moc_5d_dollars)}
+                  </div>
+                  <div className="cs-sub">
+                    5d net · 20d {fmtSignedMoney(underlyingFlowLatest?.net_moc_20d_dollars)}
+                    · z60 {Number.isFinite(Number(underlyingFlowLatest?.net_moc_z_60d)) ? Number(underlyingFlowLatest.net_moc_z_60d).toFixed(2) : '—'}
+                  </div>
+                </div>
+              </div>
+
+              {latestFundFlow && latestFundFlow.included_in_aggregate !== true && (
+                <div className="scenario-warning" style={{ marginTop: 10 }}>
+                  Latest row for <strong>{etfSym}</strong> is not included in the aggregate
+                  {latestFundFlow.quality_flag ? <> (<code>{latestFundFlow.quality_flag}</code>)</> : null}.
+                  Income overlays and stale AUM rows are excluded from the mechanical rebalance estimate.
+                </div>
+              )}
+
+              <LetfRebalanceFlowChart
+                series={fundFlowHistory}
+                title={`${etfSym} — last ${fundFlowHistory.length} included rebalance days`}
+              />
+
+              <div className="trade-card" style={{ marginTop: 12 }}>
+                <div className="trade-head">
+                  <div className="scenario-title">{String(undSym || '').toUpperCase()} contributors — latest close</div>
+                  <div className="scenario-sub">All leveraged/inverse funds on this underlying for {underlyingFlowLatest?.date || '—'}.</div>
+                </div>
+                {peerFlowRows.length ? (
+                  <div className="scenario-table-wrap" style={{ maxHeight: 260, overflow: 'auto' }}>
+                    <table className="scenario-table">
+                      <thead>
+                        <tr>
+                          <th>ETF</th>
+                          <th>L</th>
+                          <th>Rebalance $</th>
+                          <th>Prior AUM</th>
+                          <th>Share of net</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {peerFlowRows.map((row) => {
+                          const share = (
+                            Number.isFinite(Number(row?.rebalance_signed_dollars))
+                            && Number.isFinite(Number(underlyingFlowLatest?.net_moc_dollars))
+                            && Number(underlyingFlowLatest.net_moc_dollars) !== 0
+                          ) ? Number(row.rebalance_signed_dollars) / Number(underlyingFlowLatest.net_moc_dollars) : null;
+                          return (
+                            <tr key={row.ticker}>
+                              <td>{row.ticker}</td>
+                              <td>{Number.isFinite(Number(row.leverage)) ? Number(row.leverage).toFixed(2) : '—'}</td>
+                              <td className={flowValClass(row.rebalance_signed_dollars)}>{fmtSignedMoney(row.rebalance_signed_dollars)}</td>
+                              <td>{fmtMoney(row.aum_prior_close)}</td>
+                              <td>{share == null ? '—' : fmtPctDecimal(share)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="scenario-warning">No underlying aggregate available for this symbol yet.</div>
+                )}
+              </div>
+
+              <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 320, overflow: 'auto' }}>
+                <table className="scenario-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Und ret</th>
+                      <th>Prior AUM</th>
+                      <th>Rebalance $</th>
+                      <th>% prior AUM</th>
+                      <th>Quality</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...etfFlowSeries].slice(-20).reverse().map((row) => (
+                      <tr key={row.date}>
+                        <td>{row.date}</td>
+                        <td className={flowValClass(row.underlying_return_d1)}>{fmtPctDecimal(row.underlying_return_d1)}</td>
+                        <td>{fmtMoney(row.aum_prior_close)}</td>
+                        <td className={flowValClass(row.rebalance_signed_dollars)}>{fmtSignedMoney(row.rebalance_signed_dollars)}</td>
+                        <td>{fmtPctDecimal(row.abs_rebalance_pct_prior_aum)}</td>
+                        <td>{row.quality_flag || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {activePanel === 'borrow' && (
         <div className="chart-section">
           <div className="borrow-grid">
@@ -6818,7 +7141,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [showInfo, setShowInfo] = useState(false);
   const [showNews, setShowNews] = useState(false);
   const [chartRecord, setChartRecord] = useState(null);
-  /** When opening a chart from the hash, optionally land on the Backtest tab (`#/chart/SYM/backtest`). */
+  /** When opening a chart from the hash, optionally land on Backtest or Flow (`#/chart/SYM/backtest`, `#/chart/SYM/flow`). */
   const [chartDefaultPanel, setChartDefaultPanel] = useState('chart');
   /** Persisted chart timeframe (TIMEFRAMES[].range); drives TradingView embed and realized-vol diagnostics. Scenarios/default Exp. ETF return use forecast_vol_underlying_annual. */
   const [chartVolLookbackRange, setChartVolLookbackRange] = useState(TIMEFRAMES[2].range);
@@ -6834,6 +7157,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       loadEtfMetricsCache().catch(() => null),
       loadVolShapeHistoryCache().catch(() => null),
       loadBorrowHistoryCache().catch(() => null),
+      loadLetfRebalanceFlowsCache().catch(() => null),
     ]).then(() => {
       if (cancelled) return;
       setMetricsCacheTick((n) => n + 1);
@@ -6912,7 +7236,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   useEffect(() => {
     const handleHash = () => {
       const hash = window.location.hash;
-      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest))?$/i.exec(hash);
+      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest|flow))?$/i.exec(hash);
       if (chartMatch && data) {
         const sym = decodeURIComponent(chartMatch[1]).toUpperCase();
         const rec = (data.records || []).find(r => r.symbol === sym);
@@ -6920,7 +7244,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           setChartRecord(rec);
           setShowInfo(false);
           setShowNews(false);
-          setChartDefaultPanel(String(chartMatch[2] || '').toLowerCase() === 'backtest' ? 'backtest' : 'chart');
+          const panel = String(chartMatch[2] || '').toLowerCase();
+          setChartDefaultPanel(panel === 'backtest' ? 'backtest' : panel === 'flow' ? 'flow' : 'chart');
           return;
         }
       }
