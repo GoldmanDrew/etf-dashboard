@@ -135,7 +135,7 @@ jobs:
         if: steps.build_data.outcome == 'success'
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/borrow_spike_risk.json data/borrow_spike_predictions data/borrow_spike_realized.jsonl data/borrow_spike_metrics.json data/options_cache.json data/vol_shape_history.json"
+          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/borrow_spike_risk.json data/borrow_spike_predictions data/borrow_spike_realized.jsonl data/borrow_spike_metrics.json data/options_cache.json data/vol_shape_history.json data/vrp_live.json data/yieldboost_put_spreads_latest.json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ${FILES}
