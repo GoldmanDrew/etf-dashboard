@@ -136,6 +136,12 @@ def load_realized_for_date(date_iso: str, realized_json: Path = REALIZED_JSON) -
     return out
 
 
+def _signed_pct(estimate: float | None, realised: float) -> float | None:
+    if estimate is None or not abs(realised) > 0:
+        return None
+    return (estimate - realised) / realised
+
+
 def reconcile_one_day(date_iso: str, snapshot_dir: Path, realized_json: Path) -> list[dict[str, Any]]:
     snapshot_path = snapshot_dir / f"{date_iso}.jsonl"
     est = pick_close_estimate(snapshot_path)
@@ -153,30 +159,123 @@ def reconcile_one_day(date_iso: str, snapshot_dir: Path, realized_json: Path) ->
         est_row = by_und_est.get(und)
         if not est_row:
             continue
-        est_dollars = _f(est_row.get("estimated_net_close_rebalance_dollars"))
+        # The "default" estimate stays under ``estimated_net_close_rebalance_dollars``
+        # for backward-compatibility; spot/nav/blend variants are scored
+        # separately so we can compute per-source MAE and the optimal blend
+        # weight independently of which one the build script surfaced.
+        chosen = _f(est_row.get("estimated_net_close_rebalance_dollars"))
+        spot = _f(est_row.get("estimated_net_close_rebalance_dollars_spot"))
+        nav = _f(est_row.get("estimated_net_close_rebalance_dollars_nav"))
+        blend = _f(est_row.get("estimated_net_close_rebalance_dollars_blend"))
         real_dollars = _f(real_row.get("net_moc_dollars"))
-        if est_dollars is None or real_dollars is None:
+        if chosen is None and blend is None and spot is None and nav is None:
             continue
-        signed_error = est_dollars - real_dollars
-        signed_error_pct = signed_error / real_dollars if abs(real_dollars) > 0 else None
+        if real_dollars is None:
+            continue
+        chosen = chosen if chosen is not None else (blend if blend is not None else (spot if spot is not None else nav))
+        signed_error = chosen - real_dollars
         out.append({
             "trading_date": date_iso,
             "underlying": und,
-            "estimate_dollars": round(est_dollars, 2),
+            "estimate_dollars": round(chosen, 2),
+            "estimate_dollars_spot": round(spot, 2) if spot is not None else None,
+            "estimate_dollars_nav": round(nav, 2) if nav is not None else None,
+            "estimate_dollars_blend": round(blend, 2) if blend is not None else None,
             "realized_dollars": round(real_dollars, 2),
             "signed_error_dollars": round(signed_error, 2),
-            "signed_error_pct": round(signed_error_pct, 6) if signed_error_pct is not None else None,
+            "signed_error_pct": (
+                round(_signed_pct(chosen, real_dollars), 6)
+                if _signed_pct(chosen, real_dollars) is not None else None
+            ),
+            "signed_error_pct_spot": (
+                round(_signed_pct(spot, real_dollars), 6)
+                if _signed_pct(spot, real_dollars) is not None else None
+            ),
+            "signed_error_pct_nav": (
+                round(_signed_pct(nav, real_dollars), 6)
+                if _signed_pct(nav, real_dollars) is not None else None
+            ),
+            "signed_error_pct_blend": (
+                round(_signed_pct(blend, real_dollars), 6)
+                if _signed_pct(blend, real_dollars) is not None else None
+            ),
+            "top_contributors": est_row.get("top_contributors") or [],
             "minutes_to_close_at_estimate": est.get("minutes_to_close"),
             "estimate_as_of": est.get("as_of"),
         })
     return out
 
 
+def _stats_for(values: list[float]) -> dict[str, float]:
+    n = len(values)
+    if n == 0:
+        return {"n": 0}
+    mean = sum(values) / n
+    mae = sum(abs(x) for x in values) / n
+    mse = sum(x * x for x in values) / n
+    return {
+        "n": n,
+        "mean_signed_error_pct": round(mean, 6),
+        "mean_abs_error_pct": round(mae, 6),
+        "mse_pct": round(mse, 8),
+    }
+
+
+def _optimal_blend_weight(spot_pcts: list[float], nav_pcts: list[float]) -> float | None:
+    """Minimum-variance combination weight on the NAV path.
+
+    For each row that has both signed errors we minimise
+    ``var(w·err_nav + (1-w)·err_spot)``. The closed-form minimiser is::
+
+        w* = (var_spot - cov(spot, nav)) / (var_spot + var_nav - 2·cov(spot, nav))
+
+    which collapses to the inverse-MSE rule when the two sources are
+    uncorrelated. We clip to ``[0.05, 0.95]`` so neither source ever fully
+    drops out of the production estimator -- aligns with the floor/ceil in
+    ``build_letf_intraday_flows.py``.
+    """
+    if not spot_pcts or not nav_pcts or len(spot_pcts) != len(nav_pcts):
+        return None
+    n = len(spot_pcts)
+    if n < 2:
+        return None
+    mean_s = sum(spot_pcts) / n
+    mean_n = sum(nav_pcts) / n
+    var_s = sum((x - mean_s) ** 2 for x in spot_pcts) / n
+    var_n = sum((x - mean_n) ** 2 for x in nav_pcts) / n
+    cov = sum((s - mean_s) * (nv - mean_n) for s, nv in zip(spot_pcts, nav_pcts)) / n
+    denom = var_s + var_n - 2.0 * cov
+    if denom <= 1e-12:
+        return None
+    w = (var_s - cov) / denom
+    return max(0.05, min(0.95, w))
+
+
 def roll_metrics(realized_log: Path, *, window: int = ROLLING_WINDOW, min_obs: int = MIN_OBS) -> dict[str, Any]:
-    """Per-underlying rolling stats over the last ``window`` reconciled days."""
+    """Per-underlying rolling stats over the last ``window`` reconciled days.
+
+    Emits two levels of detail:
+
+    * ``by_underlying[UND]``  -- chosen-estimate signed-error stats
+      (legacy bias map; consumed by the per-underlying bias adjustment in
+      ``build_letf_intraday_flows.py``).
+    * ``by_underlying[UND].by_source.{spot,nav,blend}`` -- per-source stats so
+      the UI can show calibration quality of each path.
+    * ``by_ticker[ETF]`` -- per-fund optimal NAV blend weight derived from the
+      contributor-level breakdown stored on each reconciled row. Once we have
+      ``min_obs`` matching days for a fund's spot and NAV signed errors, we
+      surface ``blend_weight_nav`` -- ``build_letf_intraday_flows.py`` will use
+      it instead of the model/confidence prior on the next intraday build.
+    """
     rows = _read_jsonl(realized_log)
     if not rows:
-        return {"build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "by_underlying": {}}
+        return {
+            "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "window_days": window,
+            "min_observations": min_obs,
+            "by_underlying": {},
+            "by_ticker": {},
+        }
     rows.sort(key=lambda r: r.get("trading_date") or "")
     by_und: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
@@ -186,36 +285,82 @@ def roll_metrics(realized_log: Path, *, window: int = ROLLING_WINDOW, min_obs: i
         by_und.setdefault(und, []).append(r)
 
     out: dict[str, dict[str, Any]] = {}
+    contributor_pairs: dict[str, list[tuple[float, float]]] = {}
+
     for und, lst in by_und.items():
         recent = lst[-window:]
-        signed_pcts = [r.get("signed_error_pct") for r in recent if r.get("signed_error_pct") is not None]
-        if not signed_pcts:
+        chosen = [r.get("signed_error_pct") for r in recent if r.get("signed_error_pct") is not None]
+        if not chosen:
             continue
-        n = len(signed_pcts)
-        if n < min_obs:
-            # Still surface the count so the UI can show "calibrating (n/min_obs)".
-            mean_pct = sum(signed_pcts) / n
-            mae_pct = sum(abs(x) for x in signed_pcts) / n
-            out[und] = {
-                "n_observations": n,
-                "mean_signed_error_pct": round(mean_pct, 6),
-                "mean_abs_error_pct": round(mae_pct, 6),
-                "applied": False,
-            }
-            continue
-        mean_pct = sum(signed_pcts) / n
-        mae_pct = sum(abs(x) for x in signed_pcts) / n
-        out[und] = {
+        spot = [r.get("signed_error_pct_spot") for r in recent if r.get("signed_error_pct_spot") is not None]
+        nav = [r.get("signed_error_pct_nav") for r in recent if r.get("signed_error_pct_nav") is not None]
+        blend = [r.get("signed_error_pct_blend") for r in recent if r.get("signed_error_pct_blend") is not None]
+
+        # Pair spot/nav errors per day (for optimal weight at the per-underlying level).
+        pair_dates: list[tuple[float, float]] = []
+        for r in recent:
+            s = r.get("signed_error_pct_spot")
+            nv = r.get("signed_error_pct_nav")
+            if s is None or nv is None:
+                continue
+            pair_dates.append((float(s), float(nv)))
+
+        n = len(chosen)
+        chosen_stats = _stats_for([float(x) for x in chosen])
+        applied = n >= min_obs
+
+        record = {
             "n_observations": n,
-            "mean_signed_error_pct": round(mean_pct, 6),
-            "mean_abs_error_pct": round(mae_pct, 6),
-            "applied": True,
+            "mean_signed_error_pct": chosen_stats.get("mean_signed_error_pct"),
+            "mean_abs_error_pct": chosen_stats.get("mean_abs_error_pct"),
+            "applied": bool(applied),
+            "by_source": {
+                "spot": _stats_for([float(x) for x in spot]),
+                "nav": _stats_for([float(x) for x in nav]),
+                "blend": _stats_for([float(x) for x in blend]),
+            },
         }
+        if pair_dates:
+            ws = _optimal_blend_weight([s for s, _ in pair_dates], [nv for _, nv in pair_dates])
+            if ws is not None and len(pair_dates) >= min_obs:
+                record["optimal_blend_weight_nav"] = round(ws, 4)
+                record["optimal_blend_weight_n"] = len(pair_dates)
+        out[und] = record
+
+        # Per-fund contributor accumulation for by_ticker.
+        for r in recent:
+            for c in r.get("top_contributors") or []:
+                ticker = str(c.get("ticker") or "").upper()
+                if not ticker:
+                    continue
+                # Use the per-underlying spot/nav signed errors as a proxy for
+                # the fund-level calibration (fund-specific reconciliation
+                # would need a fund-level realised, which we do not have).
+                s = r.get("signed_error_pct_spot")
+                nv = r.get("signed_error_pct_nav")
+                if s is None or nv is None:
+                    continue
+                contributor_pairs.setdefault(ticker, []).append((float(s), float(nv)))
+
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for ticker, pairs in contributor_pairs.items():
+        if len(pairs) < min_obs:
+            by_ticker[ticker] = {"n_observations": len(pairs), "blend_weight_nav": None}
+            continue
+        w = _optimal_blend_weight([s for s, _ in pairs], [nv for _, nv in pairs])
+        if w is None:
+            continue
+        by_ticker[ticker] = {
+            "n_observations": len(pairs),
+            "blend_weight_nav": round(w, 4),
+        }
+
     return {
         "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "window_days": window,
         "min_observations": min_obs,
         "by_underlying": out,
+        "by_ticker": by_ticker,
     }
 
 

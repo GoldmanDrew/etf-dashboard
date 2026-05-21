@@ -1879,7 +1879,16 @@ async function loadLetfIntradayFlowsCache({ force = true } = {}) {
     spotPricedCount: latest?.spot_priced_count ?? null,
     spotUniverseCount: latest?.spot_universe_count ?? null,
     nFundsPriced: latest?.n_funds_priced ?? null,
+    nFundsPricedSpot: latest?.n_funds_priced_spot ?? null,
+    nFundsPricedNav: latest?.n_funds_priced_nav ?? null,
+    nFundsPricedBlend: latest?.n_funds_priced_blend ?? null,
     nFundsTotal: latest?.n_funds_total ?? null,
+    navForecastBuildTime: latest?.nav_forecast_build_time || null,
+    navForecastAnchorDate: latest?.nav_forecast_anchor_date || null,
+    navForecastDefaultModelsCount: latest?.nav_forecast_default_models_count || null,
+    navFundsTotal: latest?.nav_funds_total ?? null,
+    navFundsStale: latest?.nav_funds_stale ?? null,
+    blendOverridesCount: latest?.blend_overrides_count ?? 0,
     method: latest?.method || null,
     todayHistory: Array.isArray(latest?.today_history) ? latest.today_history : [],
     biasMetrics,
@@ -4328,7 +4337,20 @@ function LetfIntradayConvergenceChart({ series, underlying, latestRealized, late
   const xs = sorted.map((p) => Number(p.minutes_to_close));
   const ys = sorted.map((p) => Number(p.net));
   const refY = Number(latestRealized);
+  // Treat each trajectory (blend / spot / nav) as its own polyline so the
+  // user can see the three estimators converge as we approach the close.
+  const trajectories = [
+    { key: 'blend', color: 'rgba(245,158,11,0.95)', label: 'Blended', valueOf: (p) => Number(p.net) },
+    { key: 'spot', color: 'rgba(96,165,250,0.55)', label: 'Spot only', valueOf: (p) => Number(p.net_spot) },
+    { key: 'nav', color: 'rgba(34,197,94,0.55)', label: 'NAV-implied', valueOf: (p) => Number(p.net_nav) },
+  ];
   const allYs = [...ys];
+  for (const t of trajectories) {
+    for (const p of sorted) {
+      const v = t.valueOf(p);
+      if (Number.isFinite(v)) allYs.push(v);
+    }
+  }
   if (Number.isFinite(refY)) allYs.push(refY);
   const yMaxAbs = Math.max(...allYs.map((v) => Math.abs(v)), 1);
   const xMin = Math.max(...xs);
@@ -4336,9 +4358,16 @@ function LetfIntradayConvergenceChart({ series, underlying, latestRealized, late
   const xRange = Math.max(1, xMin - xMax);
   const xPos = (m) => padL + ((xMin - m) / xRange) * innerW;
   const yPos = (v) => padT + innerH / 2 - (v / (yMaxAbs * 1.05)) * (innerH / 2 - 4);
-  const polyPoints = sorted.map((p) => `${xPos(p.minutes_to_close).toFixed(2)},${yPos(p.net).toFixed(2)}`).join(' ');
   const yTicks = [1, 0.5, 0, -0.5, -1];
   const xTicks = [xMin, Math.round((xMin + xMax) / 2), xMax].filter((v, i, a) => a.indexOf(v) === i);
+  const visibleTrajectories = trajectories
+    .map((t) => {
+      const pts = sorted
+        .map((p) => ({ p, v: t.valueOf(p) }))
+        .filter((row) => Number.isFinite(row.v));
+      return { ...t, pts };
+    })
+    .filter((t) => t.pts.length >= 2);
   return (
     <div className="trade-card" style={{ marginTop: 12 }}>
       <div className="scenario-title">{underlying} — intraday convergence (today)</div>
@@ -4370,18 +4399,29 @@ function LetfIntradayConvergenceChart({ series, underlying, latestRealized, late
             </text>
           </g>
         )}
-        <polyline
-          fill="none"
-          stroke="rgba(245,158,11,0.95)"
-          strokeWidth="1.6"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          points={polyPoints}
-        />
-        {sorted.map((p, i) => (
-          <circle key={`pt-${i}`} cx={xPos(p.minutes_to_close)} cy={yPos(p.net)} r={2.4} fill="rgba(245,158,11,0.95)">
-            <title>{`${p.as_of || ''} (${p.minutes_to_close}m to close): ${fmtSignedMoney(p.net)}`}</title>
-          </circle>
+        {visibleTrajectories.map((t) => (
+          <g key={`tr-${t.key}`}>
+            <polyline
+              fill="none"
+              stroke={t.color}
+              strokeWidth={t.key === 'blend' ? 1.8 : 1.2}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              strokeDasharray={t.key === 'blend' ? undefined : '3 3'}
+              points={t.pts.map(({ p, v }) => `${xPos(p.minutes_to_close).toFixed(2)},${yPos(v).toFixed(2)}`).join(' ')}
+            />
+            {t.pts.map(({ p, v }, i) => (
+              <circle
+                key={`pt-${t.key}-${i}`}
+                cx={xPos(p.minutes_to_close)}
+                cy={yPos(v)}
+                r={t.key === 'blend' ? 2.4 : 1.6}
+                fill={t.color}
+              >
+                <title>{`${t.label} · ${p.as_of || ''} (${p.minutes_to_close}m to close): ${fmtSignedMoney(v)}`}</title>
+              </circle>
+            ))}
+          </g>
         ))}
         {xTicks.map((m) => (
           <text key={`gx-${m}`} x={xPos(m)} y={H - 10} textAnchor="middle" fontSize="11" fill="#8b9cbb" fontFamily="DM Sans">
@@ -4390,7 +4430,12 @@ function LetfIntradayConvergenceChart({ series, underlying, latestRealized, late
         ))}
       </svg>
       <div className="backtest-chart-legend">
-        <span><span className="backtest-legend-dot" style={{ background: 'rgba(245,158,11,0.95)' }} />Today’s estimate trajectory</span>
+        {visibleTrajectories.map((t) => (
+          <span key={`lg-${t.key}`}>
+            <span className="backtest-legend-dot" style={{ background: t.color }} />
+            {t.label}
+          </span>
+        ))}
         {Number.isFinite(refY) && (
           <span><span className="backtest-legend-dot" style={{ background: 'rgba(96,165,250,0.85)' }} />Prior-close realised</span>
         )}
@@ -4858,11 +4903,24 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const hist = Array.isArray(intradayFlows?.todayHistory) ? intradayFlows.todayHistory : [];
     const und = String(undSym || '').toUpperCase();
     return hist
-      .map((entry) => ({
-        as_of: entry?.as_of,
-        minutes_to_close: entry?.minutes_to_close,
-        net: Number(entry?.net_by_underlying?.[und]),
-      }))
+      .map((entry) => {
+        // ``net_by_underlying`` is the surfaced (blend-when-available) value;
+        // separate spot/nav/blend keys land in their own maps so the user can
+        // see the three trajectories converge.
+        const blend = Number(
+          entry?.net_by_underlying_blend?.[und]
+            ?? entry?.net_by_underlying?.[und],
+        );
+        const spot = Number(entry?.net_by_underlying_spot?.[und]);
+        const nav = Number(entry?.net_by_underlying_nav?.[und]);
+        return {
+          as_of: entry?.as_of,
+          minutes_to_close: entry?.minutes_to_close,
+          net: blend,
+          net_spot: spot,
+          net_nav: nav,
+        };
+      })
       .filter((p) => Number.isFinite(p.net));
   }, [intradayFlows, undSym]);
   const intradayFreshnessClass = useMemo(() => {
@@ -6635,7 +6693,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="chart-stats" style={{ marginTop: 4 }}>
                 <div className="chart-stat">
                   <div className="cs-label">
-                    {etfSym} intraday est.
+                    {etfSym} blended est.
                     {intradayFlows?.minutesToClose != null
                       ? <span className="cs-sub" style={{ marginLeft: 6 }}> · {intradayFlows.minutesToClose}m to close</span>
                       : null}
@@ -6647,10 +6705,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     {intradayFundRow
                       ? <>
                           {flowDirectionLabel(intradayFundRow.estimated_close_rebalance_dollars)}
-                          {Number.isFinite(Number(intradayFundRow.return_d1_so_far))
-                            ? <> · und {fmtPctDecimal(intradayFundRow.return_d1_so_far, 2)} so far</>
+                          {Number.isFinite(Number(intradayFundRow.blend_weight_nav))
+                            ? <> · w<sub>nav</sub>={Number(intradayFundRow.blend_weight_nav).toFixed(2)}</>
                             : null}
                           {intradayFundRow.spot_stale ? <> · <span className="val-negative">stale spot</span></> : null}
+                          {intradayFundRow.nav_stale && intradayFundRow.nav_present
+                            ? <> · <span className="val-negative">stale nav</span></>
+                            : null}
                           {intradayFundRow.quality_flag && intradayFundRow.quality_flag !== 'ok'
                             ? <> · <span className="val-negative">{intradayFundRow.quality_flag}</span></>
                             : null}
@@ -6663,6 +6724,39 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                         : <>Awaiting first intraday snapshot</>}
                   </div>
                 </div>
+                <div className="chart-stat" title="Spot path: L·(L−1)·AUM·return-so-far. Pure underlying spot, no NAV-model structure.">
+                  <div className="cs-label">{etfSym} spot est.</div>
+                  <div className={cls('cs-value', flowValClass(intradayFundRow?.rebalance_spot_dollars))}>
+                    {fmtSignedMoney(intradayFundRow?.rebalance_spot_dollars)}
+                  </div>
+                  <div className="cs-sub">
+                    {intradayFundRow
+                      ? Number.isFinite(Number(intradayFundRow.return_d1_so_far))
+                        ? <>und {fmtPctDecimal(intradayFundRow.return_d1_so_far, 2)} so far</>
+                        : <span className="val-negative">no spot return</span>
+                      : <>—</>}
+                  </div>
+                </div>
+                <div className="chart-stat" title="NAV-implied: r_nav = log(nav_hat/nav_anchor)/delta from forecast_nav.py, then plugged into the rebalance identity. Captures vol drag (v2) and holdings deltas (v3).">
+                  <div className="cs-label">{etfSym} NAV-implied est.</div>
+                  <div className={cls('cs-value', flowValClass(intradayFundRow?.rebalance_nav_dollars))}>
+                    {fmtSignedMoney(intradayFundRow?.rebalance_nav_dollars)}
+                  </div>
+                  <div className="cs-sub">
+                    {intradayFundRow?.nav_present
+                      ? <>
+                          {intradayFundRow.nav_model || 'unknown model'}
+                          {intradayFundRow.nav_confidence
+                            ? <> · {intradayFundRow.nav_confidence}</>
+                            : null}
+                          {Number.isFinite(Number(intradayFundRow.r_nav))
+                            ? <> · r<sub>nav</sub>={fmtPctDecimal(intradayFundRow.r_nav, 2)}</>
+                            : null}
+                          {intradayFundRow.nav_stale ? <> · <span className="val-negative">stale</span></> : null}
+                        </>
+                      : <>No NAV forecast row</>}
+                  </div>
+                </div>
                 <div className="chart-stat">
                   <div className="cs-label">{String(undSym || '').toUpperCase()} remaining-to-close</div>
                   <div className={cls('cs-value', flowValClass(intradayUnderlyingRow?.remaining_close_rebalance_dollars))}>
@@ -6673,6 +6767,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     {intradayUnderlyingRow
                       ? <>
                           {fmtNum(intradayUnderlyingRow.n_funds_priced)} fund(s)
+                          {Number.isFinite(Number(intradayUnderlyingRow.mean_blend_weight_nav)) && intradayUnderlyingRow.mean_blend_weight_nav > 0
+                            ? <> · w<sub>nav</sub>≈{Number(intradayUnderlyingRow.mean_blend_weight_nav).toFixed(2)}</>
+                            : null}
                           {intradayUnderlyingRow.estimated_close_rebalance_pct_adv_20d != null
                             ? <> · {fmtPctDecimal(intradayUnderlyingRow.estimated_close_rebalance_pct_adv_20d, 2)} of 20d $ ADV</>
                             : null}
@@ -7752,6 +7849,13 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
         {mode === 'intraday' && intradayPayload?.spotSources ? (
           <> · spots: polygon {fmtNum(intradayPayload.spotSources.polygon_snapshot)} · cache {fmtNum(intradayPayload.spotSources.options_cache)} · yf {fmtNum(intradayPayload.spotSources.yfinance_fast_info)}</>
         ) : null}
+        {mode === 'intraday' && Number.isFinite(Number(intradayPayload?.nFundsPricedNav)) ? (
+          <>
+            {' '}· funds priced spot {fmtNum(intradayPayload.nFundsPricedSpot)} / nav {fmtNum(intradayPayload.nFundsPricedNav)} / blend {fmtNum(intradayPayload.nFundsPricedBlend)}
+            {intradayPayload.navForecastBuildTime ? <> · NAV forecast {fmtTime(intradayPayload.navForecastBuildTime)}</> : null}
+            {intradayPayload.blendOverridesCount > 0 ? <> · {fmtNum(intradayPayload.blendOverridesCount)} per-ticker calibrations</> : null}
+          </>
+        ) : null}
       </div>
 
       <div className="news-chip-row" style={{ marginTop: 8 }}>
@@ -7906,7 +8010,25 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
                     {stale ? <span className="cs-sub" style={{ marginLeft: 6 }}>· stale</span> : null}
                   </td>
                   <td>{dateLabel}</td>
-                  <td className={flowValClass(netVal)} title={fmtSignedMoney(netVal)}>
+                  <td
+                    className={flowValClass(netVal)}
+                    title={
+                      mode === 'intraday'
+                        ? (
+                            'Blended ' + fmtSignedMoney(netVal)
+                            + (Number.isFinite(Number(row.estimated_net_close_rebalance_dollars_spot))
+                                ? ' · spot ' + fmtSignedMoney(row.estimated_net_close_rebalance_dollars_spot)
+                                : '')
+                            + (Number.isFinite(Number(row.estimated_net_close_rebalance_dollars_nav))
+                                ? ' · nav ' + fmtSignedMoney(row.estimated_net_close_rebalance_dollars_nav)
+                                : '')
+                            + (Number.isFinite(Number(row.mean_blend_weight_nav)) && row.mean_blend_weight_nav > 0
+                                ? ' · w_nav≈' + Number(row.mean_blend_weight_nav).toFixed(2)
+                                : '')
+                          )
+                        : fmtSignedMoney(netVal)
+                    }
+                  >
                     {fmtCompactSignedMoney(netVal)}
                   </td>
                   {mode === 'intraday' ? (
