@@ -78,6 +78,9 @@ jobs:
       - name: Print options coverage diagnostics (with hard gate)
         run: python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero
 
+      - name: VRP pipeline diagnostics
+        run: python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
+
       - name: Commit data if changed
         run: |
           BRANCH="${GITHUB_REF_NAME:-main}"

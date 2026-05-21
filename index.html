@@ -4468,6 +4468,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [optionsCacheError, setOptionsCacheError] = useState(null);
   const [vrpLive, setVrpLive] = useState(null);
   const [vrpLiveError, setVrpLiveError] = useState(null);
+  const [ybSpreads, setYbSpreads] = useState(null);
   const [etfMetricsMap, setEtfMetricsMap] = useState({});
   const [etfMetricsLoading, setEtfMetricsLoading] = useState(false);
   const [etfMetricsError, setEtfMetricsError] = useState(null);
@@ -4511,6 +4512,35 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (!Array.isArray(rows)) return null;
     return rows.find((x) => String(x?.yb_etf || '').toUpperCase() === etfSym) || null;
   }, [vrpLive, etfSym]);
+  const vrpSpreadRow = useMemo(() => {
+    const rows = ybSpreads?.spreads;
+    if (!Array.isArray(rows)) return null;
+    const mine = rows.filter((x) => String(x?.yb_etf || '').toUpperCase() === etfSym);
+    return mine.find((x) => x?.is_front) || mine[0] || null;
+  }, [ybSpreads, etfSym]);
+  const vrpDisplayRow = useMemo(() => {
+    if (vrpLiveRow) return vrpLiveRow;
+    if (!vrpSpreadRow) return null;
+    return {
+      yb_etf: vrpSpreadRow.yb_etf,
+      sleeve_2x: vrpSpreadRow.sleeve_2x_etf,
+      underlying: vrpSpreadRow.underlying,
+      expiry: vrpSpreadRow.expiry,
+      strike_long: vrpSpreadRow.strike_long,
+      strike_short: vrpSpreadRow.strike_short,
+      holdings_as_of: vrpSpreadRow.holdings_as_of,
+      moneyness_long_pct: vrpSpreadRow.moneyness_long_pct,
+      moneyness_short_pct: vrpSpreadRow.moneyness_short_pct,
+      iv_put_long: null,
+      iv_put_short: null,
+      spread_mid_market: null,
+      rv_30d_2x: null,
+      vrp_vol_2x: null,
+      iv_source: null,
+      _iv_pending: true,
+    };
+  }, [vrpLiveRow, vrpSpreadRow]);
+  const vrpIvPending = Boolean(vrpDisplayRow?._iv_pending);
   const showBacktestPanel = Boolean(String(undSym || '').trim());
   useEffect(() => {
     if (hideScenarios && activePanel === 'scenarios') setActivePanel('chart');
@@ -4658,19 +4688,37 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     let cancelled = false;
     const run = async () => {
       setVrpLiveError(null);
+      const cacheBust = `?t=${Math.floor(Date.now() / 300)}`;
+      let spreadsPayload = null;
       try {
-        const cacheBust = `?t=${Math.floor(Date.now() / 300)}`;
+        const spreadsRes = await fetch(`${YIELDBOOST_PUT_SPREADS_URL}${cacheBust}`, { cache: 'no-store' });
+        if (spreadsRes.ok) {
+          spreadsPayload = await spreadsRes.json();
+          if (!cancelled) setYbSpreads(spreadsPayload);
+        }
+      } catch (_) {
+        /* spreads fallback is best-effort */
+      }
+      try {
         const res = await fetch(`${VRP_LIVE_URL}${cacheBust}`, { cache: 'no-store' });
-        if (!res.ok) throw new Error(`vrp live HTTP ${res.status}`);
+        if (!res.ok) {
+          if (res.status === 404 && spreadsPayload?.spreads?.length) return;
+          throw new Error(`vrp live HTTP ${res.status}`);
+        }
         const payload = await res.json();
         if (!cancelled) setVrpLive(payload);
       } catch (e) {
-        if (!cancelled) setVrpLiveError(e?.message || 'vrp panel unavailable');
+        const hasSpreadFallback = Boolean(
+          spreadsPayload?.spreads?.some((x) => String(x?.yb_etf || '').toUpperCase() === etfSym),
+        );
+        if (!cancelled && !hasSpreadFallback) {
+          setVrpLiveError(e?.message || 'vrp panel unavailable');
+        }
       }
     };
     run();
     return () => { cancelled = true; };
-  }, [r?.symbol, r?.is_yieldboost]);
+  }, [r?.symbol, r?.is_yieldboost, etfSym]);
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
@@ -6948,28 +6996,33 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div>
                 <div className="scenario-title">Vol / VRP — holdings strikes</div>
                 <div className="scenario-sub">
-                  Live IV at Granite-reported put-spread legs ({etfSym} → {vrpLiveRow?.sleeve_2x || undSym}).
+                  Live IV at Granite-reported put-spread legs ({etfSym} → {vrpDisplayRow?.sleeve_2x || vrpSpreadRow?.sleeve_2x_etf || undSym}).
                 </div>
               </div>
             </div>
-            {vrpLiveError && <div className="scenario-warning">{vrpLiveError}</div>}
-            {!vrpLiveRow ? (
-              <div className="scenario-sub">No front spread in `vrp_live.json` for {etfSym}. Run holdings ingest + options refresh.</div>
+            {vrpLiveError && !vrpDisplayRow && <div className="scenario-warning">{vrpLiveError}</div>}
+            {vrpIvPending && (
+              <div className="scenario-sub" style={{ marginBottom: 8 }}>
+                IV pending — options refresh in progress. Holdings strikes below are from Granite XLS.
+              </div>
+            )}
+            {!vrpDisplayRow ? (
+              <div className="scenario-sub">No front spread for {etfSym} yet. Run Update ETF Metrics (Granite XLS holdings) then Build &amp; Deploy.</div>
             ) : (
               <div className="borrow-grid">
                 <div className="borrow-card">
-                  <div className="scenario-sub">Holdings as of {vrpLiveRow.holdings_as_of || '—'} · Expiry {vrpLiveRow.expiry || '—'}</div>
+                  <div className="scenario-sub">Holdings as of {vrpDisplayRow.holdings_as_of || '—'} · Expiry {vrpDisplayRow.expiry || '—'}</div>
                   <table className="scenario-table">
                     <tbody>
-                      <tr><td>2× sleeve</td><td><strong>{vrpLiveRow.sleeve_2x || '—'}</strong></td></tr>
-                      <tr><td>Long put strike</td><td>{vrpLiveRow.strike_long ?? '—'}</td></tr>
-                      <tr><td>Short put strike</td><td>{vrpLiveRow.strike_short ?? '—'}</td></tr>
-                      <tr><td>IV long / short</td><td>{vrpLiveRow.iv_put_long != null ? fmt(vrpLiveRow.iv_put_long) : '—'} / {vrpLiveRow.iv_put_short != null ? fmt(vrpLiveRow.iv_put_short) : '—'}</td></tr>
-                      <tr><td>Spread mid (market)</td><td>{vrpLiveRow.spread_mid_market != null ? fmt(vrpLiveRow.spread_mid_market) : '—'}</td></tr>
-                      <tr><td>RV 30d (2×)</td><td>{vrpLiveRow.rv_30d_2x != null ? fmt(vrpLiveRow.rv_30d_2x) : '—'}</td></tr>
-                      <tr><td>VRP vol (2× proxy)</td><td>{vrpLiveRow.vrp_vol_2x != null ? fmt(vrpLiveRow.vrp_vol_2x) : '—'}</td></tr>
-                      <tr><td>Moneyness long / short</td><td>{vrpLiveRow.moneyness_long_pct != null ? `${vrpLiveRow.moneyness_long_pct.toFixed(2)}%` : '—'} / {vrpLiveRow.moneyness_short_pct != null ? `${vrpLiveRow.moneyness_short_pct.toFixed(2)}%` : '—'}</td></tr>
-                      <tr><td>IV source</td><td>{vrpLiveRow.iv_source || '—'}</td></tr>
+                      <tr><td>2× sleeve</td><td><strong>{vrpDisplayRow.sleeve_2x || '—'}</strong></td></tr>
+                      <tr><td>Long put strike</td><td>{vrpDisplayRow.strike_long ?? '—'}</td></tr>
+                      <tr><td>Short put strike</td><td>{vrpDisplayRow.strike_short ?? '—'}</td></tr>
+                      <tr><td>IV long / short</td><td>{vrpDisplayRow.iv_put_long != null ? fmt(vrpDisplayRow.iv_put_long) : '—'} / {vrpDisplayRow.iv_put_short != null ? fmt(vrpDisplayRow.iv_put_short) : '—'}</td></tr>
+                      <tr><td>Spread mid (market)</td><td>{vrpDisplayRow.spread_mid_market != null ? fmt(vrpDisplayRow.spread_mid_market) : '—'}</td></tr>
+                      <tr><td>RV 30d (2×)</td><td>{vrpDisplayRow.rv_30d_2x != null ? fmt(vrpDisplayRow.rv_30d_2x) : '—'}</td></tr>
+                      <tr><td>VRP vol (2× proxy)</td><td>{vrpDisplayRow.vrp_vol_2x != null ? fmt(vrpDisplayRow.vrp_vol_2x) : '—'}</td></tr>
+                      <tr><td>Moneyness long / short</td><td>{vrpDisplayRow.moneyness_long_pct != null ? `${vrpDisplayRow.moneyness_long_pct.toFixed(2)}%` : '—'} / {vrpDisplayRow.moneyness_short_pct != null ? `${vrpDisplayRow.moneyness_short_pct.toFixed(2)}%` : '—'}</td></tr>
+                      <tr><td>IV source</td><td>{vrpIvPending ? 'holdings (IV pending)' : (vrpDisplayRow.iv_source || '—')}</td></tr>
                     </tbody>
                   </table>
                 </div>

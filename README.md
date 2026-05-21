@@ -122,11 +122,28 @@ The `build-and-deploy.yml` Action runs on push, builds the data, and deploys. Yo
 
 - `build-and-deploy.yml` runs once daily on weekdays (plus push/manual) for full rebuild.
 - `refresh-borrow.yml` runs every 10 minutes for borrow + shares refresh only (`build_data.py --borrow-only`).
-- `refresh-options.yml` runs every 5 minutes (GitHub Actions minimum cadence) for a throttled options shard focused on Bucket 3 inverse ETFs (`build_data.py --options-only`).
+- `refresh-options.yml` runs on a **5-minute cron** (GitHub Actions minimum) for a throttled options shard focused on Bucket 3 inverse ETFs, with YieldBOOST sleeve symbols included when `OPTIONS_INCLUDE_YIELDBOOST=1`. **Do not treat this as true 5-minute freshness** — GitHub schedule jitter often delays runs by 15–60+ minutes, and each run refreshes only one shard (~16 symbols). YieldBOOST IV at held strikes may lag until Phase 3 adds a dedicated targeted workflow.
 - `update-etf-metrics.yml` runs daily at **5:00 AM ET** to ingest NAV / AUM / shares outstanding panel data, plus per-ticker distribution history (`etf_distributions.json`) for the Total-Return NAV chart on the Stats tab. The same workflow then scores yesterday's NAV forecasts per `(symbol, model)` (`scripts/score_nav_forecasts.py`) and refreshes `data/nav_forecasts/_anchors.json` (with `shares_outstanding` for the holdings-aware models) for the next trading day.
 - `refresh-nav-forecast.yml` runs **every 30 minutes Mon-Fri 13:00-22:00 UTC** and snapshots the multi-model NAV forecaster — `delta_v1`, `delta_v2_ito`, `delta_v3_swap_mark`, and `yieldboost_putspread_v1` — via `scripts/forecast_nav.py`. See the Decay Models section + `data/nav_forecasts/README.md`.
 - `update-corporate-actions.yml` runs **every 6 hours** to ingest structured corporate-action events (splits, reverse splits, delistings, symbol changes, mergers) into `corporate_actions.json` and a filtered news feed into `etf_news.json`. Both artifacts power the top-level **News** tab (`#/news`). Dividends/distributions are explicitly excluded from the news feed because the Stats tab already visualizes them via the Total-Return NAV series.
 - Refresh workflows commit JSON only; GitHub Pages deployment is handled by `build-and-deploy.yml` to avoid queue contention.
+
+## Vol / VRP tab (YieldBOOST)
+
+The **Vol / VRP** panel on YieldBOOST income rows reads two artifacts:
+
+| File | What it carries | Typical cadence |
+|------|-----------------|-----------------|
+| `data/yieldboost_put_spreads_latest.json` | Paired put-spread legs scraped from Granite XLS holdings (exact strikes, expiry, sleeve) | Daily ETF metrics ingest + each `build_data` run |
+| `data/vrp_live.json` | IV, spread mid, RV, and VRP at those held strikes | Each `build_data` / `--options-only` run |
+
+**UI behavior:** the tab prefers `vrp_live.json`. If that file is missing (404 on Pages), it falls back to spreads JSON and shows holdings strikes with **IV pending** rather than an HTTP error.
+
+**CI gate:** `scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads` runs after successful builds in `build-and-deploy.yml` and `refresh-options.yml`.
+
+**Operator recovery:** run Update ETF Metrics → Build & Deploy → Refresh Options; see `AGENTS.md` §12.8.
+
+**Known limitation:** options refresh is sharded and schedule-jittered; IV coverage at YieldBOOST sleeves improves when the dedicated targeted workflow (long-term plan Phase 3) lands.
 
 ## Running Locally
 

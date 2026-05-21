@@ -13,7 +13,7 @@ If you only have time for one section, read **§3 Data Flow** and **§5 Product 
 3. [Data flow](#3-data-flow-end-to-end)
 4. [Decay models — the math you need to know](#4-decay-models--the-math-you-need-to-know)
 5. [Product taxonomy & routing matrix](#5-product-taxonomy--routing-matrix)
-6. [The ten data files in `data/`](#6-the-ten-data-files-in-data)
+6. [Data artifact registry (`data/`)](#6-data-artifact-registry-data)
 7. [Schema map — every column the dashboard reads](#7-schema-map--every-column-the-dashboard-reads)
 8. [`scripts/build_data.py` walkthrough](#8-scriptsbuild_datapy-walkthrough)
 9. [`index.html` (React SPA) component map](#9-indexhtml-react-spa-component-map)
@@ -334,7 +334,9 @@ This same function is reused for **sorting** the column. If you change the rende
 
 ---
 
-## 6. The ten data files in `data/`
+## 6. Data artifact registry (`data/`)
+
+Every user-facing JSON under `data/` has a single producer workflow, a primary consumer, and an expected refresh cadence. CI gate: `scripts/vrp_pipeline_diagnostics.py` (YieldBOOST VRP lane).
 
 | File | Producer | Consumer | Refresh cadence |
 |---|---|---|---|
@@ -346,7 +348,9 @@ This same function is reused for **sorting** the column. If you change the rende
 | `borrow_spike_predictions/<DATE>.json` | `build_data.py` (full + `--borrow-only`) | `scripts/score_borrow_spikes.py` | daily / every 10 min |
 | `borrow_spike_realized.jsonl` | `scripts/score_borrow_spikes.py` | ops / calibration audits | append on workflow |
 | `borrow_spike_metrics.json` | `scripts/score_borrow_spikes.py` | Brier, log-loss, band calibration rollup | daily / borrow refresh |
-| `options_cache.json` | `build_data.py --options-only` | `ChartPage`, `Trade Lab` | every 5 min (sharded) |
+| `options_cache.json` | `build_data.py --options-only` | `ChartPage`, `Trade Lab`, `vrp_live.json` builder | scheduled every 5 min (sharded; GitHub jitter 5–60+ min) |
+| `yieldboost_put_spreads_latest.json` | `ingest_etf_metrics.py` + `build_data.py` (`refresh_yieldboost_vrp_files`) | Vol / VRP tab (fallback), `vrp_live.json` builder | daily metrics + each `build_data` / `--options-only` run |
+| `vrp_live.json` | `build_data.py` (`refresh_yieldboost_vrp_files`) | Vol / VRP tab (`index.html`) | each `build_data` / `--options-only` run; deployed via `build-and-deploy.yml` |
 | `etf_metrics_daily.{parquet,csv,json}` | `ingest_etf_metrics.py` | Stats tab (NAV/AUM/shares outstanding/shares traded chart) and Pair Backtest total-return legs + liquidity; `close_price` and `shares_traded` (Yahoo `Close` / `Volume`) via chunked Yahoo (`ETF_METRICS_CLOSE_YF_CHUNK_SIZE`); `underlying_adj_close` via chunked Yahoo (`ETF_METRICS_UNDERLYING_YF_CHUNK_SIZE`) plus **gap backfill after upsert** (per-underlying Yahoo fetch over each underlying’s full null span in the merged store). If ingest **skips** (`ETF_METRICS_SKIP_IF_RECENT_HOURS`), `update-etf-metrics.yml` still runs **`scripts/backfill_underlying_adj_close.py`** so gaps do not stick forever. **Pair backtest joint inception:** after `backfill_close_prices.py`, **`scripts/bootstrap_metrics_yahoo_history.py`** (Yahoo first-trade → day before store `min(date)`, `status='missing'`, `source_provider='yahoo_bootstrap'`) prepends joint `close_price` + `underlying_adj_close` rows so the Chart Backtest can start at listing when Yahoo predates issuer rows (same pattern as Diamond-Creek-Quant). | daily 5 AM ET |
 | `etf_metrics_latest.json` | `ingest_etf_metrics.py` | Stats tab (snapshot panel) | daily 5 AM ET |
 | `etf_distributions.json` | `ingest_distributions.py` | Stats tab Total-Return NAV line | daily 5 AM ET |
@@ -774,6 +778,29 @@ git add -A && git commit -m "sync: etf-dashboard ETF metrics + underlying adj cl
 ```
 
 Then run **Update ETF Metrics** on Diamond-Creek-Quant (or `python scripts/ingest_etf_metrics.py` then `python scripts/backfill_underlying_adj_close.py`) so `data/etf_metrics_daily.json` picks up filled `underlying_adj_close`, and let **build-and-deploy** publish Pages.
+
+### 12.8 Recover YieldBOOST Vol / VRP after a deploy gap
+
+If the Vol / VRP tab shows holdings strikes but **IV pending**, or the browser console reports `vrp live HTTP 404`:
+
+1. **Update ETF Metrics Daily** — refreshes Granite XLS holdings → `etf_holdings_latest.csv` → `yieldboost_put_spreads_latest.json`.
+2. **Build Data & Deploy Pages** — runs full `build_data.py`, writes `vrp_live.json`, commits both VRP artifacts, deploys to Pages.
+3. **Refresh Options** (optional, for live IV) — sharded bucket-3 refresh with `OPTIONS_INCLUDE_YIELDBOOST=1`; also rebuilds `vrp_live.json`.
+
+Verify:
+
+```bash
+curl -sI https://goldmandrew.github.io/etf-dashboard/data/vrp_live.json | head -1
+curl -sI https://goldmandrew.github.io/etf-dashboard/data/yieldboost_put_spreads_latest.json | head -1
+```
+
+Local gate:
+
+```bash
+python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
+```
+
+The UI falls back to `yieldboost_put_spreads_latest.json` when `vrp_live.json` is missing, so users still see Granite-reported strikes with an **IV pending** badge instead of a raw HTTP error.
 
 ---
 

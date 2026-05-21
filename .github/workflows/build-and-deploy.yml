@@ -126,6 +126,10 @@ jobs:
         continue-on-error: true
         run: python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero
 
+      - name: VRP pipeline diagnostics
+        if: steps.build_data.outcome == 'success'
+        run: python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
+
       # If build_data.py crashed (continue-on-error above), skip the commit
       # step entirely.  Otherwise we'd risk staging a partially-written JSON
       # into main.  We still proceed to the Pages deploy steps below, so the
