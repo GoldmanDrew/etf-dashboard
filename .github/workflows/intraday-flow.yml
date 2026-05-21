@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 12
     env:
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
+      TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,11 +49,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Refresh underlying intraday spots
-        # Hard-disable yfinance fallback in CI: the Polygon snapshot covers
-        # all listed US equities in one batched call, and yf.fast_info adds
-        # ~30 s per ticker (rate-limited). Bus errors on yfinance are
-        # tolerable -- we simply skip those underlyings for this snapshot.
-        run: python scripts/refresh_underlying_spots.py --max-yfinance 0
+        # Tradier batched quotes cover the universe in 1-2 requests; Polygon
+        # last/trade fills gaps. yfinance is disabled in CI (slow, rate-limited).
+        run: python scripts/refresh_underlying_spots.py --max-yfinance 0 --min-with-return 50
 
       - name: Build intraday LETF flow estimates
         run: python scripts/build_letf_intraday_flows.py
