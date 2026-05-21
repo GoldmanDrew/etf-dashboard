@@ -2294,6 +2294,7 @@ def refresh_yieldboost_vrp_files(
         build_vrp_live_payload,
         build_yieldboost_options_target,
         load_holdings_latest_dataframe,
+        load_sleeve_by_yb_from_screener,
         load_underlying_map_from_screener,
         normalize_holdings_dataframe,
         pair_put_spreads_from_holdings,
@@ -2301,10 +2302,12 @@ def refresh_yieldboost_vrp_files(
         write_json,
     )
 
-    underlying_map = load_underlying_map_from_screener(OUTPUT_DIR / "etf_screened_today.csv")
+    screener_csv = OUTPUT_DIR / "etf_screened_today.csv"
+    underlying_map = load_underlying_map_from_screener(screener_csv)
     if not underlying_map:
         for yb, und in YIELDBOOST_BUCKET2_PAIRS:
             underlying_map[yb] = und
+    sleeve_by_yb = load_sleeve_by_yb_from_screener(screener_csv)
 
     hdf = load_holdings_latest_dataframe(
         csv_path=ETF_HOLDINGS_LATEST_FILE,
@@ -2313,15 +2316,19 @@ def refresh_yieldboost_vrp_files(
 
     spreads_payload: dict = {"spreads": [], "spread_count": 0, "front_count": 0}
     if not hdf.empty:
-        spreads_payload = build_put_spreads_payload(hdf, underlying_by_etf=underlying_map)
+        spreads_payload = build_put_spreads_payload(
+            hdf, underlying_by_etf=underlying_map, sleeve_by_yb=sleeve_by_yb,
+        )
         if spreads_payload.get("spreads"):
             write_json(YIELDBOOST_PUT_SPREADS_FILE, spreads_payload)
 
-    spreads = pair_put_spreads_from_holdings(hdf, underlying_by_etf=underlying_map)
+    spreads = pair_put_spreads_from_holdings(
+        hdf, underlying_by_etf=underlying_map, sleeve_by_yb=sleeve_by_yb,
+    )
     if not spreads and YIELDBOOST_PUT_SPREADS_FILE.exists():
         try:
             cached = json.loads(YIELDBOOST_PUT_SPREADS_FILE.read_text(encoding="utf-8"))
-            spreads = spreads_json_to_put_spread_legs(cached)
+            spreads = spreads_json_to_put_spread_legs(cached, sleeve_by_yb=sleeve_by_yb)
             if spreads and not spreads_payload.get("spreads"):
                 spreads_payload = cached
         except Exception:

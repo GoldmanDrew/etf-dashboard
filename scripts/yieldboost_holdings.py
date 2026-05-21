@@ -37,7 +37,11 @@ OPTION_ROOT_TO_SLEEVE: dict[str, str] = {
 KNOWN_SLEEVE_TICKERS: set[str] = {
     "MSTU", "MSTP", "TSLL", "TSLR", "NVDL", "CONL", "IONL", "MRAL", "AMDL",
     "CRWV", "BITX", "SMCL", "AMZZ", "BABX", "FBL", "PTIR", "MULL", "INTW",
+    "HIMZ", "SPXL", "NUGT", "FAS", "LABU", "SOXL", "TECL", "TMF", "ROBN",
+    "ETHU", "SMCX", "RIOX", "RGTX", "QBTX", "CRCA", "TQQQ",
 }
+
+DEFAULT_SCREENER_CSV = Path("data/etf_screened_today.csv")
 
 
 @dataclass
@@ -130,21 +134,88 @@ def parse_granite_option_description(desc: str) -> ParsedGraniteOption | None:
     )
 
 
-def resolve_sleeve_ticker(option_root: str, underlying: str | None = None) -> str:
+def resolve_sleeve_ticker(
+    option_root: str,
+    underlying: str | None = None,
+    *,
+    yb_etf: str | None = None,
+    sleeve_by_yb: dict[str, str] | None = None,
+) -> str:
+    """Map Granite option root (e.g. 2HIMZ) to the equity ticker for options quotes."""
     root = str(option_root or "").upper().strip()
     if root in OPTION_ROOT_TO_SLEEVE:
         return OPTION_ROOT_TO_SLEEVE[root]
+
     if root.startswith("2") and len(root) > 1:
         candidate = root[1:]
         if candidate in KNOWN_SLEEVE_TICKERS:
             return candidate
-        if underlying:
-            und = underlying.upper()
-            if candidate.startswith(und) or und in candidate:
-                return candidate
-            return und
+
+        yb = str(yb_etf or "").upper()
+        mapped = (sleeve_by_yb or {}).get(yb)
+        if mapped:
+            mapped_u = str(mapped).upper()
+            if mapped_u == candidate or root == f"2{mapped_u}":
+                return mapped_u
+
+        # Granite lists options as 2{SLEEVE}; quote the levered sleeve, not cash underlying.
         return candidate
+
     return root
+
+
+def load_sleeve_by_yb_from_screener(
+    csv_path: Path | str | None = None,
+) -> dict[str, str]:
+    """YieldBOOST income ETF -> 2x sleeve when the underlying has exactly one letf row."""
+    path = Path(csv_path) if csv_path else DEFAULT_SCREENER_CSV
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return {}
+    needed = {"ETF", "Underlying", "product_class"}
+    if not needed.issubset(df.columns):
+        return {}
+
+    df = df.copy()
+    df["ETF"] = df["ETF"].astype(str).str.upper()
+    df["Underlying"] = df["Underlying"].astype(str).str.upper()
+    yb_df = df[df["product_class"] == "income_yieldboost"]
+    letf_df = df[df["product_class"].isin(["letf", "letf_long"])]
+
+    out: dict[str, str] = {}
+    for _, row in yb_df.iterrows():
+        yb = row["ETF"]
+        und = row["Underlying"]
+        matches = sorted(letf_df[letf_df["Underlying"] == und]["ETF"].unique().tolist())
+        if len(matches) == 1:
+            out[yb] = matches[0]
+    return out
+
+
+def apply_resolved_sleeves(
+    spreads: Iterable[PutSpreadLeg],
+    *,
+    sleeve_by_yb: dict[str, str] | None = None,
+) -> list[PutSpreadLeg]:
+    """Re-resolve sleeve_2x_etf from option_root (repairs legacy spreads JSON)."""
+    resolved: list[PutSpreadLeg] = []
+    for s in spreads:
+        sleeve = resolve_sleeve_ticker(
+            s.option_root,
+            s.underlying,
+            yb_etf=s.yb_etf,
+            sleeve_by_yb=sleeve_by_yb,
+        )
+        if sleeve == s.sleeve_2x_etf:
+            resolved.append(s)
+            continue
+        d = asdict(s)
+        d["sleeve_2x_etf"] = sleeve
+        resolved.append(PutSpreadLeg(**d))
+    return resolved
 
 
 def format_occ_ticker(root: str, expiry: date, put_call: str, strike: float) -> str:
@@ -213,7 +284,7 @@ def granite_xls_rows_to_holdings(
             parsed = parse_granite_option_description(desc)
             if parsed is None:
                 continue
-            sleeve = resolve_sleeve_ticker(parsed.root, und)
+            sleeve = resolve_sleeve_ticker(parsed.root, und, yb_etf=etf)
             occ = format_occ_ticker(sleeve, parsed.expiry, parsed.put_call, parsed.strike)
             sec_type = "OPTION_PUT" if parsed.put_call == "P" else "OPTION_CALL"
             side = "long" if shares is not None and shares > 0 else "short"
@@ -380,10 +451,16 @@ def load_holdings_latest_dataframe(
     return normalize_holdings_dataframe(latest.reset_index(drop=True))
 
 
-def spreads_json_to_put_spread_legs(payload: dict[str, Any] | None) -> list[PutSpreadLeg]:
+def spreads_json_to_put_spread_legs(
+    payload: dict[str, Any] | None,
+    *,
+    sleeve_by_yb: dict[str, str] | None = None,
+) -> list[PutSpreadLeg]:
     """Rehydrate PutSpreadLeg objects from committed spreads JSON."""
     if not payload:
         return []
+    if sleeve_by_yb is None:
+        sleeve_by_yb = load_sleeve_by_yb_from_screener()
     legs: list[PutSpreadLeg] = []
     for row in payload.get("spreads") or []:
         if not isinstance(row, dict):
@@ -396,11 +473,15 @@ def spreads_json_to_put_spread_legs(payload: dict[str, Any] | None) -> list[PutS
         strike_short = _parse_float(row.get("strike_short"))
         if strike_long is None or strike_short is None:
             continue
+        yb = str(row.get("yb_etf") or "").upper()
+        und = str(row.get("underlying") or "").upper() or None
+        root = str(row.get("option_root") or "").upper()
+        sleeve = resolve_sleeve_ticker(root, und, yb_etf=yb, sleeve_by_yb=sleeve_by_yb)
         legs.append(PutSpreadLeg(
-            yb_etf=str(row.get("yb_etf") or "").upper(),
-            underlying=str(row.get("underlying") or "").upper() or None,
-            option_root=str(row.get("option_root") or "").upper(),
-            sleeve_2x_etf=str(row.get("sleeve_2x_etf") or "").upper(),
+            yb_etf=yb,
+            underlying=und,
+            option_root=root,
+            sleeve_2x_etf=sleeve,
             expiry=expiry,
             strike_long=float(strike_long),
             strike_short=float(strike_short),
@@ -417,7 +498,11 @@ def spreads_json_to_put_spread_legs(payload: dict[str, Any] | None) -> list[PutS
     return legs
 
 
-def load_yieldboost_force_symbols_from_spreads(spreads_path: Path | None = None) -> list[str]:
+def load_yieldboost_force_symbols_from_spreads(
+    spreads_path: Path | None = None,
+    *,
+    screener_csv: Path | str | None = None,
+) -> list[str]:
     """Sleeve + underlying symbols to force-refresh in options shard runs."""
     path = spreads_path or Path("data/yieldboost_put_spreads_latest.json")
     if not path.exists():
@@ -426,12 +511,16 @@ def load_yieldboost_force_symbols_from_spreads(spreads_path: Path | None = None)
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return []
+    sleeve_by_yb = load_sleeve_by_yb_from_screener(screener_csv)
     syms: set[str] = set()
     for row in payload.get("spreads") or []:
         if not isinstance(row, dict):
             continue
-        for key in ("sleeve_2x_etf", "underlying", "yb_etf"):
-            sym = str(row.get(key) or "").strip().upper()
+        yb = str(row.get("yb_etf") or "").strip().upper()
+        und = str(row.get("underlying") or "").strip().upper() or None
+        root = str(row.get("option_root") or "").strip().upper()
+        sleeve = resolve_sleeve_ticker(root, und, yb_etf=yb, sleeve_by_yb=sleeve_by_yb)
+        for sym in (sleeve, und, yb):
             if sym:
                 syms.add(sym)
     return sorted(syms)
@@ -521,6 +610,7 @@ def pair_put_spreads_from_holdings(
     holdings_df: pd.DataFrame,
     *,
     underlying_by_etf: dict[str, str] | None = None,
+    sleeve_by_yb: dict[str, str] | None = None,
     as_of: date | None = None,
 ) -> list[PutSpreadLeg]:
     """Pair Granite OPTION_PUT legs into bull put spreads per (etf, root, expiry)."""
@@ -535,6 +625,8 @@ def pair_put_spreads_from_holdings(
     if "option_put_call" in opts.columns:
         opts = opts[opts["option_put_call"].fillna("P").astype(str).str.upper() == "P"]
     und_map = {k.upper(): v.upper() for k, v in (underlying_by_etf or {}).items()}
+    if sleeve_by_yb is None:
+        sleeve_by_yb = load_sleeve_by_yb_from_screener()
     today = as_of or date.today()
     spreads: list[PutSpreadLeg] = []
 
@@ -547,8 +639,9 @@ def pair_put_spreads_from_holdings(
         if expiry is None:
             continue
         root_s = str(root or "").upper()
-        und = und_map.get(str(etf).upper())
-        sleeve = resolve_sleeve_ticker(root_s, und)
+        etf_s = str(etf).upper()
+        und = und_map.get(etf_s)
+        sleeve = resolve_sleeve_ticker(root_s, und, yb_etf=etf_s, sleeve_by_yb=sleeve_by_yb)
 
         longs = grp[grp["shares"].astype(float) > 0].copy()
         shorts = grp[grp["shares"].astype(float) < 0].copy()
@@ -615,8 +708,13 @@ def build_put_spreads_payload(
     holdings_df: pd.DataFrame,
     *,
     underlying_by_etf: dict[str, str] | None = None,
+    sleeve_by_yb: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    spreads = pair_put_spreads_from_holdings(holdings_df, underlying_by_etf=underlying_by_etf)
+    spreads = pair_put_spreads_from_holdings(
+        holdings_df,
+        underlying_by_etf=underlying_by_etf,
+        sleeve_by_yb=sleeve_by_yb,
+    )
     return spreads_to_json(spreads)
 
 

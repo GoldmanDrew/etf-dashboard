@@ -17,6 +17,7 @@ from yieldboost_holdings import (  # noqa: E402
     format_occ_ticker,
     granite_xls_rows_to_holdings,
     infer_etf_ticker_from_source_url,
+    load_sleeve_by_yb_from_screener,
     normalize_holdings_dataframe,
     pair_put_spreads_from_holdings,
     parse_granite_option_description,
@@ -38,6 +39,63 @@ def test_resolve_sleeve_ticker():
     assert resolve_sleeve_ticker("2MSTU", "MSTR") == "MSTU"
     assert resolve_sleeve_ticker("2CWVX", "CRWV") == "CRWV"
     assert resolve_sleeve_ticker("2TSLL", "TSLA") == "TSLL"
+    assert resolve_sleeve_ticker("2HIMZ", "HIMS", yb_etf="HMYY") == "HIMZ"
+    assert resolve_sleeve_ticker("2SPXL", "SPY", yb_etf="YSPY") == "SPXL"
+    assert resolve_sleeve_ticker("2NUGT", "GDX", yb_etf="NUGY") == "NUGT"
+    assert resolve_sleeve_ticker("2FAS", "XLF", yb_etf="FINY") == "FAS"
+    assert resolve_sleeve_ticker("2ROBN", "HOOD", yb_etf="HOYY") == "ROBN"
+    assert resolve_sleeve_ticker("2AMDL", "AMD", yb_etf="AMYY") == "AMDL"
+
+
+@pytest.mark.parametrize(
+    ("root", "underlying", "yb_etf", "expected"),
+    [
+        ("2AMDL", "AMD", "AMYY", "AMDL"),
+        ("2AMZZ", "AMZN", "AZYY", "AMZZ"),
+        ("2BABX", "BABA", "BBYY", "BABX"),
+        ("2BITX", "IBIT", "XBTY", "BITX"),
+        ("2CONL", "COIN", "COYY", "CONL"),
+        ("2CRCA", "CRCL", "CRY", "CRCA"),
+        ("2CWVX", "CRWV", "CWY", "CRWV"),
+        ("2ETHU", "ETHA", "XEY", "ETHU"),
+        ("2FAS", "XLF", "FINY", "FAS"),
+        ("2FBL", "META", "FBYY", "FBL"),
+        ("2HIMZ", "HIMS", "HMYY", "HIMZ"),
+        ("2IONL", "IONQ", "IOYY", "IONL"),
+        ("2LABU", "XBI", "BIOY", "LABU"),
+        ("2MRAL", "MARA", "MAAY", "MRAL"),
+        ("2MSTU", "MSTR", "MTYY", "MSTU"),
+        ("2MULL", "MU", "MUYY", "MULL"),
+        ("2NUGT", "GDX", "NUGY", "NUGT"),
+        ("2NVDL", "NVDA", "NVYY", "NVDL"),
+        ("2PTIR", "PLTR", "PLYY", "PTIR"),
+        ("2QBTX", "QBTS", "QBY", "QBTX"),
+        ("2RGTX", "RGTI", "RGYY", "RGTX"),
+        ("2RIOX", "RIOT", "RTYY", "RIOX"),
+        ("2ROBN", "HOOD", "HOYY", "ROBN"),
+        ("2SMCX", "SMCI", "SMYY", "SMCX"),
+        ("2SOXL", "SOXX", "SEMY", "SOXL"),
+        ("2SPXL", "SPY", "YSPY", "SPXL"),
+        ("2TECL", "XLK", "TECY", "TECL"),
+        ("2TMF", "TLT", "FIYY", "TMF"),
+        ("2TQQQ", "QQQ", "TQQY", "TQQQ"),
+        ("2TSLL", "TSLA", "TSYY", "TSLL"),
+        ("2TSLR", "TSLA", "TSYY", "TSLR"),
+        ("2TSMU", "TSM", "TMYY", "TSMU"),
+    ],
+)
+def test_resolve_sleeve_ticker_all_yieldboost_roots(root, underlying, yb_etf, expected):
+    assert resolve_sleeve_ticker(root, underlying, yb_etf=yb_etf) == expected
+
+
+def test_load_sleeve_by_yb_from_screener_unique_underlyings():
+    screener = Path(__file__).resolve().parents[1] / "data" / "etf_screened_today.csv"
+    if not screener.exists():
+        pytest.skip("screener csv not present")
+    mapping = load_sleeve_by_yb_from_screener(screener)
+    assert mapping.get("HMYY") == "HIMZ"
+    assert mapping.get("YSPY") == "SPXL"
+    assert "AMYY" not in mapping  # AMD has multiple letfs; root picks AMDL
 
 
 def test_format_occ_ticker():
@@ -157,6 +215,26 @@ def test_normalize_holdings_missing_etf_ticker_returns_empty():
     }])
     assert normalize_holdings_dataframe(legacy).empty
     assert pair_put_spreads_from_holdings(legacy) == []
+
+
+def test_spreads_json_to_put_spread_legs_repairs_legacy_sleeve():
+    payload = {
+        "spreads": [{
+            "yb_etf": "HMYY",
+            "underlying": "HIMS",
+            "option_root": "2HIMZ",
+            "sleeve_2x_etf": "HIMS",
+            "expiry": "2026-05-22",
+            "strike_long": 25.88,
+            "strike_short": 27.32,
+            "qty": 30.0,
+            "holdings_as_of": "2026-05-21",
+            "is_front": True,
+        }],
+    }
+    legs = spreads_json_to_put_spread_legs(payload)
+    assert len(legs) == 1
+    assert legs[0].sleeve_2x_etf == "HIMZ"
 
 
 def test_spreads_json_to_put_spread_legs_roundtrip():
