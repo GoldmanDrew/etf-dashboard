@@ -18,9 +18,11 @@ Coverage (as of probe run):
                                   ``/{ticker}-full-holdings/`` page table.
 
 Roundhill still has no machine-readable public holdings file.  GraniteShares
-does not publish swap-level line items; we still emit a **synthetic** underlying
+YieldBOOST and other Granite funds publish a **Fund Holdings** XLS download on
+each ETF page; when present we parse cash/T-bill/option legs at full fidelity.
+For Granite 2x LETFs without an XLS link we still emit a **synthetic** underlying
 row (from the screener ``Underlying`` column) plus fee / swap aggregates parsed
-from the issuer JSON so the dashboard has *something* to chart per Granite fund.
+from the issuer JSON.
 
 All providers return ``list[HoldingRow]`` -- one row per position -- so the
 downstream persistence layer can simply concatenate rows across issuers and
@@ -58,16 +60,21 @@ LOGGER = logging.getLogger("etf_holdings_providers")
 class HoldingRow:
     as_of_date: date
     etf_ticker: str
-    position_ticker: Optional[str]   # e.g. "TSM", "TSLA 260515P00405010"
+    position_ticker: Optional[str]   # e.g. "TSM", "MSTU260522P00007030"
     security_name: Optional[str]     # e.g. "Taiwan Semiconductor-SP ADR"
     cusip: Optional[str]
-    security_type: Optional[str]     # e.g. "COMMON STOCK", "OPTION", "CASH", "SWAP"
+    security_type: Optional[str]     # e.g. "COMMON STOCK", "OPTION_PUT", "CASH", "SWAP"
     shares: Optional[float]
     price: Optional[float]
     market_value: Optional[float]
     weight_pct: Optional[float]      # e.g. 10.67 (percent, not fraction)
     source: str                      # provider name
     source_url: str
+    option_root: Optional[str] = None
+    option_expiry: Optional[date] = None
+    option_strike: Optional[float] = None
+    option_put_call: Optional[str] = None
+    option_side: Optional[str] = None  # long | short
 
 
 class HoldingsProvider(Protocol):
@@ -867,22 +874,18 @@ class DefianceHoldingsProvider:
 
 
 # ---------------------------------------------------------------------------
-# 6) GraniteShares — issuer JSON + synthetic underlying row
+# 6) GraniteShares — XLS Fund Holdings + issuer JSON fee aggregates
 # ---------------------------------------------------------------------------
 
 class GraniteSharesHoldingsProvider:
-    """GraniteShares does not publish swap-level CSVs.
+    """GraniteShares Fund Holdings via XLS download + issuer JSON fee aggregates.
 
-    We still emit rows so Git history / parquet are not empty for ~60+ Granite
-    funds in the screener:
-
-      * One **synthetic** ``SYNTHETIC_UNDERLYING`` row keyed to the screener's
-        ``Underlying`` symbol (economic exposure the fund is built around).
-      * Optional **FUND_FEE_COMPONENT** rows parsed from the same JSON blob the
-        NAV stack already consumes (swap / management / licence fee dollars).
-
-    This is not a substitute for full ISDA swap disclosure — it is strictly
-    better than silently dropping Granite from the holdings table.
+    Priority:
+      1. Parse the **Fund Holdings** XLS linked from ``/etfs/{slug}/`` when
+         available (cash, T-bills, listed option legs with strikes/expiries).
+      2. Fall back to a **synthetic** ``SYNTHETIC_UNDERLYING`` row for pure 2x
+         LETFs whose page has no holdings file.
+      3. Always append **FUND_FEE_COMPONENT** rows from the product JSON.
     """
 
     name = "granite_shares"
@@ -893,7 +896,7 @@ class GraniteSharesHoldingsProvider:
         *,
         underlying_by_ticker: dict[str, str] | None = None,
     ):
-        _ = session  # Granite NAV stack ignores the shared session — match that.
+        self._session = session
         from etf_providers import GraniteSharesProvider
 
         self._granite = GraniteSharesProvider()
@@ -902,6 +905,13 @@ class GraniteSharesHoldingsProvider:
     def supports_ticker(self, ticker: str, as_of: date) -> bool:
         return self._granite.supports_ticker(ticker, as_of)
 
+    def _session_or_build(self) -> requests.Session:
+        if self._session is not None:
+            return self._session
+        from etf_providers import _build_session
+
+        return _build_session()
+
     def fetch_holdings(self, ticker: str, as_of: date) -> list[HoldingRow]:
         t = ticker.upper()
         pair = self._granite.load_product_json(ticker)
@@ -909,20 +919,57 @@ class GraniteSharesHoldingsProvider:
             return []
         api_url, payload = pair
         from etf_providers import GraniteSharesProvider as _GSP
+        from yieldboost_holdings import fetch_granite_holdings_xls, granite_xls_rows_to_holdings
 
         row_date = _GSP._parse_nav_date(payload.get("NavDate")) or as_of
         pname = str(payload.get("ProductName") or "").strip() or None
         rows: list[HoldingRow] = []
-
         und = self._underlying.get(t)
-        if und:
+
+        xls_pair = fetch_granite_holdings_xls(ticker, self._session_or_build())
+        if xls_pair is not None:
+            xls_url, xls_df = xls_pair
+            parsed = granite_xls_rows_to_holdings(
+                xls_df,
+                etf_ticker=t,
+                fallback_as_of=row_date,
+                underlying=und,
+                source_url=xls_url,
+            )
+            for rec in parsed:
+                opt_exp = rec.get("option_expiry")
+                rows.append(
+                    HoldingRow(
+                        as_of_date=rec["as_of_date"],
+                        etf_ticker=rec["etf_ticker"],
+                        position_ticker=rec.get("position_ticker"),
+                        security_name=rec.get("security_name"),
+                        cusip=rec.get("cusip"),
+                        security_type=rec.get("security_type"),
+                        shares=rec.get("shares"),
+                        price=rec.get("price"),
+                        market_value=rec.get("market_value"),
+                        weight_pct=rec.get("weight_pct"),
+                        source=self.name,
+                        source_url=rec.get("source_url") or xls_url,
+                        option_root=rec.get("option_root"),
+                        option_expiry=opt_exp if isinstance(opt_exp, date) else _parse_date(opt_exp),
+                        option_strike=rec.get("option_strike"),
+                        option_put_call=rec.get("option_put_call"),
+                        option_side=rec.get("option_side"),
+                    )
+                )
+        elif und:
             aum = _parse_float(payload.get("AUM"))
             rows.append(
                 HoldingRow(
                     as_of_date=row_date,
                     etf_ticker=t,
                     position_ticker=und,
-                    security_name=(f"{pname} — economic exposure (synthetic row; issuer omits swap detail)" if pname else None),
+                    security_name=(
+                        f"{pname} — economic exposure (synthetic row; no XLS holdings file)"
+                        if pname else None
+                    ),
                     cusip=None,
                     security_type="SYNTHETIC_UNDERLYING",
                     shares=None,
@@ -1000,6 +1047,11 @@ HOLDINGS_COLUMNS = [
     "weight_pct",
     "source",
     "source_url",
+    "option_root",
+    "option_expiry",
+    "option_strike",
+    "option_put_call",
+    "option_side",
 ]
 
 

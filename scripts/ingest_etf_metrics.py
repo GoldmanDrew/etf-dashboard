@@ -85,6 +85,7 @@ HOLDINGS_PARQUET_PATH = DATA_DIR / "etf_holdings_daily.parquet"
 # storage and produced noisy diffs on every workflow run.
 HOLDINGS_LATEST_CSV_PATH = DATA_DIR / "etf_holdings_latest.csv"
 HOLDINGS_LATEST_JSON_PATH = DATA_DIR / "etf_holdings_latest.json"
+YIELDBOOST_PUT_SPREADS_PATH = DATA_DIR / "yieldboost_put_spreads_latest.json"
 
 REQUIRED_COLUMNS = [
     "date",
@@ -1254,6 +1255,10 @@ def save_holdings_outputs(
     latest.to_csv(latest_csv_path, index=False)
     latest_json = latest.copy()
     latest_json["as_of_date"] = pd.to_datetime(latest_json["as_of_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if "option_expiry" in latest_json.columns:
+        latest_json["option_expiry"] = pd.to_datetime(
+            latest_json["option_expiry"], errors="coerce",
+        ).dt.strftime("%Y-%m-%d")
     for c in ("shares", "price", "market_value", "weight_pct"):
         latest_json[c] = pd.to_numeric(latest_json[c], errors="coerce").replace([np.inf, -np.inf], np.nan)
     latest_json = latest_json.astype(object).where(pd.notna(latest_json), None)
@@ -1268,6 +1273,37 @@ def save_holdings_outputs(
     }
     with open(latest_json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, separators=(",", ":"), allow_nan=False)
+
+
+def save_yieldboost_put_spreads(
+    holdings_df: pd.DataFrame,
+    *,
+    underlying_by_ticker: dict[str, str] | None = None,
+    output_path: Path | None = None,
+) -> Path | None:
+    """Derive paired put spreads from Granite option holdings rows."""
+    if holdings_df is None or holdings_df.empty:
+        return None
+    try:
+        from yieldboost_holdings import build_put_spreads_payload, write_json
+
+        payload = build_put_spreads_payload(
+            holdings_df, underlying_by_etf=underlying_by_ticker,
+        )
+        if not payload.get("spreads"):
+            return None
+        out = output_path or YIELDBOOST_PUT_SPREADS_PATH
+        write_json(out, payload)
+        LOGGER.info(
+            "yieldboost put spreads: %d spreads (%d front) -> %s",
+            payload.get("spread_count", 0),
+            payload.get("front_count", 0),
+            out,
+        )
+        return out
+    except Exception as exc:
+        LOGGER.warning("yieldboost put spreads export failed: %s", exc)
+        return None
 
 
 def save_outputs(df: pd.DataFrame) -> None:
@@ -1765,6 +1801,7 @@ def main() -> None:
                 )
                 LOGGER.info("holdings by security_type: %s", type_counts)
             save_holdings_outputs(holdings_df)
+            save_yieldboost_put_spreads(holdings_df, underlying_by_ticker=underlying_map)
         except Exception as e:
             LOGGER.warning("holdings phase failed (continuing): %s", e)
     else:

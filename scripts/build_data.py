@@ -98,6 +98,7 @@ OPTIONS_SHARD_COUNT = int(os.environ.get("OPTIONS_SHARD_COUNT", "20"))
 OPTIONS_SHARD_INTERVAL_MINUTES = int(os.environ.get("OPTIONS_SHARD_INTERVAL_MINUTES", "3"))
 OPTIONS_STALE_AFTER_MINUTES = int(os.environ.get("OPTIONS_STALE_AFTER_MINUTES", "180"))
 OPTIONS_ONLY_BUCKET3 = os.environ.get("OPTIONS_ONLY_BUCKET3", "1").strip().lower() not in {"0", "false", "no"}
+OPTIONS_INCLUDE_YIELDBOOST = os.environ.get("OPTIONS_INCLUDE_YIELDBOOST", "1").strip().lower() not in {"0", "false", "no"}
 OPTIONS_INCLUDE_BUCKET3_UNDERLYING = os.environ.get("OPTIONS_INCLUDE_BUCKET3_UNDERLYING", "1").strip().lower() not in {"0", "false", "no"}
 OPTIONS_ACCUMULATE_CACHE = os.environ.get("OPTIONS_ACCUMULATE_CACHE", "1").strip().lower() not in {"0", "false", "no"}
 OPTIONS_MAX_ROWS_PER_SYMBOL = int(os.environ.get("OPTIONS_MAX_ROWS_PER_SYMBOL", "1200"))
@@ -117,6 +118,8 @@ VOL_SHAPE_HISTORY_FILE = OUTPUT_DIR / "vol_shape_history.json"
 ETF_METRICS_DAILY_FILE = OUTPUT_DIR / "etf_metrics_daily.csv"
 ETF_HOLDINGS_LATEST_FILE = OUTPUT_DIR / "etf_holdings_latest.csv"
 ETF_DISTRIBUTIONS_FILE = OUTPUT_DIR / "etf_distributions.json"
+YIELDBOOST_PUT_SPREADS_FILE = OUTPUT_DIR / "yieldboost_put_spreads_latest.json"
+VRP_LIVE_FILE = OUTPUT_DIR / "vrp_live.json"
 LS_ALGO_DATA_PATH = Path(
     os.environ.get(
         "LS_ALGO_DATA_PATH",
@@ -2192,21 +2195,25 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
     """
     Keep Polygon requests bounded to avoid rate-limit starvation.
     Priority:
-      1) forced symbols from env
-      2) symbol + underlying pairs in record order
+      1) YieldBOOST sleeve + underlying symbols (when enabled)
+      2) forced symbols from env (within bucket-3 set when restricted)
+      3) bucket-3 symbol + underlying pairs in record order
     """
-    seen = set()
+    seen: set[str] = set()
     ordered: list[str] = []
 
-    def add(sym):
+    def add(sym: object) -> None:
         s = norm_sym(sym)
         if not s or s in seen:
             return
         seen.add(s)
         ordered.append(s)
 
-    # Bucket-3-only universe by default (inverse ETF options only).
-    base_set = set()
+    if OPTIONS_INCLUDE_YIELDBOOST:
+        for s in sorted(load_yieldboost_option_symbols()):
+            add(s)
+
+    base_set: set[str] = set()
     for rec in records:
         if OPTIONS_ONLY_BUCKET3 and str(rec.get("bucket")) != "bucket_3_inverse":
             continue
@@ -2214,20 +2221,76 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
         if OPTIONS_INCLUDE_BUCKET3_UNDERLYING:
             base_set.add(norm_sym(rec.get("underlying")))
 
-    allowed_forced = {norm_sym(s) for s in base_set}
     for s in POLYGON_FORCE_SYMBOLS_RAW:
         ss = norm_sym(s)
-        if ss in allowed_forced:
+        if not OPTIONS_ONLY_BUCKET3 or ss in base_set:
             add(ss)
 
-    # Deterministic ordering inside selected universe.
-    base_symbols = sorted(s for s in base_set if s)
-    for s in base_symbols:
+    for s in sorted(base_set):
         add(s)
         if len(ordered) >= max(1, POLYGON_OPTIONS_MAX_SYMBOLS):
             break
 
     return ordered
+
+
+def load_yieldboost_option_symbols() -> set[str]:
+    """Symbols needed for YieldBOOST put IV: sleeves, underlyings, YB tickers."""
+    syms: set[str] = set()
+    for yb, und in YIELDBOOST_BUCKET2_PAIRS:
+        syms.add(norm_sym(yb))
+        syms.add(norm_sym(und))
+    if YIELDBOOST_PUT_SPREADS_FILE.exists():
+        try:
+            payload = json.loads(YIELDBOOST_PUT_SPREADS_FILE.read_text(encoding="utf-8"))
+            for row in payload.get("spreads") or []:
+                syms.add(norm_sym(row.get("sleeve_2x_etf")))
+                syms.add(norm_sym(row.get("underlying")))
+        except Exception:
+            pass
+    return {s for s in syms if s}
+
+
+def refresh_yieldboost_vrp_files(
+    options_cache: dict,
+    *,
+    realized_vol_map: dict | None = None,
+) -> dict:
+    """Build/refresh put-spread pairings + live VRP panel from holdings + options."""
+    from yieldboost_holdings import (
+        build_put_spreads_payload,
+        build_vrp_live_payload,
+        load_underlying_map_from_screener,
+        pair_put_spreads_from_holdings,
+        write_json,
+    )
+
+    underlying_map = load_underlying_map_from_screener(OUTPUT_DIR / "etf_screened_today.csv")
+    if not underlying_map:
+        for yb, und in YIELDBOOST_BUCKET2_PAIRS:
+            underlying_map[yb] = und
+
+    hdf = pd.DataFrame()
+    if ETF_HOLDINGS_LATEST_FILE.exists():
+        hdf = pd.read_csv(ETF_HOLDINGS_LATEST_FILE)
+        if "option_expiry" in hdf.columns:
+            hdf["option_expiry"] = pd.to_datetime(hdf["option_expiry"], errors="coerce").dt.date
+
+    spreads_payload = build_put_spreads_payload(hdf, underlying_by_etf=underlying_map)
+    if spreads_payload.get("spreads"):
+        write_json(YIELDBOOST_PUT_SPREADS_FILE, spreads_payload)
+
+    spreads = pair_put_spreads_from_holdings(hdf, underlying_by_etf=underlying_map)
+    rv_map: dict[str, float] = {}
+    if realized_vol_map:
+        for sym, stats in realized_vol_map.items():
+            if isinstance(stats, dict):
+                v = stats.get("vol_annual") or stats.get("rv_30d")
+                if v is not None:
+                    rv_map[norm_sym(sym)] = float(v)
+    vrp_payload = build_vrp_live_payload(spreads, options_cache, rv_map=rv_map)
+    write_json(VRP_LIVE_FILE, vrp_payload)
+    return {"spreads": spreads_payload, "vrp": vrp_payload}
 
 
 # ──────────────────────────────────────────────
@@ -2946,6 +3009,11 @@ def refresh_options_only() -> None:
     with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(options_cache, f, indent=None, separators=(",", ":"))
 
+    vrp_meta = refresh_yieldboost_vrp_files(options_cache, realized_vol_map=None)
+    print(
+        f"  YieldBOOST VRP: {vrp_meta.get('vrp', {}).get('row_count', 0)} front spreads -> {VRP_LIVE_FILE.name}"
+    )
+
     print(f"[OK] Options-only refresh wrote {OPTIONS_CACHE_FILE}")
     print(f"  requested symbols: {options_cache.get('requested_symbols')}")
     print(f"  cached symbols: {options_cache.get('symbols_count')}")
@@ -3399,6 +3467,8 @@ def build():
         "polygon_api_configured": bool(POLYGON_API_KEY),
         "tradier_api_configured": bool(TRADIER_TOKEN),
         "options_cache_file": "data/options_cache.json",
+        "yieldboost_put_spreads_file": "data/yieldboost_put_spreads_latest.json",
+        "vrp_live_file": "data/vrp_live.json",
         "summary": summary,
         "records": records,
     }
@@ -3422,6 +3492,11 @@ def build():
     options_cache = build_polygon_options_cache(symbols_for_options)
     with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(options_cache, f, indent=None, separators=(",", ":"))
+    vrp_meta = refresh_yieldboost_vrp_files(options_cache, realized_vol_map=realized_vol_map)
+    print(
+        f"  [OK] YieldBOOST VRP panel -> {VRP_LIVE_FILE.name} "
+        f"({vrp_meta.get('vrp', {}).get('row_count', 0)} rows)"
+    )
 
     file_size = OUTPUT_FILE.stat().st_size
     print(f"\n[OK] Wrote {OUTPUT_FILE} ({file_size:,} bytes)")

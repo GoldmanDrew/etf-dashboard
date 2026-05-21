@@ -1370,6 +1370,8 @@ const LETF_REBALANCE_FLOWS_LATEST_URL = "data/letf_rebalance_flows_latest.json";
 const LETF_INTRADAY_FLOWS_URL = "data/letf_rebalance_flows_intraday_latest.json";
 const LETF_INTRADAY_METRICS_URL = "data/letf_intraday_flow_metrics.json";
 const VOL_SHAPE_HISTORY_URL = "data/vol_shape_history.json";
+const VRP_LIVE_URL = "data/vrp_live.json";
+const YIELDBOOST_PUT_SPREADS_URL = "data/yieldboost_put_spreads_latest.json";
 /** @type {{ symbols: Record<string, { series: object[], vcrMedian: number|null, window: number }>, buildTime: string|null }|null} */
 let VOL_SHAPE_HISTORY_CACHE = null;
 const ETF_DISTRIBUTIONS_URL = "data/etf_distributions.json";
@@ -4419,6 +4421,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [borrowSpikeRiskError, setBorrowSpikeRiskError] = useState(null);
   const [optionsCache, setOptionsCache] = useState(null);
   const [optionsCacheError, setOptionsCacheError] = useState(null);
+  const [vrpLive, setVrpLive] = useState(null);
+  const [vrpLiveError, setVrpLiveError] = useState(null);
   const [etfMetricsMap, setEtfMetricsMap] = useState({});
   const [etfMetricsLoading, setEtfMetricsLoading] = useState(false);
   const [etfMetricsError, setEtfMetricsError] = useState(null);
@@ -4456,10 +4460,19 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
   const isIncomeStrategyScenario = isYieldBoostIncomeStrategy(r);
   const hideScenarios = suppressScenarioForRow(r);
+  const showVrpPanel = isIncomeStrategyScenario;
+  const vrpLiveRow = useMemo(() => {
+    const rows = vrpLive?.rows;
+    if (!Array.isArray(rows)) return null;
+    return rows.find((x) => String(x?.yb_etf || '').toUpperCase() === etfSym) || null;
+  }, [vrpLive, etfSym]);
   const showBacktestPanel = Boolean(String(undSym || '').trim());
   useEffect(() => {
     if (hideScenarios && activePanel === 'scenarios') setActivePanel('chart');
   }, [hideScenarios, activePanel]);
+  useEffect(() => {
+    if (!showVrpPanel && activePanel === 'vrp') setActivePanel('chart');
+  }, [showVrpPanel, activePanel]);
   useEffect(() => {
     if (!showBacktestPanel && activePanel === 'backtest') setActivePanel('chart');
   }, [showBacktestPanel, activePanel]);
@@ -4595,6 +4608,24 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     run();
     return () => { cancelled = true; };
   }, []);
+  useEffect(() => {
+    if (!isYieldBoostIncomeStrategy(r)) return undefined;
+    let cancelled = false;
+    const run = async () => {
+      setVrpLiveError(null);
+      try {
+        const cacheBust = `?t=${Math.floor(Date.now() / 300)}`;
+        const res = await fetch(`${VRP_LIVE_URL}${cacheBust}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`vrp live HTTP ${res.status}`);
+        const payload = await res.json();
+        if (!cancelled) setVrpLive(payload);
+      } catch (e) {
+        if (!cancelled) setVrpLiveError(e?.message || 'vrp panel unavailable');
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, [r?.symbol, r?.is_yieldboost]);
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
@@ -5385,6 +5416,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <button className={cls('chart-view-btn', activePanel === 'scenarios' && 'active')} onClick={() => setActivePanel('scenarios')}>Scenarios</button>
           )}
           <button className={cls('chart-view-btn', activePanel === 'trade' && 'active')} onClick={() => setActivePanel('trade')}>Trade Lab</button>
+          {showVrpPanel && (
+            <button className={cls('chart-view-btn', activePanel === 'vrp' && 'active')} onClick={() => setActivePanel('vrp')}>Vol / VRP</button>
+          )}
           <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => setActivePanel('borrow')}>Borrow</button>
           {showBacktestPanel && (
             <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => setActivePanel('backtest')}>Backtest</button>
@@ -6807,6 +6841,44 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {activePanel === 'vrp' && showVrpPanel && (
+        <div className="chart-section">
+          <div className="scenario-card" style={{ marginTop: 0 }}>
+            <div className="scenario-head">
+              <div>
+                <div className="scenario-title">Vol / VRP — holdings strikes</div>
+                <div className="scenario-sub">
+                  Live IV at Granite-reported put-spread legs ({etfSym} → {vrpLiveRow?.sleeve_2x || undSym}).
+                </div>
+              </div>
+            </div>
+            {vrpLiveError && <div className="scenario-warning">{vrpLiveError}</div>}
+            {!vrpLiveRow ? (
+              <div className="scenario-sub">No front spread in `vrp_live.json` for {etfSym}. Run holdings ingest + options refresh.</div>
+            ) : (
+              <div className="borrow-grid">
+                <div className="borrow-card">
+                  <div className="scenario-sub">Holdings as of {vrpLiveRow.holdings_as_of || '—'} · Expiry {vrpLiveRow.expiry || '—'}</div>
+                  <table className="scenario-table">
+                    <tbody>
+                      <tr><td>2× sleeve</td><td><strong>{vrpLiveRow.sleeve_2x || '—'}</strong></td></tr>
+                      <tr><td>Long put strike</td><td>{vrpLiveRow.strike_long ?? '—'}</td></tr>
+                      <tr><td>Short put strike</td><td>{vrpLiveRow.strike_short ?? '—'}</td></tr>
+                      <tr><td>IV long / short</td><td>{vrpLiveRow.iv_put_long != null ? fmt(vrpLiveRow.iv_put_long) : '—'} / {vrpLiveRow.iv_put_short != null ? fmt(vrpLiveRow.iv_put_short) : '—'}</td></tr>
+                      <tr><td>Spread mid (market)</td><td>{vrpLiveRow.spread_mid_market != null ? fmt(vrpLiveRow.spread_mid_market) : '—'}</td></tr>
+                      <tr><td>RV 30d (2×)</td><td>{vrpLiveRow.rv_30d_2x != null ? fmt(vrpLiveRow.rv_30d_2x) : '—'}</td></tr>
+                      <tr><td>VRP vol (2× proxy)</td><td>{vrpLiveRow.vrp_vol_2x != null ? fmt(vrpLiveRow.vrp_vol_2x) : '—'}</td></tr>
+                      <tr><td>Moneyness long / short</td><td>{vrpLiveRow.moneyness_long_pct != null ? `${vrpLiveRow.moneyness_long_pct.toFixed(2)}%` : '—'} / {vrpLiveRow.moneyness_short_pct != null ? `${vrpLiveRow.moneyness_short_pct.toFixed(2)}%` : '—'}</td></tr>
+                      <tr><td>IV source</td><td>{vrpLiveRow.iv_source || '—'}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
