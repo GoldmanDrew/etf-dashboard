@@ -13,9 +13,10 @@ Now that the forecaster (`forecast_nav.py`) emits one row per
      ``_history_panel.json``. For UI compatibility we also expose a
      ``by_symbol`` view containing the **default** model's stats / panel
      (the model the forecaster routed to the Stats card most recently).
-  4. Builds the next session's ``_anchors.json`` (one yfinance batch
-     call for the underlying closes) -- now also captures
-     ``shares_outstanding`` so the holdings models can divide cleanly.
+  4. Builds the next session's ``_anchors.json`` using each ticker's latest
+     official NAV row on or before the session date (lag-tolerant across
+     issuers). Underlying closes prefer ``underlying_adj_close`` from the
+     same metrics row, with a yfinance fallback per anchor date.
 
 Disable yfinance for offline / unit-test runs with
 ``NAV_FORECAST_DISABLE_YFINANCE=1``.
@@ -49,6 +50,10 @@ ETF_METRICS_LATEST_PATH = DATA_DIR / "etf_metrics_latest.json"
 DASHBOARD_DATA_PATH = DATA_DIR / "dashboard_data.json"
 
 HISTORY_TRADING_DAYS = 60
+# Max business-day lag between a ticker's official NAV row and the forecaster
+# session date. Covers AXS/Tradr T+0 publish ingested on T+1 morning while
+# Direxion rows advance ``latest_date``; blocks ancient stale rows.
+MAX_ANCHOR_LAG_BDAYS = int(os.environ.get("NAV_ANCHOR_MAX_LAG_BDAYS", "3"))
 _REALIZED_JSONL_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}\.jsonl$")
 
 
@@ -505,67 +510,136 @@ def fetch_underlying_closes(underlyings: list[str], target: date) -> dict[str, f
     return out
 
 
+def _parse_iso_date(value: object) -> date | None:
+    if value is None:
+        return None
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _business_days_between(early: date, late: date) -> int | None:
+    """Valid business days in ``[early, late)``; ``None`` when unknown."""
+    if late < early:
+        return None
+    try:
+        import numpy as np
+
+        return int(np.busday_count(early.isoformat(), late.isoformat()))
+    except Exception:
+        return (late - early).days
+
+
+def _anchor_row_eligible(
+    row_date: date,
+    session_date: date,
+    *,
+    max_lag_bdays: int = MAX_ANCHOR_LAG_BDAYS,
+) -> bool:
+    if row_date > session_date:
+        return False
+    lag = _business_days_between(row_date, session_date)
+    return lag is not None and lag <= max_lag_bdays
+
+
+def _resolve_und_close(
+    und: str | None,
+    row_date: date,
+    metrics_row: dict,
+    *,
+    underlying_closes_fn,
+    yf_cache: dict[tuple[str, str], float | None],
+) -> float | None:
+    if not und:
+        return None
+    adj = metrics_row.get("underlying_adj_close")
+    if _isfin(adj) and float(adj) > 0:
+        return float(adj)
+    cache_key = (und, row_date.isoformat())
+    if cache_key not in yf_cache:
+        fetched = underlying_closes_fn([und], row_date) or {}
+        val = fetched.get(und)
+        yf_cache[cache_key] = float(val) if _isfin(val) and float(val) > 0 else None
+    cached = yf_cache.get(cache_key)
+    return float(cached) if _isfin(cached) and float(cached) > 0 else None
+
+
 def build_anchors(
     records: list[dict],
     metrics_latest: dict,
     target: date,
     *,
     underlying_closes_fn=fetch_underlying_closes,
+    max_lag_bdays: int = MAX_ANCHOR_LAG_BDAYS,
 ) -> dict:
-    """Construct the anchor file the forecaster will use during the next session."""
+    """Construct the anchor file the forecaster will use during ``target`` session.
+
+    Each screener symbol uses its own ``etf_metrics_latest.by_symbol`` row when
+    that row's ``date`` is on or before ``target`` and within ``max_lag_bdays``
+    business days. Per-symbol ``as_of_date`` is the metrics row date (which may
+    lag ``session_date`` for slower issuers such as AXS/Tradr).
+    """
     by_metric = metrics_latest.get("by_symbol") or {}
     rec_by_sym: dict[str, dict] = {}
-    needed_unds: set[str] = set()
     for rec in records:
         sym = str(rec.get("symbol") or "").upper()
         if not sym:
             continue
         rec_by_sym[sym] = rec
-        und = str(rec.get("underlying") or "").upper()
-        if und:
-            needed_unds.add(und)
-    und_closes = underlying_closes_fn(sorted(needed_unds), target)
 
     out_by_sym: dict[str, dict] = {}
-    target_iso = target.isoformat()
+    session_iso = target.isoformat()
+    yf_cache: dict[tuple[str, str], float | None] = {}
     for sym, rec in sorted(rec_by_sym.items()):
         m = by_metric.get(sym)
         if not m:
             continue
         nav = m.get("nav")
         close = m.get("close_price")
-        date_str = m.get("date")
         shares = m.get("shares_outstanding")
-        if not _isfin(nav) or float(nav) <= 0:
+        row_date = _parse_iso_date(m.get("date"))
+        if row_date is None:
             continue
-        if str(date_str) != target_iso:
+        if not _anchor_row_eligible(row_date, target, max_lag_bdays=max_lag_bdays):
+            continue
+        if not _isfin(nav) or float(nav) <= 0:
             continue
         und = str(rec.get("underlying") or "").upper() or None
         delta = float(rec.get("delta")) if _isfin(rec.get("delta")) else (
             float(rec.get("beta")) if _isfin(rec.get("beta")) else None
         )
+        und_close = _resolve_und_close(
+            und,
+            row_date,
+            m,
+            underlying_closes_fn=underlying_closes_fn,
+            yf_cache=yf_cache,
+        )
+        lag_bdays = _business_days_between(row_date, target) or 0
         out_by_sym[sym] = {
-            "as_of_date": str(date_str),
+            "as_of_date": row_date.isoformat(),
             "nav_close": round(float(nav), 6),
             "etf_close": round(float(close), 6) if _isfin(close) else None,
             "shares_outstanding": (
                 round(float(shares), 4) if _isfin(shares) and float(shares) > 0 else None
             ),
             "und_symbol": und,
-            "und_close": (
-                round(float(und_closes.get(und)), 6)
-                if und and _isfin(und_closes.get(und))
-                else None
-            ),
+            "und_close": round(float(und_close), 6) if und_close is not None else None,
             "delta": delta,
             "product_class": rec.get("product_class"),
             "is_yieldboost": bool(rec.get("is_yieldboost")),
+            "anchor_lag_bdays": int(lag_bdays),
         }
+    n_lagged = sum(1 for v in out_by_sym.values() if int(v.get("anchor_lag_bdays") or 0) > 0)
     return {
-        "as_of_date": target_iso,
+        "session_date": session_iso,
+        "as_of_date": session_iso,
         "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "max_anchor_lag_bdays": int(max_lag_bdays),
         "n_with_und_close": sum(1 for v in out_by_sym.values() if v["und_close"] is not None),
         "n_with_shares": sum(1 for v in out_by_sym.values() if v["shares_outstanding"] is not None),
+        "n_lagged": n_lagged,
         "n_total": len(out_by_sym),
         "by_symbol": out_by_sym,
     }
@@ -673,8 +747,8 @@ def main() -> None:
     anchors = build_anchors(records, metrics_latest, target)
     _atomic_write_json(Path(args.anchors_out), anchors)
     LOGGER.info(
-        "wrote anchors as_of_date=%s symbols=%d (with und_close=%d, with shares=%d)",
-        anchors["as_of_date"], anchors["n_total"],
+        "wrote anchors session_date=%s symbols=%d lagged=%d (with und_close=%d, with shares=%d)",
+        anchors["session_date"], anchors["n_total"], anchors.get("n_lagged", 0),
         anchors["n_with_und_close"], anchors["n_with_shares"],
     )
 

@@ -212,32 +212,100 @@ def test_build_anchors_includes_shares_outstanding():
     metrics_latest = {
         "by_symbol": {
             "TSLL": {"date": "2026-04-28", "nav": 10.40, "close_price": 10.42,
-                     "shares_outstanding": 5_000_000.0},
+                     "shares_outstanding": 5_000_000.0, "underlying_adj_close": 232.10},
             "AAPU": {"date": "2026-04-28", "nav": 31.50, "close_price": 31.48,
-                     "shares_outstanding": 6_000_000.0},
+                     "shares_outstanding": 6_000_000.0, "underlying_adj_close": 271.06},
         },
     }
     out = sc.build_anchors(
         _records(), metrics_latest, date(2026, 4, 28),
-        underlying_closes_fn=lambda *_: {"TSLA": 232.10, "AAPL": 271.06},
+        underlying_closes_fn=lambda *_: {"TSLA": 999.0, "AAPL": 999.0},
     )
+    assert out["session_date"] == "2026-04-28"
     assert out["by_symbol"]["TSLL"]["shares_outstanding"] == 5_000_000.0
     assert out["by_symbol"]["AAPU"]["shares_outstanding"] == 6_000_000.0
+    assert out["by_symbol"]["TSLL"]["und_close"] == 232.10
     assert out["n_with_shares"] == 2
     assert out["n_with_und_close"] == 2
+    assert out["n_lagged"] == 0
 
 
-def test_build_anchors_skips_when_metric_date_mismatches():
+def test_build_anchors_includes_one_session_lagged_ticker():
     metrics_latest = {
         "by_symbol": {
-            "TSLL": {"date": "2026-04-25", "nav": 10.40, "shares_outstanding": 5e6},
-            "AAPU": {"date": "2026-04-28", "nav": 31.50, "shares_outstanding": 6e6},
+            "TSLL": {
+                "date": "2026-05-20",
+                "nav": 10.40,
+                "shares_outstanding": 5e6,
+                "underlying_adj_close": 39.52,
+            },
+            "AAPU": {"date": "2026-05-21", "nav": 31.50, "shares_outstanding": 6e6,
+                     "underlying_adj_close": 304.89},
         },
     }
     out = sc.build_anchors(
-        _records(), metrics_latest, date(2026, 4, 28),
+        _records(), metrics_latest, date(2026, 5, 21),
+        underlying_closes_fn=lambda *_: {},
+    )
+    assert out["session_date"] == "2026-05-21"
+    assert "TSLL" in out["by_symbol"]
+    assert out["by_symbol"]["TSLL"]["as_of_date"] == "2026-05-20"
+    assert out["by_symbol"]["TSLL"]["anchor_lag_bdays"] == 1
+    assert out["by_symbol"]["TSLL"]["und_close"] == 39.52
+    assert "AAPU" in out["by_symbol"]
+    assert out["n_lagged"] == 1
+
+
+def test_build_anchors_skips_when_metric_date_too_stale():
+    metrics_latest = {
+        "by_symbol": {
+            "TSLL": {"date": "2026-05-14", "nav": 10.40, "shares_outstanding": 5e6},
+            "AAPU": {"date": "2026-05-21", "nav": 31.50, "shares_outstanding": 6e6,
+                     "underlying_adj_close": 304.89},
+        },
+    }
+    out = sc.build_anchors(
+        _records(), metrics_latest, date(2026, 5, 21),
+        underlying_closes_fn=lambda *_: {},
+        max_lag_bdays=3,
+    )
+    assert "TSLL" not in out["by_symbol"]
+    assert "AAPU" in out["by_symbol"]
+
+
+def test_build_anchors_skips_future_dated_rows():
+    metrics_latest = {
+        "by_symbol": {
+            "TSLL": {"date": "2026-05-22", "nav": 10.40, "shares_outstanding": 5e6},
+            "AAPU": {"date": "2026-05-21", "nav": 31.50, "shares_outstanding": 6e6,
+                     "underlying_adj_close": 304.89},
+        },
+    }
+    out = sc.build_anchors(
+        _records(), metrics_latest, date(2026, 5, 21),
         underlying_closes_fn=lambda *_: {},
     )
     assert "TSLL" not in out["by_symbol"]
     assert "AAPU" in out["by_symbol"]
-    assert out["by_symbol"]["AAPU"]["shares_outstanding"] == 6e6
+
+
+def test_build_anchors_yfinance_fallback_uses_anchor_row_date():
+    calls: list[tuple[list[str], date]] = []
+
+    def _yf(unds, row_date):
+        calls.append((list(unds), row_date))
+        return {unds[0]: 123.45}
+
+    metrics_latest = {
+        "by_symbol": {
+            "TSLL": {"date": "2026-05-20", "nav": 10.40, "shares_outstanding": 5e6},
+        },
+    }
+    out = sc.build_anchors(
+        [{"symbol": "TSLL", "underlying": "TSLA", "beta": 2.0, "product_class": "letf"}],
+        metrics_latest,
+        date(2026, 5, 21),
+        underlying_closes_fn=_yf,
+    )
+    assert out["by_symbol"]["TSLL"]["und_close"] == 123.45
+    assert calls == [(["TSLA"], date(2026, 5, 20))]
