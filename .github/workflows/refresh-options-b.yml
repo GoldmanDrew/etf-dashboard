@@ -1,19 +1,18 @@
-name: Refresh Options (shard A)
+name: Refresh Options (shard B offset)
 
-# Sharded bucket-3 options refresh + YieldBOOST VRP artifacts inside --options-only.
-# Pair with refresh-options-b.yml (offset cron) and refresh-yieldboost-vrp.yml (targeted sleeves).
-# Pages deploy: deploy-pages-data.yml on data/** push.
+# Offset ~2 min from shard A for ~2.5 min effective workflow starts.
+# Same shard math as shard A; offset cron picks up work between A runs.
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # GitHub Actions minimum cadence is every 5 minutes
+    - cron: "2-59/5 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: "options-refresh-a"
+  group: "options-refresh-b"
   cancel-in-progress: false
 
 jobs:
@@ -39,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Refresh options cache (sharded)
+      - name: Refresh options cache (sharded, offset)
         env:
           POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
           TRADIER_TOKEN: ${{ env.TRADIER_TOKEN }}
@@ -94,4 +93,4 @@ jobs:
             data/vrp_health.json
             data/yieldboost_put_spreads_latest.json
             data/yieldboost_options_target.json
-          commit_message: "chore: refresh options cache (shard A)"
+          commit_message: "chore: refresh options cache (shard B)"
