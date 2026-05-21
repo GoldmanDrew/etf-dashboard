@@ -1253,6 +1253,8 @@ def save_holdings_outputs(
         lambda g: g[g["as_of_date"] == g["as_of_date"].max()]
     )
     latest.to_csv(latest_csv_path, index=False)
+    if "etf_ticker" not in pd.read_csv(latest_csv_path, nrows=0).columns:
+        raise RuntimeError(f"holdings CSV missing etf_ticker column: {latest_csv_path}")
     latest_json = latest.copy()
     latest_json["as_of_date"] = pd.to_datetime(latest_json["as_of_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     if "option_expiry" in latest_json.columns:

@@ -316,6 +316,14 @@ _HOLDINGS_COLUMN_ALIASES: dict[str, str] = {
 }
 
 
+_GRANITE_URL_ETF_RE = re.compile(r"/([a-z]{2,5})_holdings_file_\d+\.xls", re.I)
+
+
+def infer_etf_ticker_from_source_url(source_url: object) -> str | None:
+    m = _GRANITE_URL_ETF_RE.search(str(source_url or ""))
+    return m.group(1).upper() if m else None
+
+
 def normalize_holdings_dataframe(holdings_df: pd.DataFrame | None) -> pd.DataFrame:
     """Normalize holdings CSV/XLS columns for YieldBOOST spread pairing."""
     if holdings_df is None or holdings_df.empty:
@@ -324,6 +332,13 @@ def normalize_holdings_dataframe(holdings_df: pd.DataFrame | None) -> pd.DataFra
     for src, dst in _HOLDINGS_COLUMN_ALIASES.items():
         if src in df.columns and dst not in df.columns:
             df[dst] = df[src]
+    if "etf_ticker" not in df.columns or df["etf_ticker"].isna().all():
+        if "source_url" in df.columns:
+            inferred = df["source_url"].map(infer_etf_ticker_from_source_url)
+            if "etf_ticker" not in df.columns:
+                df["etf_ticker"] = inferred
+            else:
+                df["etf_ticker"] = df["etf_ticker"].fillna(inferred)
     if "etf_ticker" not in df.columns:
         return pd.DataFrame()
     df["etf_ticker"] = df["etf_ticker"].astype(str).str.upper().str.strip()
@@ -331,6 +346,38 @@ def normalize_holdings_dataframe(holdings_df: pd.DataFrame | None) -> pd.DataFra
     if "option_expiry" in df.columns:
         df["option_expiry"] = pd.to_datetime(df["option_expiry"], errors="coerce").dt.date
     return df.reset_index(drop=True)
+
+
+def load_holdings_latest_dataframe(
+    *,
+    csv_path: Path | None = None,
+    parquet_path: Path | None = None,
+) -> pd.DataFrame:
+    """Load latest holdings snapshot; rebuild from parquet when CSV is legacy/missing etf_ticker."""
+    csv_path = csv_path or Path("data/etf_holdings_latest.csv")
+    parquet_path = parquet_path or Path("data/etf_holdings_daily.parquet")
+    if csv_path.exists():
+        df = normalize_holdings_dataframe(pd.read_csv(csv_path))
+        if not df.empty:
+            return df
+    if not parquet_path.exists():
+        return pd.DataFrame()
+    hist = pd.read_parquet(parquet_path)
+    if hist.empty or "etf_ticker" not in hist.columns:
+        return pd.DataFrame()
+    from etf_holdings_providers import HOLDINGS_COLUMNS
+
+    for c in HOLDINGS_COLUMNS:
+        if c not in hist.columns:
+            hist[c] = None
+    hist = hist[HOLDINGS_COLUMNS]
+    hist["as_of_date"] = pd.to_datetime(hist["as_of_date"], errors="coerce").dt.date
+    hist["etf_ticker"] = hist["etf_ticker"].astype(str).str.upper()
+    latest = hist.sort_values(["etf_ticker", "as_of_date"])
+    latest = latest.groupby("etf_ticker", group_keys=False).apply(
+        lambda g: g[g["as_of_date"] == g["as_of_date"].max()],
+    )
+    return normalize_holdings_dataframe(latest.reset_index(drop=True))
 
 
 def spreads_json_to_put_spread_legs(payload: dict[str, Any] | None) -> list[PutSpreadLeg]:

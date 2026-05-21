@@ -16,6 +16,7 @@ sys.path.insert(0, str(SCRIPTS))
 from yieldboost_holdings import (  # noqa: E402
     format_occ_ticker,
     granite_xls_rows_to_holdings,
+    infer_etf_ticker_from_source_url,
     normalize_holdings_dataframe,
     pair_put_spreads_from_holdings,
     parse_granite_option_description,
@@ -121,7 +122,33 @@ def test_pair_put_spreads_from_holdings():
     assert s.is_front is True
 
 
+def test_infer_etf_ticker_from_legacy_csv_without_column():
+    legacy = pd.DataFrame([{
+        "as_of_date": "2026-05-21",
+        "position_ticker": "MSTU260522P00007030",
+        "security_type": "OPTION_PUT",
+        "shares": 670.0,
+        "option_root": "2MSTU",
+        "option_expiry": "2026-05-22",
+        "option_strike": 7.03,
+        "option_put_call": "P",
+        "option_side": "long",
+        "source_url": "https://www.graniteshares.com/media/vhfpp1fl/mtyy_holdings_file_20260520.xls",
+    }])
+    norm = normalize_holdings_dataframe(legacy)
+    assert not norm.empty
+    assert norm.iloc[0]["etf_ticker"] == "MTYY"
+    assert infer_etf_ticker_from_source_url(legacy.iloc[0]["source_url"]) == "MTYY"
+
+
 def test_normalize_holdings_missing_etf_ticker_returns_empty():
+    legacy = pd.DataFrame([{
+        "as_of_date": "2026-04-21",
+        "position_ticker": "USD",
+        "security_type": "CASH",
+        "shares": 1.0,
+    }])
+    assert normalize_holdings_dataframe(legacy).empty
     legacy = pd.DataFrame([{
         "as_of_date": "2026-04-21",
         "position_ticker": "USD",

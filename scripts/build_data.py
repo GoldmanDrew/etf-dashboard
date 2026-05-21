@@ -2293,6 +2293,7 @@ def refresh_yieldboost_vrp_files(
         build_vrp_health_payload,
         build_vrp_live_payload,
         build_yieldboost_options_target,
+        load_holdings_latest_dataframe,
         load_underlying_map_from_screener,
         normalize_holdings_dataframe,
         pair_put_spreads_from_holdings,
@@ -2305,9 +2306,10 @@ def refresh_yieldboost_vrp_files(
         for yb, und in YIELDBOOST_BUCKET2_PAIRS:
             underlying_map[yb] = und
 
-    hdf = pd.DataFrame()
-    if ETF_HOLDINGS_LATEST_FILE.exists():
-        hdf = normalize_holdings_dataframe(pd.read_csv(ETF_HOLDINGS_LATEST_FILE))
+    hdf = load_holdings_latest_dataframe(
+        csv_path=ETF_HOLDINGS_LATEST_FILE,
+        parquet_path=OUTPUT_DIR / "etf_holdings_daily.parquet",
+    )
 
     spreads_payload: dict = {"spreads": [], "spread_count": 0, "front_count": 0}
     if not hdf.empty:
@@ -3021,15 +3023,28 @@ def refresh_borrow_only() -> None:
         "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         "refresh_type": "borrow_only",
     }
+    borrow_spike_risk = build_borrow_spike_risk_payload(
+        borrow_history_symbols=hist_symbols,
+        as_of_date=today_utc,
+        horizon_days=5,
+    )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=None, separators=(",", ":"))
     with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(hist_payload, f, indent=None, separators=(",", ":"))
+    with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
+        json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
+    _bp = write_borrow_spike_predictions_snapshot(
+        borrow_spike_risk, pred_dir=BORROW_SPIKE_PREDICTIONS_DIR, as_of_date=today_utc,
+    )
+    if _bp:
+        print(f"[OK] Borrow spike predictions snapshot -> {_bp}")
 
     print(f"[OK] Borrow-only refresh wrote {OUTPUT_FILE}")
     print(f"[OK] Borrow-only refresh wrote {BORROW_HISTORY_FILE}")
+    print(f"[OK] Borrow-only refresh wrote {BORROW_SPIKE_RISK_FILE}")
     print(f"  Updated from IBKR FTP: {updated}/{len(records)} symbols")
     print(f"  Updated from latest CSV fallback: {updated_csv}/{len(records)} symbols")
 
