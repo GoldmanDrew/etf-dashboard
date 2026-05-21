@@ -11,8 +11,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: "dispatch-${{ github.event.action }}"
@@ -59,39 +57,12 @@ jobs:
         run: python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
 
       - name: Commit data if changed
-        id: commit
-        run: |
-          BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/options_cache.json data/vrp_live.json data/vrp_health.json data/yieldboost_put_spreads_latest.json data/yieldboost_options_target.json"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${FILES}
-          if git diff --staged --quiet; then
-            echo "changed=0" >> "$GITHUB_OUTPUT"
-          else
-            git commit -m "chore: dispatch refresh (${{ github.event.action }}) [$(date -u '+%Y-%m-%d %H:%M UTC')]"
-            git push origin "HEAD:${BRANCH}"
-            echo "changed=1" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Setup Pages
-        if: steps.commit.outputs.changed == '1'
-        uses: actions/configure-pages@v5
-
-      - name: Build site artifact
-        if: steps.commit.outputs.changed == '1'
-        run: |
-          mkdir -p _site
-          cp index.html _site/
-          cp -r data _site/
-          [ -d assets ] && cp -r assets _site/ || true
-
-      - name: Upload artifact
-        if: steps.commit.outputs.changed == '1'
-        uses: actions/upload-pages-artifact@v3
+        uses: ./.github/actions/commit-data
         with:
-          path: _site
-
-      - name: Deploy to GitHub Pages
-        if: steps.commit.outputs.changed == '1'
-        uses: actions/deploy-pages@v4
+          files: >-
+            data/options_cache.json
+            data/vrp_live.json
+            data/vrp_health.json
+            data/yieldboost_put_spreads_latest.json
+            data/yieldboost_options_target.json
+          commit_message: "chore: dispatch refresh (${{ github.event.action }})"

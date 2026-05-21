@@ -5,9 +5,18 @@ on:
   schedule:
     - cron: "30 21 * * 1-5"  # Mon-Fri 21:30 UTC (4:30 PM ET)
 
-  # Run on push to main
+  # Code pushes only — data-only commits use deploy-pages-data.yml (no full rebuild).
   push:
     branches: [main]
+    paths:
+      - "index.html"
+      - "assets/**"
+      - "scripts/**"
+      - "backend/**"
+      - "tests/**"
+      - "requirements.txt"
+      - "config/**"
+      - ".github/**"
 
   # Rebuild after morning ETF metrics ingest lands on main (vol-shape uses metrics).
   workflow_run:
@@ -139,60 +148,23 @@ jobs:
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
         id: commit_data
-        run: |
-          BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/dashboard_data.json data/etf_screened_today.csv data/borrow_history.json data/borrow_spike_risk.json data/borrow_spike_predictions data/borrow_spike_realized.jsonl data/borrow_spike_metrics.json data/options_cache.json data/vol_shape_history.json data/vrp_live.json data/vrp_health.json data/yieldboost_put_spreads_latest.json data/yieldboost_options_target.json"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${FILES}
-          if git diff --staged --quiet; then
-            echo "No data changes to commit"
-          else
-            TMP_DIR="$(mktemp -d)"
-            for f in ${FILES}; do
-              mkdir -p "${TMP_DIR}/$(dirname "$f")"
-              if [ -d "$f" ]; then
-                mkdir -p "${TMP_DIR}/$f"
-                cp -a "$f"/. "${TMP_DIR}/$f"/
-              elif [ -f "$f" ]; then
-                cp "$f" "${TMP_DIR}/$f"
-              fi
-            done
-            pushed=0
-            for i in 1 2 3; do
-              git fetch origin "${BRANCH}"
-              git reset --hard || true
-              git clean -fd || true
-              git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
-              for f in ${FILES}; do
-                if [ -d "${TMP_DIR}/$f" ]; then
-                  mkdir -p "$f"
-                  cp -a "${TMP_DIR}/$f"/. "$f"/
-                elif [ -f "${TMP_DIR}/$f" ]; then
-                  mkdir -p "$(dirname "$f")"
-                  cp "${TMP_DIR}/$f" "$f"
-                fi
-              done
-              git add ${FILES}
-              if git diff --staged --quiet; then
-                echo "No data changes against latest origin"
-                pushed=1
-                break
-              fi
-              git commit -m "chore: update dashboard data [$(date -u '+%Y-%m-%d %H:%M UTC')]"
-              if git push origin "HEAD:${BRANCH}"; then
-                pushed=1
-                break
-              fi
-              git reset --hard "origin/${BRANCH}" || true
-              sleep $((i * 5))
-            done
-            rm -rf "${TMP_DIR}"
-            if [ "$pushed" -ne 1 ]; then
-              echo "Push failed after retries"
-              exit 1
-            fi
-          fi
+        uses: ./.github/actions/commit-data
+        with:
+          files: >-
+            data/dashboard_data.json
+            data/etf_screened_today.csv
+            data/borrow_history.json
+            data/borrow_spike_risk.json
+            data/borrow_spike_predictions
+            data/borrow_spike_realized.jsonl
+            data/borrow_spike_metrics.json
+            data/options_cache.json
+            data/vol_shape_history.json
+            data/vrp_live.json
+            data/vrp_health.json
+            data/yieldboost_put_spreads_latest.json
+            data/yieldboost_options_target.json
+          commit_message: "chore: update dashboard data"
 
       # If build_data.py crashed, the working tree may contain partially-
       # written JSON.  Reset `data/` (and `index.html` just in case) to the

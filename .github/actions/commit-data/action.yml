@@ -1,0 +1,95 @@
+name: Commit data with retry
+description: Stage data artifacts (files or directories), commit, and push with merge retry
+inputs:
+  files:
+    description: Space-separated paths to stage (files or directories; missing paths are skipped)
+    required: true
+  commit_message:
+    description: Git commit message
+    required: true
+  branch:
+    description: Branch to push (defaults to GITHUB_REF_NAME or main)
+    required: false
+    default: ""
+outputs:
+  changed:
+    description: "1 if a commit was pushed, 0 otherwise"
+    value: ${{ steps.commit.outputs.changed }}
+runs:
+  using: composite
+  steps:
+    - name: Commit and push data
+      id: commit
+      shell: bash
+      run: |
+        set -euo pipefail
+        BRANCH="${{ inputs.branch }}"
+        if [ -z "$BRANCH" ]; then
+          BRANCH="${GITHUB_REF_NAME:-main}"
+        fi
+        FILES="${{ inputs.files }}"
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        EXISTING=""
+        for f in ${FILES}; do
+          if [ -e "$f" ]; then EXISTING="${EXISTING} $f"; fi
+        done
+        if [ -z "${EXISTING# }" ]; then
+          echo "No artifacts to stage"
+          echo "changed=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        git add ${EXISTING}
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+          echo "changed=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        TMP_DIR="$(mktemp -d)"
+        for f in ${EXISTING}; do
+          mkdir -p "${TMP_DIR}/$(dirname "$f")"
+          if [ -d "$f" ]; then
+            mkdir -p "${TMP_DIR}/$f"
+            cp -a "$f"/. "${TMP_DIR}/$f"/
+          else
+            cp "$f" "${TMP_DIR}/$f"
+          fi
+        done
+
+        pushed=0
+        for i in 1 2 3; do
+          git fetch origin "${BRANCH}"
+          git checkout -B "${BRANCH}" "origin/${BRANCH}"
+          for f in ${EXISTING}; do
+            if [ -d "${TMP_DIR}/$f" ]; then
+              mkdir -p "$f"
+              cp -a "${TMP_DIR}/$f"/. "$f"/
+            elif [ -f "${TMP_DIR}/$f" ]; then
+              mkdir -p "$(dirname "$f")"
+              cp "${TMP_DIR}/$f" "$f"
+            fi
+          done
+          git add ${EXISTING}
+          if git diff --staged --quiet; then
+            echo "No changes against latest origin"
+            pushed=1
+            break
+          fi
+          git commit -m "${{ inputs.commit_message }} [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+          if git push origin "HEAD:${BRANCH}"; then
+            pushed=1
+            break
+          fi
+          git reset --hard "origin/${BRANCH}" || true
+          sleep $((i * 5))
+        done
+        rm -rf "${TMP_DIR}"
+
+        if [ "$pushed" -ne 1 ]; then
+          echo "Push failed after retries"
+          exit 1
+        fi
+        echo "changed=1" >> "$GITHUB_OUTPUT"

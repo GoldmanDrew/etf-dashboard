@@ -84,74 +84,10 @@ jobs:
           PY
 
       - name: Commit intraday flow artifacts
-        run: |
-          BRANCH="${GITHUB_REF_NAME:-main}"
-          ALL_PATHS="data/underlying_intraday_spot.json data/letf_rebalance_flows_intraday_latest.json data/letf_rebalance_flows_intraday_snapshots"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          STAGE=""
-          for p in ${ALL_PATHS}; do
-            if [ -e "$p" ]; then STAGE="${STAGE} $p"; fi
-          done
-          if [ -z "${STAGE# }" ]; then
-            echo "No intraday-flow artifacts present; nothing to commit."
-            exit 0
-          fi
-          git add ${STAGE}
-          if git diff --staged --quiet; then
-            echo "No intraday-flow changes to commit"
-            exit 0
-          fi
-          TMP_DIR="$(mktemp -d)"
-          for p in ${STAGE}; do
-            mkdir -p "${TMP_DIR}/$(dirname "$p")"
-            if [ -d "$p" ]; then
-              mkdir -p "${TMP_DIR}/$p"
-              cp -a "$p"/. "${TMP_DIR}/$p"/
-            else
-              cp -a "$p" "${TMP_DIR}/$p"
-            fi
-          done
-          pushed=0
-          for i in 1 2 3; do
-            git fetch origin "${BRANCH}"
-            git reset --hard || true
-            git clean -fd || true
-            git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
-            ROUND=""
-            for p in ${ALL_PATHS}; do
-              if [ -e "${TMP_DIR}/$p" ]; then
-                mkdir -p "$(dirname "$p")"
-                if [ -d "${TMP_DIR}/$p" ]; then
-                  mkdir -p "$p"
-                  cp -a "${TMP_DIR}/$p"/. "$p"/
-                else
-                  cp -a "${TMP_DIR}/$p" "$p"
-                fi
-                ROUND="${ROUND} $p"
-              fi
-            done
-            if [ -z "${ROUND# }" ]; then
-              echo "No files to stage after rebase"
-              pushed=1
-              break
-            fi
-            git add ${ROUND}
-            if git diff --staged --quiet; then
-              echo "No intraday-flow changes against latest origin"
-              pushed=1
-              break
-            fi
-            git commit -m "chore: refresh intraday LETF flow [$(date -u '+%Y-%m-%d %H:%M UTC')]"
-            if git push origin "HEAD:${BRANCH}"; then
-              pushed=1
-              break
-            fi
-            git reset --hard "origin/${BRANCH}" || true
-            sleep $((i * 5))
-          done
-          rm -rf "${TMP_DIR}"
-          if [ "$pushed" -ne 1 ]; then
-            echo "Push failed after retries"
-            exit 1
-          fi
+        uses: ./.github/actions/commit-data
+        with:
+          files: >-
+            data/underlying_intraday_spot.json
+            data/letf_rebalance_flows_intraday_latest.json
+            data/letf_rebalance_flows_intraday_snapshots
+          commit_message: "chore: refresh intraday LETF flow"

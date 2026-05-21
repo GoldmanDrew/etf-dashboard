@@ -29,7 +29,7 @@ If you only have time for one section, read **§3 Data Flow** and **§5 Product 
 
 The dashboard tracks **leveraged, inverse, volatility, and YieldBOOST income ETFs** for a short-borrow strategy. For every ticker we want to know:
 
-1. **Borrow rate** — what does it cost to short? (IBKR FTP feed, refreshed every 10 min)
+1. **Borrow rate** — what does it cost to short? (IBKR FTP feed, refreshed every 30 min)
 2. **Gross decay** — how fast does the ETF lose value to volatility drag, expense ratio, tracking error, and (for income strategies) put-spread NAV decay? (multiple models, see §4)
 3. **Net edge** — `gross_decay − borrow_cost`, with both sides bootstrapped to give a fan of quantiles. (block bootstrap on log-drag + weighted resample on borrow history)
 4. **Scenario behaviour** — what does the ETF do under a 0%, ±σ, ±3σ underlying shock at 1M / 3M / 6M / 1Y horizons?
@@ -129,8 +129,8 @@ Steps 4–7 are the "etf-dashboard sweep". You will do this often. There is a re
 │    11. commit data/* and push                                                  │
 │    12. assemble _site/ (index.html + assets/ + data/) and deploy to Pages      │
 │                                                                                │
-│   .github/workflows/refresh-borrow.yml      (every 10 min, --borrow-only)      │
-│   .github/workflows/refresh-options.yml     (every 5 min,  --options-only)     │
+│   .github/workflows/refresh-borrow.yml      (every 30 min, --borrow-only)      │
+│   .github/workflows/refresh-options.yml     (every 10 min, --options-only, sharded) │
 │   .github/workflows/update-etf-metrics.yml  (daily 5:00 AM ET)                 │
 │   .github/workflows/update-corporate-actions.yml (every 6 h)                   │
 │                                                                                │
@@ -340,15 +340,15 @@ Every user-facing JSON under `data/` has a single producer workflow, a primary c
 
 | File | Producer | Consumer | Refresh cadence |
 |---|---|---|---|
-| `dashboard_data.json` | `build_data.py` | `index.html` (always loaded) | daily, plus `--borrow-only` every 10 min |
+| `dashboard_data.json` | `build_data.py` | `index.html` (always loaded) | daily, plus `--borrow-only` every 30 min |
 | `vol_shape_history.json` | `build_data.py` (`vol_shape_metrics.py`) | Chart page vol-shape history plots (prefetched); falls back to client recompute from `etf_metrics_daily` | full `build_data` after metrics ingest |
 | `etf_screened_today.csv` | `ls-algo/daily_screener.py` | `build_data.py` | daily (cached copy of upstream) |
 | `borrow_history.json` | `build_data.py` (walks ls-algo git history) | `ChartPage`, `ls-algo` net-edge bootstrap | daily |
 | `borrow_spike_risk.json` | `build_data.py` (spike model) | `ChartPage`, `BorrowMonitor` | daily |
-| `borrow_spike_predictions/<DATE>.json` | `build_data.py` (full + `--borrow-only`) | `scripts/score_borrow_spikes.py` | daily / every 10 min |
-| `borrow_spike_realized.jsonl` | `scripts/score_borrow_spikes.py` | ops / calibration audits | append on workflow |
-| `borrow_spike_metrics.json` | `scripts/score_borrow_spikes.py` | Brier, log-loss, band calibration rollup | daily / borrow refresh |
-| `options_cache.json` | `build_data.py --options-only` | `ChartPage`, `Trade Lab`, `vrp_live.json` builder | scheduled every 5 min (sharded; GitHub jitter 5–60+ min) |
+| `borrow_spike_predictions/<DATE>.json` | `build_data.py` (full build only) | `scripts/score_borrow_spikes.py` | daily (with full build / ETF metrics) |
+| `borrow_spike_realized.jsonl` | `scripts/score_borrow_spikes.py` | ops / calibration audits | daily |
+| `borrow_spike_metrics.json` | `scripts/score_borrow_spikes.py` | Brier, log-loss, band calibration rollup | daily |
+| `options_cache.json` | `build_data.py --options-only` | `ChartPage`, `Trade Lab`, `vrp_live.json` builder | every 10 min (sharded; GitHub jitter) |
 | `yieldboost_put_spreads_latest.json` | `ingest_etf_metrics.py` + `build_data.py` (`refresh_yieldboost_vrp_files`) | Vol / VRP tab (fallback), `vrp_live.json` builder | daily metrics + each `build_data` / `--options-only` run |
 | `vrp_live.json` | `build_data.py` (`refresh_yieldboost_vrp_files`) | Vol / VRP tab (`index.html`) | each `build_data` / `--options-only` run; deployed via `build-and-deploy.yml` |
 | `etf_metrics_daily.{parquet,csv,json}` | `ingest_etf_metrics.py` | Stats tab (NAV/AUM/shares outstanding/shares traded chart) and Pair Backtest total-return legs + liquidity; `close_price` and `shares_traded` (Yahoo `Close` / `Volume`) via chunked Yahoo (`ETF_METRICS_CLOSE_YF_CHUNK_SIZE`); `underlying_adj_close` via chunked Yahoo (`ETF_METRICS_UNDERLYING_YF_CHUNK_SIZE`) plus **gap backfill after upsert** (per-underlying Yahoo fetch over each underlying’s full null span in the merged store). If ingest **skips** (`ETF_METRICS_SKIP_IF_RECENT_HOURS`), `update-etf-metrics.yml` still runs **`scripts/backfill_underlying_adj_close.py`** so gaps do not stick forever. **Pair backtest joint inception:** after `backfill_close_prices.py`, **`scripts/bootstrap_metrics_yahoo_history.py`** (Yahoo first-trade → day before store `min(date)`, `status='missing'`, `source_provider='yahoo_bootstrap'`) prepends joint `close_price` + `underlying_adj_close` rows so the Chart Backtest can start at listing when Yahoo predates issuer rows (same pattern as Diamond-Creek-Quant). | daily 5 AM ET |
@@ -524,7 +524,7 @@ This is the single most important file in this repo. ~2840 lines. Don't be intim
     }
     ```
 
-11. **`refresh_borrow_only()`** and **`refresh_options_only()`** are partial reruns that read the existing `dashboard_data.json` / `options_cache.json`, mutate only the relevant fields, and write back. They are what the 10-min and 5-min cron workflows call.
+11. **`refresh_borrow_only()`** and **`refresh_options_only()`** are partial reruns that read the existing `dashboard_data.json` / `options_cache.json`, mutate only the relevant fields, and write back. They are what the 30-min and 10-min cron workflows call.
 
 The CLI:
 
@@ -663,19 +663,28 @@ The dev server runs at `http://localhost:8000` via `python run.py` and exposes `
 
 ## 11. GitHub Actions deployment topology
 
-Five workflows, four cron schedules:
+Core workflows:
 
 | Workflow | Cadence | What it does |
 |---|---|---|
-| `build-and-deploy.yml` | Daily 4:30 PM ET (Mon–Fri) + on every `push` to `main` + after successful `Update ETF Metrics Daily` | `git pull` latest `main`, full `build_data.py` (incl. `vol_shape_history.json`) + commit `data/*` + deploy `_site/` to GitHub Pages |
-| `refresh-borrow.yml` | Every 10 min | `build_data.py --borrow-only` + commit `data/dashboard_data.json` |
-| `refresh-options.yml` | Every 5 min | `build_data.py --options-only` + commit `data/options_cache.json` |
-| `update-etf-metrics.yml` | Daily 5:00 AM ET | `ingest_etf_metrics.py` + backfills + **`bootstrap_metrics_yahoo_history.py`** + `ingest_distributions.py` |
-| `update-corporate-actions.yml` | Every 6 h | `ingest_corporate_actions.py` (writes `corporate_actions.json` + `etf_news.json`) |
+| `build-and-deploy.yml` | Daily 4:30 PM ET (Mon–Fri) + **code** push to `main` + after successful `Update ETF Metrics Daily` | Full `build_data.py` + borrow-spike scoring + commit `data/*` + deploy Pages |
+| `deploy-pages-data.yml` | On `data/**` push to `main` | Lightweight Pages deploy only (no rebuild) |
+| `refresh-borrow.yml` | Every 30 min | `build_data.py --borrow-only` → `dashboard_data.json` + `borrow_history.json` |
+| `refresh-options.yml` | Every 10 min | Sharded `--options-only` (+ YieldBOOST VRP artifacts) |
+| `refresh-nav-forecast.yml` | Every 30 min (RTH weekdays) | `forecast_nav.py` snapshots |
+| `intraday-flow.yml` | Every 5 min (RTH weekdays) | LETF rebalance flow estimate |
+| `update-etf-metrics.yml` | Daily 5:00 AM ET | Metrics ingest + NAV forecast scoring + borrow-spike scoring |
+| `update-corporate-actions.yml` | Every 6 h | Corporate actions + news feed |
+
+Shared infra: `.github/actions/commit-data/` — commit-with-retry used by all refresh workflows.
+
+**Deploy split:** Data-only commits from refresh workflows trigger `deploy-pages-data.yml` only. `build-and-deploy.yml` no longer runs on `data/**` pushes, avoiding redundant full rebuilds.
+
+**Removed (May 2026 simplification):** `refresh-options-b.yml` (offset shard B) and `refresh-yieldboost-vrp.yml` — YieldBOOST VRP is rebuilt inside `--options-only` when `OPTIONS_INCLUDE_YIELDBOOST=1`.
 
 **Critical safety rail:** `build-and-deploy.yml`'s `Build dashboard data` step is `continue-on-error: true`. If `build_data.py` flakes (Polygon 429, Yahoo timeout, IBKR FTP outage), the workflow falls back to whatever JSON is currently committed to `main` and still ships a Pages deploy. This means a transient API outage will not blank out the site — but it also means a bad data push **will** stick until the next successful build. Always sanity-check `data/dashboard_data.json` after committing.
 
-The four refresh workflows do not embed a Pages deploy step; instead **any push to `main`** (including their data commits) starts **`build-and-deploy.yml`**, which assembles `_site/` and publishes GitHub Pages. Until that job finishes, `https://…/etf-dashboard/data/etf_metrics_daily.json` on Pages can lag `main`. The SPA busts cache on that JSON with a **1-minute** `?t=` query param (`index.html`); hard-refresh if you still see stale cells after deploy.
+Until `deploy-pages-data.yml` finishes, `https://…/etf-dashboard/data/*.json` on Pages can lag `main`. The SPA busts cache on metrics JSON with a **1-minute** `?t=` query param (`index.html`); hard-refresh if you still see stale cells after deploy.
 
 ### Required repo secrets
 
@@ -826,9 +835,9 @@ The schema of `etf_screened_today.csv` is the contract between `ls-algo` and `et
 
 `continue-on-error: true` on `Build dashboard data`. A failed build does **not** prevent the Pages deploy — it just deploys the previous JSON. This is intentional (rate-limit-friendly), but it means you must verify a successful build pushed before assuming your change is live. Check the workflow log AND `data/dashboard_data.json` git history.
 
-### 13.6 The 10-min borrow refresh writes `dashboard_data.json` directly
+### 13.6 The 30-min borrow refresh writes `dashboard_data.json` directly
 
-`build_data.py --borrow-only` mutates only the borrow-related fields in the existing `dashboard_data.json`. If the daily full build hasn't run yet today, `--borrow-only` is operating on yesterday's full dataset. The schema for the partial-update path lives at `refresh_borrow_only()` near line 2410.
+`build_data.py --borrow-only` mutates only borrow-related fields in the existing `dashboard_data.json` and appends today's point to `borrow_history.json`. It does **not** rebuild borrow-spike risk or prediction snapshots (those run on the daily full build and in `update-etf-metrics.yml`). If the daily full build hasn't run yet today, `--borrow-only` is operating on yesterday's full dataset. The schema for the partial-update path lives at `refresh_borrow_only()` near line 2917.
 
 ### 13.7 The HARQ-Log model can produce `simple_ito_fallback` rows with NaN p10/p50/p90
 

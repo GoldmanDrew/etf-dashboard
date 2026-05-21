@@ -1,15 +1,19 @@
-name: Refresh Options (shard A)
+name: Refresh Options
+
+# Single sharded options refresh (replaces former shard A/B + YieldBOOST VRP cron).
+# YieldBOOST sleeves are included via OPTIONS_INCLUDE_YIELDBOOST=1; VRP artifacts
+# rebuild inside --options-only. Pages deploy is handled by deploy-pages-data.yml.
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # GitHub Actions minimum cadence is every 5 minutes
+    - cron: "*/10 * * * *"  # every 10 minutes
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: "options-refresh-a"
+  group: "options-refresh"
   cancel-in-progress: false
 
 jobs:
@@ -35,7 +39,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Refresh options cache (ultra-safe throttled shard)
+      - name: Refresh options cache (sharded)
         env:
           POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
           TRADIER_TOKEN: ${{ env.TRADIER_TOKEN }}
@@ -56,7 +60,7 @@ jobs:
           OPTIONS_REFRESH_SLEEP_MS: "150"
           OPTIONS_SYMBOLS_PER_RUN: "20"
           OPTIONS_SHARD_COUNT: "6"
-          OPTIONS_SHARD_INTERVAL_MINUTES: "3"
+          OPTIONS_SHARD_INTERVAL_MINUTES: "10"
           OPTIONS_STALE_AFTER_MINUTES: "120"
           OPTIONS_ONLY_BUCKET3: "1"
           OPTIONS_INCLUDE_YIELDBOOST: "1"
@@ -82,50 +86,12 @@ jobs:
         run: python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
 
       - name: Commit data if changed
-        run: |
-          BRANCH="${GITHUB_REF_NAME:-main}"
-          FILES="data/options_cache.json data/vrp_live.json data/vrp_health.json data/yieldboost_put_spreads_latest.json data/yieldboost_options_target.json"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${FILES}
-          if git diff --staged --quiet; then
-            echo "No options changes to commit"
-          else
-            TMP_DIR="$(mktemp -d)"
-            for f in ${FILES}; do
-              mkdir -p "${TMP_DIR}/$(dirname "$f")"
-              cp "$f" "${TMP_DIR}/$f"
-            done
-            pushed=0
-            for i in 1 2 3; do
-              git fetch origin "${BRANCH}"
-              git reset --hard || true
-              git clean -fd || true
-              git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
-              for f in ${FILES}; do
-                if [ -f "${TMP_DIR}/$f" ]; then
-                  mkdir -p "$(dirname "$f")"
-                  cp "${TMP_DIR}/$f" "$f"
-                fi
-              done
-              git add ${FILES}
-              if git diff --staged --quiet; then
-                echo "No options changes against latest origin"
-                pushed=1
-                break
-              fi
-              git commit -m "chore: refresh options cache [$(date -u '+%Y-%m-%d %H:%M UTC')]"
-              if git push origin "HEAD:${BRANCH}"; then
-                pushed=1
-                break
-              fi
-              git reset --hard "origin/${BRANCH}" || true
-              sleep $((i * 5))
-            done
-            rm -rf "${TMP_DIR}"
-            if [ "$pushed" -ne 1 ]; then
-              echo "Push failed after retries"
-              exit 1
-            fi
-          fi
-
+        uses: ./.github/actions/commit-data
+        with:
+          files: >-
+            data/options_cache.json
+            data/vrp_live.json
+            data/vrp_health.json
+            data/yieldboost_put_spreads_latest.json
+            data/yieldboost_options_target.json
+          commit_message: "chore: refresh options cache"

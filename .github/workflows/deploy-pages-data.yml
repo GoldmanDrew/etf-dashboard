@@ -1,13 +1,13 @@
 name: Deploy Pages Data Refresh
 
+# Lightweight Pages deploy when refresh workflows commit data JSON only.
+# Full rebuild + deploy stays on build-and-deploy.yml (code pushes, schedule, metrics).
+
 on:
   push:
     branches: [main]
     paths:
-      - "data/vrp_live.json"
-      - "data/vrp_health.json"
-      - "data/yieldboost_put_spreads_latest.json"
-      - "data/options_cache.json"
+      - "data/**"
   workflow_dispatch:
 
 permissions:
