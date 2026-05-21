@@ -303,6 +303,173 @@ def granite_xls_rows_to_holdings(
     return rows
 
 
+_HOLDINGS_COLUMN_ALIASES: dict[str, str] = {
+    "ETF Ticker": "etf_ticker",
+    "etf": "etf_ticker",
+    "Ticker": "position_ticker",
+    "Security Description": "security_name",
+    "Shares/Par": "shares",
+    "Market/Notional Value": "market_value",
+    "Percentage Weighting": "weight_pct",
+    "Position Date": "as_of_date",
+    "Mat/Exp Date": "option_expiry",
+}
+
+
+def normalize_holdings_dataframe(holdings_df: pd.DataFrame | None) -> pd.DataFrame:
+    """Normalize holdings CSV/XLS columns for YieldBOOST spread pairing."""
+    if holdings_df is None or holdings_df.empty:
+        return pd.DataFrame()
+    df = holdings_df.copy()
+    for src, dst in _HOLDINGS_COLUMN_ALIASES.items():
+        if src in df.columns and dst not in df.columns:
+            df[dst] = df[src]
+    if "etf_ticker" not in df.columns:
+        return pd.DataFrame()
+    df["etf_ticker"] = df["etf_ticker"].astype(str).str.upper().str.strip()
+    df = df[df["etf_ticker"].astype(str).str.len() > 0]
+    if "option_expiry" in df.columns:
+        df["option_expiry"] = pd.to_datetime(df["option_expiry"], errors="coerce").dt.date
+    return df.reset_index(drop=True)
+
+
+def spreads_json_to_put_spread_legs(payload: dict[str, Any] | None) -> list[PutSpreadLeg]:
+    """Rehydrate PutSpreadLeg objects from committed spreads JSON."""
+    if not payload:
+        return []
+    legs: list[PutSpreadLeg] = []
+    for row in payload.get("spreads") or []:
+        if not isinstance(row, dict):
+            continue
+        expiry = _parse_date(row.get("expiry"))
+        holdings_as_of = _parse_date(row.get("holdings_as_of")) or date.today()
+        if expiry is None:
+            continue
+        strike_long = _parse_float(row.get("strike_long"))
+        strike_short = _parse_float(row.get("strike_short"))
+        if strike_long is None or strike_short is None:
+            continue
+        legs.append(PutSpreadLeg(
+            yb_etf=str(row.get("yb_etf") or "").upper(),
+            underlying=str(row.get("underlying") or "").upper() or None,
+            option_root=str(row.get("option_root") or "").upper(),
+            sleeve_2x_etf=str(row.get("sleeve_2x_etf") or "").upper(),
+            expiry=expiry,
+            strike_long=float(strike_long),
+            strike_short=float(strike_short),
+            qty=float(_parse_float(row.get("qty")) or 0.0),
+            notional_long=float(_parse_float(row.get("notional_long")) or 0.0),
+            notional_short=float(_parse_float(row.get("notional_short")) or 0.0),
+            weight_net=float(_parse_float(row.get("weight_net")) or 0.0),
+            holdings_as_of=holdings_as_of,
+            is_front=bool(row.get("is_front")),
+            moneyness_long_pct=_parse_float(row.get("moneyness_long_pct")),
+            moneyness_short_pct=_parse_float(row.get("moneyness_short_pct")),
+            days_to_exp=int(row.get("days_to_exp")) if row.get("days_to_exp") is not None else None,
+        ))
+    return legs
+
+
+def load_yieldboost_force_symbols_from_spreads(spreads_path: Path | None = None) -> list[str]:
+    """Sleeve + underlying symbols to force-refresh in options shard runs."""
+    path = spreads_path or Path("data/yieldboost_put_spreads_latest.json")
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    syms: set[str] = set()
+    for row in payload.get("spreads") or []:
+        if not isinstance(row, dict):
+            continue
+        for key in ("sleeve_2x_etf", "underlying", "yb_etf"):
+            sym = str(row.get(key) or "").strip().upper()
+            if sym:
+                syms.add(sym)
+    return sorted(syms)
+
+
+def build_yieldboost_options_target(spreads: Iterable[PutSpreadLeg]) -> dict[str, Any]:
+    """Explicit contract list for targeted YieldBOOST quote refresh."""
+    contracts: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, float, str]] = set()
+    for s in spreads:
+        for strike, side in ((s.strike_long, "long"), (s.strike_short, "short")):
+            key = (s.sleeve_2x_etf, s.expiry.isoformat(), float(strike), "P")
+            if key in seen:
+                continue
+            seen.add(key)
+            contracts.append({
+                "yb_etf": s.yb_etf,
+                "sleeve": s.sleeve_2x_etf,
+                "underlying": s.underlying,
+                "expiry": s.expiry.isoformat(),
+                "strike": float(strike),
+                "put_call": "P",
+                "leg_side": side,
+                "is_front": bool(s.is_front),
+            })
+    return {
+        "build_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "contract_count": len(contracts),
+        "contracts": contracts,
+    }
+
+
+def build_vrp_health_payload(
+    spreads_payload: dict[str, Any],
+    vrp_payload: dict[str, Any],
+    *,
+    options_cache: dict[str, Any] | None = None,
+    errors: list[str] | None = None,
+    stale_after_minutes: int = 30,
+) -> dict[str, Any]:
+    """Coverage + staleness rollup for YieldBOOST VRP lane."""
+    now = datetime.now(timezone.utc)
+    front_spreads = [
+        r for r in (spreads_payload.get("spreads") or [])
+        if isinstance(r, dict) and r.get("is_front")
+    ]
+    vrp_rows = [r for r in (vrp_payload.get("rows") or []) if isinstance(r, dict)]
+    iv_ok = sum(
+        1 for r in vrp_rows
+        if r.get("iv_put_long") is not None and r.get("iv_put_short") is not None
+    )
+    front_count = len(front_spreads) or len(vrp_rows)
+    coverage = (iv_ok / front_count) if front_count else 0.0
+
+    stale_sleeves: list[str] = []
+    options_as_of_max: str | None = None
+    for row in vrp_rows:
+        sleeve = str(row.get("sleeve_2x") or "").upper()
+        if row.get("iv_put_long") is None or row.get("iv_put_short") is None:
+            if sleeve and sleeve not in stale_sleeves:
+                stale_sleeves.append(sleeve)
+        ts = row.get("options_as_of")
+        if ts and (options_as_of_max is None or str(ts) > options_as_of_max):
+            options_as_of_max = str(ts)
+
+    holdings_as_of = None
+    for row in front_spreads:
+        ha = row.get("holdings_as_of")
+        if ha and (holdings_as_of is None or str(ha) > holdings_as_of):
+            holdings_as_of = str(ha)
+
+    return {
+        "build_time": now.isoformat().replace("+00:00", "Z"),
+        "holdings_as_of": holdings_as_of,
+        "spreads_front_count": front_count,
+        "iv_coverage_front_pct": round(coverage, 4),
+        "stale_sleeves": stale_sleeves,
+        "last_options_refresh": options_cache.get("build_time") if options_cache else options_as_of_max,
+        "last_holdings_refresh": spreads_payload.get("build_time"),
+        "last_vrp_refresh": vrp_payload.get("build_time"),
+        "stale_after_minutes": int(stale_after_minutes),
+        "errors": list(errors or []),
+    }
+
+
 def pair_put_spreads_from_holdings(
     holdings_df: pd.DataFrame,
     *,
@@ -310,10 +477,9 @@ def pair_put_spreads_from_holdings(
     as_of: date | None = None,
 ) -> list[PutSpreadLeg]:
     """Pair Granite OPTION_PUT legs into bull put spreads per (etf, root, expiry)."""
-    if holdings_df is None or holdings_df.empty:
+    df = normalize_holdings_dataframe(holdings_df)
+    if df.empty:
         return []
-    df = holdings_df.copy()
-    df["etf_ticker"] = df["etf_ticker"].astype(str).str.upper()
     if "security_type" not in df.columns:
         return []
     opts = df[df["security_type"].astype(str).str.upper().isin({"OPTION_PUT", "OPTION"})].copy()

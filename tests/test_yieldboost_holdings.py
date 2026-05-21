@@ -16,9 +16,11 @@ sys.path.insert(0, str(SCRIPTS))
 from yieldboost_holdings import (  # noqa: E402
     format_occ_ticker,
     granite_xls_rows_to_holdings,
+    normalize_holdings_dataframe,
     pair_put_spreads_from_holdings,
     parse_granite_option_description,
     resolve_sleeve_ticker,
+    spreads_json_to_put_spread_legs,
 )
 
 
@@ -117,3 +119,44 @@ def test_pair_put_spreads_from_holdings():
     assert s.strike_short == pytest.approx(29.44)
     assert s.sleeve_2x_etf == "CRWV"
     assert s.is_front is True
+
+
+def test_normalize_holdings_missing_etf_ticker_returns_empty():
+    legacy = pd.DataFrame([{
+        "as_of_date": "2026-04-21",
+        "position_ticker": "USD",
+        "security_type": "CASH",
+        "shares": 1.0,
+    }])
+    assert normalize_holdings_dataframe(legacy).empty
+    assert pair_put_spreads_from_holdings(legacy) == []
+
+
+def test_spreads_json_to_put_spread_legs_roundtrip():
+    rows = granite_xls_rows_to_holdings(
+        _cwy_fixture_df(),
+        etf_ticker="CWY",
+        fallback_as_of=date(2026, 5, 19),
+        underlying="CRWV",
+        source_url="https://example.com/cwy.xls",
+    )
+    spreads = pair_put_spreads_from_holdings(
+        pd.DataFrame(rows), underlying_by_etf={"CWY": "CRWV"}, as_of=date(2026, 5, 20),
+    )
+    payload = {
+        "spreads": [{
+            "yb_etf": spreads[0].yb_etf,
+            "sleeve_2x_etf": spreads[0].sleeve_2x_etf,
+            "underlying": spreads[0].underlying,
+            "option_root": spreads[0].option_root,
+            "expiry": spreads[0].expiry.isoformat(),
+            "strike_long": spreads[0].strike_long,
+            "strike_short": spreads[0].strike_short,
+            "qty": spreads[0].qty,
+            "holdings_as_of": spreads[0].holdings_as_of.isoformat(),
+            "is_front": True,
+        }],
+    }
+    legs = spreads_json_to_put_spread_legs(payload)
+    assert len(legs) == 1
+    assert legs[0].strike_long == pytest.approx(27.89)

@@ -1,0 +1,100 @@
+name: Refresh YieldBOOST VRP
+
+on:
+  schedule:
+    - cron: "*/15 * * * 1-5"  # every 15 min on market days (UTC weekdays)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "yieldboost-vrp"
+  cancel-in-progress: false
+
+jobs:
+  refresh-yieldboost-vrp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
+      TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh YieldBOOST sleeve options + VRP panel
+        env:
+          POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
+          TRADIER_TOKEN: ${{ env.TRADIER_TOKEN }}
+          YIELDBOOST_OPTIONS_MAX_SYMBOLS: "40"
+          OPTIONS_SYMBOLS_PER_RUN: "40"
+          OPTIONS_SHARD_COUNT: "1"
+          OPTIONS_SHARD_INTERVAL_MINUTES: "15"
+          OPTIONS_ACCUMULATE_CACHE: "1"
+          OPTIONS_INCLUDE_YIELDBOOST: "1"
+          OPTIONS_ONLY_BUCKET3: "0"
+          POLYGON_MAX_REQUESTS_PER_MINUTE: "25"
+          POLYGON_MAX_TOTAL_REQUESTS: "120"
+          POLYGON_MAX_SNAPSHOT_PAGES_PER_SYMBOL: "2"
+          POLYGON_CHAIN_MAX_EXPIRIES: "8"
+          POLYGON_CHAIN_STRIKE_BAND_PCT: "0.35"
+          OPTIONS_REFRESH_SLEEP_MS: "200"
+        run: python scripts/build_data.py --yieldboost-vrp-only
+
+      - name: VRP pipeline diagnostics
+        run: python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
+
+      - name: Commit data if changed
+        id: commit
+        run: |
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          FILES="data/options_cache.json data/vrp_live.json data/vrp_health.json data/yieldboost_put_spreads_latest.json data/yieldboost_options_target.json"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${FILES}
+          if git diff --staged --quiet; then
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+            echo "No YieldBOOST VRP changes to commit"
+          else
+            git commit -m "chore: refresh YieldBOOST VRP [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+            git push origin "HEAD:${BRANCH}"
+            echo "changed=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Pages
+        if: steps.commit.outputs.changed == '1'
+        uses: actions/configure-pages@v5
+
+      - name: Build site artifact
+        if: steps.commit.outputs.changed == '1'
+        run: |
+          mkdir -p _site
+          cp index.html _site/
+          cp -r data _site/
+          [ -d assets ] && cp -r assets _site/ || true
+
+      - name: Upload artifact
+        if: steps.commit.outputs.changed == '1'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        if: steps.commit.outputs.changed == '1'
+        id: deployment
+        uses: actions/deploy-pages@v4

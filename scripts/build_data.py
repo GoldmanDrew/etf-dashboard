@@ -119,7 +119,9 @@ ETF_METRICS_DAILY_FILE = OUTPUT_DIR / "etf_metrics_daily.csv"
 ETF_HOLDINGS_LATEST_FILE = OUTPUT_DIR / "etf_holdings_latest.csv"
 ETF_DISTRIBUTIONS_FILE = OUTPUT_DIR / "etf_distributions.json"
 YIELDBOOST_PUT_SPREADS_FILE = OUTPUT_DIR / "yieldboost_put_spreads_latest.json"
+YIELDBOOST_OPTIONS_TARGET_FILE = OUTPUT_DIR / "yieldboost_options_target.json"
 VRP_LIVE_FILE = OUTPUT_DIR / "vrp_live.json"
+VRP_HEALTH_FILE = OUTPUT_DIR / "vrp_health.json"
 LS_ALGO_DATA_PATH = Path(
     os.environ.get(
         "LS_ALGO_DATA_PATH",
@@ -1224,7 +1226,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             return 10**9
 
     # Time-sharded refresh keeps frequent updates while controlling API pressure.
-    forced_symbols = [norm_sym(s) for s in POLYGON_FORCE_SYMBOLS_RAW if str(s).strip()]
+    forced_symbols = [norm_sym(s) for s in get_polygon_force_symbols() if str(s).strip()]
     forced_set = set(forced_symbols)
     shard_count = max(1, OPTIONS_SHARD_COUNT)
     symbols_per_run = max(1, OPTIONS_SYMBOLS_PER_RUN)
@@ -1263,7 +1265,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "tradier_api_configured": bool(TRADIER_TOKEN),
         "requested_symbols": int(len(symbols)),
         "max_symbols": int(POLYGON_OPTIONS_MAX_SYMBOLS),
-        "forced_symbols": [norm_sym(s) for s in POLYGON_FORCE_SYMBOLS_RAW],
+        "forced_symbols": get_polygon_force_symbols(),
         "tradier_chain_symbols": sorted(tradier_chain_symbols),
         "refresh_symbols_count": int(len(refresh_symbols)),
         "shard_interval_minutes": int(shard_interval_minutes),
@@ -2221,7 +2223,7 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
         if OPTIONS_INCLUDE_BUCKET3_UNDERLYING:
             base_set.add(norm_sym(rec.get("underlying")))
 
-    for s in POLYGON_FORCE_SYMBOLS_RAW:
+    for s in get_polygon_force_symbols():
         ss = norm_sym(s)
         if not OPTIONS_ONLY_BUCKET3 or ss in base_set:
             add(ss)
@@ -2232,6 +2234,35 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
             break
 
     return ordered
+
+
+def get_polygon_force_symbols() -> list[str]:
+    """Env POLYGON_FORCE_SYMBOLS plus YieldBOOST sleeves from spreads JSON."""
+    from yieldboost_holdings import load_yieldboost_force_symbols_from_spreads
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for s in POLYGON_FORCE_SYMBOLS_RAW + load_yieldboost_force_symbols_from_spreads(
+        YIELDBOOST_PUT_SPREADS_FILE,
+    ):
+        ss = norm_sym(s)
+        if ss and ss not in seen:
+            seen.add(ss)
+            ordered.append(ss)
+    return ordered
+
+
+def load_yieldboost_sleeve_symbols() -> list[str]:
+    """2x sleeve tickers from spreads file (for targeted YB refresh)."""
+    syms = sorted(load_yieldboost_force_symbols_from_spreads(YIELDBOOST_PUT_SPREADS_FILE))
+    # Prefer sleeve over yb_etf/underlying when both present — keep all unique.
+    return syms
+
+
+def load_yieldboost_force_symbols_from_spreads(path: Path) -> list[str]:
+    from yieldboost_holdings import load_yieldboost_force_symbols_from_spreads as _load
+
+    return _load(path)
 
 
 def load_yieldboost_option_symbols() -> set[str]:
@@ -2259,9 +2290,13 @@ def refresh_yieldboost_vrp_files(
     """Build/refresh put-spread pairings + live VRP panel from holdings + options."""
     from yieldboost_holdings import (
         build_put_spreads_payload,
+        build_vrp_health_payload,
         build_vrp_live_payload,
+        build_yieldboost_options_target,
         load_underlying_map_from_screener,
+        normalize_holdings_dataframe,
         pair_put_spreads_from_holdings,
+        spreads_json_to_put_spread_legs,
         write_json,
     )
 
@@ -2272,15 +2307,27 @@ def refresh_yieldboost_vrp_files(
 
     hdf = pd.DataFrame()
     if ETF_HOLDINGS_LATEST_FILE.exists():
-        hdf = pd.read_csv(ETF_HOLDINGS_LATEST_FILE)
-        if "option_expiry" in hdf.columns:
-            hdf["option_expiry"] = pd.to_datetime(hdf["option_expiry"], errors="coerce").dt.date
+        hdf = normalize_holdings_dataframe(pd.read_csv(ETF_HOLDINGS_LATEST_FILE))
 
-    spreads_payload = build_put_spreads_payload(hdf, underlying_by_etf=underlying_map)
-    if spreads_payload.get("spreads"):
-        write_json(YIELDBOOST_PUT_SPREADS_FILE, spreads_payload)
+    spreads_payload: dict = {"spreads": [], "spread_count": 0, "front_count": 0}
+    if not hdf.empty:
+        spreads_payload = build_put_spreads_payload(hdf, underlying_by_etf=underlying_map)
+        if spreads_payload.get("spreads"):
+            write_json(YIELDBOOST_PUT_SPREADS_FILE, spreads_payload)
 
     spreads = pair_put_spreads_from_holdings(hdf, underlying_by_etf=underlying_map)
+    if not spreads and YIELDBOOST_PUT_SPREADS_FILE.exists():
+        try:
+            cached = json.loads(YIELDBOOST_PUT_SPREADS_FILE.read_text(encoding="utf-8"))
+            spreads = spreads_json_to_put_spread_legs(cached)
+            if spreads and not spreads_payload.get("spreads"):
+                spreads_payload = cached
+        except Exception:
+            pass
+
+    if spreads:
+        write_json(YIELDBOOST_OPTIONS_TARGET_FILE, build_yieldboost_options_target(spreads))
+
     rv_map: dict[str, float] = {}
     if realized_vol_map:
         for sym, stats in realized_vol_map.items():
@@ -2290,7 +2337,17 @@ def refresh_yieldboost_vrp_files(
                     rv_map[norm_sym(sym)] = float(v)
     vrp_payload = build_vrp_live_payload(spreads, options_cache, rv_map=rv_map)
     write_json(VRP_LIVE_FILE, vrp_payload)
-    return {"spreads": spreads_payload, "vrp": vrp_payload}
+    health_payload = build_vrp_health_payload(
+        spreads_payload,
+        vrp_payload,
+        options_cache=options_cache,
+    )
+    write_json(VRP_HEALTH_FILE, health_payload)
+    return {
+        "spreads": spreads_payload,
+        "vrp": vrp_payload,
+        "health": health_payload,
+    }
 
 
 # ──────────────────────────────────────────────
@@ -3021,6 +3078,48 @@ def refresh_options_only() -> None:
         print(f"  sample error: {options_cache['errors'][0]}")
 
 
+def refresh_yieldboost_vrp_only() -> None:
+    """Targeted YieldBOOST sleeve options refresh + VRP/health artifacts."""
+    if not OUTPUT_FILE.exists():
+        raise FileNotFoundError(
+            f"Cannot run --yieldboost-vrp-only because {OUTPUT_FILE} does not exist. Run full build first."
+        )
+
+    sleeves = load_yieldboost_sleeve_symbols()
+    if not sleeves:
+        sleeves = sorted(norm_sym(s) for s in load_yieldboost_option_symbols())
+    if not sleeves:
+        print("[WARN] No YieldBOOST sleeve symbols found; writing VRP from cached spreads only.")
+        sleeves = []
+
+    prior_cache: dict = {}
+    if OPTIONS_CACHE_FILE.exists():
+        try:
+            prior_cache = json.loads(OPTIONS_CACHE_FILE.read_text(encoding="utf-8")) or {}
+        except Exception:
+            prior_cache = {}
+
+    max_contracts = int(os.environ.get("YIELDBOOST_OPTIONS_MAX_SYMBOLS", "40"))
+    refresh_list = sleeves[: max(1, max_contracts)] if sleeves else []
+    options_cache = prior_cache
+    if refresh_list:
+        options_cache = build_polygon_options_cache(refresh_list)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(options_cache, f, indent=None, separators=(",", ":"))
+
+    vrp_meta = refresh_yieldboost_vrp_files(options_cache, realized_vol_map=None)
+    print(
+        f"  YieldBOOST VRP: {vrp_meta.get('vrp', {}).get('row_count', 0)} front spreads -> {VRP_LIVE_FILE.name}"
+    )
+    health = vrp_meta.get("health") or {}
+    print(
+        f"  IV coverage: {health.get('iv_coverage_front_pct')} "
+        f"({health.get('spreads_front_count')} front spreads)"
+    )
+    print(f"[OK] YieldBOOST VRP refresh wrote {VRP_LIVE_FILE.name}, {VRP_HEALTH_FILE.name}")
+
+
 # ──────────────────────────────────────────────
 # Main build
 # ──────────────────────────────────────────────
@@ -3527,13 +3626,21 @@ if __name__ == "__main__":
         action="store_true",
         help="Only refresh options/spot cache in data/options_cache.json",
     )
+    parser.add_argument(
+        "--yieldboost-vrp-only",
+        action="store_true",
+        help="Refresh YieldBOOST sleeve options slice + vrp_live.json + vrp_health.json",
+    )
     args = parser.parse_args()
 
-    if args.borrow_only and args.options_only:
-        raise SystemExit("Use either --borrow-only or --options-only, not both.")
+    modes = sum([args.borrow_only, args.options_only, args.yieldboost_vrp_only])
+    if modes > 1:
+        raise SystemExit("Use only one of --borrow-only, --options-only, --yieldboost-vrp-only.")
     if args.borrow_only:
         refresh_borrow_only()
     elif args.options_only:
         refresh_options_only()
+    elif args.yieldboost_vrp_only:
+        refresh_yieldboost_vrp_only()
     else:
         build()

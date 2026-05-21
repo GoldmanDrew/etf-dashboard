@@ -1371,6 +1371,7 @@ const LETF_INTRADAY_FLOWS_URL = "data/letf_rebalance_flows_intraday_latest.json"
 const LETF_INTRADAY_METRICS_URL = "data/letf_intraday_flow_metrics.json";
 const VOL_SHAPE_HISTORY_URL = "data/vol_shape_history.json";
 const VRP_LIVE_URL = "data/vrp_live.json";
+const VRP_HEALTH_URL = "data/vrp_health.json";
 const YIELDBOOST_PUT_SPREADS_URL = "data/yieldboost_put_spreads_latest.json";
 /** @type {{ symbols: Record<string, { series: object[], vcrMedian: number|null, window: number }>, buildTime: string|null }|null} */
 let VOL_SHAPE_HISTORY_CACHE = null;
@@ -4469,6 +4470,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [vrpLive, setVrpLive] = useState(null);
   const [vrpLiveError, setVrpLiveError] = useState(null);
   const [ybSpreads, setYbSpreads] = useState(null);
+  const [vrpHealth, setVrpHealth] = useState(null);
   const [etfMetricsMap, setEtfMetricsMap] = useState({});
   const [etfMetricsLoading, setEtfMetricsLoading] = useState(false);
   const [etfMetricsError, setEtfMetricsError] = useState(null);
@@ -4541,6 +4543,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     };
   }, [vrpLiveRow, vrpSpreadRow]);
   const vrpIvPending = Boolean(vrpDisplayRow?._iv_pending);
+  const vrpStaleness = useMemo(() => {
+    const ts = vrpDisplayRow?.options_as_of || vrpHealth?.last_options_refresh || vrpHealth?.last_vrp_refresh;
+    if (!ts) return { label: vrpIvPending ? 'IV pending' : 'unknown', cls: 'scenario-sub' };
+    const ageMin = (Date.now() - new Date(ts).getTime()) / 60000;
+    if (!Number.isFinite(ageMin)) return { label: 'unknown', cls: 'scenario-sub' };
+    const staleAfter = Number(vrpHealth?.stale_after_minutes) || 30;
+    if (ageMin <= staleAfter) return { label: `IV fresh (${Math.round(ageMin)}m ago)`, cls: 'scenario-sub' };
+    if (ageMin <= staleAfter * 6) return { label: `IV aging (${Math.round(ageMin)}m ago)`, cls: 'scenario-warning' };
+    return { label: `IV stale (${Math.round(ageMin)}m ago)`, cls: 'scenario-warning' };
+  }, [vrpDisplayRow, vrpHealth, vrpIvPending]);
   const showBacktestPanel = Boolean(String(undSym || '').trim());
   useEffect(() => {
     if (hideScenarios && activePanel === 'scenarios') setActivePanel('chart');
@@ -4698,6 +4710,15 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         }
       } catch (_) {
         /* spreads fallback is best-effort */
+      }
+      try {
+        const healthRes = await fetch(`${VRP_HEALTH_URL}${cacheBust}`, { cache: 'no-store' });
+        if (healthRes.ok) {
+          const healthPayload = await healthRes.json();
+          if (!cancelled) setVrpHealth(healthPayload);
+        }
+      } catch (_) {
+        /* health is best-effort */
       }
       try {
         const res = await fetch(`${VRP_LIVE_URL}${cacheBust}`, { cache: 'no-store' });
@@ -7004,6 +7025,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             {vrpIvPending && (
               <div className="scenario-sub" style={{ marginBottom: 8 }}>
                 IV pending — options refresh in progress. Holdings strikes below are from Granite XLS.
+              </div>
+            )}
+            {!vrpIvPending && vrpDisplayRow && (
+              <div className={vrpStaleness.cls} style={{ marginBottom: 8 }}>
+                {vrpStaleness.label}
+                {vrpHealth?.iv_coverage_front_pct != null && (
+                  <> · coverage {Math.round(Number(vrpHealth.iv_coverage_front_pct) * 100)}%</>
+                )}
               </div>
             )}
             {!vrpDisplayRow ? (

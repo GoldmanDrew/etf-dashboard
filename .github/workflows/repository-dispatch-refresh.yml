@@ -1,0 +1,97 @@
+name: External Dispatch Refresh
+
+# Ping from cron on a home server / VPS:
+# curl -X POST -H "Authorization: token $GH_PAT" \
+#   -H "Accept: application/vnd.github+json" \
+#   https://api.github.com/repos/GoldmanDrew/etf-dashboard/dispatches \
+#   -d '{"event_type":"refresh-options"}'
+on:
+  repository_dispatch:
+    types: [refresh-options, refresh-yieldboost-vrp]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "dispatch-${{ github.event.action }}"
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
+      TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run dispatched refresh
+        env:
+          OPTIONS_REFRESH_SLEEP_MS: "150"
+          OPTIONS_SYMBOLS_PER_RUN: "20"
+          OPTIONS_SHARD_COUNT: "6"
+          OPTIONS_INCLUDE_YIELDBOOST: "1"
+          OPTIONS_ONLY_BUCKET3: "1"
+          YIELDBOOST_OPTIONS_MAX_SYMBOLS: "40"
+        run: |
+          if [ "${{ github.event.action }}" = "refresh-yieldboost-vrp" ]; then
+            python scripts/build_data.py --yieldboost-vrp-only
+          else
+            python scripts/build_data.py --options-only
+          fi
+
+      - name: VRP pipeline diagnostics
+        run: python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
+
+      - name: Commit data if changed
+        id: commit
+        run: |
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          FILES="data/options_cache.json data/vrp_live.json data/vrp_health.json data/yieldboost_put_spreads_latest.json data/yieldboost_options_target.json"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${FILES}
+          if git diff --staged --quiet; then
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: dispatch refresh (${{ github.event.action }}) [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+            git push origin "HEAD:${BRANCH}"
+            echo "changed=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Pages
+        if: steps.commit.outputs.changed == '1'
+        uses: actions/configure-pages@v5
+
+      - name: Build site artifact
+        if: steps.commit.outputs.changed == '1'
+        run: |
+          mkdir -p _site
+          cp index.html _site/
+          cp -r data _site/
+          [ -d assets ] && cp -r assets _site/ || true
+
+      - name: Upload artifact
+        if: steps.commit.outputs.changed == '1'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        if: steps.commit.outputs.changed == '1'
+        uses: actions/deploy-pages@v4

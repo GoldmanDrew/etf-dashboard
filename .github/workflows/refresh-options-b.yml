@@ -1,15 +1,15 @@
-name: Refresh Options (shard A)
+name: Refresh Options (shard B offset)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # GitHub Actions minimum cadence is every 5 minutes
+    - cron: "2-59/5 * * * *"  # offset ~2 min from shard A for ~2.5 min effective cadence
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: "options-refresh-a"
+  group: "options-refresh-b"
   cancel-in-progress: false
 
 jobs:
@@ -114,7 +114,7 @@ jobs:
                 pushed=1
                 break
               fi
-              git commit -m "chore: refresh options cache [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+              git commit -m "chore: refresh options cache (offset B) [$(date -u '+%Y-%m-%d %H:%M UTC')]"
               if git push origin "HEAD:${BRANCH}"; then
                 pushed=1
                 break
@@ -128,4 +128,3 @@ jobs:
               exit 1
             fi
           fi
-

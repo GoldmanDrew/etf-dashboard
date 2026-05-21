@@ -1,0 +1,45 @@
+name: Deploy Pages Data Refresh
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "data/vrp_live.json"
+      - "data/vrp_health.json"
+      - "data/yieldboost_put_spreads_latest.json"
+      - "data/options_cache.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages-deploy"
+  cancel-in-progress: false
+
+jobs:
+  deploy-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build site artifact
+        run: |
+          mkdir -p _site
+          cp index.html _site/
+          cp -r data _site/
+          [ -d assets ] && cp -r assets _site/ || true
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
