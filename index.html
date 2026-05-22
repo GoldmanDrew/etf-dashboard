@@ -1413,14 +1413,6 @@ let NAV_FORECAST_HISTORY_CACHE = null;
 
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
-const fmtUsd = v => v == null ? '—' : `$${Number(v).toFixed(2)}`;
-const fmtSpreadMid = (mid, spot) => {
-  if (mid == null) return '—';
-  const usd = fmtUsd(mid);
-  const s = Number(spot);
-  if (Number.isFinite(s) && s > 0) return `${usd} (${((Number(mid) / s) * 100).toFixed(2)}% of spot)`;
-  return usd;
-};
 const fmtNum = v => v == null ? '—' : Number(v).toLocaleString();
 /** Whole-share counts (ETF shares outstanding, etc.): integer separators only — avoids 87,333.079 misread as 87,333,079. */
 const fmtSharesCount = v => (
@@ -1435,6 +1427,13 @@ const fmtSharesTradedStat = (raw) => {
   return Math.round(n).toLocaleString('en-US');
 };
 const fmtUsd = v => (v == null || !Number.isFinite(Number(v))) ? '—' : `$${Number(v).toFixed(2)}`;
+const fmtSpreadMid = (mid, spot) => {
+  if (mid == null) return '—';
+  const usd = fmtUsd(mid);
+  const s = Number(spot);
+  if (Number.isFinite(s) && s > 0) return `${usd} (${((Number(mid) / s) * 100).toFixed(2)}% of spot)`;
+  return usd;
+};
 const fmtMoney = v => (v == null || !Number.isFinite(Number(v))) ? '—' : `$${Math.round(Number(v)).toLocaleString()}`;
 const fmtTime = iso => {
   if (!iso) return '—';
