@@ -885,12 +885,31 @@ def build_vrp_health_payload(
         if ha and (holdings_as_of is None or str(ha) > holdings_as_of):
             holdings_as_of = str(ha)
 
+    missing_chain_ybs = sorted({
+        str(r.get("yb_etf") or "").upper()
+        for r in vrp_rows
+        if isinstance(r, dict)
+        and r.get("iv_source") == "holdings_missing_chain"
+        and r.get("yb_etf")
+    })
+    occ_stats = {}
+    if options_cache:
+        occ_stats = {
+            "tradier_api_configured": bool(options_cache.get("tradier_api_configured")),
+            "yieldboost_occ_quotes_requested": options_cache.get("yieldboost_occ_quotes_requested"),
+            "yieldboost_occ_quotes_filled": options_cache.get("yieldboost_occ_quotes_filled"),
+            "yieldboost_occ_quotes_fetched_requests": options_cache.get("yieldboost_occ_quotes_fetched_requests"),
+            "yieldboost_occ_skip_reason": options_cache.get("yieldboost_occ_skip_reason"),
+        }
+
     return {
         "build_time": now.isoformat().replace("+00:00", "Z"),
         "holdings_as_of": holdings_as_of,
         "spreads_front_count": front_count,
         "iv_coverage_front_pct": round(coverage, 4),
         "stale_sleeves": stale_sleeves,
+        "missing_chain_ybs": missing_chain_ybs,
+        "occ_supplement": occ_stats,
         "last_options_refresh": options_cache.get("build_time") if options_cache else options_as_of_max,
         "last_holdings_refresh": spreads_payload.get("build_time"),
         "last_vrp_refresh": vrp_payload.get("build_time"),
@@ -1022,6 +1041,11 @@ def lookup_contract_iv(
     spot = _parse_float(entry.get("spot"))
     target_type = "put" if put_call.upper() == "P" else "call"
     expiry_s = expiry.isoformat()
+    expiry_in_chain = any(
+        str(c.get("expiration_date")) == expiry_s
+        for c in (entry.get("options") or [])
+        if isinstance(c, dict)
+    )
     best = None
     best_dist = None
     for c in entry.get("options") or []:
@@ -1037,9 +1061,17 @@ def lookup_contract_iv(
             best = c
             best_dist = dist
     if best is None:
-        return {"matched": False, "spot": spot, "iv": None, "mid": None}
+        return {
+            "matched": False,
+            "expiry_in_chain": expiry_in_chain,
+            "spot": spot,
+            "iv": None,
+            "mid": None,
+            "options_as_of": entry.get("updated_at"),
+        }
     return {
         "matched": best_dist is not None and best_dist < 0.05,
+        "expiry_in_chain": True,
         "strike_used": _parse_float(best.get("strike_price")),
         "strike_interp": best_dist is not None and best_dist >= 1e-4,
         "iv": _norm_iv(best.get("iv")),
@@ -1047,6 +1079,17 @@ def lookup_contract_iv(
         "spot": spot,
         "options_as_of": entry.get("updated_at"),
     }
+
+
+def resolve_iv_source(long_q: dict[str, Any], short_q: dict[str, Any]) -> str:
+    """Label how held-leg IV was resolved from the options cache."""
+    if long_q.get("iv") is None and short_q.get("iv") is None:
+        if not long_q.get("expiry_in_chain") or not short_q.get("expiry_in_chain"):
+            return "holdings_missing_chain"
+        return "holdings_missing_quote"
+    if long_q.get("matched") and short_q.get("matched"):
+        return "holdings_exact"
+    return "holdings_nearest_strike"
 
 
 def build_vrp_live_payload(
@@ -1124,7 +1167,7 @@ def build_vrp_live_payload(
             "rv_30d_underlying": rv_u,
             "vrp_vol_2x": vrp_2x,
             "rv_30d_source": "dashboard_1m" if rv_2x is not None else None,
-            "iv_source": "holdings_exact" if long_q.get("matched") and short_q.get("matched") else "holdings_nearest",
+            "iv_source": resolve_iv_source(long_q, short_q),
             "holdings_as_of": s.holdings_as_of.isoformat(),
             "options_as_of": long_q.get("options_as_of") or short_q.get("options_as_of"),
             "days_to_exp": s.days_to_exp,

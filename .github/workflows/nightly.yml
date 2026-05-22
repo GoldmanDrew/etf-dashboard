@@ -134,6 +134,21 @@ jobs:
           OPTIONS_ACCUMULATE_CACHE: "1"
         run: python scripts/build_data.py
 
+      - name: Refresh YieldBOOST VRP (sleeves + Tradier OCC)
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        env:
+          YIELDBOOST_OPTIONS_MAX_SYMBOLS: "40"
+          OPTIONS_SYMBOLS_PER_RUN: "40"
+          OPTIONS_SHARD_COUNT: "1"
+          OPTIONS_ACCUMULATE_CACHE: "1"
+          OPTIONS_INCLUDE_YIELDBOOST: "1"
+          OPTIONS_ONLY_BUCKET3: "0"
+          POLYGON_MAX_REQUESTS_PER_MINUTE: "25"
+          POLYGON_MAX_TOTAL_REQUESTS: "120"
+          YIELDBOOST_OCC_QUOTES_MAX_REQUESTS: "12"
+        run: python scripts/build_data.py --yieldboost-vrp-only
+
       - name: Score borrow spike predictions
         if: steps.build_data.outcome == 'success'
         continue-on-error: true

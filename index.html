@@ -4626,6 +4626,19 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return merged;
   }, [vrpLiveRow, vrpSpreadRow, allRecords]);
   const vrpIvPending = Boolean(vrpDisplayRow?._iv_pending);
+  const vrpIvSourceLabel = useMemo(() => {
+    const src = String(vrpDisplayRow?.iv_source || '').trim();
+    if (!src) return '—';
+    const labels = {
+      holdings_exact: 'chain exact strike',
+      holdings_nearest_strike: 'chain nearest strike',
+      holdings_missing_chain: 'held expiry not in options chain',
+      holdings_missing_quote: 'expiry listed but no IV/mid quote',
+      holdings_nearest: 'chain nearest strike',
+    };
+    return labels[src] || src;
+  }, [vrpDisplayRow]);
+  const vrpMissingChain = vrpDisplayRow?.iv_source === 'holdings_missing_chain';
   const vrpStaleness = useMemo(() => {
     const ts = vrpDisplayRow?.options_as_of || vrpHealth?.last_options_refresh || vrpHealth?.last_vrp_refresh;
     if (!ts) return { label: vrpIvPending ? 'IV pending' : 'unknown', cls: 'scenario-sub' };
@@ -7272,6 +7285,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 )}
               </div>
             )}
+            {vrpMissingChain && (
+              <div className="scenario-warning" style={{ marginBottom: 8 }}>
+                Held expiry not in options chain — IV/VRP need Tradier OCC backfill or a yieldboost refresh tick.
+                {vrpHealth?.occ_supplement?.tradier_api_configured === false && (
+                  <> Last options build ran without Tradier token.</>
+                )}
+              </div>
+            )}
             {!vrpDisplayRow ? (
               <div className="scenario-sub">No front spread for {etfSym} yet. Run Update ETF Metrics (Granite XLS holdings) then Build &amp; Deploy.</div>
             ) : (
@@ -7310,7 +7331,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <tr><td>Spread VRP (event-aware)</td><td>{vrpDisplayRow.put_spread_vrp_event_aware != null ? fmtSpreadMid(vrpDisplayRow.put_spread_vrp_event_aware, vrpDisplayRow.spot_2x) : '—'}</td></tr>
                       <tr><td>Moneyness long / short</td><td>{vrpDisplayRow.moneyness_long_pct != null ? `${vrpDisplayRow.moneyness_long_pct.toFixed(2)}%` : '—'} / {vrpDisplayRow.moneyness_short_pct != null ? `${vrpDisplayRow.moneyness_short_pct.toFixed(2)}%` : '—'}</td></tr>
                       <tr><td>Event var source</td><td>{vrpDisplayRow.event_var_source || 'none'}{vrpDisplayRow.event_calendar_stale ? ' · calendar stale' : ''}</td></tr>
-                      <tr><td>IV source</td><td>{vrpIvPending ? 'holdings (IV pending)' : (vrpDisplayRow.iv_source || '—')}</td></tr>
+                      <tr><td>IV source</td><td>{vrpIvPending ? 'holdings (IV pending)' : vrpIvSourceLabel}</td></tr>
                     </tbody>
                   </table>
                 </div>

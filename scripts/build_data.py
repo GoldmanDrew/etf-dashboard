@@ -1823,24 +1823,33 @@ def build_polygon_options_cache(
 
         return None, "; ".join(errs[:3]) if errs else "spot unavailable"
 
-    def _fetch_tradier_chain(sym: str, spot_hint: float | None) -> tuple[list[dict], float | None, str | None]:
+    def _fetch_tradier_chain(
+        sym: str,
+        spot_hint: float | None,
+        *,
+        force_expiries: list[str] | None = None,
+    ) -> tuple[list[dict], float | None, str | None]:
         # Tradier chain fetch is intentionally narrow: few expiries + near-ATM strikes.
-        exp_resp, exp_err = _tradier_get(
-            "/markets/options/expirations",
-            {"symbol": sym, "includeAllRoots": "true"},
-        )
-        if exp_err and exp_resp is None:
-            return [], spot_hint, exp_err
+        expirations: list[str] = []
+        exp_err: str | None = None
+        if force_expiries:
+            expirations = sorted({str(x) for x in force_expiries if x})
+        else:
+            exp_resp, exp_err = _tradier_get(
+                "/markets/options/expirations",
+                {"symbol": sym, "includeAllRoots": "true"},
+            )
+            if exp_err and exp_resp is None:
+                return [], spot_hint, exp_err
 
-        expirations = []
-        if exp_resp is not None and exp_resp.ok:
-            payload = exp_resp.json() or {}
-            dates = ((payload.get("expirations") or {}).get("date")) or []
-            if isinstance(dates, str):
-                expirations = [dates]
-            elif isinstance(dates, list):
-                expirations = [str(x) for x in dates if x]
-        expirations = expirations[: max(0, TRADIER_CHAIN_MAX_EXPIRIES)]
+            if exp_resp is not None and exp_resp.ok:
+                payload = exp_resp.json() or {}
+                dates = ((payload.get("expirations") or {}).get("date")) or []
+                if isinstance(dates, str):
+                    expirations = [dates]
+                elif isinstance(dates, list):
+                    expirations = [str(x) for x in dates if x]
+            expirations = expirations[: max(0, TRADIER_CHAIN_MAX_EXPIRIES)]
         if not expirations:
             return [], spot_hint, exp_err or "tradier expirations unavailable"
 
@@ -2101,6 +2110,25 @@ def build_polygon_options_cache(
                 )
 
             parsed = [x for x in parsed if x.get("expiration_date") and x.get("strike_price") is not None]
+
+            held_exp = held_expiries_by_sleeve.get(norm_sym(sym), set())
+            if held_exp and TRADIER_TOKEN:
+                parsed_exps = {str(x.get("expiration_date")) for x in parsed}
+                missing_held = sorted(str(e) for e in held_exp if str(e) not in parsed_exps)
+                if missing_held:
+                    tradier_rows, _, held_err = _fetch_tradier_chain(
+                        sym, tradier_spot, force_expiries=missing_held,
+                    )
+                    if tradier_rows:
+                        parsed = _merge_option_rows(parsed, tradier_rows)
+                        symbol_source = f"{symbol_source}+tradier_held_exp"
+                        print(
+                            f"  {sym}: merged Tradier chain for held expiries {missing_held[:4]}"
+                            f"{'…' if len(missing_held) > 4 else ''} ({len(tradier_rows)} rows)"
+                        )
+                    elif held_err:
+                        sym_errors.append(f"tradier_held_exp: {held_err}")
+
             parsed, enrich_err = _enrich_rows_with_tradier_quotes(parsed)
             if enrich_err:
                 sym_errors.append(f"tradier_quote_enrich: {enrich_err}")
@@ -2150,16 +2178,56 @@ def build_polygon_options_cache(
 
     def _supplement_yieldboost_occ_quotes() -> None:
         """Fetch Tradier OCC quotes for held front legs missing from chain snapshots."""
-        if not TRADIER_TOKEN:
-            return
         from yieldboost_holdings import (
             format_occ_ticker,
             held_contract_needs_occ_quote,
             load_yieldboost_front_contracts,
         )
 
+        def _record_occ_stats(
+            *,
+            requested: int = 0,
+            filled: int = 0,
+            fetched_requests: int = 0,
+            skip_reason: str | None = None,
+        ) -> None:
+            out["yieldboost_occ_quotes_requested"] = int(requested)
+            out["yieldboost_occ_quotes_filled"] = int(filled)
+            out["yieldboost_occ_quotes_fetched_requests"] = int(fetched_requests)
+            if skip_reason:
+                out["yieldboost_occ_skip_reason"] = skip_reason
+
         contracts = load_yieldboost_front_contracts(YIELDBOOST_OPTIONS_TARGET_FILE)
         if not contracts:
+            _record_occ_stats(skip_reason="no_front_contracts")
+            return
+
+        if not TRADIER_TOKEN:
+            pending_count = 0
+            for c in contracts:
+                sleeve = norm_sym(c.get("sleeve"))
+                expiry = c.get("expiry")
+                strike = _safe_float(c.get("strike"))
+                put_call = str(c.get("put_call") or "P").upper()
+                if not sleeve or strike is None or not expiry:
+                    continue
+                try:
+                    expiry_date = dt.date.fromisoformat(str(expiry))
+                except ValueError:
+                    continue
+                sym_payload = out["symbols"].get(sleeve) if isinstance(out["symbols"].get(sleeve), dict) else {}
+                rows = sym_payload.get("options") if isinstance(sym_payload, dict) else []
+                if not isinstance(rows, list):
+                    rows = []
+                if held_contract_needs_occ_quote(
+                    rows, expiry=expiry_date, strike=float(strike), put_call=put_call,
+                ):
+                    pending_count += 1
+            _record_occ_stats(requested=pending_count, skip_reason="tradier_token_missing")
+            print(
+                f"  [WARN] YieldBOOST OCC supplement skipped: TRADIER_TOKEN not set "
+                f"({pending_count} held legs would need OCC quotes)"
+            )
             return
 
         pending: list[dict] = []
@@ -2192,6 +2260,7 @@ def build_polygon_options_cache(
             })
 
         if not pending:
+            _record_occ_stats(skip_reason="all_front_legs_in_chain")
             return
 
         occ_meta = {p["occ"]: p for p in pending}
@@ -2202,6 +2271,7 @@ def build_polygon_options_cache(
         )
         used_requests = 0
         occ_errors: list[str] = []
+        filled_occs: set[str] = set()
         for batch in _chunked(sorted(occ_meta.keys()), TRADIER_OPTION_QUOTES_BATCH_SIZE):
             if used_requests >= max_requests:
                 occ_errors.append(f"occ quotes capped at {max_requests} requests")
@@ -2274,12 +2344,22 @@ def build_polygon_options_cache(
                 src = str(sym_payload.get("source") or "")
                 if "occ_quote" not in src:
                     sym_payload["source"] = f"{src}+occ_quote" if src else "tradier_occ_quote"
+                filled_occs.add(occ)
 
         if occ_errors:
             out.setdefault("errors", [])
             out["errors"].append("; ".join(occ_errors[:3]))
-        out["yieldboost_occ_quotes_requested"] = int(len(pending))
-        out["yieldboost_occ_quotes_fetched_requests"] = int(used_requests)
+        _record_occ_stats(
+            requested=len(pending),
+            filled=len(filled_occs),
+            fetched_requests=used_requests,
+        )
+        print(
+            f"  YieldBOOST OCC supplement: requested={len(pending)} filled={len(filled_occs)} "
+            f"requests={used_requests}/{max_requests}"
+        )
+        if occ_errors:
+            print(f"  [WARN] OCC supplement errors: {occ_errors[0]}")
 
     _supplement_yieldboost_occ_quotes()
 
@@ -3367,6 +3447,14 @@ def refresh_yieldboost_vrp_only() -> None:
         f"  IV coverage: {health.get('iv_coverage_front_pct')} "
         f"({health.get('spreads_front_count')} front spreads)"
     )
+    occ = health.get("occ_supplement") or {}
+    if occ:
+        print(
+            f"  OCC supplement: tradier={occ.get('tradier_api_configured')} "
+            f"requested={occ.get('yieldboost_occ_quotes_requested')} "
+            f"filled={occ.get('yieldboost_occ_quotes_filled')} "
+            f"skip={occ.get('yieldboost_occ_skip_reason') or 'none'}"
+        )
     print(f"[OK] YieldBOOST VRP refresh wrote {VRP_LIVE_FILE.name}, {VRP_HEALTH_FILE.name}")
 
 

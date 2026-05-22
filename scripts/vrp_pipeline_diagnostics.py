@@ -30,6 +30,10 @@ from event_vol import calendar_is_stale  # noqa: E402
 YIELDBOOST_COVERAGE_SKIP: set[str] = set()
 
 EVENT_CALENDAR_PATH = Path("data/event_calendar_combined.json")
+OPTIONS_CACHE_PATH = Path("data/options_cache.json")
+VRP_HEALTH_PATH = Path("data/vrp_health.json")
+MIN_IV_COVERAGE_WARN = 0.50
+MIN_IV_COVERAGE_FAIL = 0.80
 EVENT_VRP_ROW_KEYS = (
     "iv_base_proxy",
     "iv_full_proxy",
@@ -109,21 +113,31 @@ def run_diagnostics(
     spreads_path: Path,
     vrp_path: Path,
     event_calendar_path: Path | None = None,
+    options_cache_path: Path | None = None,
+    vrp_health_path: Path | None = None,
     require_vrp_file: bool = False,
     fail_on_missing_vrp_when_spreads: bool = False,
     fail_on_missing_yb_coverage: bool = False,
     fail_on_stale_event_calendar: bool = False,
+    fail_on_low_iv_coverage: bool = False,
+    min_iv_coverage_fail: float = MIN_IV_COVERAGE_FAIL,
 ) -> int:
     exit_code = 0
     spreads_payload = _load_json(spreads_path)
     vrp_payload = _load_json(vrp_path)
     calendar_path = event_calendar_path or EVENT_CALENDAR_PATH
+    cache_path = options_cache_path or OPTIONS_CACHE_PATH
+    health_path = vrp_health_path or VRP_HEALTH_PATH
     event_calendar = _load_json(calendar_path)
+    options_cache = _load_json(cache_path)
+    vrp_health = _load_json(health_path)
     front = _front_spreads(spreads_payload)
 
     print(f"spreads_path: {spreads_path} exists={spreads_path.exists()}")
     print(f"vrp_path: {vrp_path} exists={vrp_path.exists()}")
     print(f"event_calendar_path: {calendar_path} exists={calendar_path.exists()}")
+    print(f"options_cache_path: {cache_path} exists={cache_path.exists()}")
+    print(f"vrp_health_path: {health_path} exists={health_path.exists()}")
     if spreads_payload:
         print(
             "spreads_summary:",
@@ -154,6 +168,41 @@ def run_diagnostics(
         print("WARN event_calendar: file exists but could not be parsed")
     else:
         print("WARN event_calendar: combined calendar missing")
+
+    if options_cache:
+        print(
+            "options_cache_summary:",
+            {
+                "build_time": options_cache.get("build_time"),
+                "tradier_api_configured": options_cache.get("tradier_api_configured"),
+                "yieldboost_targeted": options_cache.get("yieldboost_targeted"),
+                "occ_requested": options_cache.get("yieldboost_occ_quotes_requested"),
+                "occ_filled": options_cache.get("yieldboost_occ_quotes_filled"),
+                "occ_skip_reason": options_cache.get("yieldboost_occ_skip_reason"),
+            },
+        )
+        if options_cache.get("tradier_api_configured") is False:
+            print(
+                "WARN options_cache: tradier_api_configured=false — "
+                "YieldBOOST OCC backfill did not run; held weekly expiries may show missing IV."
+            )
+        occ_req = options_cache.get("yieldboost_occ_quotes_requested")
+        occ_fill = options_cache.get("yieldboost_occ_quotes_filled")
+        if isinstance(occ_req, int) and occ_req > 0 and (occ_fill or 0) < occ_req:
+            print(
+                f"WARN options_cache: OCC supplement partial ({occ_fill}/{occ_req} filled). "
+                "Check Market Hours yieldboost tick logs for Tradier errors or request caps."
+            )
+    if vrp_health:
+        print(
+            "vrp_health_summary:",
+            {
+                "iv_coverage_front_pct": vrp_health.get("iv_coverage_front_pct"),
+                "stale_sleeves_count": len(vrp_health.get("stale_sleeves") or []),
+                "missing_chain_ybs": vrp_health.get("missing_chain_ybs"),
+                "occ_supplement": vrp_health.get("occ_supplement"),
+            },
+        )
 
     if spreads_payload:
         for issue in _validate_spreads_schema(spreads_payload):
@@ -206,6 +255,7 @@ def run_diagnostics(
         else:
             print(f"WARN: {msg}")
 
+    coverage: float | None = None
     if vrp_payload:
         rows = vrp_payload.get("rows") or []
         iv_rows = sum(
@@ -215,12 +265,25 @@ def run_diagnostics(
             and r.get("iv_put_long") is not None
             and r.get("iv_put_short") is not None
         )
-        print(f"vrp_iv_coverage: {iv_rows}/{len(rows)} rows with both leg IVs")
+        coverage = iv_rows / len(rows) if rows else 0.0
+        print(f"vrp_iv_coverage: {iv_rows}/{len(rows)} rows with both leg IVs ({coverage:.1%})")
         if rows and iv_rows == 0:
             print(
                 "WARN: vrp_live.json has rows but no IV at held strikes - "
                 "options refresh may be stale or sharded away from YieldBOOST sleeves."
             )
+        elif rows and coverage < MIN_IV_COVERAGE_WARN:
+            print(
+                f"WARN: vrp IV coverage {coverage:.1%} below {MIN_IV_COVERAGE_WARN:.0%} — "
+                "check yieldboost tick logs for tradier_api_configured and OCC supplement stats."
+            )
+        missing_chain = sorted({
+            str(r.get("yb_etf") or "").upper()
+            for r in rows
+            if isinstance(r, dict) and r.get("iv_source") == "holdings_missing_chain" and r.get("yb_etf")
+        })
+        if missing_chain:
+            print(f"WARN vrp rows with holdings_missing_chain: {missing_chain}")
         event_rows = sum(
             1
             for r in rows
@@ -232,6 +295,20 @@ def run_diagnostics(
                 "WARN: vrp_live.json rows missing event-decomposed fields - "
                 "refresh_yieldboost_vrp_files may not be using event_calendar."
             )
+
+    if coverage is None and vrp_health and vrp_health.get("iv_coverage_front_pct") is not None:
+        coverage = float(vrp_health["iv_coverage_front_pct"])
+
+    if coverage is not None and coverage < min_iv_coverage_fail:
+        msg = (
+            f"YieldBOOST front IV coverage {coverage:.1%} below {min_iv_coverage_fail:.0%} — "
+            "check Market Hours yieldboost tick logs for OCC supplement / Tradier chain."
+        )
+        if fail_on_low_iv_coverage:
+            print(f"FATAL: {msg}")
+            exit_code = 2
+        elif coverage < MIN_IV_COVERAGE_WARN:
+            print(f"WARN: {msg}")
 
     return exit_code
 
@@ -254,6 +331,16 @@ def main() -> int:
         help="Path to event_calendar_combined.json",
     )
     parser.add_argument(
+        "--options-cache-path",
+        default=str(OPTIONS_CACHE_PATH),
+        help="Path to options_cache.json",
+    )
+    parser.add_argument(
+        "--vrp-health-path",
+        default=str(VRP_HEALTH_PATH),
+        help="Path to vrp_health.json",
+    )
+    parser.add_argument(
         "--require-vrp-file",
         action="store_true",
         help="Exit non-zero when vrp_live.json is missing",
@@ -273,16 +360,31 @@ def main() -> int:
         action="store_true",
         help="Exit non-zero when event_calendar_combined.json is missing or older than 24h",
     )
+    parser.add_argument(
+        "--fail-on-low-iv-coverage",
+        action="store_true",
+        help=f"Exit non-zero when IV row coverage is below {MIN_IV_COVERAGE_FAIL:.0%}",
+    )
+    parser.add_argument(
+        "--min-iv-coverage-fail",
+        type=float,
+        default=MIN_IV_COVERAGE_FAIL,
+        help="IV coverage threshold for --fail-on-low-iv-coverage",
+    )
     args = parser.parse_args()
 
     return run_diagnostics(
         spreads_path=Path(args.spreads_path),
         vrp_path=Path(args.vrp_path),
         event_calendar_path=Path(args.event_calendar_path),
+        options_cache_path=Path(args.options_cache_path),
+        vrp_health_path=Path(args.vrp_health_path),
         require_vrp_file=args.require_vrp_file,
         fail_on_missing_vrp_when_spreads=args.fail_on_missing_vrp_when_spreads,
         fail_on_missing_yb_coverage=args.fail_on_missing_yb_coverage,
         fail_on_stale_event_calendar=args.fail_on_stale_event_calendar,
+        fail_on_low_iv_coverage=args.fail_on_low_iv_coverage,
+        min_iv_coverage_fail=args.min_iv_coverage_fail,
     )
 
 

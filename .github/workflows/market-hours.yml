@@ -65,7 +65,8 @@ jobs:
         continue-on-error: true
         run: |
           python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero
-          python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
+          python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads || true
+          python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-low-iv-coverage || true
 
       - name: Commit data if changed
         if: steps.tick.outputs.skipped != 'true' && steps.tick.outputs.files != ''

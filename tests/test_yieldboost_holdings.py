@@ -31,6 +31,7 @@ from yieldboost_holdings import (  # noqa: E402
     normalize_holdings_dataframe,
     pair_put_spreads_from_holdings,
     parse_granite_option_description,
+    resolve_iv_source,
     resolve_sleeve_ticker,
     spreads_json_to_put_spread_legs,
 )
@@ -118,6 +119,70 @@ def test_build_vrp_live_payload_populates_rv_and_vrp():
     assert row["rv_30d_2x"] == pytest.approx(1.36)
     assert row["iv_put_long"] == pytest.approx(2.2666)
     assert row["vrp_vol_2x"] == pytest.approx((2.2666 + 2.2314) / 2 - 1.36)
+    assert row["iv_source"] == "holdings_exact"
+
+
+def test_resolve_iv_source_labels():
+    assert resolve_iv_source(
+        {"matched": True, "expiry_in_chain": True, "iv": 1.0},
+        {"matched": True, "expiry_in_chain": True, "iv": 1.1},
+    ) == "holdings_exact"
+    assert resolve_iv_source(
+        {"matched": False, "expiry_in_chain": True, "iv": 1.0},
+        {"matched": True, "expiry_in_chain": True, "iv": 1.1},
+    ) == "holdings_nearest_strike"
+    assert resolve_iv_source(
+        {"matched": False, "expiry_in_chain": False, "iv": None},
+        {"matched": False, "expiry_in_chain": False, "iv": None},
+    ) == "holdings_missing_chain"
+
+
+def test_build_vrp_live_payload_missing_chain_iv_source():
+    spread = pair_put_spreads_from_holdings(
+        pd.DataFrame([{
+            "as_of_date": "2026-05-21",
+            "etf_ticker": "AZYY",
+            "position_ticker": "AMZZ260522P00034860",
+            "security_type": "OPTION_PUT",
+            "shares": 390.0,
+            "option_root": "2AMZZ",
+            "option_expiry": "2026-05-22",
+            "option_strike": 34.86,
+            "option_put_call": "P",
+            "option_side": "long",
+        }, {
+            "as_of_date": "2026-05-21",
+            "etf_ticker": "AZYY",
+            "position_ticker": "AMZZ260522P00036790",
+            "security_type": "OPTION_PUT",
+            "shares": -390.0,
+            "option_root": "2AMZZ",
+            "option_expiry": "2026-05-22",
+            "option_strike": 36.79,
+            "option_put_call": "P",
+            "option_side": "short",
+        }]),
+        underlying_by_etf={"AZYY": "AMZN"},
+        as_of=date(2026, 5, 22),
+    )
+    options_cache = {
+        "symbols": {
+            "AMZZ": {
+                "spot": 39.8,
+                "options": [{
+                    "expiration_date": "2026-06-18",
+                    "contract_type": "put",
+                    "strike_price": 35.0,
+                    "iv": 0.62,
+                    "mid": 0.95,
+                }],
+            },
+        },
+    }
+    payload = build_vrp_live_payload(spread, options_cache, rv_map={"AMZZ": 0.44})
+    row = payload["rows"][0]
+    assert row["iv_put_long"] is None
+    assert row["iv_source"] == "holdings_missing_chain"
 
 
 def test_spreads_json_to_put_spread_legs_recomputes_front_per_etf():

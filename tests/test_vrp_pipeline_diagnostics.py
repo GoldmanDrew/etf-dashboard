@@ -132,3 +132,29 @@ def test_warns_when_event_calendar_stale(tmp_path: Path):
         fail_on_stale_event_calendar=True,
     )
     assert rc == 2
+
+
+def test_fails_on_low_iv_coverage(tmp_path: Path, capsys):
+    vrp = tmp_path / "vrp_live.json"
+    cache = tmp_path / "options_cache.json"
+    _write_json(cache, {"tradier_api_configured": False, "yieldboost_occ_quotes_requested": 60})
+    _write_json(
+        vrp,
+        {
+            "build_time": "2026-05-20T12:00:00Z",
+            "row_count": 2,
+            "rows": [
+                {"yb_etf": "AMYY", "iv_put_long": 1.0, "iv_put_short": 1.0, "iv_source": "holdings_exact"},
+                {"yb_etf": "AZYY", "iv_put_long": None, "iv_put_short": None, "iv_source": "holdings_missing_chain"},
+            ],
+        },
+    )
+    rc = run_diagnostics(
+        spreads_path=tmp_path / "yieldboost_put_spreads_latest.json",
+        vrp_path=vrp,
+        options_cache_path=cache,
+        fail_on_low_iv_coverage=True,
+        min_iv_coverage_fail=0.8,
+    )
+    assert rc == 2
+    assert "tradier_api_configured=false" in capsys.readouterr().out
