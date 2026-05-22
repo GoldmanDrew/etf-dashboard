@@ -675,7 +675,7 @@ Five workflows + shared actions (`commit-data`, `deploy-pages`):
 | Workflow | Cadence | What it does |
 |---|---|---|
 | `nightly.yml` | Tue–Sat 6 AM ET | ETF metrics ingest + scoring + **full** `build_data.py` → one commit + deploy |
-| `market-hours.yml` | Every 15 min | `scripts/ci_tick.py` runs **intraday first** when stale (~5m RTH cadence), then one other stale rotation task (borrow / options / YB VRP / NAV) → commit + deploy |
+| `market-hours.yml` | Every 15 min | `scripts/ci_tick.py` runs **NAV then intraday** when stale (~30m / ~5m RTH cadence), then one other stale rotation task (borrow / options / YB VRP) → commit + deploy |
 | `build-and-deploy.yml` | Mon–Fri 4:30 PM ET + code push + manual | Full `build_data.py` after ls-algo screener + deploy |
 | `update-corporate-actions.yml` | Every 6 h | News / corp actions → commit + deploy |
 | `deploy-pages-data.yml` | Hourly | Safety-net Pages deploy (no rebuild) |

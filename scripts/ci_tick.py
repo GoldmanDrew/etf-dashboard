@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """CI refresh orchestrator for market-hours.yml.
 
-During US RTH, runs intraday flow first when it exceeds ``intraday_rth`` cadence,
-then at most one other stale rotation task (borrow / options / yieldboost / nav).
-Off-hours: borrow only.
+During US RTH, runs stale NAV forecast and intraday flow on fast-lane cadences
+(NAV first so intraday blends fresh ``_latest.json`` rows), then at most one
+other rotation task (borrow / options / yieldboost). Off-hours: borrow only.
 
 Updates ``data/ci_state.json`` and prints commit file paths for deploy steps.
 """
@@ -30,6 +30,7 @@ DEFAULT_CONFIG: dict = {
         "intraday": 15,
         "intraday_rth": 5,
         "nav_forecast": 30,
+        "nav_forecast_rth": 30,
     },
     "rth": {"utc_hours": list(range(13, 23)), "weekdays": [0, 1, 2, 3, 4]},
     "rotation_rth": ["borrow", "options", "yieldboost", "intraday"],
@@ -170,6 +171,8 @@ def is_rth(now: datetime, config: dict) -> bool:
 def _cadence_minutes(task: str, config: dict, *, rth: bool = False) -> float:
     cadence_map = config.get("cadence_minutes") or {}
     if task == "nav":
+        if rth:
+            return float(cadence_map.get("nav_forecast_rth", cadence_map.get("nav_forecast", 30)))
         return float(cadence_map.get("nav_forecast", 30))
     if task == "intraday" and rth:
         return float(cadence_map.get("intraday_rth", cadence_map.get("intraday", 15)))
@@ -182,19 +185,13 @@ def is_stale(task: str, state: dict, config: dict, now: datetime, *, rth: bool =
 
 
 def _pick_rotation_secondary(state: dict, config: dict, now: datetime) -> str | None:
-    """One non-intraday stale task from the RTH rotation (borrow / options / YB / nav)."""
+    """One stale borrow / options / yieldboost task from the RTH rotation."""
     rotation = list(config.get("rotation_rth") or ["borrow", "options", "yieldboost", "intraday"])
     slot = (int(now.timestamp()) // 900) % max(len(rotation), 1)
 
-    # Nav forecast on alternating ticks when the rotation lands on the intraday slot.
-    if slot == 3 and is_stale("nav", state, config, now):
-        if int(now.timestamp()) // 1800 % 2 == 0:
-            return "nav"
-
     order = [rotation[slot % len(rotation)]] + [t for i, t in enumerate(rotation) if i != slot % len(rotation)]
-    order.append("nav")
     for task in order:
-        if task == "intraday":
+        if task in {"intraday", "nav"}:
             continue
         if is_stale(task, state, config, now):
             return task
@@ -202,9 +199,12 @@ def _pick_rotation_secondary(state: dict, config: dict, now: datetime) -> str | 
 
 
 def pick_auto_tasks(state: dict, config: dict, now: datetime) -> list[str]:
-    """Return ordered task list for this tick (intraday fast-lane first during RTH)."""
+    """Return ordered task list for this tick (NAV + intraday fast-lanes first during RTH)."""
     if is_rth(now, config):
         tasks: list[str] = []
+        # NAV before intraday: build_letf_intraday_flows reads nav_forecasts/_latest.json.
+        if is_stale("nav", state, config, now, rth=True):
+            tasks.append("nav")
         if is_stale("intraday", state, config, now, rth=True):
             tasks.append("intraday")
         secondary = _pick_rotation_secondary(state, config, now)
@@ -284,7 +284,9 @@ def write_github_output(tasks: list[str], skipped: bool, files: list[str]) -> No
 
 
 def _task_is_stale(task: str, state: dict, config: dict, now: datetime) -> bool:
-    return is_stale(task, state, config, now, rth=is_rth(now, config) and task == "intraday")
+    rth = is_rth(now, config)
+    use_rth = rth and task in {"intraday", "nav"}
+    return is_stale(task, state, config, now, rth=use_rth)
 
 
 def _merge_commit_paths(config: dict, tasks: list[str]) -> list[str]:

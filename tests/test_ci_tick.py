@@ -63,25 +63,50 @@ def test_pick_auto_off_hours_skips_fresh_borrow(cfg):
 
 
 def test_pick_auto_rth_intraday_fast_lane(cfg):
-    """During RTH, stale intraday is always scheduled even when rotation slot is borrow."""
+    """During RTH, stale intraday is scheduled even when rotation slot is borrow."""
     now = datetime(2026, 5, 22, 15, 0, tzinfo=UTC)  # slot 0 -> borrow in rotation
     state = {
         "last_borrow_utc": "2026-05-22T10:00:00Z",
+        "last_nav_utc": "2026-05-22T14:58:00Z",  # 2m ago -> fresh
         "last_intraday_utc": "2026-05-22T14:00:00Z",  # 60m ago -> stale at 5m RTH cadence
     }
     tasks = ct.pick_auto_tasks(state, cfg, now)
     assert tasks[0] == "intraday"
+    assert "nav" not in tasks
     assert "borrow" in tasks
+
+
+def test_pick_auto_rth_nav_before_intraday_when_both_stale(cfg):
+    """NAV must run before intraday so the flow builder blends fresh forecasts."""
+    now = datetime(2026, 5, 22, 15, 0, tzinfo=UTC)
+    state = {
+        "last_borrow_utc": "2026-05-22T10:00:00Z",
+        "last_intraday_utc": "2026-05-22T14:00:00Z",
+    }
+    tasks = ct.pick_auto_tasks(state, cfg, now)
+    assert tasks[:2] == ["nav", "intraday"]
+    assert "borrow" in tasks
+
+
+def test_nav_rth_cadence(cfg):
+    now = datetime(2026, 5, 21, 15, 0, tzinfo=UTC)
+    state = {"last_nav_utc": "2026-05-21T14:40:00Z"}  # 20m ago
+    assert ct.is_stale("nav", state, cfg, now, rth=False) is False
+    assert ct.is_stale("nav", state, cfg, now, rth=True) is False
+    state = {"last_nav_utc": "2026-05-21T14:20:00Z"}  # 40m ago
+    assert ct.is_stale("nav", state, cfg, now, rth=True) is True
 
 
 def test_pick_auto_rth_skips_fresh_intraday_but_runs_rotation(cfg):
     now = datetime(2026, 5, 22, 15, 0, tzinfo=UTC)
     state = {
         "last_borrow_utc": "2026-05-22T10:00:00Z",
+        "last_nav_utc": "2026-05-22T14:58:00Z",  # 2m ago -> fresh at 30m RTH cadence
         "last_intraday_utc": "2026-05-22T14:58:00Z",  # 2m ago -> fresh at 5m RTH cadence
     }
     tasks = ct.pick_auto_tasks(state, cfg, now)
     assert "intraday" not in tasks
+    assert "nav" not in tasks
     assert tasks == ["borrow"]
 
 
@@ -97,6 +122,7 @@ def test_rth_day_simulation_intraday_runs_most_ticks(cfg):
     """Over a full RTH day with 15m ticks, intraday should run on most slots."""
     state: dict[str, str] = {}
     intraday_runs = 0
+    nav_runs = 0
     total_rth_ticks = 0
     for hour in range(13, 23):
         for minute in (0, 15, 30, 45):
@@ -107,12 +133,16 @@ def test_rth_day_simulation_intraday_runs_most_ticks(cfg):
             tasks = ct.pick_auto_tasks(state, cfg, now)
             if "intraday" in tasks:
                 intraday_runs += 1
+            if "nav" in tasks:
+                nav_runs += 1
             for task in tasks:
                 key = "nav" if task == "nav" else task
                 state[f"last_{key}_utc"] = now.isoformat().replace("+00:00", "Z")
 
     assert total_rth_ticks == 40
     assert intraday_runs >= 35
+    # NAV cadence is 30m on 15m ticks -> roughly every other slot once warm.
+    assert nav_runs >= 18
 
 
 def test_commit_paths_includes_ci_state(tmp_path, cfg, monkeypatch):

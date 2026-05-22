@@ -121,7 +121,7 @@ The `build-and-deploy.yml` Action runs on push, builds the data, and deploys. Yo
 ## Schedule
 
 - **`nightly.yml`** — Tue–Sat **6 AM ET**: ETF metrics ingest, distributions, NAV/borrow scoring, then **full** `build_data.py` in one commit + deploy.
-- **`market-hours.yml`** — **Every 15 minutes**: `scripts/ci_tick.py` runs one stale refresh (borrow ~30m, options/YB/intraday ~15m, NAV ~30m during RTH) → commit + deploy. Manual: `workflow_dispatch` with `mode` (`auto`, `borrow`, `options`, `yieldboost`, `intraday`, `nav`) and optional `force`.
+- **`market-hours.yml`** — **Every 15 minutes**: `scripts/ci_tick.py` runs stale refreshes during RTH (NAV ~30m + intraday ~5m fast-lanes when due — NAV first — plus one rotation task: borrow ~30m, options/YB ~15m) → commit + deploy. Manual: `workflow_dispatch` with `mode` (`auto`, `borrow`, `options`, `yieldboost`, `intraday`, `nav`) and optional `force`.
 - **`build-and-deploy.yml`** — **4:30 PM ET** weekdays + code push + manual: full rebuild after ls-algo daily screener.
 - **`update-corporate-actions.yml`** — **Every 6 hours**: corporate actions + news feed.
 - **`deploy-pages-data.yml`** — **Hourly** safety-net Pages deploy (primary deploy is inline in the workflows above).
