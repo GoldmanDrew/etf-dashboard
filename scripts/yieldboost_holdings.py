@@ -16,6 +16,8 @@ import pandas as pd
 
 LOGGER = logging.getLogger("yieldboost_holdings")
 
+HELD_STRIKE_EXACT_TOL = 0.011
+
 GRANITE_BASE = "https://www.graniteshares.com"
 
 _GRANITE_OPT_RE = re.compile(
@@ -385,6 +387,9 @@ def load_yieldboost_held_expiries_by_sleeve(
     return by_sleeve
 
 
+HELD_STRIKE_EXACT_TOL = 0.011
+
+
 def held_contract_needs_occ_quote(
     rows: Iterable[dict],
     *,
@@ -392,11 +397,10 @@ def held_contract_needs_occ_quote(
     strike: float,
     put_call: str = "P",
 ) -> bool:
-    """True when the held leg is missing or has no IV/mid in cached chain rows."""
+    """True when the held leg lacks IV+mid at the exact Granite strike."""
     expiry_s = expiry.isoformat()
     target_type = "put" if str(put_call or "P").upper() == "P" else "call"
-    best = None
-    best_dist = None
+    exact_row = None
     for r in rows or []:
         if not isinstance(r, dict):
             continue
@@ -407,17 +411,14 @@ def held_contract_needs_occ_quote(
         cstrike = _parse_float(r.get("strike_price"))
         if cstrike is None:
             continue
-        dist = abs(cstrike - float(strike))
-        if best is None or dist < best_dist:
-            best = r
-            best_dist = dist
-    if best is None or best_dist is None or best_dist >= 0.05:
+        if abs(cstrike - float(strike)) <= HELD_STRIKE_EXACT_TOL:
+            exact_row = r
+            break
+    if exact_row is None:
         return True
-    if _norm_iv(best.get("iv")) is not None:
-        return False
-    if _parse_float(best.get("mid")) is not None:
-        return False
-    return True
+    has_iv = _norm_iv(exact_row.get("iv")) is not None
+    has_mid = _parse_float(exact_row.get("mid")) is not None
+    return not (has_iv and has_mid)
 
 
 def fetch_granite_holdings_xls(
@@ -892,6 +893,30 @@ def build_vrp_health_payload(
         and r.get("iv_source") == "holdings_missing_chain"
         and r.get("yb_etf")
     })
+    leg_iv_ok = 0
+    leg_mid_ok = 0
+    spread_iv_and_mid_ok = 0
+    for row in vrp_rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("iv_put_long") is not None:
+            leg_iv_ok += 1
+        if row.get("iv_put_short") is not None:
+            leg_iv_ok += 1
+        if row.get("spread_mid_market") is not None:
+            leg_mid_ok += 2
+            if row.get("iv_put_long") is not None and row.get("iv_put_short") is not None:
+                spread_iv_and_mid_ok += 1
+    legs_total = max(len(vrp_rows) * 2, 1) if vrp_rows else 0
+    front_leg_quote_coverage = {
+        "legs_total": len(vrp_rows) * 2,
+        "leg_iv_ok": leg_iv_ok,
+        "leg_mid_ok": leg_mid_ok,
+        "spread_iv_and_mid_ok": spread_iv_and_mid_ok,
+        "leg_iv_pct": round(leg_iv_ok / legs_total, 4) if vrp_rows else 0.0,
+        "leg_mid_pct": round(leg_mid_ok / legs_total, 4) if vrp_rows else 0.0,
+        "spread_mid_pct": round(spread_iv_and_mid_ok / front_count, 4) if front_count else 0.0,
+    }
     occ_stats = {}
     if options_cache:
         occ_stats = {
@@ -909,6 +934,7 @@ def build_vrp_health_payload(
         "iv_coverage_front_pct": round(coverage, 4),
         "stale_sleeves": stale_sleeves,
         "missing_chain_ybs": missing_chain_ybs,
+        "front_leg_quote_coverage": front_leg_quote_coverage,
         "occ_supplement": occ_stats,
         "last_options_refresh": options_cache.get("build_time") if options_cache else options_as_of_max,
         "last_holdings_refresh": spreads_payload.get("build_time"),
@@ -1046,8 +1072,9 @@ def lookup_contract_iv(
         for c in (entry.get("options") or [])
         if isinstance(c, dict)
     )
-    best = None
-    best_dist = None
+    exact_row = None
+    nearest_row = None
+    nearest_dist = None
     for c in entry.get("options") or []:
         if str(c.get("expiration_date")) != expiry_s:
             continue
@@ -1057,23 +1084,31 @@ def lookup_contract_iv(
         if cstrike is None:
             continue
         dist = abs(cstrike - float(strike))
-        if best is None or dist < best_dist:
-            best = c
-            best_dist = dist
+        if dist <= HELD_STRIKE_EXACT_TOL:
+            exact_row = c
+            break
+        if nearest_row is None or dist < nearest_dist:
+            nearest_row = c
+            nearest_dist = dist
+    best = exact_row or nearest_row
+    best_dist = 0.0 if exact_row is not None else nearest_dist
     if best is None:
         return {
             "matched": False,
             "expiry_in_chain": expiry_in_chain,
+            "exact_strike": False,
             "spot": spot,
             "iv": None,
             "mid": None,
             "options_as_of": entry.get("updated_at"),
         }
+    exact = exact_row is not None
     return {
-        "matched": best_dist is not None and best_dist < 0.05,
+        "matched": exact or (best_dist is not None and best_dist < 0.05),
+        "exact_strike": exact,
         "expiry_in_chain": True,
         "strike_used": _parse_float(best.get("strike_price")),
-        "strike_interp": best_dist is not None and best_dist >= 1e-4,
+        "strike_interp": not exact and best_dist is not None and best_dist >= HELD_STRIKE_EXACT_TOL,
         "iv": _norm_iv(best.get("iv")),
         "mid": _parse_float(best.get("mid")),
         "spot": spot,
@@ -1087,8 +1122,15 @@ def resolve_iv_source(long_q: dict[str, Any], short_q: dict[str, Any]) -> str:
         if not long_q.get("expiry_in_chain") or not short_q.get("expiry_in_chain"):
             return "holdings_missing_chain"
         return "holdings_missing_quote"
-    if long_q.get("matched") and short_q.get("matched"):
+    if (
+        long_q.get("exact_strike")
+        and short_q.get("exact_strike")
+        and long_q.get("matched")
+        and short_q.get("matched")
+    ):
         return "holdings_exact"
+    if long_q.get("matched") and short_q.get("matched"):
+        return "holdings_nearest_strike"
     return "holdings_nearest_strike"
 
 
@@ -1129,6 +1171,9 @@ def build_vrp_live_payload(
         spread_mid = None
         if long_q.get("mid") is not None and short_q.get("mid") is not None:
             spread_mid = float(short_q["mid"]) - float(long_q["mid"])
+        spread_mid_unavailable = spread_mid is None and (
+            long_q.get("mid") is None or short_q.get("mid") is None
+        )
         sleeve_key = str(s.sleeve_2x_etf or "").upper()
         und_key = str(s.underlying or "").upper() if s.underlying else None
         rv_2x = rv_map.get(sleeve_key)
@@ -1163,6 +1208,7 @@ def build_vrp_live_payload(
             "iv_put_long": long_q.get("iv"),
             "iv_put_short": short_q.get("iv"),
             "spread_mid_market": spread_mid,
+            "spread_mid_market_unavailable": spread_mid_unavailable,
             "rv_30d_2x": rv_2x,
             "rv_30d_underlying": rv_u,
             "vrp_vol_2x": vrp_2x,

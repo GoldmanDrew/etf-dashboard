@@ -7319,16 +7319,23 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       </tr>
                       <tr>
                         <td className="vrp-label-tip" title={VRP_SPREAD_MID_TOOLTIP}>Spread mid (market)</td>
-                        <td>{fmtSpreadMid(vrpDisplayRow.spread_mid_market, vrpDisplayRow.spot_2x)}</td>
+                        <td>
+                          {vrpDisplayRow.spread_mid_market != null
+                            ? fmtSpreadMid(vrpDisplayRow.spread_mid_market, vrpDisplayRow.spot_2x)
+                            : (vrpDisplayRow.spread_mid_market_unavailable
+                              ? '— (no quote at held strikes)'
+                              : '—')}
+                        </td>
                       </tr>
                       <tr className="vrp-field-note">
                         <td colSpan={2}>{VRP_SPREAD_MID_NOTE}</td>
                       </tr>
+                      <tr><td>Fair spread mid (base IV)</td><td>{vrpDisplayRow.put_spread_fair_event_aware != null ? fmtSpreadMid(vrpDisplayRow.put_spread_fair_event_aware, vrpDisplayRow.spot_2x) : '—'}</td></tr>
                       <tr><td>RV 30d (2× full)</td><td>{vrpDisplayRow.rv_30d_2x_full != null ? fmt(vrpDisplayRow.rv_30d_2x_full) : (vrpDisplayRow.rv_30d_2x != null ? fmt(vrpDisplayRow.rv_30d_2x) : '—')}</td></tr>
                       <tr><td>RV 30d (2× base)</td><td>{vrpDisplayRow.rv_30d_2x_base != null ? fmt(vrpDisplayRow.rv_30d_2x_base) : '—'}</td></tr>
                       <tr><td>VRP vol base (headline)</td><td><strong>{vrpDisplayRow.vrp_vol_2x_base != null ? fmt(vrpDisplayRow.vrp_vol_2x_base) : '—'}</strong></td></tr>
                       <tr><td>VRP vol full (legacy)</td><td>{vrpDisplayRow.vrp_vol_2x_full != null ? fmt(vrpDisplayRow.vrp_vol_2x_full) : (vrpDisplayRow.vrp_vol_2x != null ? fmt(vrpDisplayRow.vrp_vol_2x) : '—')}</td></tr>
-                      <tr><td>Spread VRP (event-aware)</td><td>{vrpDisplayRow.put_spread_vrp_event_aware != null ? fmtSpreadMid(vrpDisplayRow.put_spread_vrp_event_aware, vrpDisplayRow.spot_2x) : '—'}</td></tr>
+                      <tr><td>Spread VRP (event-aware)</td><td>{vrpDisplayRow.put_spread_vrp_event_aware != null ? fmtSpreadMid(vrpDisplayRow.put_spread_vrp_event_aware, vrpDisplayRow.spot_2x) : (vrpDisplayRow.put_spread_fair_event_aware != null ? '— (needs market mid)' : '—')}</td></tr>
                       <tr><td>Moneyness long / short</td><td>{vrpDisplayRow.moneyness_long_pct != null ? `${vrpDisplayRow.moneyness_long_pct.toFixed(2)}%` : '—'} / {vrpDisplayRow.moneyness_short_pct != null ? `${vrpDisplayRow.moneyness_short_pct.toFixed(2)}%` : '—'}</td></tr>
                       <tr><td>Event var source</td><td>{vrpDisplayRow.event_var_source || 'none'}{vrpDisplayRow.event_calendar_stale ? ' · calendar stale' : ''}</td></tr>
                       <tr><td>IV source</td><td>{vrpIvPending ? 'holdings (IV pending)' : vrpIvSourceLabel}</td></tr>

@@ -158,3 +158,35 @@ def test_fails_on_low_iv_coverage(tmp_path: Path, capsys):
     )
     assert rc == 2
     assert "tradier_api_configured=false" in capsys.readouterr().out
+
+
+def test_fails_on_low_mid_coverage(tmp_path: Path):
+    vrp = tmp_path / "vrp_live.json"
+    health = tmp_path / "vrp_health.json"
+    _write_json(
+        health,
+        {
+            "front_leg_quote_coverage": {
+                "spread_mid_pct": 0.2,
+                "leg_mid_pct": 0.4,
+            },
+        },
+    )
+    _write_json(
+        vrp,
+        {
+            "build_time": "2026-05-20T12:00:00Z",
+            "row_count": 1,
+            "rows": [
+                {"yb_etf": "MTYY", "iv_put_long": 1.0, "iv_put_short": 1.0},
+            ],
+        },
+    )
+    rc = run_diagnostics(
+        spreads_path=tmp_path / "yieldboost_put_spreads_latest.json",
+        vrp_path=vrp,
+        vrp_health_path=health,
+        fail_on_low_mid_coverage=True,
+        min_mid_coverage_fail=0.5,
+    )
+    assert rc == 2

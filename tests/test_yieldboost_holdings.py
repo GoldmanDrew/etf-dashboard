@@ -124,17 +124,47 @@ def test_build_vrp_live_payload_populates_rv_and_vrp():
 
 def test_resolve_iv_source_labels():
     assert resolve_iv_source(
-        {"matched": True, "expiry_in_chain": True, "iv": 1.0},
-        {"matched": True, "expiry_in_chain": True, "iv": 1.1},
+        {"matched": True, "exact_strike": True, "expiry_in_chain": True, "iv": 1.0},
+        {"matched": True, "exact_strike": True, "expiry_in_chain": True, "iv": 1.1},
     ) == "holdings_exact"
     assert resolve_iv_source(
-        {"matched": False, "expiry_in_chain": True, "iv": 1.0},
-        {"matched": True, "expiry_in_chain": True, "iv": 1.1},
+        {"matched": True, "exact_strike": False, "expiry_in_chain": True, "iv": 1.0},
+        {"matched": True, "exact_strike": True, "expiry_in_chain": True, "iv": 1.1},
     ) == "holdings_nearest_strike"
     assert resolve_iv_source(
-        {"matched": False, "expiry_in_chain": False, "iv": None},
-        {"matched": False, "expiry_in_chain": False, "iv": None},
+        {"matched": False, "exact_strike": False, "expiry_in_chain": False, "iv": None},
+        {"matched": False, "exact_strike": False, "expiry_in_chain": False, "iv": None},
     ) == "holdings_missing_chain"
+
+
+def test_held_contract_needs_occ_quote_when_nearest_iv_without_exact_mid():
+    rows = [
+        {
+            "expiration_date": "2026-05-22",
+            "contract_type": "put",
+            "strike_price": 35.0,
+            "iv": 0.82,
+            "mid": 0.15,
+        },
+    ]
+    assert held_contract_needs_occ_quote(
+        rows, expiry=date(2026, 5, 22), strike=34.86, put_call="P",
+    )
+
+
+def test_held_contract_needs_occ_quote_when_exact_iv_without_mid():
+    rows = [
+        {
+            "expiration_date": "2026-05-22",
+            "contract_type": "put",
+            "strike_price": 34.86,
+            "iv": 0.82,
+            "mid": None,
+        },
+    ]
+    assert held_contract_needs_occ_quote(
+        rows, expiry=date(2026, 5, 22), strike=34.86, put_call="P",
+    )
 
 
 def test_build_vrp_live_payload_missing_chain_iv_source():

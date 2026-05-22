@@ -84,6 +84,10 @@ TRADIER_CHAIN_SYMBOLS_RAW = [
 ]
 TRADIER_MAX_REQUESTS_PER_MINUTE = int(os.environ.get("TRADIER_MAX_REQUESTS_PER_MINUTE", "25"))
 TRADIER_MAX_TOTAL_REQUESTS = int(os.environ.get("TRADIER_MAX_TOTAL_REQUESTS", "140"))
+TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS = int(os.environ.get("TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS", "4"))
+TRADIER_CHAIN_MAX_TOTAL_REQUESTS = int(
+    os.environ.get("TRADIER_CHAIN_MAX_TOTAL_REQUESTS", str(max(1, TRADIER_MAX_TOTAL_REQUESTS - TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS)))
+)
 TRADIER_OPTION_QUOTES_MAX_REQUESTS = int(os.environ.get("TRADIER_OPTION_QUOTES_MAX_REQUESTS", "12"))
 TRADIER_OPTION_QUOTES_BATCH_SIZE = int(os.environ.get("TRADIER_OPTION_QUOTES_BATCH_SIZE", "75"))
 YIELDBOOST_OCC_QUOTES_MAX_REQUESTS = int(os.environ.get("YIELDBOOST_OCC_QUOTES_MAX_REQUESTS", "12"))
@@ -1324,6 +1328,40 @@ def build_polygon_options_cache(
     total_polygon_requests = 0
     tradier_request_timestamps: collections.deque[float] = collections.deque()
     total_tradier_requests = 0
+    tradier_budget = {
+        "used": 0,
+        "held_used": 0,
+        "chain_used": 0,
+        "phase": "chain",
+    }
+
+    def _tradier_quote_fields(q: dict) -> tuple[float | None, float | None, float | None, dict]:
+        nested = q.get("quote") if isinstance(q.get("quote"), dict) else {}
+        greeks = q.get("greeks") or nested.get("greeks") or {}
+        bid = q.get("bid") if q.get("bid") is not None else nested.get("bid")
+        ask = q.get("ask") if q.get("ask") is not None else nested.get("ask")
+        mid = _normalize_mid(
+            bid,
+            ask,
+            q.get("mark") or nested.get("mark"),
+            q.get("last") or nested.get("last"),
+            q.get("close") or nested.get("close"),
+            nested.get("mid"),
+        )
+        iv = _pick_iv(
+            [
+                greeks.get("mid_iv"),
+                greeks.get("smv_vol"),
+                greeks.get("bid_iv"),
+                greeks.get("ask_iv"),
+                greeks.get("iv"),
+                q.get("implied_volatility"),
+                q.get("iv"),
+                nested.get("implied_volatility"),
+            ]
+        )
+        delta = _safe_float(greeks.get("delta") or q.get("delta") or nested.get("delta"))
+        return mid, iv, delta, greeks
 
     def _safe_float(v):
         if v is None:
@@ -1438,28 +1476,8 @@ def build_polygon_options_cache(
                 t = _canon_option_ticker(q.get("symbol") or q.get("option_symbol"))
                 if not t:
                     continue
-                greeks = q.get("greeks") or {}
-                quote_by_ticker[t] = {
-                    "mid": _normalize_mid(
-                        q.get("bid"),
-                        q.get("ask"),
-                        q.get("mark"),
-                        q.get("last"),
-                        q.get("close"),
-                    ),
-                    "iv": _pick_iv(
-                        [
-                            greeks.get("mid_iv"),
-                            greeks.get("smv_vol"),
-                            greeks.get("bid_iv"),
-                            greeks.get("ask_iv"),
-                            greeks.get("iv"),
-                            q.get("implied_volatility"),
-                            q.get("iv"),
-                        ]
-                    ),
-                    "delta": _safe_float(greeks.get("delta") or q.get("delta")),
-                }
+                mid, iv, delta, _greeks = _tradier_quote_fields(q)
+                quote_by_ticker[t] = {"mid": mid, "iv": iv, "delta": delta}
 
         if not quote_by_ticker:
             return rows, "; ".join(errs[:2]) if errs else None
@@ -1707,12 +1725,27 @@ def build_polygon_options_cache(
         wait_s = max(0.01, 60.0 - (now - tradier_request_timestamps[0]))
         time.sleep(wait_s)
 
-    def _tradier_get(path: str, params: dict[str, str]) -> tuple[requests.Response | None, str | None]:
+    def _tradier_get(
+        path: str,
+        params: dict[str, str],
+        *,
+        phase: str | None = None,
+    ) -> tuple[requests.Response | None, str | None]:
         nonlocal total_tradier_requests
+        active_phase = phase or tradier_budget["phase"]
         if not TRADIER_TOKEN:
             return None, "tradier token missing"
-        if TRADIER_MAX_TOTAL_REQUESTS > 0 and total_tradier_requests >= TRADIER_MAX_TOTAL_REQUESTS:
+        if TRADIER_MAX_TOTAL_REQUESTS > 0 and tradier_budget["used"] >= TRADIER_MAX_TOTAL_REQUESTS:
             return None, f"tradier request budget exceeded ({TRADIER_MAX_TOTAL_REQUESTS})"
+        if active_phase == "held":
+            if tradier_budget["held_used"] >= TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS:
+                return None, f"tradier held-leg budget exceeded ({TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS})"
+        elif active_phase == "chain":
+            if (
+                TRADIER_CHAIN_MAX_TOTAL_REQUESTS > 0
+                and tradier_budget["chain_used"] >= TRADIER_CHAIN_MAX_TOTAL_REQUESTS
+            ):
+                return None, f"tradier chain budget exceeded ({TRADIER_CHAIN_MAX_TOTAL_REQUESTS})"
         _rate_limit_tradier()
         headers = {
             "Authorization": f"Bearer {TRADIER_TOKEN}",
@@ -1729,6 +1762,11 @@ def build_polygon_options_cache(
         except Exception:
             return None, "tradier request exception"
         total_tradier_requests += 1
+        tradier_budget["used"] += 1
+        if active_phase == "held":
+            tradier_budget["held_used"] += 1
+        else:
+            tradier_budget["chain_used"] += 1
         tradier_request_timestamps.append(time.monotonic())
         if not resp.ok:
             msg = ""
@@ -1828,6 +1866,7 @@ def build_polygon_options_cache(
         spot_hint: float | None,
         *,
         force_expiries: list[str] | None = None,
+        phase: str = "chain",
     ) -> tuple[list[dict], float | None, str | None]:
         # Tradier chain fetch is intentionally narrow: few expiries + near-ATM strikes.
         expirations: list[str] = []
@@ -1838,6 +1877,7 @@ def build_polygon_options_cache(
             exp_resp, exp_err = _tradier_get(
                 "/markets/options/expirations",
                 {"symbol": sym, "includeAllRoots": "true"},
+                phase=phase,
             )
             if exp_err and exp_resp is None:
                 return [], spot_hint, exp_err
@@ -1862,6 +1902,7 @@ def build_polygon_options_cache(
             chain_resp, chain_err = _tradier_get(
                 "/markets/options/chains",
                 {"symbol": sym, "expiration": exp, "greeks": "true"},
+                phase=phase,
             )
             if chain_err:
                 errs.append(chain_err)
@@ -1892,35 +1933,17 @@ def build_polygon_options_cache(
                     continue
 
                 quote = opt.get("quote") or {}
-                greeks = opt.get("greeks") or {}
-                iv = _pick_iv(
-                    [
-                        greeks.get("mid_iv"),
-                        greeks.get("smv_vol"),
-                        greeks.get("bid_iv"),
-                        greeks.get("ask_iv"),
-                        greeks.get("iv"),
-                        opt.get("implied_volatility"),
-                        opt.get("iv"),
-                    ]
-                )
+                opt_greeks = opt.get("greeks") or {}
+                mid, iv, delta, _g = _tradier_quote_fields({**opt, "greeks": opt_greeks, "quote": quote})
                 out_rows.append(
                     {
                         "ticker": opt.get("symbol") or opt.get("option_symbol"),
                         "expiration_date": opt.get("expiration_date") or opt.get("expiration") or exp,
                         "strike_price": strike,
                         "contract_type": "put" if option_type.startswith("put") else "call",
-                        "mid": _normalize_mid(
-                            opt.get("bid") if opt.get("bid") is not None else quote.get("bid"),
-                            opt.get("ask") if opt.get("ask") is not None else quote.get("ask"),
-                            quote.get("mid"),
-                            quote.get("mark"),
-                            opt.get("mark"),
-                            opt.get("last"),
-                            opt.get("close"),
-                        ),
+                        "mid": mid,
                         "iv": iv,
-                        "delta": _safe_float(greeks.get("delta")),
+                        "delta": delta,
                     }
                 )
                 if len(out_rows) >= max(1, TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL):
@@ -1946,6 +1969,185 @@ def build_polygon_options_cache(
     if tradier_err:
         out["errors"].append(tradier_err)
 
+    def _supplement_yieldboost_occ_quotes(*, force_all_front: bool = False) -> None:
+        """Fetch Tradier OCC quotes for held front legs (runs in held budget phase)."""
+        from yieldboost_holdings import (
+            format_occ_ticker,
+            held_contract_needs_occ_quote,
+            load_yieldboost_front_contracts,
+        )
+
+        def _record_occ_stats(
+            *,
+            requested: int = 0,
+            filled: int = 0,
+            filled_mid: int = 0,
+            fetched_requests: int = 0,
+            skip_reason: str | None = None,
+            unmatched: list[str] | None = None,
+            iv_only: list[str] | None = None,
+        ) -> None:
+            out["yieldboost_occ_quotes_requested"] = int(requested)
+            out["yieldboost_occ_quotes_filled"] = int(filled)
+            out["yieldboost_occ_quotes_filled_mid"] = int(filled_mid)
+            out["yieldboost_occ_quotes_fetched_requests"] = int(fetched_requests)
+            if skip_reason:
+                out["yieldboost_occ_skip_reason"] = skip_reason
+            if unmatched:
+                out["yieldboost_occ_unmatched"] = unmatched[:12]
+            if iv_only:
+                out["yieldboost_occ_iv_only"] = iv_only[:12]
+
+        contracts = load_yieldboost_front_contracts(YIELDBOOST_OPTIONS_TARGET_FILE)
+        if not contracts:
+            _record_occ_stats(skip_reason="no_front_contracts")
+            return
+
+        if not TRADIER_TOKEN:
+            pending_count = sum(1 for _ in contracts)
+            _record_occ_stats(requested=pending_count, skip_reason="tradier_token_missing")
+            print(
+                f"  [WARN] YieldBOOST held-leg quotes skipped: TRADIER_TOKEN not set "
+                f"({pending_count} front legs)"
+            )
+            return
+
+        pending: list[dict] = []
+        for c in contracts:
+            sleeve = norm_sym(c.get("sleeve"))
+            expiry = c.get("expiry")
+            strike = _safe_float(c.get("strike"))
+            put_call = str(c.get("put_call") or "P").upper()
+            if not sleeve or strike is None or not expiry:
+                continue
+            try:
+                expiry_date = dt.date.fromisoformat(str(expiry))
+            except ValueError:
+                continue
+            if not force_all_front:
+                sym_payload = out["symbols"].get(sleeve) if isinstance(out["symbols"].get(sleeve), dict) else {}
+                rows = sym_payload.get("options") if isinstance(sym_payload, dict) else []
+                if not isinstance(rows, list):
+                    rows = []
+                if not held_contract_needs_occ_quote(
+                    rows, expiry=expiry_date, strike=float(strike), put_call=put_call,
+                ):
+                    continue
+            occ = format_occ_ticker(sleeve, expiry_date, put_call, float(strike))
+            pending.append({
+                "sleeve": sleeve,
+                "expiry": expiry_date.isoformat(),
+                "strike": float(strike),
+                "put_call": put_call,
+                "occ": occ,
+            })
+
+        if not pending:
+            _record_occ_stats(skip_reason="all_front_legs_in_chain")
+            return
+
+        occ_meta = {p["occ"]: p for p in pending}
+        max_requests = (
+            TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS
+            if force_all_front
+            else max(1, min(YIELDBOOST_OCC_QUOTES_MAX_REQUESTS, TRADIER_OPTION_QUOTES_MAX_REQUESTS))
+        )
+        used_requests = 0
+        occ_errors: list[str] = []
+        filled_occs: set[str] = set()
+        filled_mid_occs: set[str] = set()
+        returned_occs: set[str] = set()
+        iv_only_occs: list[str] = []
+        for batch in _chunked(sorted(occ_meta.keys()), TRADIER_OPTION_QUOTES_BATCH_SIZE):
+            if used_requests >= max_requests:
+                occ_errors.append(f"occ quotes capped at {max_requests} requests")
+                break
+            used_requests += 1
+            resp, req_err = _tradier_get(
+                "/markets/quotes",
+                {"symbols": ",".join(batch), "greeks": "true"},
+                phase="held",
+            )
+            if req_err and resp is None:
+                occ_errors.append(req_err)
+                continue
+            if resp is None or not resp.ok:
+                occ_errors.append(f"occ quotes HTTP {getattr(resp, 'status_code', '?')}")
+                continue
+            payload = resp.json() or {}
+            quotes = ((payload.get("quotes") or {}).get("quote")) or []
+            if isinstance(quotes, dict):
+                quotes = [quotes]
+            for q in quotes:
+                occ = _canon_option_ticker(q.get("symbol") or q.get("option_symbol"))
+                if not occ:
+                    continue
+                returned_occs.add(occ)
+                meta = occ_meta.get(occ)
+                if not meta:
+                    continue
+                mid, iv, delta, greeks = _tradier_quote_fields(q)
+                if iv is None and mid is None:
+                    continue
+                if mid is None and iv is not None:
+                    iv_only_occs.append(occ)
+                ctype = "put" if meta["put_call"] == "P" else "call"
+                row = {
+                    "ticker": occ,
+                    "expiration_date": meta["expiry"],
+                    "strike_price": meta["strike"],
+                    "contract_type": ctype,
+                    "mid": mid,
+                    "iv": iv,
+                    "delta": delta,
+                    "source": "tradier_occ_quote",
+                }
+                sleeve = meta["sleeve"]
+                sym_payload = out["symbols"].get(sleeve)
+                if not isinstance(sym_payload, dict):
+                    sym_payload = {
+                        "spot": tradier_spot_map.get(sleeve),
+                        "options": [],
+                        "updated_at": build_time,
+                        "source": "tradier_occ_quote",
+                    }
+                    out["symbols"][sleeve] = sym_payload
+                prior_rows = sym_payload.get("options") if isinstance(sym_payload.get("options"), list) else []
+                sym_payload["options"] = _merge_option_rows(prior_rows, [row])
+                sym_payload["updated_at"] = build_time
+                src = str(sym_payload.get("source") or "")
+                if "occ_quote" not in src:
+                    sym_payload["source"] = f"{src}+occ_quote" if src else "tradier_occ_quote"
+                filled_occs.add(occ)
+                if mid is not None:
+                    filled_mid_occs.add(occ)
+
+        unmatched = sorted(set(occ_meta.keys()) - returned_occs)
+        if occ_errors:
+            out.setdefault("errors", [])
+            out["errors"].append("; ".join(occ_errors[:3]))
+        _record_occ_stats(
+            requested=len(pending),
+            filled=len(filled_occs),
+            filled_mid=len(filled_mid_occs),
+            fetched_requests=used_requests,
+            unmatched=unmatched,
+            iv_only=iv_only_occs,
+        )
+        print(
+            f"  YieldBOOST held-leg quotes: requested={len(pending)} filled={len(filled_occs)} "
+            f"mid_ok={len(filled_mid_occs)} requests={used_requests}/{max_requests}"
+        )
+        if unmatched:
+            print(f"  [WARN] OCC unmatched ({len(unmatched)}): {unmatched[:4]}")
+        if occ_errors:
+            print(f"  [WARN] Held-leg quote errors: {occ_errors[0]}")
+
+    if yieldboost_targeted and TRADIER_TOKEN:
+        tradier_budget["phase"] = "held"
+        _supplement_yieldboost_occ_quotes(force_all_front=True)
+        tradier_budget["phase"] = "chain"
+
     for sym in refresh_symbols:
         try:
             under_px = None
@@ -1957,8 +2159,20 @@ def build_polygon_options_cache(
             payload = {}
             resp = None
 
+            nsym = norm_sym(sym)
+            held_exp = sorted(str(e) for e in held_expiries_by_sleeve.get(nsym, set()))
+            if yieldboost_targeted and held_exp and nsym in target_strikes_by_sleeve:
+                tradier_rows, _, held_chain_err = _fetch_tradier_chain(
+                    sym, tradier_spot, force_expiries=held_exp, phase="chain",
+                )
+                if tradier_rows:
+                    rows = tradier_rows
+                    symbol_source = "tradier_held_exp"
+                elif held_chain_err:
+                    sym_errors.append(f"tradier_held_exp: {held_chain_err}")
+
             # For configured symbols, prefer Tradier chain directly to avoid Polygon 403/429 churn.
-            if sym in tradier_chain_symbols:
+            if not rows and sym in tradier_chain_symbols:
                 tradier_rows, _, tradier_chain_err = _fetch_tradier_chain(sym, tradier_spot)
                 if tradier_rows:
                     rows = tradier_rows
@@ -2176,196 +2390,14 @@ def build_polygon_options_cache(
                 out["symbols"][sym] = prior_sym
             continue
 
-    def _supplement_yieldboost_occ_quotes() -> None:
-        """Fetch Tradier OCC quotes for held front legs missing from chain snapshots."""
-        from yieldboost_holdings import (
-            format_occ_ticker,
-            held_contract_needs_occ_quote,
-            load_yieldboost_front_contracts,
-        )
-
-        def _record_occ_stats(
-            *,
-            requested: int = 0,
-            filled: int = 0,
-            fetched_requests: int = 0,
-            skip_reason: str | None = None,
-        ) -> None:
-            out["yieldboost_occ_quotes_requested"] = int(requested)
-            out["yieldboost_occ_quotes_filled"] = int(filled)
-            out["yieldboost_occ_quotes_fetched_requests"] = int(fetched_requests)
-            if skip_reason:
-                out["yieldboost_occ_skip_reason"] = skip_reason
-
-        contracts = load_yieldboost_front_contracts(YIELDBOOST_OPTIONS_TARGET_FILE)
-        if not contracts:
-            _record_occ_stats(skip_reason="no_front_contracts")
-            return
-
-        if not TRADIER_TOKEN:
-            pending_count = 0
-            for c in contracts:
-                sleeve = norm_sym(c.get("sleeve"))
-                expiry = c.get("expiry")
-                strike = _safe_float(c.get("strike"))
-                put_call = str(c.get("put_call") or "P").upper()
-                if not sleeve or strike is None or not expiry:
-                    continue
-                try:
-                    expiry_date = dt.date.fromisoformat(str(expiry))
-                except ValueError:
-                    continue
-                sym_payload = out["symbols"].get(sleeve) if isinstance(out["symbols"].get(sleeve), dict) else {}
-                rows = sym_payload.get("options") if isinstance(sym_payload, dict) else []
-                if not isinstance(rows, list):
-                    rows = []
-                if held_contract_needs_occ_quote(
-                    rows, expiry=expiry_date, strike=float(strike), put_call=put_call,
-                ):
-                    pending_count += 1
-            _record_occ_stats(requested=pending_count, skip_reason="tradier_token_missing")
-            print(
-                f"  [WARN] YieldBOOST OCC supplement skipped: TRADIER_TOKEN not set "
-                f"({pending_count} held legs would need OCC quotes)"
-            )
-            return
-
-        pending: list[dict] = []
-        for c in contracts:
-            sleeve = norm_sym(c.get("sleeve"))
-            expiry = c.get("expiry")
-            strike = _safe_float(c.get("strike"))
-            put_call = str(c.get("put_call") or "P").upper()
-            if not sleeve or strike is None or not expiry:
-                continue
-            try:
-                expiry_date = dt.date.fromisoformat(str(expiry))
-            except ValueError:
-                continue
-            sym_payload = out["symbols"].get(sleeve) if isinstance(out["symbols"].get(sleeve), dict) else {}
-            rows = sym_payload.get("options") if isinstance(sym_payload, dict) else []
-            if not isinstance(rows, list):
-                rows = []
-            if not held_contract_needs_occ_quote(
-                rows, expiry=expiry_date, strike=float(strike), put_call=put_call,
-            ):
-                continue
-            occ = format_occ_ticker(sleeve, expiry_date, put_call, float(strike))
-            pending.append({
-                "sleeve": sleeve,
-                "expiry": expiry_date.isoformat(),
-                "strike": float(strike),
-                "put_call": put_call,
-                "occ": occ,
-            })
-
-        if not pending:
-            _record_occ_stats(skip_reason="all_front_legs_in_chain")
-            return
-
-        occ_meta = {p["occ"]: p for p in pending}
-        max_requests = (
-            YIELDBOOST_OCC_QUOTES_MAX_REQUESTS
-            if yieldboost_targeted
-            else max(1, min(YIELDBOOST_OCC_QUOTES_MAX_REQUESTS, TRADIER_OPTION_QUOTES_MAX_REQUESTS))
-        )
-        used_requests = 0
-        occ_errors: list[str] = []
-        filled_occs: set[str] = set()
-        for batch in _chunked(sorted(occ_meta.keys()), TRADIER_OPTION_QUOTES_BATCH_SIZE):
-            if used_requests >= max_requests:
-                occ_errors.append(f"occ quotes capped at {max_requests} requests")
-                break
-            used_requests += 1
-            resp, req_err = _tradier_get(
-                "/markets/quotes",
-                {"symbols": ",".join(batch), "greeks": "true"},
-            )
-            if req_err and resp is None:
-                occ_errors.append(req_err)
-                continue
-            if resp is None or not resp.ok:
-                occ_errors.append(f"occ quotes HTTP {getattr(resp, 'status_code', '?')}")
-                continue
-            payload = resp.json() or {}
-            quotes = ((payload.get("quotes") or {}).get("quote")) or []
-            if isinstance(quotes, dict):
-                quotes = [quotes]
-            for q in quotes:
-                occ = _canon_option_ticker(q.get("symbol") or q.get("option_symbol"))
-                meta = occ_meta.get(occ)
-                if not meta:
-                    continue
-                greeks = q.get("greeks") or {}
-                iv = _pick_iv(
-                    [
-                        greeks.get("mid_iv"),
-                        greeks.get("smv_vol"),
-                        greeks.get("bid_iv"),
-                        greeks.get("ask_iv"),
-                        greeks.get("iv"),
-                        q.get("implied_volatility"),
-                        q.get("iv"),
-                    ]
-                )
-                mid = _normalize_mid(
-                    q.get("bid"),
-                    q.get("ask"),
-                    q.get("mark"),
-                    q.get("last"),
-                    q.get("close"),
-                )
-                if iv is None and mid is None:
-                    continue
-                ctype = "put" if meta["put_call"] == "P" else "call"
-                row = {
-                    "ticker": occ,
-                    "expiration_date": meta["expiry"],
-                    "strike_price": meta["strike"],
-                    "contract_type": ctype,
-                    "mid": mid,
-                    "iv": iv,
-                    "delta": _safe_float(greeks.get("delta") or q.get("delta")),
-                    "source": "tradier_occ_quote",
-                }
-                sleeve = meta["sleeve"]
-                sym_payload = out["symbols"].get(sleeve)
-                if not isinstance(sym_payload, dict):
-                    sym_payload = {
-                        "spot": tradier_spot_map.get(sleeve),
-                        "options": [],
-                        "updated_at": build_time,
-                        "source": "tradier_occ_quote",
-                    }
-                    out["symbols"][sleeve] = sym_payload
-                prior_rows = sym_payload.get("options") if isinstance(sym_payload.get("options"), list) else []
-                sym_payload["options"] = _merge_option_rows(prior_rows, [row])
-                sym_payload["updated_at"] = build_time
-                src = str(sym_payload.get("source") or "")
-                if "occ_quote" not in src:
-                    sym_payload["source"] = f"{src}+occ_quote" if src else "tradier_occ_quote"
-                filled_occs.add(occ)
-
-        if occ_errors:
-            out.setdefault("errors", [])
-            out["errors"].append("; ".join(occ_errors[:3]))
-        _record_occ_stats(
-            requested=len(pending),
-            filled=len(filled_occs),
-            fetched_requests=used_requests,
-        )
-        print(
-            f"  YieldBOOST OCC supplement: requested={len(pending)} filled={len(filled_occs)} "
-            f"requests={used_requests}/{max_requests}"
-        )
-        if occ_errors:
-            print(f"  [WARN] OCC supplement errors: {occ_errors[0]}")
-
-    _supplement_yieldboost_occ_quotes()
+    if not yieldboost_targeted:
+        _supplement_yieldboost_occ_quotes(force_all_front=False)
 
     out["symbols_count"] = len(out["symbols"])
     out["polygon_requests_used"] = int(total_polygon_requests)
-    out["tradier_requests_used"] = int(total_tradier_requests)
+    out["tradier_requests_used"] = int(tradier_budget["used"])
+    out["tradier_requests_used_held"] = int(tradier_budget["held_used"])
+    out["tradier_requests_used_chain"] = int(tradier_budget["chain_used"])
     # Normalize/prune carried cache entries so stale null-only chains do not dominate.
     for sym, payload in list(out["symbols"].items()):
         if not isinstance(payload, dict):

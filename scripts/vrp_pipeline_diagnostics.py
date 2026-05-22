@@ -34,6 +34,8 @@ OPTIONS_CACHE_PATH = Path("data/options_cache.json")
 VRP_HEALTH_PATH = Path("data/vrp_health.json")
 MIN_IV_COVERAGE_WARN = 0.50
 MIN_IV_COVERAGE_FAIL = 0.80
+MIN_MID_COVERAGE_FAIL = 0.50
+MIN_OCC_FILL_RATIO = 0.80
 EVENT_VRP_ROW_KEYS = (
     "iv_base_proxy",
     "iv_full_proxy",
@@ -120,7 +122,9 @@ def run_diagnostics(
     fail_on_missing_yb_coverage: bool = False,
     fail_on_stale_event_calendar: bool = False,
     fail_on_low_iv_coverage: bool = False,
+    fail_on_low_mid_coverage: bool = False,
     min_iv_coverage_fail: float = MIN_IV_COVERAGE_FAIL,
+    min_mid_coverage_fail: float = MIN_MID_COVERAGE_FAIL,
 ) -> int:
     exit_code = 0
     spreads_payload = _load_json(spreads_path)
@@ -187,11 +191,11 @@ def run_diagnostics(
                 "YieldBOOST OCC backfill did not run; held weekly expiries may show missing IV."
             )
         occ_req = options_cache.get("yieldboost_occ_quotes_requested")
-        occ_fill = options_cache.get("yieldboost_occ_quotes_filled")
-        if isinstance(occ_req, int) and occ_req > 0 and (occ_fill or 0) < occ_req:
+        occ_fill = options_cache.get("yieldboost_occ_quotes_filled") or 0
+        if isinstance(occ_req, int) and occ_req > 0 and occ_fill / occ_req < MIN_OCC_FILL_RATIO:
             print(
-                f"WARN options_cache: OCC supplement partial ({occ_fill}/{occ_req} filled). "
-                "Check Market Hours yieldboost tick logs for Tradier errors or request caps."
+                f"WARN options_cache: OCC fill ratio {occ_fill}/{occ_req} below {MIN_OCC_FILL_RATIO:.0%}. "
+                "Check held-leg quote logs for unmatched OCC symbols."
             )
     if vrp_health:
         print(
@@ -200,6 +204,7 @@ def run_diagnostics(
                 "iv_coverage_front_pct": vrp_health.get("iv_coverage_front_pct"),
                 "stale_sleeves_count": len(vrp_health.get("stale_sleeves") or []),
                 "missing_chain_ybs": vrp_health.get("missing_chain_ybs"),
+                "front_leg_quote_coverage": vrp_health.get("front_leg_quote_coverage"),
                 "occ_supplement": vrp_health.get("occ_supplement"),
             },
         )
@@ -310,6 +315,23 @@ def run_diagnostics(
         elif coverage < MIN_IV_COVERAGE_WARN:
             print(f"WARN: {msg}")
 
+    mid_coverage = None
+    if vrp_health:
+        flc = vrp_health.get("front_leg_quote_coverage") or {}
+        mid_coverage = flc.get("spread_mid_pct")
+        if mid_coverage is None:
+            mid_coverage = flc.get("leg_mid_pct")
+    if mid_coverage is not None and mid_coverage < min_mid_coverage_fail:
+        msg = (
+            f"YieldBOOST spread mid coverage {mid_coverage:.1%} below {min_mid_coverage_fail:.0%} — "
+            "held-leg Tradier quotes may be IV-only without bid/ask mids."
+        )
+        if fail_on_low_mid_coverage:
+            print(f"FATAL: {msg}")
+            exit_code = 2
+        else:
+            print(f"WARN: {msg}")
+
     return exit_code
 
 
@@ -366,6 +388,11 @@ def main() -> int:
         help=f"Exit non-zero when IV row coverage is below {MIN_IV_COVERAGE_FAIL:.0%}",
     )
     parser.add_argument(
+        "--fail-on-low-mid-coverage",
+        action="store_true",
+        help=f"Exit non-zero when spread mid coverage is below {MIN_MID_COVERAGE_FAIL:.0%}",
+    )
+    parser.add_argument(
         "--min-iv-coverage-fail",
         type=float,
         default=MIN_IV_COVERAGE_FAIL,
@@ -384,6 +411,7 @@ def main() -> int:
         fail_on_missing_yb_coverage=args.fail_on_missing_yb_coverage,
         fail_on_stale_event_calendar=args.fail_on_stale_event_calendar,
         fail_on_low_iv_coverage=args.fail_on_low_iv_coverage,
+        fail_on_low_mid_coverage=args.fail_on_low_mid_coverage,
         min_iv_coverage_fail=args.min_iv_coverage_fail,
     )
 
