@@ -111,3 +111,24 @@ def test_validates_matching_vrp_and_spreads(tmp_path: Path):
         )
         == 0
     )
+
+
+def test_warns_when_event_calendar_stale(tmp_path: Path):
+    vrp = tmp_path / "vrp_live.json"
+    cal = tmp_path / "event_calendar_combined.json"
+    _write_json(
+        cal,
+        {
+            "build_time": "2020-01-01T00:00:00Z",
+            "item_count": 0,
+            "items": [],
+        },
+    )
+    _write_json(vrp, {"build_time": "2026-05-20T12:00:00Z", "rows": [], "row_count": 0})
+    rc = run_diagnostics(
+        spreads_path=tmp_path / "yieldboost_put_spreads_latest.json",
+        vrp_path=vrp,
+        event_calendar_path=cal,
+        fail_on_stale_event_calendar=True,
+    )
+    assert rc == 2

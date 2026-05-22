@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Single-task CI refresh orchestrator for market-hours.yml.
+"""CI refresh orchestrator for market-hours.yml.
 
-Picks at most one stale refresh per invocation, runs it, updates data/ci_state.json,
-and prints commit file paths for the workflow commit/deploy steps.
+During US RTH, runs intraday flow first when it exceeds ``intraday_rth`` cadence,
+then at most one other stale rotation task (borrow / options / yieldboost / nav).
+Off-hours: borrow only.
+
+Updates ``data/ci_state.json`` and prints commit file paths for deploy steps.
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ DEFAULT_CONFIG: dict = {
         "options": 15,
         "yieldboost": 15,
         "intraday": 15,
+        "intraday_rth": 5,
         "nav_forecast": 30,
     },
     "rth": {"utc_hours": list(range(13, 23)), "weekdays": [0, 1, 2, 3, 4]},
@@ -37,6 +41,9 @@ DEFAULT_CONFIG: dict = {
             "data/vrp_health.json",
             "data/yieldboost_put_spreads_latest.json",
             "data/yieldboost_options_target.json",
+            "data/event_calendar_known.json",
+            "data/event_calendar_inferred.json",
+            "data/event_calendar_combined.json",
         ],
         "yieldboost": [
             "data/options_cache.json",
@@ -44,6 +51,9 @@ DEFAULT_CONFIG: dict = {
             "data/vrp_health.json",
             "data/yieldboost_put_spreads_latest.json",
             "data/yieldboost_options_target.json",
+            "data/event_calendar_known.json",
+            "data/event_calendar_inferred.json",
+            "data/event_calendar_combined.json",
         ],
         "intraday": [
             "data/underlying_intraday_spot.json",
@@ -157,37 +167,60 @@ def is_rth(now: datetime, config: dict) -> bool:
     return now.weekday() in weekdays and now.hour in hours
 
 
-def is_stale(task: str, state: dict, config: dict, now: datetime) -> bool:
+def _cadence_minutes(task: str, config: dict, *, rth: bool = False) -> float:
     cadence_map = config.get("cadence_minutes") or {}
     if task == "nav":
-        cadence = cadence_map.get("nav_forecast", 30)
-        state_key = "nav"
-    else:
-        cadence = cadence_map.get(task, 30)
-        state_key = task
-    return minutes_since(state, state_key, now) >= float(cadence)
+        return float(cadence_map.get("nav_forecast", 30))
+    if task == "intraday" and rth:
+        return float(cadence_map.get("intraday_rth", cadence_map.get("intraday", 15)))
+    return float(cadence_map.get(task, 30))
 
 
-def pick_auto_task(state: dict, config: dict, now: datetime) -> str | None:
-    rth = is_rth(now, config)
+def is_stale(task: str, state: dict, config: dict, now: datetime, *, rth: bool = False) -> bool:
+    state_key = "nav" if task == "nav" else task
+    return minutes_since(state, state_key, now) >= _cadence_minutes(task, config, rth=rth)
+
+
+def _pick_rotation_secondary(state: dict, config: dict, now: datetime) -> str | None:
+    """One non-intraday stale task from the RTH rotation (borrow / options / YB / nav)."""
     rotation = list(config.get("rotation_rth") or ["borrow", "options", "yieldboost", "intraday"])
     slot = (int(now.timestamp()) // 900) % max(len(rotation), 1)
 
-    if rth:
-        # Nav forecast on alternating ticks when intraday slot and nav is stale.
-        if slot == 3 and is_stale("nav", state, config, now):
-            if int(now.timestamp()) // 1800 % 2 == 0:
-                return "nav"
-        order = [rotation[slot % len(rotation)]] + [t for i, t in enumerate(rotation) if i != slot % len(rotation)]
-        order += ["nav"]
-        for task in order:
-            if is_stale(task, state, config, now):
-                return task
-        return None
+    # Nav forecast on alternating ticks when the rotation lands on the intraday slot.
+    if slot == 3 and is_stale("nav", state, config, now):
+        if int(now.timestamp()) // 1800 % 2 == 0:
+            return "nav"
+
+    order = [rotation[slot % len(rotation)]] + [t for i, t in enumerate(rotation) if i != slot % len(rotation)]
+    order.append("nav")
+    for task in order:
+        if task == "intraday":
+            continue
+        if is_stale(task, state, config, now):
+            return task
+    return None
+
+
+def pick_auto_tasks(state: dict, config: dict, now: datetime) -> list[str]:
+    """Return ordered task list for this tick (intraday fast-lane first during RTH)."""
+    if is_rth(now, config):
+        tasks: list[str] = []
+        if is_stale("intraday", state, config, now, rth=True):
+            tasks.append("intraday")
+        secondary = _pick_rotation_secondary(state, config, now)
+        if secondary and secondary not in tasks:
+            tasks.append(secondary)
+        return tasks
 
     if is_stale("borrow", state, config, now):
-        return "borrow"
-    return None
+        return ["borrow"]
+    return []
+
+
+def pick_auto_task(state: dict, config: dict, now: datetime) -> str | None:
+    """Backward-compatible single-task picker (first auto task only)."""
+    tasks = pick_auto_tasks(state, config, now)
+    return tasks[0] if tasks else None
 
 
 def commit_paths(config: dict, task: str) -> list[str]:
@@ -238,14 +271,31 @@ def execute_task(task: str, config: dict) -> None:
         raise ValueError(f"Unknown task: {task}")
 
 
-def write_github_output(task: str, skipped: bool, files: list[str]) -> None:
+def write_github_output(tasks: list[str], skipped: bool, files: list[str]) -> None:
     out_path = os.environ.get("GITHUB_OUTPUT")
     if not out_path:
         return
+    primary = tasks[0] if tasks else "none"
     with open(out_path, "a", encoding="utf-8") as f:
-        f.write(f"task={task}\n")
+        f.write(f"task={primary}\n")
+        f.write(f"tasks={' '.join(tasks) if tasks else 'none'}\n")
         f.write(f"skipped={'true' if skipped else 'false'}\n")
         f.write(f"files={' '.join(files)}\n")
+
+
+def _task_is_stale(task: str, state: dict, config: dict, now: datetime) -> bool:
+    return is_stale(task, state, config, now, rth=is_rth(now, config) and task == "intraday")
+
+
+def _merge_commit_paths(config: dict, tasks: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for task in tasks:
+        for path in commit_paths(config, task):
+            if path not in seen:
+                seen.add(path)
+                out.append(path)
+    return out
 
 
 def main() -> int:
@@ -263,31 +313,33 @@ def main() -> int:
     now = datetime.now(UTC)
 
     if args.mode == "auto":
-        task = pick_auto_task(state, config, now)
+        tasks = pick_auto_tasks(state, config, now)
     else:
-        task = args.mode
+        tasks = [args.mode]
 
-    if task is None:
+    if not tasks:
         print("[ci_tick] No stale task; skipping")
-        write_github_output("none", True, [])
+        write_github_output([], True, [])
         return 0
 
     if not args.force and args.mode == "auto":
-        if not is_stale(task, state, config, now):
-            print(f"[ci_tick] Task {task} not stale; skipping")
-            write_github_output(task, True, [])
+        tasks = [t for t in tasks if _task_is_stale(t, state, config, now)]
+        if not tasks:
+            print("[ci_tick] All auto tasks fresh; skipping")
+            write_github_output([], True, [])
             return 0
 
-    print(f"[ci_tick] Running task={task}")
-    execute_task(task, config)
+    print(f"[ci_tick] Running task(s)={','.join(tasks)}")
+    for task in tasks:
+        execute_task(task, config)
+        state_key = "nav" if task == "nav" else task
+        state[f"last_{state_key}_utc"] = now.isoformat().replace("+00:00", "Z")
 
-    state_key = "nav" if task == "nav" else task
-    state[f"last_{state_key}_utc"] = now.isoformat().replace("+00:00", "Z")
     save_state(state)
 
-    files = commit_paths(config, task)
+    files = _merge_commit_paths(config, tasks)
     print(f"[ci_tick] Commit candidates: {' '.join(files) or '(none)'}")
-    write_github_output(task, False, files)
+    write_github_output(tasks, False, files)
     return 0
 
 

@@ -24,9 +24,19 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from build_data import YIELDBOOST_BUCKET2_PAIRS  # noqa: E402
+from event_vol import calendar_is_stale  # noqa: E402
 
 # YieldBOOST tickers without Granite option legs yet (document skips here).
 YIELDBOOST_COVERAGE_SKIP: set[str] = set()
+
+EVENT_CALENDAR_PATH = Path("data/event_calendar_combined.json")
+EVENT_VRP_ROW_KEYS = (
+    "iv_base_proxy",
+    "iv_full_proxy",
+    "rv_30d_2x_base",
+    "vrp_vol_2x_base",
+    "event_count_in_window",
+)
 
 VRP_REQUIRED_ROW_KEYS = (
     "yb_etf",
@@ -98,17 +108,22 @@ def run_diagnostics(
     *,
     spreads_path: Path,
     vrp_path: Path,
+    event_calendar_path: Path | None = None,
     require_vrp_file: bool = False,
     fail_on_missing_vrp_when_spreads: bool = False,
     fail_on_missing_yb_coverage: bool = False,
+    fail_on_stale_event_calendar: bool = False,
 ) -> int:
     exit_code = 0
     spreads_payload = _load_json(spreads_path)
     vrp_payload = _load_json(vrp_path)
+    calendar_path = event_calendar_path or EVENT_CALENDAR_PATH
+    event_calendar = _load_json(calendar_path)
     front = _front_spreads(spreads_payload)
 
     print(f"spreads_path: {spreads_path} exists={spreads_path.exists()}")
     print(f"vrp_path: {vrp_path} exists={vrp_path.exists()}")
+    print(f"event_calendar_path: {calendar_path} exists={calendar_path.exists()}")
     if spreads_payload:
         print(
             "spreads_summary:",
@@ -126,6 +141,19 @@ def run_diagnostics(
                 "build_time": vrp_payload.get("build_time"),
             },
         )
+    if event_calendar:
+        print(
+            "event_calendar_summary:",
+            {
+                "item_count": event_calendar.get("item_count"),
+                "build_time": event_calendar.get("build_time"),
+                "stale": calendar_is_stale(event_calendar),
+            },
+        )
+    elif calendar_path.exists():
+        print("WARN event_calendar: file exists but could not be parsed")
+    else:
+        print("WARN event_calendar: combined calendar missing")
 
     if spreads_payload:
         for issue in _validate_spreads_schema(spreads_payload):
@@ -142,6 +170,13 @@ def run_diagnostics(
         print(
             "FATAL: yieldboost_put_spreads has front spreads but vrp_live.json is missing. "
             "Run build_data.py (refresh_yieldboost_vrp_files) and commit data/vrp_live.json."
+        )
+        return 2
+
+    if fail_on_stale_event_calendar and calendar_is_stale(event_calendar):
+        print(
+            f"FATAL: event calendar stale or missing: {calendar_path}. "
+            "Run ingest_event_calendar.py and event_vol_decomposition.py."
         )
         return 2
 
@@ -186,6 +221,17 @@ def run_diagnostics(
                 "WARN: vrp_live.json has rows but no IV at held strikes - "
                 "options refresh may be stale or sharded away from YieldBOOST sleeves."
             )
+        event_rows = sum(
+            1
+            for r in rows
+            if isinstance(r, dict) and all(k in r for k in EVENT_VRP_ROW_KEYS)
+        )
+        print(f"vrp_event_field_coverage: {event_rows}/{len(rows)} rows with event-decomposed fields")
+        if rows and event_rows == 0:
+            print(
+                "WARN: vrp_live.json rows missing event-decomposed fields - "
+                "refresh_yieldboost_vrp_files may not be using event_calendar."
+            )
 
     return exit_code
 
@@ -203,6 +249,11 @@ def main() -> int:
         help="Path to vrp_live.json",
     )
     parser.add_argument(
+        "--event-calendar-path",
+        default=str(EVENT_CALENDAR_PATH),
+        help="Path to event_calendar_combined.json",
+    )
+    parser.add_argument(
         "--require-vrp-file",
         action="store_true",
         help="Exit non-zero when vrp_live.json is missing",
@@ -217,14 +268,21 @@ def main() -> int:
         action="store_true",
         help="Exit non-zero when a YieldBOOST ticker lacks a front spread (minus documented skips)",
     )
+    parser.add_argument(
+        "--fail-on-stale-event-calendar",
+        action="store_true",
+        help="Exit non-zero when event_calendar_combined.json is missing or older than 24h",
+    )
     args = parser.parse_args()
 
     return run_diagnostics(
         spreads_path=Path(args.spreads_path),
         vrp_path=Path(args.vrp_path),
+        event_calendar_path=Path(args.event_calendar_path),
         require_vrp_file=args.require_vrp_file,
         fail_on_missing_vrp_when_spreads=args.fail_on_missing_vrp_when_spreads,
         fail_on_missing_yb_coverage=args.fail_on_missing_yb_coverage,
+        fail_on_stale_event_calendar=args.fail_on_stale_event_calendar,
     )
 
 

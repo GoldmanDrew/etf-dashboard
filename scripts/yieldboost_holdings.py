@@ -141,14 +141,22 @@ def extract_rv_30d_annual(
     stats: dict | None,
     *,
     prefer: str = "etf",
+    vol_kind: str = "full",
 ) -> float | None:
     """
     Annualized ~30d realized vol from dashboard `realized_vol` or Yahoo window maps.
 
     Dashboard windows use `etf` / `underlying`; Yahoo builder windows use `vol_annual`.
+    ``vol_kind='base'`` prefers event-stripped ``vol_annual_base`` when present.
     """
     if not stats or not isinstance(stats, dict):
         return None
+
+    if vol_kind == "base":
+        for key in ("rv_30d_base", "vol_annual_base"):
+            v = _parse_float(stats.get(key))
+            if v is not None and v > 0:
+                return float(v)
 
     for key in ("rv_30d", "vol_annual"):
         v = _parse_float(stats.get(key))
@@ -157,12 +165,19 @@ def extract_rv_30d_annual(
 
     etf_keys = ("etf", "vol_annual", "etf_ewma", "etf_robust_ewma")
     und_keys = ("underlying", "vol_annual", "underlying_ewma", "underlying_robust_ewma")
+    if vol_kind == "base":
+        etf_keys = ("vol_annual_base", "etf_robust_ewma", "etf", "vol_annual")
+        und_keys = ("vol_annual_base", "underlying_robust_ewma", "underlying", "vol_annual")
     keys = etf_keys if prefer == "etf" else und_keys
 
     for window in RV_VRP_WINDOWS:
         win = stats.get(window)
         if not isinstance(win, dict):
             continue
+        if vol_kind == "base":
+            v = _parse_float(win.get("vol_annual_base"))
+            if v is not None and v > 0:
+                return float(v)
         for key in keys:
             v = _parse_float(win.get(key))
             if v is not None and v > 0:
@@ -174,6 +189,7 @@ def build_yieldboost_rv_map(
     *,
     realized_vol_by_symbol: dict[str, dict] | None = None,
     dashboard_records: list[dict] | None = None,
+    vol_kind: str = "full",
 ) -> dict[str, float]:
     """Symbol -> annualized ~30d RV for VRP panel (sleeves + underlyings)."""
     rv_map: dict[str, float] = {}
@@ -184,7 +200,7 @@ def build_yieldboost_rv_map(
         sym = str(rec.get("symbol") or "").upper().strip()
         if not sym:
             continue
-        v = extract_rv_30d_annual(rec.get("realized_vol"), prefer="etf")
+        v = extract_rv_30d_annual(rec.get("realized_vol"), prefer="etf", vol_kind=vol_kind)
         if v is not None:
             rv_map[sym] = v
 
@@ -192,11 +208,32 @@ def build_yieldboost_rv_map(
         ss = str(sym or "").upper().strip()
         if not ss or not isinstance(stats, dict):
             continue
-        v = extract_rv_30d_annual(stats, prefer="etf")
+        v = extract_rv_30d_annual(stats, prefer="etf", vol_kind=vol_kind)
         if v is not None:
             rv_map[ss] = v
 
     return rv_map
+
+
+def build_yieldboost_rv_maps(
+    *,
+    realized_vol_by_symbol: dict[str, dict] | None = None,
+    dashboard_records: list[dict] | None = None,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Full and event-stripped RV maps for VRP panel."""
+    full = build_yieldboost_rv_map(
+        realized_vol_by_symbol=realized_vol_by_symbol,
+        dashboard_records=dashboard_records,
+        vol_kind="full",
+    )
+    base = build_yieldboost_rv_map(
+        realized_vol_by_symbol=realized_vol_by_symbol,
+        dashboard_records=dashboard_records,
+        vol_kind="base",
+    )
+    for sym, val in full.items():
+        base.setdefault(sym, val)
+    return full, base
 
 
 def recompute_put_spread_front_flags(
@@ -712,6 +749,31 @@ def load_yieldboost_sleeve_symbols_from_spreads(
     return sorted(syms)
 
 
+def load_yieldboost_underlying_symbols_from_spreads(
+    spreads_path: Path | str | None = None,
+    *,
+    front_only: bool = True,
+) -> list[str]:
+    """Unique underlying tickers from YieldBOOST spreads (for mystery-event option chains)."""
+    path = Path(spreads_path) if spreads_path else Path("data/yieldboost_put_spreads_latest.json")
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    syms: set[str] = set()
+    for row in payload.get("spreads") or []:
+        if not isinstance(row, dict):
+            continue
+        if front_only and not row.get("is_front"):
+            continue
+        und = str(row.get("underlying") or "").strip().upper()
+        if und:
+            syms.add(und)
+    return sorted(syms)
+
+
 def held_strike_band(
     strikes: list[float],
     spot_value: float | None,
@@ -992,9 +1054,21 @@ def build_vrp_live_payload(
     options_cache: dict,
     *,
     rv_map: dict[str, float] | None = None,
+    rv_map_base: dict[str, float] | None = None,
+    event_calendar: dict[str, Any] | None = None,
+    as_of: date | None = None,
 ) -> dict[str, Any]:
     rv_map = rv_map or {}
+    rv_map_base = rv_map_base or rv_map
+    today = as_of or date.today()
     rows: list[dict[str, Any]] = []
+    event_mod = None
+    if event_calendar:
+        try:
+            from event_vol import enrich_vrp_row_with_events
+            event_mod = enrich_vrp_row_with_events
+        except ImportError:
+            event_mod = None
     for s in spreads:
         if not s.is_front:
             continue
@@ -1031,7 +1105,7 @@ def build_vrp_live_payload(
             if iv_spread_proxy is not None and rv_2x is not None
             else None
         )
-        rows.append({
+        row = {
             "yb_etf": s.yb_etf,
             "underlying": s.underlying,
             "option_root": s.option_root,
@@ -1054,7 +1128,16 @@ def build_vrp_live_payload(
             "holdings_as_of": s.holdings_as_of.isoformat(),
             "options_as_of": long_q.get("options_as_of") or short_q.get("options_as_of"),
             "days_to_exp": s.days_to_exp,
-        })
+        }
+        if event_mod is not None:
+            row = event_mod(
+                row,
+                calendar=event_calendar,
+                options_cache=options_cache,
+                rv_map_base=rv_map_base,
+                as_of=today,
+            )
+        rows.append(row)
     return {
         "build_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "rows": rows,

@@ -352,6 +352,11 @@ Every user-facing JSON under `data/` has a single producer workflow, a primary c
 | `options_cache.json` | `build_data.py --options-only` / `--yieldboost-vrp-only` | `ChartPage`, `Trade Lab`, `vrp_live.json` builder | `market-hours.yml` ~15 min rotation |
 | `yieldboost_put_spreads_latest.json` | `ingest_etf_metrics.py` + `build_data.py` (`refresh_yieldboost_vrp_files`) | Vol / VRP tab (fallback), `vrp_live.json` builder | daily metrics + each `build_data` / `--options-only` run |
 | `vrp_live.json` | `build_data.py` (`refresh_yieldboost_vrp_files`) | Vol / VRP tab (`index.html`) | each `build_data` / `--options-only` run; deployed via `build-and-deploy.yml` |
+| `vrp_health.json` | `build_data.py` (`refresh_yieldboost_vrp_files`) | Vol / VRP tab health panel | each VRP refresh |
+| `event_calendar_known.json` | `ingest_event_calendar.py` | `event_vol_decomposition.py`, VRP de-eventing | nightly + when stale (>24h) during VRP refresh |
+| `event_calendar_inferred.json` | `event_vol_decomposition.py` (mystery scanner) | combined calendar merge | each VRP refresh |
+| `event_calendar_combined.json` | `event_vol_decomposition.py` | `vrp_live.json` builder, `ls-algo/decay_distribution.py` | each VRP refresh |
+| `macro_event_calendar.json` | manual (FOMC/CPI dates) | combined calendar merge | manual |
 | `etf_metrics_daily.{parquet,csv,json}` | `ingest_etf_metrics.py` | Stats tab … | **`nightly.yml`** Tue–Sat 6 AM ET |
 | `etf_metrics_latest.json` | `ingest_etf_metrics.py` | Stats tab (snapshot panel) | **`nightly.yml`** |
 | `ci_state.json` | `scripts/ci_tick.py` | staleness gates for `market-hours.yml` | each market tick |
@@ -670,7 +675,7 @@ Five workflows + shared actions (`commit-data`, `deploy-pages`):
 | Workflow | Cadence | What it does |
 |---|---|---|
 | `nightly.yml` | Tue–Sat 6 AM ET | ETF metrics ingest + scoring + **full** `build_data.py` → one commit + deploy |
-| `market-hours.yml` | Every 15 min | `scripts/ci_tick.py` runs **one** stale task (borrow / options / YB VRP / intraday / NAV) → commit + deploy |
+| `market-hours.yml` | Every 15 min | `scripts/ci_tick.py` runs **intraday first** when stale (~5m RTH cadence), then one other stale rotation task (borrow / options / YB VRP / NAV) → commit + deploy |
 | `build-and-deploy.yml` | Mon–Fri 4:30 PM ET + code push + manual | Full `build_data.py` after ls-algo screener + deploy |
 | `update-corporate-actions.yml` | Every 6 h | News / corp actions → commit + deploy |
 | `deploy-pages-data.yml` | Hourly | Safety-net Pages deploy (no rebuild) |

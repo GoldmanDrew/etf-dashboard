@@ -123,6 +123,7 @@ YIELDBOOST_PUT_SPREADS_FILE = OUTPUT_DIR / "yieldboost_put_spreads_latest.json"
 YIELDBOOST_OPTIONS_TARGET_FILE = OUTPUT_DIR / "yieldboost_options_target.json"
 VRP_LIVE_FILE = OUTPUT_DIR / "vrp_live.json"
 VRP_HEALTH_FILE = OUTPUT_DIR / "vrp_health.json"
+EVENT_CALENDAR_COMBINED_FILE = OUTPUT_DIR / "event_calendar_combined.json"
 LS_ALGO_DATA_PATH = Path(
     os.environ.get(
         "LS_ALGO_DATA_PATH",
@@ -2404,14 +2405,20 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
 
 
 def get_polygon_force_symbols() -> list[str]:
-    """Env POLYGON_FORCE_SYMBOLS plus YieldBOOST sleeves from spreads JSON."""
-    from yieldboost_holdings import load_yieldboost_force_symbols_from_spreads
+    """Env POLYGON_FORCE_SYMBOLS plus YieldBOOST sleeves and underlyings from spreads."""
+    from yieldboost_holdings import (
+        load_yieldboost_force_symbols_from_spreads,
+        load_yieldboost_underlying_symbols_from_spreads,
+    )
 
     seen: set[str] = set()
     ordered: list[str] = []
-    for s in POLYGON_FORCE_SYMBOLS_RAW + load_yieldboost_force_symbols_from_spreads(
+    yb_symbols = load_yieldboost_force_symbols_from_spreads(YIELDBOOST_PUT_SPREADS_FILE)
+    yb_symbols += load_yieldboost_underlying_symbols_from_spreads(
         YIELDBOOST_PUT_SPREADS_FILE,
-    ):
+        front_only=True,
+    )
+    for s in POLYGON_FORCE_SYMBOLS_RAW + yb_symbols:
         ss = norm_sym(s)
         if ss and ss not in seen:
             seen.add(ss)
@@ -2470,7 +2477,7 @@ def refresh_yieldboost_vrp_files(
         build_vrp_health_payload,
         build_vrp_live_payload,
         build_yieldboost_options_target,
-        build_yieldboost_rv_map,
+        build_yieldboost_rv_maps,
         load_holdings_latest_dataframe,
         load_sleeve_by_yb_from_screener,
         load_underlying_map_from_screener,
@@ -2480,6 +2487,19 @@ def refresh_yieldboost_vrp_files(
         spreads_json_to_put_spread_legs,
         write_json,
     )
+
+    event_calendar: dict = {}
+    try:
+        from event_vol_decomposition import refresh_event_pipeline
+        ev_meta = refresh_event_pipeline(write=True)
+        event_calendar = ev_meta.get("combined") or {}
+    except Exception as exc:
+        print(f"  [WARN] Event calendar refresh failed: {exc}")
+        if EVENT_CALENDAR_COMBINED_FILE.exists():
+            try:
+                event_calendar = json.loads(EVENT_CALENDAR_COMBINED_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                event_calendar = {}
 
     screener_csv = OUTPUT_DIR / "etf_screened_today.csv"
     underlying_map = load_underlying_map_from_screener(screener_csv)
@@ -2518,11 +2538,17 @@ def refresh_yieldboost_vrp_files(
         spreads = recompute_put_spread_front_flags(spreads)
         write_json(YIELDBOOST_OPTIONS_TARGET_FILE, build_yieldboost_options_target(spreads))
 
-    rv_map = build_yieldboost_rv_map(
+    rv_map, rv_map_base = build_yieldboost_rv_maps(
         realized_vol_by_symbol=realized_vol_map,
         dashboard_records=load_dashboard_records_for_rv(),
     )
-    vrp_payload = build_vrp_live_payload(spreads, options_cache, rv_map=rv_map)
+    vrp_payload = build_vrp_live_payload(
+        spreads,
+        options_cache,
+        rv_map=rv_map,
+        rv_map_base=rv_map_base,
+        event_calendar=event_calendar,
+    )
     write_json(VRP_LIVE_FILE, vrp_payload)
     health_payload = build_vrp_health_payload(
         spreads_payload,
@@ -2545,6 +2571,7 @@ def _compute_vol_stats_from_closes(closes: list[float]) -> dict:
     if len(closes) < 3:
         return {
             "vol_annual": None,
+            "vol_annual_base": None,
             "ewma_vol_annual": None,
             "robust_ewma_vol_annual": None,
             "robust_event_flag": False,
@@ -2555,6 +2582,7 @@ def _compute_vol_stats_from_closes(closes: list[float]) -> dict:
     if not np.all(np.isfinite(arr)) or np.any(arr <= 0):
         return {
             "vol_annual": None,
+            "vol_annual_base": None,
             "ewma_vol_annual": None,
             "robust_ewma_vol_annual": None,
             "robust_event_flag": False,
@@ -2605,6 +2633,7 @@ def _compute_vol_stats_from_closes(closes: list[float]) -> dict:
 
     return {
         "vol_annual": round(vol, 6),
+        "vol_annual_base": round(robust_ewma_vol, 6) if robust_ewma_vol is not None else round(vol, 6),
         "ewma_vol_annual": round(ewma_vol, 6),
         "robust_ewma_vol_annual": round(robust_ewma_vol, 6) if robust_ewma_vol is not None else None,
         "robust_event_flag": robust_event_flag,
@@ -2687,6 +2716,7 @@ def _build_market_windows(
 
         results[window] = {
             "vol_annual": stats["vol_annual"],
+            "vol_annual_base": stats.get("vol_annual_base"),
             "ewma_vol_annual": stats["ewma_vol_annual"],
             "robust_ewma_vol_annual": stats["robust_ewma_vol_annual"],
             "robust_event_flag": stats["robust_event_flag"],
@@ -3291,15 +3321,21 @@ def refresh_yieldboost_vrp_only() -> None:
             write_json(YIELDBOOST_PUT_SPREADS_FILE, spreads_payload)
         write_json(YIELDBOOST_OPTIONS_TARGET_FILE, build_yieldboost_options_target(spreads))
 
+    from yieldboost_holdings import load_yieldboost_underlying_symbols_from_spreads
+
     sleeves = load_yieldboost_sleeve_symbols(front_only=True)
+    underlyings = load_yieldboost_underlying_symbols_from_spreads(
+        YIELDBOOST_PUT_SPREADS_FILE,
+        front_only=True,
+    )
     if not sleeves:
         sleeves = sorted(
             norm_sym(s)
             for s in load_yieldboost_option_symbols()
             if s not in {norm_sym(yb) for yb, _ in YIELDBOOST_BUCKET2_PAIRS}
         )
-    if not sleeves:
-        print("[WARN] No YieldBOOST sleeve symbols found; writing VRP from cached spreads only.")
+    if not sleeves and not underlyings:
+        print("[WARN] No YieldBOOST sleeve/underlying symbols found; writing VRP from cached spreads only.")
 
     prior_cache: dict = {}
     if OPTIONS_CACHE_FILE.exists():
@@ -3308,7 +3344,13 @@ def refresh_yieldboost_vrp_only() -> None:
         except Exception:
             prior_cache = {}
 
-    refresh_list = list(sleeves) if sleeves else []
+    refresh_list: list[str] = []
+    seen_refresh: set[str] = set()
+    for sym in sleeves + underlyings:
+        ss = norm_sym(sym)
+        if ss and ss not in seen_refresh:
+            seen_refresh.add(ss)
+            refresh_list.append(ss)
     options_cache = prior_cache
     if refresh_list:
         options_cache = build_polygon_options_cache(refresh_list, yieldboost_targeted=True)

@@ -27,6 +27,7 @@ from yieldboost_holdings import (  # noqa: E402
     load_sleeve_by_yb_from_screener,
     load_yieldboost_target_strikes_by_sleeve,
     load_yieldboost_sleeve_symbols_from_spreads,
+    load_yieldboost_underlying_symbols_from_spreads,
     normalize_holdings_dataframe,
     pair_put_spreads_from_holdings,
     parse_granite_option_description,
@@ -274,6 +275,16 @@ def test_load_yieldboost_sleeve_symbols_from_spreads_sleeves_only():
     assert "MTYY" not in sleeves
     assert "MSTR" not in sleeves
     assert len(sleeves) <= 32
+
+
+def test_load_yieldboost_underlying_symbols_from_spreads():
+    spreads = Path(__file__).resolve().parents[1] / "data" / "yieldboost_put_spreads_latest.json"
+    if not spreads.exists():
+        pytest.skip("spreads file missing")
+    underlyings = load_yieldboost_underlying_symbols_from_spreads(spreads, front_only=True)
+    assert "MSTR" in underlyings
+    assert "MSTU" not in underlyings
+    assert len(underlyings) <= 32
 
 
 def test_held_strike_band_includes_itm_puts():

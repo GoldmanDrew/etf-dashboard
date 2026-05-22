@@ -115,6 +115,10 @@ jobs:
         continue-on-error: true
         run: python scripts/backtest_intraday_remaining.py
 
+      - name: Ingest event calendar
+        continue-on-error: true
+        run: python scripts/ingest_event_calendar.py
+
       - name: Full dashboard build
         id: build_data
         continue-on-error: true
@@ -180,6 +184,9 @@ jobs:
             data/vrp_live.json
             data/vrp_health.json
             data/yieldboost_options_target.json
+            data/event_calendar_known.json
+            data/event_calendar_inferred.json
+            data/event_calendar_combined.json
             data/ci_state.json
           commit_message: "chore: nightly metrics and full build"
 
