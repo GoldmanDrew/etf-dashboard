@@ -310,6 +310,79 @@ def format_occ_ticker(root: str, expiry: date, put_call: str, strike: float) -> 
     return f"{root.upper()}{yy:02d}{expiry.month:02d}{expiry.day:02d}{put_call.upper()}{strike8:08d}"
 
 
+def load_yieldboost_front_contracts(
+    target_path: Path | str | None = None,
+    *,
+    front_only: bool = True,
+) -> list[dict[str, Any]]:
+    """Held Granite contracts for targeted OCC quote refresh."""
+    path = Path(target_path) if target_path else Path("data/yieldboost_options_target.json")
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for row in payload.get("contracts") or []:
+        if not isinstance(row, dict):
+            continue
+        if front_only and not row.get("is_front"):
+            continue
+        out.append(dict(row))
+    return out
+
+
+def load_yieldboost_held_expiries_by_sleeve(
+    target_path: Path | str | None = None,
+    *,
+    front_only: bool = True,
+) -> dict[str, set[str]]:
+    """Expiry dates that must survive chain expiry filters (per 2x sleeve)."""
+    by_sleeve: dict[str, set[str]] = {}
+    for row in load_yieldboost_front_contracts(target_path, front_only=front_only):
+        sleeve = str(row.get("sleeve") or "").upper()
+        expiry = str(row.get("expiry") or "").strip()
+        if sleeve and expiry:
+            by_sleeve.setdefault(sleeve, set()).add(expiry)
+    return by_sleeve
+
+
+def held_contract_needs_occ_quote(
+    rows: Iterable[dict],
+    *,
+    expiry: date,
+    strike: float,
+    put_call: str = "P",
+) -> bool:
+    """True when the held leg is missing or has no IV/mid in cached chain rows."""
+    expiry_s = expiry.isoformat()
+    target_type = "put" if str(put_call or "P").upper() == "P" else "call"
+    best = None
+    best_dist = None
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("expiration_date")) != expiry_s:
+            continue
+        if str(r.get("contract_type") or "").lower() != target_type:
+            continue
+        cstrike = _parse_float(r.get("strike_price"))
+        if cstrike is None:
+            continue
+        dist = abs(cstrike - float(strike))
+        if best is None or dist < best_dist:
+            best = r
+            best_dist = dist
+    if best is None or best_dist is None or best_dist >= 0.05:
+        return True
+    if _norm_iv(best.get("iv")) is not None:
+        return False
+    if _parse_float(best.get("mid")) is not None:
+        return False
+    return True
+
+
 def fetch_granite_holdings_xls(
     ticker: str,
     session,

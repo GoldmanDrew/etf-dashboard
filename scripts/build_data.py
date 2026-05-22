@@ -86,6 +86,7 @@ TRADIER_MAX_REQUESTS_PER_MINUTE = int(os.environ.get("TRADIER_MAX_REQUESTS_PER_M
 TRADIER_MAX_TOTAL_REQUESTS = int(os.environ.get("TRADIER_MAX_TOTAL_REQUESTS", "140"))
 TRADIER_OPTION_QUOTES_MAX_REQUESTS = int(os.environ.get("TRADIER_OPTION_QUOTES_MAX_REQUESTS", "12"))
 TRADIER_OPTION_QUOTES_BATCH_SIZE = int(os.environ.get("TRADIER_OPTION_QUOTES_BATCH_SIZE", "75"))
+YIELDBOOST_OCC_QUOTES_MAX_REQUESTS = int(os.environ.get("YIELDBOOST_OCC_QUOTES_MAX_REQUESTS", "12"))
 TRADIER_CHAIN_MAX_EXPIRIES = int(os.environ.get("TRADIER_CHAIN_MAX_EXPIRIES", "8"))
 TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL = int(os.environ.get("TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL", "320"))
 TRADIER_CHAIN_STRIKE_BAND_PCT = float(os.environ.get("TRADIER_CHAIN_STRIKE_BAND_PCT", "0.50"))
@@ -1176,9 +1177,14 @@ def build_polygon_options_cache(
     Build delayed options snapshot cache from Polygon for UI consumption.
     Returns a JSON-serializable dict with per-symbol spot + option rows.
     """
-    from yieldboost_holdings import held_strike_band, load_yieldboost_target_strikes_by_sleeve
+    from yieldboost_holdings import (
+        held_strike_band,
+        load_yieldboost_held_expiries_by_sleeve,
+        load_yieldboost_target_strikes_by_sleeve,
+    )
 
     target_strikes_by_sleeve = load_yieldboost_target_strikes_by_sleeve(YIELDBOOST_OPTIONS_TARGET_FILE)
+    held_expiries_by_sleeve = load_yieldboost_held_expiries_by_sleeve(YIELDBOOST_OPTIONS_TARGET_FILE)
 
     prior_cache = {}
     if OPTIONS_CACHE_FILE.exists():
@@ -1544,6 +1550,8 @@ def build_polygon_options_cache(
         )
         if POLYGON_CHAIN_MAX_EXPIRIES > 0 and expiries:
             allowed_exp = set(expiries[:POLYGON_CHAIN_MAX_EXPIRIES])
+            for exp in held_expiries_by_sleeve.get(norm_sym(sym), set()):
+                allowed_exp.add(str(exp))
             rows = [r for r in rows if str(r.get("expiration_date")) in allowed_exp]
 
         if spot_value is not None and spot_value > 0:
@@ -2138,6 +2146,141 @@ def build_polygon_options_cache(
             if prior_sym:
                 out["symbols"][sym] = prior_sym
             continue
+
+    def _supplement_yieldboost_occ_quotes() -> None:
+        """Fetch Tradier OCC quotes for held front legs missing from chain snapshots."""
+        if not TRADIER_TOKEN:
+            return
+        from yieldboost_holdings import (
+            format_occ_ticker,
+            held_contract_needs_occ_quote,
+            load_yieldboost_front_contracts,
+        )
+
+        contracts = load_yieldboost_front_contracts(YIELDBOOST_OPTIONS_TARGET_FILE)
+        if not contracts:
+            return
+
+        pending: list[dict] = []
+        for c in contracts:
+            sleeve = norm_sym(c.get("sleeve"))
+            expiry = c.get("expiry")
+            strike = _safe_float(c.get("strike"))
+            put_call = str(c.get("put_call") or "P").upper()
+            if not sleeve or strike is None or not expiry:
+                continue
+            try:
+                expiry_date = dt.date.fromisoformat(str(expiry))
+            except ValueError:
+                continue
+            sym_payload = out["symbols"].get(sleeve) if isinstance(out["symbols"].get(sleeve), dict) else {}
+            rows = sym_payload.get("options") if isinstance(sym_payload, dict) else []
+            if not isinstance(rows, list):
+                rows = []
+            if not held_contract_needs_occ_quote(
+                rows, expiry=expiry_date, strike=float(strike), put_call=put_call,
+            ):
+                continue
+            occ = format_occ_ticker(sleeve, expiry_date, put_call, float(strike))
+            pending.append({
+                "sleeve": sleeve,
+                "expiry": expiry_date.isoformat(),
+                "strike": float(strike),
+                "put_call": put_call,
+                "occ": occ,
+            })
+
+        if not pending:
+            return
+
+        occ_meta = {p["occ"]: p for p in pending}
+        max_requests = (
+            YIELDBOOST_OCC_QUOTES_MAX_REQUESTS
+            if yieldboost_targeted
+            else max(1, min(YIELDBOOST_OCC_QUOTES_MAX_REQUESTS, TRADIER_OPTION_QUOTES_MAX_REQUESTS))
+        )
+        used_requests = 0
+        occ_errors: list[str] = []
+        for batch in _chunked(sorted(occ_meta.keys()), TRADIER_OPTION_QUOTES_BATCH_SIZE):
+            if used_requests >= max_requests:
+                occ_errors.append(f"occ quotes capped at {max_requests} requests")
+                break
+            used_requests += 1
+            resp, req_err = _tradier_get(
+                "/markets/quotes",
+                {"symbols": ",".join(batch), "greeks": "true"},
+            )
+            if req_err and resp is None:
+                occ_errors.append(req_err)
+                continue
+            if resp is None or not resp.ok:
+                occ_errors.append(f"occ quotes HTTP {getattr(resp, 'status_code', '?')}")
+                continue
+            payload = resp.json() or {}
+            quotes = ((payload.get("quotes") or {}).get("quote")) or []
+            if isinstance(quotes, dict):
+                quotes = [quotes]
+            for q in quotes:
+                occ = _canon_option_ticker(q.get("symbol") or q.get("option_symbol"))
+                meta = occ_meta.get(occ)
+                if not meta:
+                    continue
+                greeks = q.get("greeks") or {}
+                iv = _pick_iv(
+                    [
+                        greeks.get("mid_iv"),
+                        greeks.get("smv_vol"),
+                        greeks.get("bid_iv"),
+                        greeks.get("ask_iv"),
+                        greeks.get("iv"),
+                        q.get("implied_volatility"),
+                        q.get("iv"),
+                    ]
+                )
+                mid = _normalize_mid(
+                    q.get("bid"),
+                    q.get("ask"),
+                    q.get("mark"),
+                    q.get("last"),
+                    q.get("close"),
+                )
+                if iv is None and mid is None:
+                    continue
+                ctype = "put" if meta["put_call"] == "P" else "call"
+                row = {
+                    "ticker": occ,
+                    "expiration_date": meta["expiry"],
+                    "strike_price": meta["strike"],
+                    "contract_type": ctype,
+                    "mid": mid,
+                    "iv": iv,
+                    "delta": _safe_float(greeks.get("delta") or q.get("delta")),
+                    "source": "tradier_occ_quote",
+                }
+                sleeve = meta["sleeve"]
+                sym_payload = out["symbols"].get(sleeve)
+                if not isinstance(sym_payload, dict):
+                    sym_payload = {
+                        "spot": tradier_spot_map.get(sleeve),
+                        "options": [],
+                        "updated_at": build_time,
+                        "source": "tradier_occ_quote",
+                    }
+                    out["symbols"][sleeve] = sym_payload
+                prior_rows = sym_payload.get("options") if isinstance(sym_payload.get("options"), list) else []
+                sym_payload["options"] = _merge_option_rows(prior_rows, [row])
+                sym_payload["updated_at"] = build_time
+                src = str(sym_payload.get("source") or "")
+                if "occ_quote" not in src:
+                    sym_payload["source"] = f"{src}+occ_quote" if src else "tradier_occ_quote"
+
+        if occ_errors:
+            out.setdefault("errors", [])
+            out["errors"].append("; ".join(occ_errors[:3]))
+        out["yieldboost_occ_quotes_requested"] = int(len(pending))
+        out["yieldboost_occ_quotes_fetched_requests"] = int(used_requests)
+
+    _supplement_yieldboost_occ_quotes()
 
     out["symbols_count"] = len(out["symbols"])
     out["polygon_requests_used"] = int(total_polygon_requests)

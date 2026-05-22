@@ -18,6 +18,9 @@ from yieldboost_holdings import (  # noqa: E402
     build_yieldboost_rv_map,
     extract_rv_30d_annual,
     format_occ_ticker,
+    held_contract_needs_occ_quote,
+    load_yieldboost_front_contracts,
+    load_yieldboost_held_expiries_by_sleeve,
     granite_xls_rows_to_holdings,
     held_strike_band,
     infer_etf_ticker_from_source_url,
@@ -298,6 +301,50 @@ def test_load_sleeve_by_yb_from_screener_unique_underlyings():
     assert mapping.get("HMYY") == "HIMZ"
     assert mapping.get("YSPY") == "SPXL"
     assert "AMYY" not in mapping  # AMD has multiple letfs; root picks AMDL
+
+
+def test_format_occ_ticker_amzz():
+    occ = format_occ_ticker("AMZZ", date(2026, 5, 22), "P", 34.86)
+    assert occ == "AMZZ260522P00034860"
+
+
+def test_held_contract_needs_occ_quote_when_expiry_missing():
+    rows = [
+        {
+            "expiration_date": "2026-06-18",
+            "contract_type": "put",
+            "strike_price": 35.0,
+            "iv": 0.5,
+            "mid": 1.0,
+        },
+    ]
+    assert held_contract_needs_occ_quote(
+        rows, expiry=date(2026, 5, 22), strike=34.86, put_call="P",
+    )
+
+
+def test_held_contract_needs_occ_quote_false_when_iv_present():
+    rows = [
+        {
+            "expiration_date": "2026-05-22",
+            "contract_type": "put",
+            "strike_price": 34.86,
+            "iv": 0.82,
+            "mid": 0.15,
+        },
+    ]
+    assert not held_contract_needs_occ_quote(
+        rows, expiry=date(2026, 5, 22), strike=34.86, put_call="P",
+    )
+
+
+def test_load_yieldboost_held_expiries_by_sleeve():
+    target = Path(__file__).resolve().parents[1] / "data" / "yieldboost_options_target.json"
+    if not target.exists():
+        pytest.skip("target file missing")
+    by_sleeve = load_yieldboost_held_expiries_by_sleeve(target, front_only=True)
+    assert "AMZZ" in by_sleeve
+    assert "2026-05-22" in by_sleeve["AMZZ"]
 
 
 def test_format_occ_ticker():
