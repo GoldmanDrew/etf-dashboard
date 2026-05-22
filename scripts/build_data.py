@@ -2276,11 +2276,14 @@ def get_polygon_force_symbols() -> list[str]:
     return ordered
 
 
-def load_yieldboost_sleeve_symbols() -> list[str]:
-    """2x sleeve tickers from spreads file (for targeted YB refresh)."""
-    syms = sorted(load_yieldboost_force_symbols_from_spreads(YIELDBOOST_PUT_SPREADS_FILE))
-    # Prefer sleeve over yb_etf/underlying when both present — keep all unique.
-    return syms
+def load_yieldboost_sleeve_symbols(*, front_only: bool = True) -> list[str]:
+    """Unique 2x sleeve tickers from spreads file (for targeted YB options refresh)."""
+    from yieldboost_holdings import load_yieldboost_sleeve_symbols_from_spreads
+
+    return load_yieldboost_sleeve_symbols_from_spreads(
+        YIELDBOOST_PUT_SPREADS_FILE,
+        front_only=front_only,
+    )
 
 
 def load_yieldboost_force_symbols_from_spreads(path: Path) -> list[str]:
@@ -3105,12 +3108,47 @@ def refresh_yieldboost_vrp_only() -> None:
             f"Cannot run --yieldboost-vrp-only because {OUTPUT_FILE} does not exist. Run full build first."
         )
 
-    sleeves = load_yieldboost_sleeve_symbols()
+    from yieldboost_holdings import (
+        build_put_spreads_payload,
+        build_yieldboost_options_target,
+        load_holdings_latest_dataframe,
+        load_sleeve_by_yb_from_screener,
+        load_underlying_map_from_screener,
+        pair_put_spreads_from_holdings,
+        write_json,
+    )
+
+    screener_csv = OUTPUT_DIR / "etf_screened_today.csv"
+    underlying_map = load_underlying_map_from_screener(screener_csv)
+    if not underlying_map:
+        for yb, und in YIELDBOOST_BUCKET2_PAIRS:
+            underlying_map[yb] = und
+    sleeve_by_yb = load_sleeve_by_yb_from_screener(screener_csv)
+
+    hdf = load_holdings_latest_dataframe(
+        csv_path=ETF_HOLDINGS_LATEST_FILE,
+        parquet_path=OUTPUT_DIR / "etf_holdings_daily.parquet",
+    )
+    spreads = pair_put_spreads_from_holdings(
+        hdf, underlying_by_etf=underlying_map, sleeve_by_yb=sleeve_by_yb,
+    )
+    if spreads:
+        spreads_payload = build_put_spreads_payload(
+            hdf, underlying_by_etf=underlying_map, sleeve_by_yb=sleeve_by_yb,
+        )
+        if spreads_payload.get("spreads"):
+            write_json(YIELDBOOST_PUT_SPREADS_FILE, spreads_payload)
+        write_json(YIELDBOOST_OPTIONS_TARGET_FILE, build_yieldboost_options_target(spreads))
+
+    sleeves = load_yieldboost_sleeve_symbols(front_only=True)
     if not sleeves:
-        sleeves = sorted(norm_sym(s) for s in load_yieldboost_option_symbols())
+        sleeves = sorted(
+            norm_sym(s)
+            for s in load_yieldboost_option_symbols()
+            if s not in {norm_sym(yb) for yb, _ in YIELDBOOST_BUCKET2_PAIRS}
+        )
     if not sleeves:
         print("[WARN] No YieldBOOST sleeve symbols found; writing VRP from cached spreads only.")
-        sleeves = []
 
     prior_cache: dict = {}
     if OPTIONS_CACHE_FILE.exists():

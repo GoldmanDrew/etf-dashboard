@@ -500,6 +500,8 @@ def spreads_json_to_put_spread_legs(
 
 def load_yieldboost_target_strikes_by_sleeve(
     target_path: Path | str | None = None,
+    *,
+    front_only: bool = True,
 ) -> dict[str, list[float]]:
     """Held put/call strikes per 2x sleeve from yieldboost_options_target.json."""
     path = Path(target_path) if target_path else Path("data/yieldboost_options_target.json")
@@ -513,11 +515,43 @@ def load_yieldboost_target_strikes_by_sleeve(
     for row in payload.get("contracts") or []:
         if not isinstance(row, dict):
             continue
+        if front_only and not row.get("is_front"):
+            continue
         sleeve = str(row.get("sleeve") or "").upper()
         strike = _parse_float(row.get("strike"))
         if sleeve and strike is not None:
             by_sleeve.setdefault(sleeve, set()).add(float(strike))
     return {k: sorted(v) for k, v in by_sleeve.items()}
+
+
+def load_yieldboost_sleeve_symbols_from_spreads(
+    spreads_path: Path | str | None = None,
+    *,
+    front_only: bool = True,
+    screener_csv: Path | str | None = None,
+) -> list[str]:
+    """Unique 2x sleeve tickers to fetch options for (not YB ETF / underlying symbols)."""
+    path = Path(spreads_path) if spreads_path else Path("data/yieldboost_put_spreads_latest.json")
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    sleeve_by_yb = load_sleeve_by_yb_from_screener(screener_csv)
+    syms: set[str] = set()
+    for row in payload.get("spreads") or []:
+        if not isinstance(row, dict):
+            continue
+        if front_only and not row.get("is_front"):
+            continue
+        yb = str(row.get("yb_etf") or "").strip().upper()
+        und = str(row.get("underlying") or "").strip().upper() or None
+        root = str(row.get("option_root") or "").strip().upper()
+        sleeve = resolve_sleeve_ticker(root, und, yb_etf=yb, sleeve_by_yb=sleeve_by_yb)
+        if sleeve:
+            syms.add(sleeve)
+    return sorted(syms)
 
 
 def held_strike_band(
@@ -537,8 +571,9 @@ def load_yieldboost_force_symbols_from_spreads(
     spreads_path: Path | None = None,
     *,
     screener_csv: Path | str | None = None,
+    include_underlying_yb: bool = False,
 ) -> list[str]:
-    """Sleeve + underlying symbols to force-refresh in options shard runs."""
+    """Symbols to force-refresh in options shard runs (default: 2x sleeves only)."""
     path = spreads_path or Path("data/yieldboost_put_spreads_latest.json")
     if not path.exists():
         return []
@@ -555,9 +590,12 @@ def load_yieldboost_force_symbols_from_spreads(
         und = str(row.get("underlying") or "").strip().upper() or None
         root = str(row.get("option_root") or "").strip().upper()
         sleeve = resolve_sleeve_ticker(root, und, yb_etf=yb, sleeve_by_yb=sleeve_by_yb)
-        for sym in (sleeve, und, yb):
-            if sym:
-                syms.add(sym)
+        if sleeve:
+            syms.add(sleeve)
+        if include_underlying_yb:
+            for sym in (und, yb):
+                if sym:
+                    syms.add(sym)
     return sorted(syms)
 
 
@@ -714,13 +752,17 @@ def pair_put_spreads_from_holdings(
     if not spreads:
         return []
 
-    future = [s for s in spreads if s.expiry >= today]
-    if future:
-        front_expiry = min(s.expiry for s in future)
-    else:
-        front_expiry = max(s.expiry for s in spreads)
+    by_etf: dict[str, list[PutSpreadLeg]] = {}
     for s in spreads:
-        s.is_front = s.expiry == front_expiry
+        by_etf.setdefault(s.yb_etf, []).append(s)
+    for legs in by_etf.values():
+        future = [s for s in legs if s.expiry >= today]
+        if future:
+            front_expiry = min(s.expiry for s in future)
+        else:
+            front_expiry = max(s.expiry for s in legs)
+        for s in legs:
+            s.is_front = s.expiry == front_expiry
     return spreads
 
 

@@ -20,6 +20,7 @@ from yieldboost_holdings import (  # noqa: E402
     infer_etf_ticker_from_source_url,
     load_sleeve_by_yb_from_screener,
     load_yieldboost_target_strikes_by_sleeve,
+    load_yieldboost_sleeve_symbols_from_spreads,
     normalize_holdings_dataframe,
     pair_put_spreads_from_holdings,
     parse_granite_option_description,
@@ -88,6 +89,65 @@ def test_resolve_sleeve_ticker():
 )
 def test_resolve_sleeve_ticker_all_yieldboost_roots(root, underlying, yb_etf, expected):
     assert resolve_sleeve_ticker(root, underlying, yb_etf=yb_etf) == expected
+
+
+def test_pair_put_spreads_front_is_per_yb_etf():
+    """Each YB ETF marks its own nearest expiry as front (not global min)."""
+    rows = granite_xls_rows_to_holdings(
+        _cwy_fixture_df(),
+        etf_ticker="CWY",
+        fallback_as_of=date(2026, 5, 19),
+        underlying="CRWV",
+        source_url="https://example.com/cwy.xls",
+    )
+    bioy_opts = pd.DataFrame([
+        {
+            "as_of_date": "2026-05-21",
+            "etf_ticker": "BIOY",
+            "position_ticker": "LABU260526P00144560",
+            "security_type": "OPTION_PUT",
+            "shares": 50.0,
+            "option_root": "2LABU",
+            "option_expiry": "2026-05-26",
+            "option_strike": 144.56,
+            "option_put_call": "P",
+            "option_side": "long",
+        },
+        {
+            "as_of_date": "2026-05-21",
+            "etf_ticker": "BIOY",
+            "position_ticker": "LABU260526P00152590",
+            "security_type": "OPTION_PUT",
+            "shares": -50.0,
+            "option_root": "2LABU",
+            "option_expiry": "2026-05-26",
+            "option_strike": 152.59,
+            "option_put_call": "P",
+            "option_side": "short",
+        },
+    ])
+    hdf = pd.concat([pd.DataFrame(rows), bioy_opts], ignore_index=True)
+    spreads = pair_put_spreads_from_holdings(
+        hdf,
+        underlying_by_etf={"CWY": "CRWV", "BIOY": "XBI"},
+        as_of=date(2026, 5, 21),
+    )
+    cwy = [s for s in spreads if s.yb_etf == "CWY"]
+    bioy = [s for s in spreads if s.yb_etf == "BIOY"]
+    assert cwy and bioy
+    assert all(s.is_front for s in cwy)
+    assert all(s.is_front for s in bioy)
+
+
+def test_load_yieldboost_sleeve_symbols_from_spreads_sleeves_only():
+    spreads = Path(__file__).resolve().parents[1] / "data" / "yieldboost_put_spreads_latest.json"
+    if not spreads.exists():
+        pytest.skip("spreads file missing")
+    sleeves = load_yieldboost_sleeve_symbols_from_spreads(spreads, front_only=True)
+    assert "MSTU" in sleeves
+    assert "MTYY" not in sleeves
+    assert "MSTR" not in sleeves
+    assert len(sleeves) <= 32
 
 
 def test_held_strike_band_includes_itm_puts():
