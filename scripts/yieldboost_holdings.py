@@ -43,6 +43,9 @@ KNOWN_SLEEVE_TICKERS: set[str] = {
 
 DEFAULT_SCREENER_CSV = Path("data/etf_screened_today.csv")
 
+# ~30 calendar-day realized vol window (matches dashboard `realized_vol["1M"]`).
+RV_VRP_WINDOWS = ("1M", "30D", "30d", "3M")
+
 
 @dataclass
 class ParsedGraniteOption:
@@ -132,6 +135,88 @@ def parse_granite_option_description(desc: str) -> ParsedGraniteOption | None:
         put_call=m.group("pc").upper(),
         strike=strike,
     )
+
+
+def extract_rv_30d_annual(
+    stats: dict | None,
+    *,
+    prefer: str = "etf",
+) -> float | None:
+    """
+    Annualized ~30d realized vol from dashboard `realized_vol` or Yahoo window maps.
+
+    Dashboard windows use `etf` / `underlying`; Yahoo builder windows use `vol_annual`.
+    """
+    if not stats or not isinstance(stats, dict):
+        return None
+
+    for key in ("rv_30d", "vol_annual"):
+        v = _parse_float(stats.get(key))
+        if v is not None and v > 0:
+            return float(v)
+
+    etf_keys = ("etf", "vol_annual", "etf_ewma", "etf_robust_ewma")
+    und_keys = ("underlying", "vol_annual", "underlying_ewma", "underlying_robust_ewma")
+    keys = etf_keys if prefer == "etf" else und_keys
+
+    for window in RV_VRP_WINDOWS:
+        win = stats.get(window)
+        if not isinstance(win, dict):
+            continue
+        for key in keys:
+            v = _parse_float(win.get(key))
+            if v is not None and v > 0:
+                return float(v)
+    return None
+
+
+def build_yieldboost_rv_map(
+    *,
+    realized_vol_by_symbol: dict[str, dict] | None = None,
+    dashboard_records: list[dict] | None = None,
+) -> dict[str, float]:
+    """Symbol -> annualized ~30d RV for VRP panel (sleeves + underlyings)."""
+    rv_map: dict[str, float] = {}
+
+    for rec in dashboard_records or []:
+        if not isinstance(rec, dict):
+            continue
+        sym = str(rec.get("symbol") or "").upper().strip()
+        if not sym:
+            continue
+        v = extract_rv_30d_annual(rec.get("realized_vol"), prefer="etf")
+        if v is not None:
+            rv_map[sym] = v
+
+    for sym, stats in (realized_vol_by_symbol or {}).items():
+        ss = str(sym or "").upper().strip()
+        if not ss or not isinstance(stats, dict):
+            continue
+        v = extract_rv_30d_annual(stats, prefer="etf")
+        if v is not None:
+            rv_map[ss] = v
+
+    return rv_map
+
+
+def recompute_put_spread_front_flags(
+    spreads: list[PutSpreadLeg],
+    *,
+    as_of: date | None = None,
+) -> list[PutSpreadLeg]:
+    """Mark nearest (per YB ETF) future expiry as front; repairs stale spreads JSON."""
+    if not spreads:
+        return spreads
+    today = as_of or date.today()
+    by_etf: dict[str, list[PutSpreadLeg]] = {}
+    for s in spreads:
+        by_etf.setdefault(s.yb_etf, []).append(s)
+    for legs in by_etf.values():
+        future = [s for s in legs if s.expiry >= today]
+        front_expiry = min((s.expiry for s in future), default=max(s.expiry for s in legs))
+        for s in legs:
+            s.is_front = s.expiry == front_expiry
+    return spreads
 
 
 def resolve_sleeve_ticker(
@@ -495,7 +580,7 @@ def spreads_json_to_put_spread_legs(
             moneyness_short_pct=_parse_float(row.get("moneyness_short_pct")),
             days_to_exp=int(row.get("days_to_exp")) if row.get("days_to_exp") is not None else None,
         ))
-    return legs
+    return recompute_put_spread_front_flags(legs, as_of=date.today())
 
 
 def load_yieldboost_target_strikes_by_sleeve(
@@ -749,21 +834,7 @@ def pair_put_spreads_from_holdings(
             days_to_exp=max(0, (expiry - today).days),
         ))
 
-    if not spreads:
-        return []
-
-    by_etf: dict[str, list[PutSpreadLeg]] = {}
-    for s in spreads:
-        by_etf.setdefault(s.yb_etf, []).append(s)
-    for legs in by_etf.values():
-        future = [s for s in legs if s.expiry >= today]
-        if future:
-            front_expiry = min(s.expiry for s in future)
-        else:
-            front_expiry = max(s.expiry for s in legs)
-        for s in legs:
-            s.is_front = s.expiry == front_expiry
-    return spreads
+    return recompute_put_spread_front_flags(spreads, as_of=today)
 
 
 def spreads_to_json(spreads: Iterable[PutSpreadLeg]) -> dict[str, Any]:
@@ -868,10 +939,25 @@ def build_vrp_live_payload(
         spread_mid = None
         if long_q.get("mid") is not None and short_q.get("mid") is not None:
             spread_mid = float(short_q["mid"]) - float(long_q["mid"])
-        rv_2x = rv_map.get(s.sleeve_2x_etf)
-        rv_u = rv_map.get(s.underlying) if s.underlying else None
-        iv_atm_proxy = long_q.get("iv") or short_q.get("iv")
-        vrp_2x = (iv_atm_proxy - rv_2x) if iv_atm_proxy is not None and rv_2x is not None else None
+        sleeve_key = str(s.sleeve_2x_etf or "").upper()
+        und_key = str(s.underlying or "").upper() if s.underlying else None
+        rv_2x = rv_map.get(sleeve_key)
+        rv_u = rv_map.get(und_key) if und_key else None
+        iv_long = long_q.get("iv")
+        iv_short = short_q.get("iv")
+        if iv_long is not None and iv_short is not None:
+            iv_spread_proxy = (float(iv_long) + float(iv_short)) / 2.0
+        elif iv_long is not None:
+            iv_spread_proxy = float(iv_long)
+        elif iv_short is not None:
+            iv_spread_proxy = float(iv_short)
+        else:
+            iv_spread_proxy = None
+        vrp_2x = (
+            (iv_spread_proxy - rv_2x)
+            if iv_spread_proxy is not None and rv_2x is not None
+            else None
+        )
         rows.append({
             "yb_etf": s.yb_etf,
             "underlying": s.underlying,
@@ -890,6 +976,7 @@ def build_vrp_live_payload(
             "rv_30d_2x": rv_2x,
             "rv_30d_underlying": rv_u,
             "vrp_vol_2x": vrp_2x,
+            "rv_30d_source": "dashboard_1m" if rv_2x is not None else None,
             "iv_source": "holdings_exact" if long_q.get("matched") and short_q.get("matched") else "holdings_nearest",
             "holdings_as_of": s.holdings_as_of.isoformat(),
             "options_as_of": long_q.get("options_as_of") or short_q.get("options_as_of"),

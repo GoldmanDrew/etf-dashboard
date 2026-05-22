@@ -14,6 +14,9 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from yieldboost_holdings import (  # noqa: E402
+    build_vrp_live_payload,
+    build_yieldboost_rv_map,
+    extract_rv_30d_annual,
     format_occ_ticker,
     granite_xls_rows_to_holdings,
     held_strike_band,
@@ -27,6 +30,126 @@ from yieldboost_holdings import (  # noqa: E402
     resolve_sleeve_ticker,
     spreads_json_to_put_spread_legs,
 )
+
+
+def test_extract_rv_30d_annual_dashboard_shape():
+    stats = {
+        "1M": {"etf": 1.361367, "underlying": 0.693201},
+        "6M": {"etf": 1.556064, "underlying": 0.8},
+    }
+    assert extract_rv_30d_annual(stats) == pytest.approx(1.361367)
+
+
+def test_extract_rv_30d_annual_yahoo_window_shape():
+    stats = {
+        "1M": {"vol_annual": 0.95, "ewma_vol_annual": 1.1},
+    }
+    assert extract_rv_30d_annual(stats) == pytest.approx(0.95)
+
+
+def test_build_yieldboost_rv_map_prefers_yahoo_over_dashboard():
+    rv = build_yieldboost_rv_map(
+        dashboard_records=[{"symbol": "MSTU", "realized_vol": {"1M": {"etf": 1.0}}}],
+        realized_vol_by_symbol={"MSTU": {"1M": {"vol_annual": 1.25}}},
+    )
+    assert rv["MSTU"] == pytest.approx(1.25)
+
+
+def test_build_vrp_live_payload_populates_rv_and_vrp():
+    spread = pair_put_spreads_from_holdings(
+        pd.DataFrame([{
+            "as_of_date": "2026-05-21",
+            "etf_ticker": "MTYY",
+            "position_ticker": "MSTU260522P00007030",
+            "security_type": "OPTION_PUT",
+            "shares": 670.0,
+            "option_root": "2MSTU",
+            "option_expiry": "2026-05-22",
+            "option_strike": 7.03,
+            "option_put_call": "P",
+            "option_side": "long",
+        }, {
+            "as_of_date": "2026-05-21",
+            "etf_ticker": "MTYY",
+            "position_ticker": "MSTU260522P00007420",
+            "security_type": "OPTION_PUT",
+            "shares": -670.0,
+            "option_root": "2MSTU",
+            "option_expiry": "2026-05-22",
+            "option_strike": 7.42,
+            "option_put_call": "P",
+            "option_side": "short",
+        }]),
+        underlying_by_etf={"MTYY": "MSTR"},
+        as_of=date(2026, 5, 21),
+    )
+    assert len(spread) == 1
+    options_cache = {
+        "symbols": {
+            "MSTU": {
+                "spot": 6.66,
+                "updated_at": "2026-05-22T00:00:00Z",
+                "options": [
+                    {
+                        "expiration_date": "2026-05-22",
+                        "contract_type": "put",
+                        "strike_price": 7.03,
+                        "iv": 2.2666,
+                        "mid": 0.45,
+                    },
+                    {
+                        "expiration_date": "2026-05-22",
+                        "contract_type": "put",
+                        "strike_price": 7.42,
+                        "iv": 2.2314,
+                        "mid": 0.85,
+                    },
+                ],
+            },
+        },
+    }
+    rv_map = {"MSTU": 1.36, "MSTR": 0.69}
+    payload = build_vrp_live_payload(spread, options_cache, rv_map=rv_map)
+    row = payload["rows"][0]
+    assert row["rv_30d_2x"] == pytest.approx(1.36)
+    assert row["iv_put_long"] == pytest.approx(2.2666)
+    assert row["vrp_vol_2x"] == pytest.approx((2.2666 + 2.2314) / 2 - 1.36)
+
+
+def test_spreads_json_to_put_spread_legs_recomputes_front_per_etf():
+    payload = {
+        "spreads": [
+            {
+                "yb_etf": "CWY",
+                "underlying": "CRWV",
+                "option_root": "2CWVX",
+                "sleeve_2x_etf": "CRWV",
+                "expiry": "2026-05-26",
+                "strike_long": 27.89,
+                "strike_short": 29.44,
+                "qty": 240.0,
+                "holdings_as_of": "2026-05-21",
+                "is_front": False,
+            },
+            {
+                "yb_etf": "AMYY",
+                "underlying": "AMD",
+                "option_root": "2AMDL",
+                "sleeve_2x_etf": "AMDL",
+                "expiry": "2026-05-22",
+                "strike_long": 43.29,
+                "strike_short": 45.7,
+                "qty": 890.0,
+                "holdings_as_of": "2026-05-21",
+                "is_front": True,
+            },
+        ],
+    }
+    legs = spreads_json_to_put_spread_legs(payload)
+    cwy = next(s for s in legs if s.yb_etf == "CWY")
+    amyy = next(s for s in legs if s.yb_etf == "AMYY")
+    assert cwy.is_front is True
+    assert amyy.is_front is True
 
 
 def test_parse_granite_option_description_cwy():

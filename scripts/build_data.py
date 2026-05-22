@@ -2286,10 +2286,16 @@ def load_yieldboost_sleeve_symbols(*, front_only: bool = True) -> list[str]:
     )
 
 
-def load_yieldboost_force_symbols_from_spreads(path: Path) -> list[str]:
-    from yieldboost_holdings import load_yieldboost_force_symbols_from_spreads as _load
-
-    return _load(path)
+def load_dashboard_records_for_rv(dashboard_path: Path | None = None) -> list[dict]:
+    """Dashboard records for YieldBOOST RV lookup (sleeve + underlying symbols)."""
+    path = dashboard_path or OUTPUT_FILE
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return [r for r in (payload.get("records") or []) if isinstance(r, dict)]
 
 
 def load_yieldboost_option_symbols() -> set[str]:
@@ -2316,15 +2322,18 @@ def refresh_yieldboost_vrp_files(
 ) -> dict:
     """Build/refresh put-spread pairings + live VRP panel from holdings + options."""
     from yieldboost_holdings import (
+        apply_resolved_sleeves,
         build_put_spreads_payload,
         build_vrp_health_payload,
         build_vrp_live_payload,
         build_yieldboost_options_target,
+        build_yieldboost_rv_map,
         load_holdings_latest_dataframe,
         load_sleeve_by_yb_from_screener,
         load_underlying_map_from_screener,
         normalize_holdings_dataframe,
         pair_put_spreads_from_holdings,
+        recompute_put_spread_front_flags,
         spreads_json_to_put_spread_legs,
         write_json,
     )
@@ -2362,15 +2371,14 @@ def refresh_yieldboost_vrp_files(
             pass
 
     if spreads:
+        spreads = apply_resolved_sleeves(spreads, sleeve_by_yb=sleeve_by_yb)
+        spreads = recompute_put_spread_front_flags(spreads)
         write_json(YIELDBOOST_OPTIONS_TARGET_FILE, build_yieldboost_options_target(spreads))
 
-    rv_map: dict[str, float] = {}
-    if realized_vol_map:
-        for sym, stats in realized_vol_map.items():
-            if isinstance(stats, dict):
-                v = stats.get("vol_annual") or stats.get("rv_30d")
-                if v is not None:
-                    rv_map[norm_sym(sym)] = float(v)
+    rv_map = build_yieldboost_rv_map(
+        realized_vol_by_symbol=realized_vol_map,
+        dashboard_records=load_dashboard_records_for_rv(),
+    )
     vrp_payload = build_vrp_live_payload(spreads, options_cache, rv_map=rv_map)
     write_json(VRP_LIVE_FILE, vrp_payload)
     health_payload = build_vrp_health_payload(
@@ -3157,8 +3165,7 @@ def refresh_yieldboost_vrp_only() -> None:
         except Exception:
             prior_cache = {}
 
-    max_contracts = int(os.environ.get("YIELDBOOST_OPTIONS_MAX_SYMBOLS", "40"))
-    refresh_list = sleeves[: max(1, max_contracts)] if sleeves else []
+    refresh_list = list(sleeves) if sleeves else []
     options_cache = prior_cache
     if refresh_list:
         options_cache = build_polygon_options_cache(refresh_list, yieldboost_targeted=True)

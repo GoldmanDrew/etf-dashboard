@@ -1413,6 +1413,14 @@ let NAV_FORECAST_HISTORY_CACHE = null;
 
 // ── Formatters ──────────────────────────────
 const fmt = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
+const fmtUsd = v => v == null ? '—' : `$${Number(v).toFixed(2)}`;
+const fmtSpreadMid = (mid, spot) => {
+  if (mid == null) return '—';
+  const usd = fmtUsd(mid);
+  const s = Number(spot);
+  if (Number.isFinite(s) && s > 0) return `${usd} (${((Number(mid) / s) * 100).toFixed(2)}% of spot)`;
+  return usd;
+};
 const fmtNum = v => v == null ? '—' : Number(v).toLocaleString();
 /** Whole-share counts (ETF shares outstanding, etc.): integer separators only — avoids 87,333.079 misread as 87,333,079. */
 const fmtSharesCount = v => (
@@ -4549,27 +4557,50 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return mine.find((x) => x?.is_front) || mine[0] || null;
   }, [ybSpreads, etfSym]);
   const vrpDisplayRow = useMemo(() => {
-    if (vrpLiveRow) return vrpLiveRow;
-    if (!vrpSpreadRow) return null;
-    return {
-      yb_etf: vrpSpreadRow.yb_etf,
-      sleeve_2x: vrpSpreadRow.sleeve_2x_etf,
-      underlying: vrpSpreadRow.underlying,
-      expiry: vrpSpreadRow.expiry,
-      strike_long: vrpSpreadRow.strike_long,
-      strike_short: vrpSpreadRow.strike_short,
-      holdings_as_of: vrpSpreadRow.holdings_as_of,
-      moneyness_long_pct: vrpSpreadRow.moneyness_long_pct,
-      moneyness_short_pct: vrpSpreadRow.moneyness_short_pct,
-      iv_put_long: null,
-      iv_put_short: null,
-      spread_mid_market: null,
-      rv_30d_2x: null,
-      vrp_vol_2x: null,
-      iv_source: null,
-      _iv_pending: true,
-    };
-  }, [vrpLiveRow, vrpSpreadRow]);
+    const base = vrpLiveRow
+      ? { ...vrpLiveRow }
+      : (!vrpSpreadRow
+        ? null
+        : {
+          yb_etf: vrpSpreadRow.yb_etf,
+          sleeve_2x: vrpSpreadRow.sleeve_2x_etf,
+          underlying: vrpSpreadRow.underlying,
+          expiry: vrpSpreadRow.expiry,
+          strike_long: vrpSpreadRow.strike_long,
+          strike_short: vrpSpreadRow.strike_short,
+          holdings_as_of: vrpSpreadRow.holdings_as_of,
+          moneyness_long_pct: vrpSpreadRow.moneyness_long_pct,
+          moneyness_short_pct: vrpSpreadRow.moneyness_short_pct,
+          iv_put_long: null,
+          iv_put_short: null,
+          spread_mid_market: null,
+          rv_30d_2x: null,
+          vrp_vol_2x: null,
+          iv_source: null,
+          _iv_pending: true,
+        });
+    if (!base) return null;
+    const merged = { ...base };
+    if (merged.rv_30d_2x == null) {
+      const sleeve = String(merged.sleeve_2x || merged.sleeve_2x_etf || '').toUpperCase();
+      const sleeveRec = (Array.isArray(allRecords) ? allRecords : [])
+        .find((x) => String(x?.symbol || '').toUpperCase() === sleeve);
+      const rv = Number(sleeveRec?.realized_vol?.['1M']?.etf);
+      if (Number.isFinite(rv) && rv > 0) {
+        merged.rv_30d_2x = rv;
+        merged.rv_30d_source = merged.rv_30d_source || 'dashboard_1m';
+      }
+    }
+    if (merged.vrp_vol_2x == null && merged.rv_30d_2x != null) {
+      const ivLong = merged.iv_put_long;
+      const ivShort = merged.iv_put_short;
+      let ivProxy = null;
+      if (ivLong != null && ivShort != null) ivProxy = (Number(ivLong) + Number(ivShort)) / 2;
+      else ivProxy = ivLong != null ? Number(ivLong) : (ivShort != null ? Number(ivShort) : null);
+      if (ivProxy != null && Number.isFinite(ivProxy)) merged.vrp_vol_2x = ivProxy - merged.rv_30d_2x;
+    }
+    return merged;
+  }, [vrpLiveRow, vrpSpreadRow, allRecords]);
   const vrpIvPending = Boolean(vrpDisplayRow?._iv_pending);
   const vrpStaleness = useMemo(() => {
     const ts = vrpDisplayRow?.options_as_of || vrpHealth?.last_options_refresh || vrpHealth?.last_vrp_refresh;
@@ -7229,7 +7260,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <tr><td>Long put strike</td><td>{vrpDisplayRow.strike_long ?? '—'}</td></tr>
                       <tr><td>Short put strike</td><td>{vrpDisplayRow.strike_short ?? '—'}</td></tr>
                       <tr><td>IV long / short</td><td>{vrpDisplayRow.iv_put_long != null ? fmt(vrpDisplayRow.iv_put_long) : '—'} / {vrpDisplayRow.iv_put_short != null ? fmt(vrpDisplayRow.iv_put_short) : '—'}</td></tr>
-                      <tr><td>Spread mid (market)</td><td>{vrpDisplayRow.spread_mid_market != null ? fmt(vrpDisplayRow.spread_mid_market) : '—'}</td></tr>
+                      <tr><td>Spread mid (market)</td><td>{fmtSpreadMid(vrpDisplayRow.spread_mid_market, vrpDisplayRow.spot_2x)}</td></tr>
                       <tr><td>RV 30d (2×)</td><td>{vrpDisplayRow.rv_30d_2x != null ? fmt(vrpDisplayRow.rv_30d_2x) : '—'}</td></tr>
                       <tr><td>VRP vol (2× proxy)</td><td>{vrpDisplayRow.vrp_vol_2x != null ? fmt(vrpDisplayRow.vrp_vol_2x) : '—'}</td></tr>
                       <tr><td>Moneyness long / short</td><td>{vrpDisplayRow.moneyness_long_pct != null ? `${vrpDisplayRow.moneyness_long_pct.toFixed(2)}%` : '—'} / {vrpDisplayRow.moneyness_short_pct != null ? `${vrpDisplayRow.moneyness_short_pct.toFixed(2)}%` : '—'}</td></tr>
