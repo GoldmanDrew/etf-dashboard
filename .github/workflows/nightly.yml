@@ -1,0 +1,183 @@
+name: Nightly Metrics & Full Build
+
+# Morning ingest (ETF metrics, holdings, distributions, scoring) + full build_data.py
+# in one commit/deploy. Replaces update-etf-metrics.yml + workflow_run chain into
+# build-and-deploy.
+
+on:
+  schedule:
+    - cron: "0 10 * * 2-6"
+    - cron: "0 11 * * 2-6"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "nightly-build"
+  cancel-in-progress: true
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
+      TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.LS_ALGO_TOKEN }}
+      ETF_METRICS_HTTP_TIMEOUT_SEC: "30"
+      ETF_METRICS_HTTP_RETRY_TOTAL: "3"
+      ETF_METRICS_HTTP_RETRY_BACKOFF: "0.5"
+      ETF_METRICS_MAX_STALE_BUSINESS_DAYS: "3"
+      ETF_METRICS_SKIP_IF_RECENT_HOURS: ${{ github.event_name == 'schedule' && '8' || '0' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate Polygon key
+        run: |
+          if [ -z "${POLYGON_API_KEY}" ]; then
+            echo "POLYGON_API_KEY (or POLYGON_IO_API_KEY) is missing in repo secrets."
+            exit 1
+          fi
+
+      - name: Skip duplicate DST slot (run only at 6 AM ET Tue-Sat)
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          SLOT=$(python - <<'PY'
+          from datetime import datetime
+          import pytz
+          now_et = datetime.now(pytz.timezone("America/New_York"))
+          print(f"{now_et.hour} {now_et.weekday()}")
+          PY
+          )
+          ET_HOUR=$(echo $SLOT | awk '{print $1}')
+          ET_DOW=$(echo $SLOT | awk '{print $2}')
+          echo "Current ET hour=$ET_HOUR weekday(0=Mon)=$ET_DOW"
+          if [ "$ET_HOUR" != "6" ]; then
+            echo "Not 6 AM ET slot; exiting."
+            exit 0
+          fi
+          if [ "$ET_DOW" -lt "1" ] || [ "$ET_DOW" -gt "5" ]; then
+            echo "Not a Tue-Sat run (weekday=$ET_DOW); exiting."
+            exit 0
+          fi
+
+      - name: Pull latest main
+        run: git pull --ff-only origin main
+
+      - name: Ingest ETF metrics
+        run: python scripts/ingest_etf_metrics.py --lookback-days 10 --polygon-lookback-days 5
+
+      - name: Backfill underlying adj. close gaps
+        continue-on-error: true
+        run: python scripts/backfill_underlying_adj_close.py
+
+      - name: Backfill historical close prices
+        continue-on-error: true
+        run: python scripts/backfill_close_prices.py --chunk 50
+
+      - name: Bootstrap Yahoo prices before first stored metrics row
+        continue-on-error: true
+        run: python scripts/bootstrap_metrics_yahoo_history.py --max-tickers 500
+
+      - name: Ingest ETF distribution history
+        run: python scripts/ingest_distributions.py --sleep 0.1
+
+      - name: Score NAV forecasts and refresh anchors
+        continue-on-error: true
+        run: |
+          python scripts/score_nav_forecasts.py
+          python scripts/repair_nav_forecast_stale_spots.py --apply
+
+      - name: Build LETF rebalance flows
+        run: python scripts/build_letf_rebalance_flows.py
+
+      - name: Score intraday LETF flow estimates vs realised
+        continue-on-error: true
+        run: python scripts/score_intraday_flows.py
+
+      - name: Full dashboard build
+        id: build_data
+        continue-on-error: true
+        env:
+          POLYGON_OPTIONS_MAX_SYMBOLS: "100"
+          POLYGON_MAX_REQUESTS_PER_MINUTE: "25"
+          POLYGON_MAX_TOTAL_REQUESTS: "90"
+          OPTIONS_SYMBOLS_PER_RUN: "16"
+          OPTIONS_SHARD_COUNT: "12"
+          OPTIONS_SHARD_INTERVAL_MINUTES: "3"
+          OPTIONS_ONLY_BUCKET3: "1"
+          OPTIONS_INCLUDE_BUCKET3_UNDERLYING: "1"
+          OPTIONS_ACCUMULATE_CACHE: "1"
+        run: python scripts/build_data.py
+
+      - name: Score borrow spike predictions
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/score_borrow_spikes.py
+
+      - name: Options / VRP diagnostics
+        continue-on-error: true
+        run: |
+          python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero || true
+          python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads || true
+
+      - name: Commit nightly artifacts
+        if: steps.build_data.outcome == 'success'
+        id: commit
+        uses: ./.github/actions/commit-data
+        with:
+          files: >-
+            data/etf_metrics_daily.parquet
+            data/etf_metrics_daily.csv
+            data/etf_metrics_daily.json
+            data/etf_metrics_latest.json
+            data/etf_metrics_health.json
+            data/etf_distributions.json
+            data/etf_holdings_daily.parquet
+            data/etf_holdings_latest.csv
+            data/etf_holdings_latest.json
+            data/yieldboost_put_spreads_latest.json
+            data/nav_forecasts/_anchors.json
+            data/nav_forecasts/_metrics_daily.json
+            data/nav_forecasts/_history_panel.json
+            data/nav_forecasts/realized
+            data/borrow_spike_realized.jsonl
+            data/borrow_spike_metrics.json
+            data/letf_rebalance_flows_daily.parquet
+            data/letf_rebalance_flows_daily.json
+            data/letf_rebalance_flows_latest.json
+            data/underlying_volume_history.parquet
+            data/letf_intraday_flow_realized.jsonl
+            data/letf_intraday_flow_metrics.json
+            data/dashboard_data.json
+            data/etf_screened_today.csv
+            data/borrow_history.json
+            data/borrow_spike_risk.json
+            data/borrow_spike_predictions
+            data/options_cache.json
+            data/vol_shape_history.json
+            data/vrp_live.json
+            data/vrp_health.json
+            data/yieldboost_options_target.json
+            data/ci_state.json
+          commit_message: "chore: nightly metrics and full build"
+
+      - name: Deploy Pages
+        if: steps.commit.outputs.changed == '1'
+        uses: ./.github/actions/deploy-pages

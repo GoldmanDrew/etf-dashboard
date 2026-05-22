@@ -1,0 +1,80 @@
+name: Market Hours Data Tick
+
+# Single orchestrator for borrow / options / YieldBOOST VRP / intraday / NAV forecast.
+# Replaces refresh-borrow, refresh-options (A/B), refresh-yieldboost-vrp,
+# intraday-flow, and refresh-nav-forecast.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Task mode (auto, borrow, options, yieldboost, intraday, nav)"
+        required: false
+        default: auto
+      force:
+        description: "Run even if staleness gate would skip"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "market-hours-tick"
+  cancel-in-progress: true
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
+      TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run CI tick
+        id: tick
+        run: |
+          FORCE_FLAG=""
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+          MODE="${{ github.event.inputs.mode || 'auto' }}"
+          python scripts/ci_tick.py --mode "$MODE" $FORCE_FLAG
+
+      - name: Options / VRP diagnostics
+        if: steps.tick.outputs.skipped != 'true' && (steps.tick.outputs.task == 'options' || steps.tick.outputs.task == 'yieldboost')
+        continue-on-error: true
+        run: |
+          python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero
+          python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
+
+      - name: Commit data if changed
+        if: steps.tick.outputs.skipped != 'true' && steps.tick.outputs.files != ''
+        id: commit
+        uses: ./.github/actions/commit-data
+        with:
+          files: ${{ steps.tick.outputs.files }}
+          commit_message: "chore: market tick (${{ steps.tick.outputs.task }})"
+
+      - name: Deploy Pages
+        if: steps.commit.outputs.changed == '1'
+        uses: ./.github/actions/deploy-pages

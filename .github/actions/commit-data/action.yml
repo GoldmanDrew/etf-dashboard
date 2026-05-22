@@ -41,14 +41,27 @@ runs:
           exit 0
         fi
 
-        git add ${EXISTING}
-        if git diff --staged --quiet; then
-          echo "No changes to commit"
-          echo "changed=0" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
+        # Snapshot artifacts before any git branch movement. Build steps leave
+        # modified JSON in the working tree; a plain `git checkout` to rebase
+        # onto origin/main fails with "would be overwritten by checkout".
         TMP_DIR="$(mktemp -d)"
+        restore_from_backup() {
+          local restored=""
+          for f in ${EXISTING}; do
+            if [ -d "${TMP_DIR}/$f" ]; then
+              rm -rf "$f"
+              mkdir -p "$(dirname "$f")"
+              cp -a "${TMP_DIR}/$f" "$f"
+              restored="${restored} $f"
+            elif [ -f "${TMP_DIR}/$f" ]; then
+              mkdir -p "$(dirname "$f")"
+              cp "${TMP_DIR}/$f" "$f"
+              restored="${restored} $f"
+            fi
+          done
+          echo "${restored# }"
+        }
+
         for f in ${EXISTING}; do
           mkdir -p "${TMP_DIR}/$(dirname "$f")"
           if [ -d "$f" ]; then
@@ -60,36 +73,42 @@ runs:
         done
 
         pushed=0
+        changed=0
         for i in 1 2 3; do
           git fetch origin "${BRANCH}"
+          git reset --hard "origin/${BRANCH}"
+          git clean -fd || true
           git checkout -B "${BRANCH}" "origin/${BRANCH}"
-          for f in ${EXISTING}; do
-            if [ -d "${TMP_DIR}/$f" ]; then
-              mkdir -p "$f"
-              cp -a "${TMP_DIR}/$f"/. "$f"/
-            elif [ -f "${TMP_DIR}/$f" ]; then
-              mkdir -p "$(dirname "$f")"
-              cp "${TMP_DIR}/$f" "$f"
-            fi
-          done
-          git add ${EXISTING}
+
+          RESTORED="$(restore_from_backup)"
+          if [ -z "${RESTORED}" ]; then
+            echo "Backup restore produced no files"
+            exit 1
+          fi
+
+          git add ${RESTORED}
           if git diff --staged --quiet; then
-            echo "No changes against latest origin"
+            echo "No changes against latest origin/${BRANCH}"
             pushed=1
+            changed=0
             break
           fi
+
           git commit -m "${{ inputs.commit_message }} [$(date -u '+%Y-%m-%d %H:%M UTC')]"
           if git push origin "HEAD:${BRANCH}"; then
             pushed=1
+            changed=1
             break
           fi
-          git reset --hard "origin/${BRANCH}" || true
+
+          echo "Push rejected (attempt ${i}/3); retrying after backoff..."
           sleep $((i * 5))
         done
+
         rm -rf "${TMP_DIR}"
 
         if [ "$pushed" -ne 1 ]; then
           echo "Push failed after retries"
           exit 1
         fi
-        echo "changed=1" >> "$GITHUB_OUTPUT"
+        echo "changed=${changed}" >> "$GITHUB_OUTPUT"

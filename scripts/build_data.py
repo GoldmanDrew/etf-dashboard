@@ -3030,28 +3030,15 @@ def refresh_borrow_only() -> None:
         "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         "refresh_type": "borrow_only",
     }
-    borrow_spike_risk = build_borrow_spike_risk_payload(
-        borrow_history_symbols=hist_symbols,
-        as_of_date=today_utc,
-        horizon_days=5,
-    )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=None, separators=(",", ":"))
     with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(hist_payload, f, indent=None, separators=(",", ":"))
-    with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
-        json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
-    _bp = write_borrow_spike_predictions_snapshot(
-        borrow_spike_risk, pred_dir=BORROW_SPIKE_PREDICTIONS_DIR, as_of_date=today_utc,
-    )
-    if _bp:
-        print(f"[OK] Borrow spike predictions snapshot -> {_bp}")
 
     print(f"[OK] Borrow-only refresh wrote {OUTPUT_FILE}")
     print(f"[OK] Borrow-only refresh wrote {BORROW_HISTORY_FILE}")
-    print(f"[OK] Borrow-only refresh wrote {BORROW_SPIKE_RISK_FILE}")
     print(f"  Updated from IBKR FTP: {updated}/{len(records)} symbols")
     print(f"  Updated from latest CSV fallback: {updated_csv}/{len(records)} symbols")
 

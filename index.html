@@ -7911,7 +7911,7 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
           </div>
           <div>
             {mode === 'intraday'
-              ? <>The <code>intraday-flow.yml</code> workflow refreshes every 5 min during US RTH (Mon–Fri 9:30 AM – 5:00 PM ET). {intradayError ? <><br/><span className="val-negative">{intradayError}</span></> : null}</>
+              ? <>The <code>market-hours.yml</code> workflow refreshes intraday flow during US RTH via <code>ci_tick.py</code> (~every 15 min when stale). {intradayError ? <><br/><span className="val-negative">{intradayError}</span></> : null}</>
               : <>Run <code>python scripts/build_letf_rebalance_flows.py</code> to build the EOD aggregates.</>}
             {otherCount > 0 ? <> <a href="#" onClick={(e) => { e.preventDefault(); setMode(otherMode); }}>Switch to {otherMode === 'intraday' ? 'Intraday (live)' : 'EOD'} ({otherCount})</a>.</> : null}
           </div>

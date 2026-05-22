@@ -3,7 +3,7 @@ name: Update Corporate Actions & News
 on:
   schedule:
     # Every 6 hours, offset 15 minutes after the top of the hour to avoid stacking
-    # with update-etf-metrics.yml (which runs at :00). Corporate actions move slowly
+    # with nightly.yml (which runs at :00). Corporate actions move slowly
     # so sub-hourly polling would add no value and eat Polygon quota.
     - cron: "15 */6 * * *"
   workflow_dispatch:
@@ -19,6 +19,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: "corporate-actions-refresh"
@@ -150,67 +152,16 @@ jobs:
           PY
 
       - name: Commit corporate-actions artifacts
-        run: |
-          BRANCH="${GITHUB_REF_NAME:-main}"
-          # Phase 4 + 5 additions: polygon_ticker_events_cache.json (per-ticker
-          # cache) + ticker_alias_map.json (derived alias map).  Both are
-          # produced on the first Phase 4 run and committed thereafter so the
-          # next run starts with a warm cache.  Missing files are tolerated
-          # (git add only picks up what exists).
-          FILES="data/corporate_actions.json data/etf_news.json data/polygon_ticker_events_cache.json data/ticker_alias_map.json"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+        id: commit
+        uses: ./.github/actions/commit-data
+        with:
+          files: >-
+            data/corporate_actions.json
+            data/etf_news.json
+            data/polygon_ticker_events_cache.json
+            data/ticker_alias_map.json
+          commit_message: "chore: refresh corporate actions and news"
 
-          existing_files=()
-          for f in ${FILES}; do
-            if [ -f "$f" ]; then existing_files+=("$f"); fi
-          done
-          if [ "${#existing_files[@]}" -eq 0 ]; then
-            echo "No corporate-actions artifacts on disk; nothing to commit"
-            exit 0
-          fi
-          git add "${existing_files[@]}"
-          if git diff --staged --quiet; then
-            echo "No corporate-actions changes to commit"
-          else
-            TMP_DIR="$(mktemp -d)"
-            for f in "${existing_files[@]}"; do
-              mkdir -p "${TMP_DIR}/$(dirname "$f")"
-              cp "$f" "${TMP_DIR}/$f"
-            done
-            pushed=0
-            for i in 1 2 3; do
-              git fetch origin "${BRANCH}"
-              git reset --hard || true
-              git clean -fd || true
-              git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
-              present_now=()
-              for f in "${existing_files[@]}"; do
-                if [ -f "${TMP_DIR}/$f" ]; then
-                  mkdir -p "$(dirname "$f")"
-                  cp "${TMP_DIR}/$f" "$f"
-                  present_now+=("$f")
-                fi
-              done
-              if [ "${#present_now[@]}" -gt 0 ]; then
-                git add "${present_now[@]}"
-              fi
-              if git diff --staged --quiet; then
-                echo "No corporate-actions changes against latest origin"
-                pushed=1
-                break
-              fi
-              git commit -m "chore: refresh corporate actions & news [$(date -u '+%Y-%m-%d %H:%M UTC')]"
-              if git push origin "HEAD:${BRANCH}"; then
-                pushed=1
-                break
-              fi
-              git reset --hard "origin/${BRANCH}" || true
-              sleep $((i * 5))
-            done
-            rm -rf "${TMP_DIR}"
-            if [ "$pushed" -ne 1 ]; then
-              echo "Push failed after retries"
-              exit 1
-            fi
-          fi
+      - name: Deploy Pages
+        if: steps.commit.outputs.changed == '1'
+        uses: ./.github/actions/deploy-pages
