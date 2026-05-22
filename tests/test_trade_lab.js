@@ -131,6 +131,57 @@ test("trade monte carlo financing reduces short pnl when borrow exceeds proceeds
   assert.ok(outFin.summary.meanTerminal < outNoFin.summary.meanTerminal);
 });
 
+test("trade scenario grid supports multiple ETF symbols on one underlying", () => {
+  const grid = buildTradeScenarioGrid({
+    baseLegs: [
+      { symbol: "APLD", side: "short", quantity: 100, entry: 32 },
+      { symbol: "APLX", side: "long", quantity: 100, entry: 14 },
+      { symbol: "APLZ", side: "long", quantity: 100, entry: 8 },
+    ],
+    optionLegs: [],
+    underlyingSymbol: "APLD",
+    etfSymbol: "APLX",
+    spotBySymbol: { APLD: 32, APLX: 14, APLZ: 8 },
+    leverageBySymbol: { APLX: 1.995, APLZ: -1.9876 },
+    spotUnderlying: 32,
+    spotEtf: 14,
+    leverage: 1.995,
+    horizonYears: 0.5,
+    baseVolAnnual: 0.8,
+    shockRows: [{ sigmaMultiple: 0, underlyingReturn: 0 }],
+    volColumns: [{ sigmaAnnual: 0.8 }],
+    ttxDays: 30,
+  });
+  assert.equal(grid.ok, true);
+  assert.equal(grid.rows.length, 1);
+  assert.ok(Number.isFinite(grid.rows[0].cells[0].pnl));
+});
+
+test("trade monte carlo derives sibling ETF paths from underlying paths", () => {
+  const path = [1, 1.02, 1.04];
+  const out = evaluateTradeMonteCarlo({
+    baseLegs: [
+      { symbol: "APLD", side: "short", quantity: 100, entry: 32 },
+      { symbol: "APLX", side: "long", quantity: 100, entry: 14 },
+      { symbol: "APLZ", side: "long", quantity: 100, entry: 8 },
+    ],
+    optionLegs: [],
+    underlyingSymbol: "APLD",
+    etfSymbol: "APLX",
+    spotBySymbol: { APLD: 32, APLX: 14, APLZ: 8 },
+    leverageBySymbol: { APLX: 2, APLZ: -2 },
+    spotUnderlying: 32,
+    spotEtf: 14,
+    ttxDaysStart: 30,
+    horizonYears: 0.25,
+    volAnnual: 0.6,
+    underlyingPaths: [path],
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.terminal.length, 1);
+  assert.ok(Number.isFinite(out.summary.meanTerminal));
+});
+
 test("ttx sensitivity returns requested tenors", () => {
   const arr = buildTtxSensitivity({
     baseLegs: [{ symbol: "UND", side: "long", quantity: 10, entry: 100 }],

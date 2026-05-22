@@ -153,6 +153,95 @@
     return Math.exp(etfLog) - 1;
   }
 
+  function resolveSpotBySymbol(params) {
+    const underlyingSymbol = String((params && params.underlyingSymbol) || "").toUpperCase();
+    const etfSymbol = String((params && params.etfSymbol) || "").toUpperCase();
+    const spotUnderlying = toNum(params && params.spotUnderlying);
+    const spotEtf = toNum(params && params.spotEtf);
+    const spotBySymbol = { ...((params && params.spotBySymbol) || {}) };
+    if (underlyingSymbol && !Number.isFinite(toNum(spotBySymbol[underlyingSymbol]))) {
+      spotBySymbol[underlyingSymbol] = spotUnderlying;
+    }
+    if (etfSymbol && !Number.isFinite(toNum(spotBySymbol[etfSymbol]))) {
+      spotBySymbol[etfSymbol] = spotEtf;
+    }
+    return spotBySymbol;
+  }
+
+  function resolveLeverageBySymbol(params) {
+    const etfSymbol = String((params && params.etfSymbol) || "").toUpperCase();
+    const leverage = toNum(params && params.leverage);
+    const leverageBySymbol = { ...((params && params.leverageBySymbol) || {}) };
+    if (etfSymbol && !Number.isFinite(toNum(leverageBySymbol[etfSymbol]))) {
+      leverageBySymbol[etfSymbol] = leverage;
+    }
+    return leverageBySymbol;
+  }
+
+  function symbolsFromLegs(baseLegs, optionLegs, underlyingSymbol) {
+    const used = new Set();
+    for (const leg of [...baseLegs, ...optionLegs]) {
+      const sym = String((leg && leg.symbol) || "").toUpperCase();
+      if (sym) used.add(sym);
+    }
+    if (underlyingSymbol) used.add(String(underlyingSymbol).toUpperCase());
+    return used;
+  }
+
+  function etfPathFromUnderlyingPath(undPath, leverage, volAnnual, horizonYears) {
+    const steps = undPath.length - 1;
+    return undPath.map((up, t) => {
+      const undRet = up - 1;
+      const elapsed = steps > 0 ? (t / steps) * horizonYears : horizonYears;
+      const etfRet = etfReturnFromUnderlying({
+        leverage,
+        underlyingReturn: undRet,
+        sigmaAnnual: volAnnual,
+        horizonYears: Math.max(1e-8, elapsed),
+      });
+      return 1 + etfRet;
+    });
+  }
+
+  function buildTradePriceMaps(params, undRet, sigmaAnnual) {
+    const underlyingSymbol = String((params && params.underlyingSymbol) || "").toUpperCase();
+    const etfSymbol = String((params && params.etfSymbol) || "").toUpperCase();
+    const leverage = toNum(params && params.leverage);
+    const horizonYears = toNum(params && params.horizonYears);
+    const baseLegs = Array.isArray(params && params.baseLegs) ? params.baseLegs : [];
+    const optionLegs = Array.isArray(params && params.optionLegs) ? params.optionLegs : [];
+    const baseVol = Math.max(0.01, toNum(params && params.baseVolAnnual));
+    const spotBySymbol = resolveSpotBySymbol(params);
+    const leverageBySymbol = resolveLeverageBySymbol(params);
+    const usedSymbols = symbolsFromLegs(baseLegs, optionLegs, underlyingSymbol);
+
+    const priceNow = {};
+    const priceFinal = {};
+    const volMap = {};
+    for (const sym of usedSymbols) {
+      const spot = toNum(spotBySymbol[sym]);
+      if (!Number.isFinite(spot)) continue;
+      priceNow[sym] = spot;
+      if (sym === underlyingSymbol) {
+        priceFinal[sym] = spot * (1 + undRet);
+        volMap[sym] = baseVol;
+        continue;
+      }
+      const lev = Number.isFinite(toNum(leverageBySymbol[sym]))
+        ? toNum(leverageBySymbol[sym])
+        : (sym === etfSymbol ? leverage : NaN);
+      if (!Number.isFinite(lev)) {
+        priceFinal[sym] = spot;
+        volMap[sym] = sigmaAnnual * 0.5;
+        continue;
+      }
+      const etfRet = etfReturnFromUnderlying({ leverage: lev, underlyingReturn: undRet, sigmaAnnual, horizonYears });
+      priceFinal[sym] = spot * (1 + etfRet);
+      volMap[sym] = sigmaAnnual * Math.max(0.2, Math.abs(lev));
+    }
+    return { priceNow, priceFinal, volMap };
+  }
+
   function buildTradeScenarioGrid(params) {
     const shockRows = Array.isArray(params && params.shockRows) ? params.shockRows : [];
     const volColumns = Array.isArray(params && params.volColumns) ? params.volColumns : [];
@@ -160,36 +249,37 @@
     const spotEtf = toNum(params && params.spotEtf);
     const underlyingSymbol = String((params && params.underlyingSymbol) || "").toUpperCase();
     const etfSymbol = String((params && params.etfSymbol) || "").toUpperCase();
-    const leverage = toNum(params && params.leverage);
     const horizonYears = toNum(params && params.horizonYears);
     const baseLegs = Array.isArray(params && params.baseLegs) ? params.baseLegs : [];
     const optionLegs = Array.isArray(params && params.optionLegs) ? params.optionLegs : [];
     const ttxDays = toNum(params && params.ttxDays);
     const rate = Number.isFinite(toNum(params && params.rate)) ? toNum(params.rate) : 0;
-    const baseVol = Math.max(0.01, toNum(params && params.baseVolAnnual));
+    const spotBySymbol = resolveSpotBySymbol(params);
+    const undSpot = toNum(spotBySymbol[underlyingSymbol]);
 
-    if (!Number.isFinite(spotUnderlying) || !Number.isFinite(spotEtf) || !underlyingSymbol || !etfSymbol) {
+    if (!underlyingSymbol || !Number.isFinite(undSpot)) {
       return { ok: false, error: "Missing trade spot inputs." };
     }
 
     const rows = shockRows.map((row) => {
       const undRet = toNum(row && row.underlyingReturn);
-      const undFinal = spotUnderlying * (1 + undRet);
       const cells = volColumns.map((col) => {
         const sigmaAnnual = Math.max(0.01, toNum(col && col.sigmaAnnual));
-        const etfRet = etfReturnFromUnderlying({ leverage, underlyingReturn: undRet, sigmaAnnual, horizonYears });
-        const etfFinal = spotEtf * (1 + etfRet);
+        const maps = buildTradePriceMaps({ ...params, baseVolAnnual: toNum(params && params.baseVolAnnual) }, undRet, sigmaAnnual);
+        const etfRet = (etfSymbol && Number.isFinite(toNum(maps.priceNow[etfSymbol])) && Number.isFinite(toNum(maps.priceFinal[etfSymbol])))
+          ? (maps.priceFinal[etfSymbol] / maps.priceNow[etfSymbol]) - 1
+          : NaN;
         const out = evaluateStructurePnl({
           baseLegs,
           optionLegs,
-          priceNow: { [underlyingSymbol]: spotUnderlying, [etfSymbol]: spotEtf },
-          priceFinal: { [underlyingSymbol]: undFinal, [etfSymbol]: etfFinal },
+          priceNow: maps.priceNow,
+          priceFinal: maps.priceFinal,
           ttxDays,
           elapsedYears: horizonYears,
           annualBorrowBySymbol: (params && params.annualBorrowBySymbol) || {},
           defaultBorrowAnnual: (params && params.defaultBorrowAnnual) ?? 0,
           shortProceedsRateAnnual: (params && params.shortProceedsRateAnnual) ?? 0,
-          volMap: { [underlyingSymbol]: baseVol, [etfSymbol]: sigmaAnnual * Math.max(0.2, Math.abs(leverage)) },
+          volMap: maps.volMap,
           rate,
         });
         return { ok: true, pnl: out.totalPnl, etfRet, undRet };
@@ -225,12 +315,15 @@
   function evaluateTradeMonteCarlo(params) {
     const etfPaths = Array.isArray(params && params.etfPaths) ? params.etfPaths : [];
     const underlyingPaths = Array.isArray(params && params.underlyingPaths) ? params.underlyingPaths : [];
+    const pathsBySymbol = { ...((params && params.pathsBySymbol) || {}) };
     const baseLegs = Array.isArray(params && params.baseLegs) ? params.baseLegs : [];
     const optionLegs = Array.isArray(params && params.optionLegs) ? params.optionLegs : [];
     const underlyingSymbol = String((params && params.underlyingSymbol) || "").toUpperCase();
     const etfSymbol = String((params && params.etfSymbol) || "").toUpperCase();
-    const spotUnderlying = toNum(params && params.spotUnderlying);
-    const spotEtf = toNum(params && params.spotEtf);
+    const spotBySymbol = resolveSpotBySymbol(params);
+    const leverageBySymbol = resolveLeverageBySymbol(params);
+    const spotUnderlying = toNum(spotBySymbol[underlyingSymbol]);
+    const spotEtf = toNum(spotBySymbol[etfSymbol]);
     const ttxDaysStart = Math.max(0, toNum(params && params.ttxDaysStart));
     const horizonYears = Math.max(1e-8, toNum(params && params.horizonYears));
     const volAnnual = Math.max(0.01, toNum(params && params.volAnnual));
@@ -239,32 +332,53 @@
     const defaultBorrowAnnual = Number.isFinite(toNum(params && params.defaultBorrowAnnual)) ? Math.max(0, toNum(params.defaultBorrowAnnual)) : 0;
     const shortProceedsRateAnnual = Number.isFinite(toNum(params && params.shortProceedsRateAnnual)) ? toNum(params.shortProceedsRateAnnual) : 0;
 
-    if (!etfPaths.length || !underlyingPaths.length) return { ok: false, error: "Monte Carlo paths missing." };
-    const n = Math.min(etfPaths.length, underlyingPaths.length);
-    const steps = Math.max(1, etfPaths[0].length - 1);
+    if (!underlyingPaths.length) return { ok: false, error: "Monte Carlo paths missing." };
+    const usedSymbols = symbolsFromLegs(baseLegs, optionLegs, underlyingSymbol);
+    if (underlyingSymbol) pathsBySymbol[underlyingSymbol] = underlyingPaths;
+    if (etfSymbol && etfPaths.length && !pathsBySymbol[etfSymbol]) {
+      pathsBySymbol[etfSymbol] = etfPaths;
+    }
+    for (const sym of usedSymbols) {
+      if (sym === underlyingSymbol || pathsBySymbol[sym]) continue;
+      const lev = toNum(leverageBySymbol[sym]);
+      if (!Number.isFinite(lev)) continue;
+      pathsBySymbol[sym] = underlyingPaths.map((up) => etfPathFromUnderlyingPath(up, lev, volAnnual, horizonYears));
+    }
+
+    const n = underlyingPaths.length;
+    const steps = Math.max(1, underlyingPaths[0].length - 1);
     const horizonDays = Math.round(horizonYears * 252);
 
     const terminal = [];
     const mdds = [];
     for (let p = 0; p < n; p += 1) {
-      const ep = etfPaths[p];
-      const up = underlyingPaths[p];
       const pnlPath = new Array(steps + 1);
       for (let t = 0; t <= steps; t += 1) {
         const ttxRemain = Math.max(0, ttxDaysStart - ((t / steps) * horizonDays));
-        const undNow = spotUnderlying * up[t];
-        const etfNow = spotEtf * ep[t];
+        const priceNow = {};
+        const priceFinal = {};
+        const volMap = {};
+        for (const sym of usedSymbols) {
+          const spot0 = toNum(spotBySymbol[sym]);
+          const symPaths = pathsBySymbol[sym];
+          if (!Number.isFinite(spot0) || !Array.isArray(symPaths) || !symPaths[p]) continue;
+          priceNow[sym] = spot0;
+          priceFinal[sym] = spot0 * symPaths[p][t];
+          volMap[sym] = sym === underlyingSymbol
+            ? volAnnual
+            : volAnnual * Math.max(0.2, Math.abs(toNum(leverageBySymbol[sym]) || 1));
+        }
         const out = evaluateStructurePnl({
           baseLegs,
           optionLegs,
-          priceNow: { [underlyingSymbol]: spotUnderlying, [etfSymbol]: spotEtf },
-          priceFinal: { [underlyingSymbol]: undNow, [etfSymbol]: etfNow },
+          priceNow,
+          priceFinal,
           ttxDays: ttxRemain,
           elapsedYears: (t / steps) * horizonYears,
           annualBorrowBySymbol,
           defaultBorrowAnnual,
           shortProceedsRateAnnual,
-          volMap: { [underlyingSymbol]: volAnnual, [etfSymbol]: volAnnual },
+          volMap,
           rate,
         });
         pnlPath[t] = out.totalPnl;
@@ -316,6 +430,9 @@
     equityLegPnl,
     optionLegPnl,
     evaluateStructurePnl,
+    etfReturnFromUnderlying,
+    etfPathFromUnderlyingPath,
+    buildTradePriceMaps,
     buildTradeScenarioGrid,
     evaluateTradeMonteCarlo,
     buildTtxSensitivity,
