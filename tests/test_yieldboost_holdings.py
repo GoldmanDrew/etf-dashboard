@@ -16,8 +16,10 @@ sys.path.insert(0, str(SCRIPTS))
 from yieldboost_holdings import (  # noqa: E402
     format_occ_ticker,
     granite_xls_rows_to_holdings,
+    held_strike_band,
     infer_etf_ticker_from_source_url,
     load_sleeve_by_yb_from_screener,
+    load_yieldboost_target_strikes_by_sleeve,
     normalize_holdings_dataframe,
     pair_put_spreads_from_holdings,
     parse_granite_option_description,
@@ -86,6 +88,23 @@ def test_resolve_sleeve_ticker():
 )
 def test_resolve_sleeve_ticker_all_yieldboost_roots(root, underlying, yb_etf, expected):
     assert resolve_sleeve_ticker(root, underlying, yb_etf=yb_etf) == expected
+
+
+def test_held_strike_band_includes_itm_puts():
+    """MTYY front spread: strikes 7.03/7.42 vs spot ~6.66 must stay in band."""
+    lo, hi = held_strike_band([7.03, 7.42], spot_value=6.66)
+    assert lo <= 7.03
+    assert hi >= 7.42
+
+
+def test_load_yieldboost_target_strikes_by_sleeve():
+    target = Path(__file__).resolve().parents[1] / "data" / "yieldboost_options_target.json"
+    if not target.exists():
+        pytest.skip("yieldboost_options_target.json not present")
+    by_sleeve = load_yieldboost_target_strikes_by_sleeve(target)
+    assert "MSTU" in by_sleeve
+    assert 7.03 in by_sleeve["MSTU"]
+    assert 7.42 in by_sleeve["MSTU"]
 
 
 def test_load_sleeve_by_yb_from_screener_unique_underlyings():

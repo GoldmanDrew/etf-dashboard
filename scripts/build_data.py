@@ -1167,11 +1167,19 @@ def _maps_from_universe_csv(df: pd.DataFrame) -> dict:
     return out
 
 
-def build_polygon_options_cache(symbols: list[str]) -> dict:
+def build_polygon_options_cache(
+    symbols: list[str],
+    *,
+    yieldboost_targeted: bool = False,
+) -> dict:
     """
     Build delayed options snapshot cache from Polygon for UI consumption.
     Returns a JSON-serializable dict with per-symbol spot + option rows.
     """
+    from yieldboost_holdings import held_strike_band, load_yieldboost_target_strikes_by_sleeve
+
+    target_strikes_by_sleeve = load_yieldboost_target_strikes_by_sleeve(YIELDBOOST_OPTIONS_TARGET_FILE)
+
     prior_cache = {}
     if OPTIONS_CACHE_FILE.exists():
         try:
@@ -1226,11 +1234,16 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
             return 10**9
 
     # Time-sharded refresh keeps frequent updates while controlling API pressure.
-    forced_symbols = [norm_sym(s) for s in get_polygon_force_symbols() if str(s).strip()]
-    forced_set = set(forced_symbols)
-    shard_count = max(1, OPTIONS_SHARD_COUNT)
     symbols_per_run = max(1, OPTIONS_SYMBOLS_PER_RUN)
     shard_interval_minutes = max(1, OPTIONS_SHARD_INTERVAL_MINUTES)
+    if yieldboost_targeted:
+        forced_symbols = sorted(all_symbols)
+        symbols_per_run = max(symbols_per_run, len(all_symbols))
+        shard_count = 1
+    else:
+        forced_symbols = [norm_sym(s) for s in get_polygon_force_symbols() if str(s).strip()]
+        shard_count = max(1, OPTIONS_SHARD_COUNT)
+    forced_set = set(forced_symbols)
     slot = int(time.time() // (shard_interval_minutes * 60)) % shard_count
     shard_candidates = [s for s in all_symbols if (hash(s) % shard_count) == slot and s not in forced_set]
     # Prioritize low-quality/stale symbols first inside the active shard.
@@ -1268,6 +1281,8 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         "forced_symbols": get_polygon_force_symbols(),
         "tradier_chain_symbols": sorted(tradier_chain_symbols),
         "refresh_symbols_count": int(len(refresh_symbols)),
+        "yieldboost_targeted": bool(yieldboost_targeted),
+        "yieldboost_target_sleeves": sorted(target_strikes_by_sleeve.keys()),
         "shard_interval_minutes": int(shard_interval_minutes),
         "polygon_request_limits": {
             "max_requests_per_minute": int(POLYGON_MAX_REQUESTS_PER_MINUTE),
@@ -1459,6 +1474,10 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
         return rows, "; ".join(errs[:2]) if errs else None
 
     def _strike_bands_for_symbol(sym: str, spot_value: float | None, *, provider: str) -> tuple[float | None, float | None]:
+        held = target_strikes_by_sleeve.get(norm_sym(sym)) or []
+        if held:
+            lo, hi = held_strike_band(held, spot_value)
+            return lo, hi
         if spot_value is None or spot_value <= 0:
             return None, None
         symbol = norm_sym(sym)
@@ -1512,6 +1531,11 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 merged[k] = dict(r)
         return list(merged.values())
 
+    def _keep_moneyness_filter(sym: str) -> bool:
+        if norm_sym(sym) in target_strikes_by_sleeve:
+            return False
+        return True
+
     def _filter_option_rows(rows: list[dict], spot_value: float | None, sym: str) -> list[dict]:
         if not rows:
             return rows
@@ -1530,7 +1554,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 if strike is None:
                     continue
                 ctype = str(r.get("contract_type") or "").lower()
-                if POLYGON_CHAIN_MONEYNESS_MODE == "atm_otm":
+                if _keep_moneyness_filter(sym) and POLYGON_CHAIN_MONEYNESS_MODE == "atm_otm":
                     if ctype.startswith("call") and strike < spot_value:
                         continue
                     if ctype.startswith("put") and strike > spot_value:
@@ -1836,7 +1860,7 @@ def build_polygon_options_cache(symbols: list[str]) -> dict:
                 if strike is None:
                     continue
                 option_type = str(opt.get("option_type") or opt.get("type") or "").lower()
-                if spot_value is not None and spot_value > 0 and TRADIER_CHAIN_MONEYNESS_MODE == "atm_otm":
+                if spot_value is not None and spot_value > 0 and _keep_moneyness_filter(sym) and TRADIER_CHAIN_MONEYNESS_MODE == "atm_otm":
                     # Keep only ATM/OTM contracts:
                     # - Calls: strike >= spot (ATM or OTM)
                     # - Puts:  strike <= spot (ATM or OTM)
@@ -3099,7 +3123,7 @@ def refresh_yieldboost_vrp_only() -> None:
     refresh_list = sleeves[: max(1, max_contracts)] if sleeves else []
     options_cache = prior_cache
     if refresh_list:
-        options_cache = build_polygon_options_cache(refresh_list)
+        options_cache = build_polygon_options_cache(refresh_list, yieldboost_targeted=True)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(options_cache, f, indent=None, separators=(",", ":"))

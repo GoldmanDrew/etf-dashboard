@@ -498,6 +498,41 @@ def spreads_json_to_put_spread_legs(
     return legs
 
 
+def load_yieldboost_target_strikes_by_sleeve(
+    target_path: Path | str | None = None,
+) -> dict[str, list[float]]:
+    """Held put/call strikes per 2x sleeve from yieldboost_options_target.json."""
+    path = Path(target_path) if target_path else Path("data/yieldboost_options_target.json")
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    by_sleeve: dict[str, set[float]] = {}
+    for row in payload.get("contracts") or []:
+        if not isinstance(row, dict):
+            continue
+        sleeve = str(row.get("sleeve") or "").upper()
+        strike = _parse_float(row.get("strike"))
+        if sleeve and strike is not None:
+            by_sleeve.setdefault(sleeve, set()).add(float(strike))
+    return {k: sorted(v) for k, v in by_sleeve.items()}
+
+
+def held_strike_band(
+    strikes: list[float],
+    spot_value: float | None,
+    *,
+    pad_pct: float = 0.25,
+) -> tuple[float, float]:
+    """Inclusive strike band around Granite held legs (allows slightly ITM puts)."""
+    lo, hi = min(strikes), max(strikes)
+    span = max(hi - lo, 0.01)
+    pad = max(span * pad_pct, (spot_value or hi) * 0.05, 0.25)
+    return lo - pad, hi + pad
+
+
 def load_yieldboost_force_symbols_from_spreads(
     spreads_path: Path | None = None,
     *,
