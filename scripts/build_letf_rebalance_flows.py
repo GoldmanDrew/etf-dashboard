@@ -372,16 +372,32 @@ def load_or_refresh_underlying_volume_panel(
 
 def compute_adv_panel(volume_panel: pd.DataFrame, *, window: int = _ADV_WINDOW_DAYS) -> pd.DataFrame:
     """Trailing-window mean dollar volume per (date, underlying)."""
-    if volume_panel.empty:
+    full = compute_adv_panel_with_median(volume_panel, window=window)
+    if full.empty:
         return pd.DataFrame(columns=["date", "underlying", "underlying_dollar_adv_20d"])
+    return full[["date", "underlying", "underlying_dollar_adv_20d"]]
+
+
+def compute_adv_panel_with_median(
+    volume_panel: pd.DataFrame, *, window: int = _ADV_WINDOW_DAYS,
+) -> pd.DataFrame:
+    """Trailing mean + median dollar volume per (date, underlying)."""
+    cols = [
+        "date", "underlying",
+        "underlying_dollar_adv_20d", "underlying_dollar_median_adv_20d",
+    ]
+    if volume_panel.empty:
+        return pd.DataFrame(columns=cols)
     panel = volume_panel.sort_values(["underlying", "date"]).copy()
+    min_p = min(_ADV_MIN_PERIODS, window)
+    grouped = panel.groupby("underlying")["dollar_volume"]
     panel["underlying_dollar_adv_20d"] = (
-        panel.groupby("underlying")["dollar_volume"]
-        .rolling(window=window, min_periods=min(_ADV_MIN_PERIODS, window))
-        .mean()
-        .reset_index(level=0, drop=True)
+        grouped.rolling(window=window, min_periods=min_p).mean().reset_index(level=0, drop=True)
     )
-    return panel[["date", "underlying", "underlying_dollar_adv_20d"]]
+    panel["underlying_dollar_median_adv_20d"] = (
+        grouped.rolling(window=window, min_periods=min_p).median().reset_index(level=0, drop=True)
+    )
+    return panel[cols]
 
 
 def annotate_with_adv(

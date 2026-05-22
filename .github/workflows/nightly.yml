@@ -111,6 +111,10 @@ jobs:
         continue-on-error: true
         run: python scripts/score_intraday_flows.py
 
+      - name: Backtest intraday remaining heuristics
+        continue-on-error: true
+        run: python scripts/backtest_intraday_remaining.py
+
       - name: Full dashboard build
         id: build_data
         continue-on-error: true
@@ -165,6 +169,7 @@ jobs:
             data/underlying_volume_history.parquet
             data/letf_intraday_flow_realized.jsonl
             data/letf_intraday_flow_metrics.json
+            data/letf_intraday_remaining_backtest.json
             data/dashboard_data.json
             data/etf_screened_today.csv
             data/borrow_history.json

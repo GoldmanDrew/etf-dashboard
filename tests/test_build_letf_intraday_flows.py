@@ -62,7 +62,6 @@ def _spots() -> dict:
             "last": 707.07,
             "prior_close": 700.0,
             "return_d1_so_far": 0.01,
-            "volume_so_far": 12_000_000.0,
             "as_of": "2026-05-20T19:55:00Z",
             "source": "polygon_snapshot",
             "stale": False,
@@ -78,8 +77,25 @@ def _spots() -> dict:
     }
 
 
+def _volumes() -> dict:
+    return {
+        "SPY": {"volume_so_far": 12_000_000.0, "source": "tradier_volume"},
+    }
+
+
+def _agg_kwargs(**over):
+    base = {
+        "remaining_model": {"model": "none", "session_minutes": 390},
+        "minutes_to_close": 15,
+    }
+    base.update(over)
+    return base
+
+
 def test_compute_fund_intraday_signs_match_avellaneda_zhang():
-    fund_df = intraday.compute_fund_intraday(_universe(), _latest_metrics(), _spots())
+    fund_df = intraday.compute_fund_intraday(
+        _universe(), _latest_metrics(), _spots(), volume_by_und=_volumes(),
+    )
     upro = fund_df[fund_df["ticker"].eq("UPRO")].iloc[0]
     spxu = fund_df[fund_df["ticker"].eq("SPXU")].iloc[0]
     # 3*(3-1)*1B*+1% = +$60M
@@ -91,34 +107,74 @@ def test_compute_fund_intraday_signs_match_avellaneda_zhang():
 
 
 def test_excluded_fund_marked_but_not_aggregated():
-    fund_df = intraday.compute_fund_intraday(_universe(), _latest_metrics(), _spots())
+    fund_df = intraday.compute_fund_intraday(
+        _universe(), _latest_metrics(), _spots(), volume_by_und=_volumes(),
+    )
     excluded = fund_df[fund_df["ticker"].eq("TSLZ")].iloc[0]
     assert excluded["quality_flag"] == "income_overlay"
     assert excluded["included_in_aggregate"] == False  # noqa: E712 -- intentional bool comparison
 
-    agg = intraday.aggregate_underlying(fund_df, adv_latest={}, bias_map={})
+    agg = intraday.aggregate_underlying(fund_df, adv_latest={}, bias_map={}, **_agg_kwargs())
     # TSLA had no included funds, so it must be absent from the aggregate.
     assert "TSLA" not in agg["underlying"].tolist()
 
 
 def test_aggregate_with_adv_and_bias_adjustment():
-    fund_df = intraday.compute_fund_intraday(_universe(), _latest_metrics(), _spots())
+    fund_df = intraday.compute_fund_intraday(
+        _universe(), _latest_metrics(), _spots(), volume_by_und=_volumes(),
+    )
     adv_latest = {
-        "SPY": {"underlying_dollar_adv_20d": 30_000_000_000.0, "as_of_date": "2026-05-19"},
+        "SPY": {
+            "underlying_dollar_adv_20d": 30_000_000_000.0,
+            "underlying_dollar_median_adv_20d": 28_000_000_000.0,
+            "underlying_dollar_adv_intraday_20d": 28_000_000_000.0,
+            "as_of_date": "2026-05-19",
+        },
     }
     bias_map = {
         # Suppose historical signed error is +5 % (estimate consistently 5 %
-        # over realised); adjusted = (1 - 0.05) � estimate = 95 % � est.
+        # over realised); adjusted = (1 - 0.05) × estimate = 95 % × est.
         "SPY": {"mean_signed_error_pct": 0.05, "n": 12},
     }
-    agg = intraday.aggregate_underlying(fund_df, adv_latest=adv_latest, bias_map=bias_map)
+    agg = intraday.aggregate_underlying(
+        fund_df, adv_latest=adv_latest, bias_map=bias_map, **_agg_kwargs(),
+    )
     spy = agg[agg["underlying"].eq("SPY")].iloc[0]
-    # Both UPRO and SPXU push +$60M each on a +1 % day ? net +$120M.
+    # Both UPRO and SPXU push +$60M each on a +1 % day → net +$120M.
     assert spy["estimated_net_close_rebalance_dollars"] == pytest.approx(120_000_000.0, rel=1e-9)
-    assert spy["estimated_close_rebalance_pct_adv_20d"] == pytest.approx(120_000_000.0 / 30_000_000_000.0, rel=1e-9)
+    assert spy["estimated_close_rebalance_pct_adv_20d"] == pytest.approx(
+        120_000_000.0 / 28_000_000_000.0, rel=1e-9,
+    )
     assert spy["bias_signed_error_pct"] == pytest.approx(0.05, rel=1e-9)
-    # 120_000_000 � (1 ? 0.05) = 114_000_000
     assert spy["estimated_close_rebalance_dollars_bias_adj"] == pytest.approx(114_000_000.0, rel=1e-9)
+    # model none → remaining equals full est
+    assert spy["remaining_close_rebalance_dollars"] == pytest.approx(120_000_000.0, rel=1e-9)
+
+
+def test_vol_remaining_model_scales_remaining():
+    fund_df = intraday.compute_fund_intraday(
+        _universe(), _latest_metrics(), _spots(), volume_by_und=_volumes(),
+    )
+    adv_latest = {
+        "SPY": {
+            "underlying_dollar_adv_20d": 30_000_000_000.0,
+            "underlying_dollar_median_adv_20d": 30_000_000_000.0,
+            "underlying_dollar_adv_intraday_20d": 30_000_000_000.0,
+        },
+    }
+    agg = intraday.aggregate_underlying(
+        fund_df,
+        adv_latest=adv_latest,
+        bias_map={},
+        remaining_model={"model": "vol_remaining", "session_minutes": 390},
+        minutes_to_close=15,
+    )
+    spy = agg[agg["underlying"].eq("SPY")].iloc[0]
+    vol_pct = float(spy["volume_so_far_pct_adv"])
+    assert vol_pct > 0
+    assert spy["remaining_close_rebalance_dollars"] == pytest.approx(
+        120_000_000.0 * (1.0 - vol_pct), rel=1e-6,
+    )
 
 
 def test_stale_spot_drops_from_aggregate():
@@ -360,7 +416,7 @@ def test_blend_uses_nav_when_spot_missing_but_nav_fresh():
 def test_aggregate_rolls_per_source_dollars_and_fund_counts():
     u, m, s, nav = _spy_universe_with_v2_nav()
     fund_df = intraday.compute_fund_intraday(u, m, s, nav_forecasts=nav)
-    agg = intraday.aggregate_underlying(fund_df, adv_latest={}, bias_map={})
+    agg = intraday.aggregate_underlying(fund_df, adv_latest={}, bias_map={}, **_agg_kwargs())
     spy = agg[agg["underlying"].eq("SPY")].iloc[0]
     assert spy["estimated_net_close_rebalance_dollars_spot"] == pytest.approx(fund_df.iloc[0]["rebalance_spot"])
     assert spy["estimated_net_close_rebalance_dollars_nav"] == pytest.approx(fund_df.iloc[0]["rebalance_nav"])

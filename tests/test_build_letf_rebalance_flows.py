@@ -159,6 +159,20 @@ def test_compute_adv_panel_rolls_per_underlying():
     assert pd.isna(tsla_19.underlying_dollar_adv_20d)
 
 
+def test_compute_adv_panel_with_median_includes_median_column():
+    panel = pd.DataFrame([
+        {"date": "2026-05-15", "underlying": "AAPL", "dollar_volume": 100.0},
+        {"date": "2026-05-16", "underlying": "AAPL", "dollar_volume": 200.0},
+        {"date": "2026-05-17", "underlying": "AAPL", "dollar_volume": 300.0},
+        {"date": "2026-05-18", "underlying": "AAPL", "dollar_volume": 400.0},
+        {"date": "2026-05-19", "underlying": "AAPL", "dollar_volume": 10_000.0},
+    ])
+    out = flows.compute_adv_panel_with_median(panel, window=3)
+    row = out[(out.date == "2026-05-19") & (out.underlying == "AAPL")].iloc[0]
+    assert row.underlying_dollar_adv_20d == pytest.approx((300.0 + 400.0 + 10_000.0) / 3)
+    assert row.underlying_dollar_median_adv_20d == pytest.approx(400.0)
+
+
 def test_annotate_with_adv_attaches_pct_adv():
     fund_flows = pd.DataFrame([
         {

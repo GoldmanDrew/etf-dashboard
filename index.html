@@ -8185,7 +8185,7 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
           <div className="cs-sub">
             {headline.topBuy?.underlying || '—'}
             {Number.isFinite(Number(headline.topBuy?.[advFieldName]))
-              ? <> · {fmtPctDecimal(headline.topBuy[advFieldName], 2)} of 20d $ ADV</>
+              ? <> · {fmtPctDecimal(headline.topBuy[advFieldName], 2)} of {mode === 'intraday' ? '20d median $ ADV' : '20d $ ADV'}</>
               : null}
           </div>
         </div>
@@ -8197,7 +8197,7 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
           <div className="cs-sub">
             {headline.topSell?.underlying || '—'}
             {Number.isFinite(Number(headline.topSell?.[advFieldName]))
-              ? <> · {fmtPctDecimal(headline.topSell[advFieldName], 2)} of 20d $ ADV</>
+              ? <> · {fmtPctDecimal(headline.topSell[advFieldName], 2)} of {mode === 'intraday' ? '20d median $ ADV' : '20d $ ADV'}</>
               : null}
           </div>
         </div>
@@ -8262,15 +8262,17 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
                 {mode === 'intraday' ? 'Est. close $' : 'Net MOC $'}{sortIndicator('abs_net_moc')}
               </th>
               {mode === 'intraday' ? (
-                <th onClick={() => handleSort('abs_remaining')} style={{ cursor: 'pointer' }} title="Estimated remaining-to-close = (1 − vol_so_far/20d_ADV) × est. close $">
+                <th onClick={() => handleSort('abs_remaining')} style={{ cursor: 'pointer' }} title="Estimated remaining-to-close = (1 − today_volume/20d_ADV) × est. close $">
                   Remaining $ {sortIndicator('abs_remaining')}
                 </th>
               ) : null}
               <th onClick={() => handleSort('abs_pct_aum')} style={{ cursor: 'pointer' }}>% LETF AUM{sortIndicator('abs_pct_aum')}</th>
-              <th onClick={() => handleSort('abs_pct_adv')} style={{ cursor: 'pointer' }}>% 20d $ ADV{sortIndicator('abs_pct_adv')}</th>
+              <th onClick={() => handleSort('abs_pct_adv')} style={{ cursor: 'pointer' }}>
+                {mode === 'intraday' ? '% 20d median $ ADV' : '% 20d $ ADV'}{sortIndicator('abs_pct_adv')}
+              </th>
               {mode === 'intraday' ? (
-                <th onClick={() => handleSort('abs_volume_so_far')} style={{ cursor: 'pointer' }} title="Today's traded $ vol / 20d $ ADV">
-                  Vol so far{sortIndicator('abs_volume_so_far')}
+                <th onClick={() => handleSort('abs_volume_so_far')} style={{ cursor: 'pointer' }} title="Today's cumulative share volume × spot, as % of 20d median dollar ADV">
+                  Today vol / ADV{sortIndicator('abs_volume_so_far')}
                 </th>
               ) : null}
               <th onClick={() => handleSort('return')} style={{ cursor: 'pointer' }}>

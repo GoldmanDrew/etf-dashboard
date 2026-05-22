@@ -47,6 +47,7 @@ DEFAULT_CONFIG: dict = {
         ],
         "intraday": [
             "data/underlying_intraday_spot.json",
+            "data/underlying_intraday_volume.json",
             "data/letf_rebalance_flows_intraday_latest.json",
         ],
         "nav": ["data/nav_forecasts/_latest.json"],
@@ -226,6 +227,10 @@ def execute_task(task: str, config: dict) -> None:
         run_subprocess([py, str(BUILD_DATA), "--yieldboost-vrp-only"], config.get("yieldboost_env"))
     elif task == "intraday":
         run_subprocess([py, str(ROOT / "scripts" / "refresh_underlying_spots.py"), "--max-yfinance", "0", "--min-with-return", "50"])
+        try:
+            run_subprocess([py, str(ROOT / "scripts" / "refresh_underlying_volume.py"), "--max-yfinance", "0"])
+        except subprocess.CalledProcessError:
+            print("[ci_tick] volume refresh failed; continuing with stale/missing volume")
         run_subprocess([py, str(ROOT / "scripts" / "build_letf_intraday_flows.py")])
     elif task == "nav":
         run_subprocess([py, str(ROOT / "scripts" / "forecast_nav.py")])

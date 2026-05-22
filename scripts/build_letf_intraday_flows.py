@@ -9,8 +9,10 @@ Inputs:
   * ``data/etf_screened_today.csv``                 -- universe, leverage, product class
   * ``data/etf_metrics_daily.parquet``              -- last AUM-bearing row per fund
   * ``data/underlying_intraday_spot.json``          -- live spots + prior closes
-  * ``data/underlying_volume_history.parquet``      -- 20d $ ADV (optional)
+  * ``data/underlying_intraday_volume.json``        -- cumulative day volume (optional)
+  * ``data/underlying_volume_history.parquet``      -- 20d mean/median $ ADV (optional)
   * ``data/letf_intraday_flow_metrics.json``        -- per-underlying bias adj. (optional)
+  * ``data/letf_intraday_remaining_backtest.json``  -- remaining-model selector (optional)
 
 Outputs:
   * ``data/letf_rebalance_flows_intraday_latest.json``
@@ -19,10 +21,10 @@ Outputs:
         Append-only log: one JSON line per build. Used by ``score_intraday_flows.py``
         (T+1 reconciliation against the EOD realised close-flow).
 
-The "remaining-to-close" decomposition assumes that issuers have already
-worked a fraction of their hedge intraday roughly equal to ``volume_so_far /
-20d $ ADV`` (a crude proxy -- LETFs are <1% of underlying ADV typically, so
-this only matters for very concentrated single-name buckets).
+The "remaining-to-close" decomposition is driven by
+``data/letf_intraday_remaining_backtest.json`` (built nightly by
+``backtest_intraday_remaining.py``). When no backtest exists or baseline wins,
+remaining equals the full est. close $ (``remaining_model=none``).
 """
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ from build_letf_rebalance_flows import (  # noqa: E402
     UNDERLYING_VOLUME_PARQUET,
     _ADV_WINDOW_DAYS,
     _f,
-    compute_adv_panel,
+    compute_adv_panel_with_median,
     load_metrics,
     load_universe,
     norm_sym,
@@ -57,6 +59,8 @@ LOGGER = logging.getLogger("letf_intraday_flows")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
 SPOT_INPUT = DATA_DIR / "underlying_intraday_spot.json"
+VOLUME_INPUT = DATA_DIR / "underlying_intraday_volume.json"
+REMAINING_BACKTEST_JSON = DATA_DIR / "letf_intraday_remaining_backtest.json"
 NAV_FORECAST_LATEST = DATA_DIR / "nav_forecasts" / "_latest.json"
 INTRADAY_OUTPUT = DATA_DIR / "letf_rebalance_flows_intraday_latest.json"
 SNAPSHOT_DIR = DATA_DIR / "letf_rebalance_flows_intraday_snapshots"
@@ -86,6 +90,9 @@ NAV_BLEND_DEFAULT_BY_MODEL: dict[str, float] = {
 NAV_BLEND_MEDIUM_CONFIDENCE_SCALE = 0.5  # halve the weight on medium-confidence rows
 NAV_BLEND_WEIGHT_FLOOR = 0.05
 NAV_BLEND_WEIGHT_CEIL = 0.95
+
+# Regular US cash session length for time-based remaining heuristic (minutes).
+SESSION_MINUTES = 390
 
 
 # ?? Helpers ??????????????????????????????????????????????????????????????
@@ -166,8 +173,24 @@ def load_intraday_spots(path: Path = SPOT_INPUT) -> tuple[dict[str, dict[str, An
     return by_und, meta
 
 
+def load_intraday_volume(path: Path = VOLUME_INPUT) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    if not path.exists():
+        return {}, {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOGGER.warning("failed to parse %s: %s", path, exc)
+        return {}, {}
+    by_und = payload.get("by_underlying") or {}
+    meta = {
+        k: payload.get(k)
+        for k in ("build_time", "trading_date", "n_underlyings_with_volume", "n_underlyings_universe", "sources")
+    }
+    return by_und, meta
+
+
 def load_adv_latest(path: Path = UNDERLYING_VOLUME_PARQUET) -> dict[str, dict[str, Any]]:
-    """Most recent 20d $ ADV per underlying."""
+    """Most recent 20d mean + median dollar ADV per underlying (intraday uses median)."""
     if not path.exists():
         return {}
     try:
@@ -177,21 +200,72 @@ def load_adv_latest(path: Path = UNDERLYING_VOLUME_PARQUET) -> dict[str, dict[st
         return {}
     if df.empty:
         return {}
-    panel = compute_adv_panel(df, window=_ADV_WINDOW_DAYS)
+    panel = compute_adv_panel_with_median(df, window=_ADV_WINDOW_DAYS)
     if panel.empty:
         return {}
     panel = panel.sort_values(["underlying", "date"])
     last = panel.groupby("underlying", as_index=False).tail(1)
     out: dict[str, dict[str, Any]] = {}
     for _, r in last.iterrows():
-        adv = _f(r.get("underlying_dollar_adv_20d"))
-        if adv is None or adv <= 0:
+        mean_adv = _f(r.get("underlying_dollar_adv_20d"))
+        med_adv = _f(r.get("underlying_dollar_median_adv_20d"))
+        adv_intraday = med_adv if med_adv and med_adv > 0 else mean_adv
+        if adv_intraday is None or adv_intraday <= 0:
             continue
         out[str(r["underlying"]).upper()] = {
-            "underlying_dollar_adv_20d": adv,
+            "underlying_dollar_adv_20d": mean_adv,
+            "underlying_dollar_median_adv_20d": med_adv,
+            "underlying_dollar_adv_intraday_20d": adv_intraday,
             "as_of_date": str(r.get("date") or ""),
         }
     return out
+
+
+def load_remaining_model(path: Path = REMAINING_BACKTEST_JSON) -> dict[str, Any]:
+    """Backtest-selected remaining decomposition (``none`` | ``vol_remaining`` | ``time_remaining``)."""
+    default: dict[str, Any] = {
+        "model": "none",
+        "session_minutes": SESSION_MINUTES,
+        "source": "default",
+    }
+    if not path.exists():
+        return default
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+    model = str(payload.get("recommended_remaining_model") or "none").strip()
+    if model not in {"none", "vol_remaining", "time_remaining", "baseline_est"}:
+        model = "none"
+    if model == "baseline_est":
+        model = "none"
+    return {
+        "model": model,
+        "session_minutes": int(payload.get("session_minutes") or SESSION_MINUTES),
+        "source": str(path),
+        "backtest_build_time": payload.get("build_time"),
+        "n_observations": payload.get("n_observations"),
+    }
+
+
+def _remaining_share(row: pd.Series, *, model: str, minutes_to_close: int, session_minutes: int) -> float | None:
+    """Fraction of est. close $ still pending (0 = fully realised, 1 = none yet)."""
+    est = _f(row.get("estimated_net_close_rebalance_dollars"))
+    if est is None:
+        return None
+    if model == "none":
+        return 1.0
+    if model == "vol_remaining":
+        vol_pct = _f(row.get("volume_so_far_pct_adv"))
+        if vol_pct is None:
+            return 1.0
+        return max(0.0, min(1.0, 1.0 - vol_pct))
+    if model == "time_remaining":
+        if session_minutes <= 0:
+            return 1.0
+        frac = max(0.0, min(1.0, float(minutes_to_close) / float(session_minutes)))
+        return frac
+    return 1.0
 
 
 def load_intraday_bias(path: Path = INTRADAY_BIAS_JSON) -> dict[str, dict[str, Any]]:
@@ -376,6 +450,7 @@ def compute_fund_intraday(
     latest_metrics: pd.DataFrame,
     spots: dict[str, dict[str, Any]],
     *,
+    volume_by_und: dict[str, dict[str, Any]] | None = None,
     nav_forecasts: dict[str, dict[str, Any]] | None = None,
     blend_weight_overrides: dict[str, float] | None = None,
 ) -> pd.DataFrame:
@@ -402,6 +477,7 @@ def compute_fund_intraday(
 
     nav_forecasts = nav_forecasts or {}
     blend_weight_overrides = blend_weight_overrides or {}
+    volume_by_und = volume_by_und or {}
 
     df = latest_metrics.merge(universe, on="ticker", how="left")
     df["underlying"] = df["underlying"].fillna("")
@@ -414,6 +490,7 @@ def compute_fund_intraday(
     for _, row in df.iterrows():
         und = str(row.get("underlying") or "").upper()
         s = spots.get(und) if und else None
+        v = volume_by_und.get(und) if und else None
         ticker = norm_sym(row.get("ticker"))
         n = nav_forecasts.get(ticker) if ticker else None
         enrich_records.append({
@@ -423,7 +500,9 @@ def compute_fund_intraday(
             "spot_as_of": s.get("as_of") if s else None,
             "spot_source": s.get("source") if s else None,
             "spot_stale": bool(s.get("stale")) if s else False,
-            "underlying_volume_so_far": _f(s.get("volume_so_far")) if s else None,
+            "underlying_volume_so_far": _f(v.get("volume_so_far")) if v else None,
+            "volume_as_of": v.get("as_of") if v else None,
+            "volume_source": v.get("source") if v else None,
             # NAV-forecast row (may be missing, stale, or not applicable for the
             # ETF universe row -- handled in _quality / weight policy below).
             "nav_model": (n or {}).get("model"),
@@ -570,6 +649,8 @@ def aggregate_underlying(
     *,
     adv_latest: dict[str, dict[str, Any]],
     bias_map: dict[str, dict[str, Any]],
+    remaining_model: dict[str, Any],
+    minutes_to_close: int,
 ) -> pd.DataFrame:
     if fund_df.empty:
         return pd.DataFrame()
@@ -624,10 +705,18 @@ def aggregate_underlying(
         agg["estimated_net_close_rebalance_dollars"] / agg["total_letf_aum_prior_close"]
     )
 
-    # ADV + intraday volume context.
+    # ADV + intraday volume context (intraday %ADV uses 20d median dollar volume).
     agg["underlying_dollar_adv_20d"] = agg["underlying"].map(
         lambda u: adv_latest.get(u, {}).get("underlying_dollar_adv_20d")
     )
+    agg["underlying_dollar_median_adv_20d"] = agg["underlying"].map(
+        lambda u: adv_latest.get(u, {}).get("underlying_dollar_median_adv_20d")
+    )
+    adv_intraday = {
+        u: meta.get("underlying_dollar_adv_intraday_20d")
+        for u, meta in adv_latest.items()
+    }
+    agg["underlying_dollar_adv_intraday_20d"] = agg["underlying"].map(adv_intraday)
     vol_so_far = (
         eligible.groupby("underlying")["underlying_volume_so_far"].max().to_dict()
     )
@@ -637,21 +726,25 @@ def aggregate_underlying(
     agg["volume_so_far_dollars"] = (
         agg["underlying_volume_so_far"].astype(float) * agg["spot_last"].astype(float)
     )
+    denom = agg["underlying_dollar_adv_intraday_20d"].astype(float)
     with np.errstate(divide="ignore", invalid="ignore"):
-        agg["volume_so_far_pct_adv"] = (
-            agg["volume_so_far_dollars"] / agg["underlying_dollar_adv_20d"]
-        )
+        agg["volume_so_far_pct_adv"] = agg["volume_so_far_dollars"] / denom
         agg["estimated_close_rebalance_pct_adv_20d"] = (
-            agg["estimated_net_close_rebalance_dollars"] / agg["underlying_dollar_adv_20d"]
+            agg["estimated_net_close_rebalance_dollars"] / denom
         )
 
-    # Already-realised approximation: cap at 1.
-    agg["already_realized_share"] = pd.to_numeric(
-        agg["volume_so_far_pct_adv"], errors="coerce"
-    ).clip(lower=0, upper=1)
+    model_name = str(remaining_model.get("model") or "none")
+    session_minutes = int(remaining_model.get("session_minutes") or SESSION_MINUTES)
+    agg["remaining_model"] = model_name
+    remaining_share = agg.apply(
+        lambda r: _remaining_share(
+            r, model=model_name, minutes_to_close=minutes_to_close, session_minutes=session_minutes,
+        ),
+        axis=1,
+    )
+    agg["already_realized_share"] = 1.0 - remaining_share
     agg["remaining_close_rebalance_dollars"] = (
-        (1.0 - agg["already_realized_share"].fillna(0.0))
-        * agg["estimated_net_close_rebalance_dollars"]
+        remaining_share.fillna(1.0) * agg["estimated_net_close_rebalance_dollars"]
     )
 
     # Optional bias adjustment from G.1 reconciliations.
@@ -709,11 +802,15 @@ def build_payloads(
     now: datetime,
     bias_map: dict[str, dict[str, Any]],
     nav_meta: dict[str, Any] | None = None,
+    volume_meta: dict[str, Any] | None = None,
+    remaining_model: dict[str, Any] | None = None,
     blend_overrides_count: int = 0,
 ) -> dict[str, Any]:
     close_dt = _market_close_utc(now)
     minutes_to_close = max(0, int(round((close_dt - now).total_seconds() / 60.0)))
     nav_meta = nav_meta or {}
+    volume_meta = volume_meta or {}
+    remaining_model = remaining_model or {"model": "none"}
 
     by_fund: dict[str, dict[str, Any]] = {}
     for _, row in fund_df.iterrows():
@@ -787,10 +884,13 @@ def build_payloads(
                 "moc_sell_dollars_est": _round(row.get("moc_sell_dollars_est"), 2),
                 "estimated_close_rebalance_pct_aum": _round(row.get("estimated_close_rebalance_pct_aum"), 8),
                 "underlying_dollar_adv_20d": _round(row.get("underlying_dollar_adv_20d"), 2),
+                "underlying_dollar_median_adv_20d": _round(row.get("underlying_dollar_median_adv_20d"), 2),
+                "underlying_dollar_adv_intraday_20d": _round(row.get("underlying_dollar_adv_intraday_20d"), 2),
                 "underlying_volume_so_far": _round(row.get("underlying_volume_so_far"), 0),
                 "volume_so_far_dollars": _round(row.get("volume_so_far_dollars"), 2),
                 "volume_so_far_pct_adv": _round(row.get("volume_so_far_pct_adv"), 8),
                 "estimated_close_rebalance_pct_adv_20d": _round(row.get("estimated_close_rebalance_pct_adv_20d"), 8),
+                "remaining_model": row.get("remaining_model"),
                 "already_realized_share": _round(row.get("already_realized_share"), 6),
                 "remaining_close_rebalance_dollars": _round(row.get("remaining_close_rebalance_dollars"), 2),
                 "estimated_close_rebalance_dollars_bias_adj": _round(
@@ -809,6 +909,11 @@ def build_payloads(
         "spot_sources": spot_meta.get("sources"),
         "spot_priced_count": spot_meta.get("n_underlyings_priced"),
         "spot_universe_count": spot_meta.get("n_underlyings_universe"),
+        "volume_build_time": volume_meta.get("build_time"),
+        "volume_sources": volume_meta.get("sources"),
+        "volume_priced_count": volume_meta.get("n_underlyings_with_volume"),
+        "remaining_model": remaining_model.get("model"),
+        "remaining_model_source": remaining_model.get("source"),
         "nav_forecast_build_time": nav_meta.get("build_time"),
         "nav_forecast_anchor_date": nav_meta.get("anchor_date"),
         "nav_forecast_default_models_count": nav_meta.get("default_models_count"),
@@ -919,8 +1024,10 @@ def build_all(
     metrics_parquet: Path,
     metrics_csv: Path,
     spot_path: Path,
-    volume_path: Path,
+    adv_parquet_path: Path,
+    intraday_volume_path: Path,
     bias_path: Path,
+    remaining_backtest_path: Path = REMAINING_BACKTEST_JSON,
     nav_forecast_path: Path = NAV_FORECAST_LATEST,
     now: datetime | None = None,
     nav_max_age_sec: float = NAV_FRESHNESS_MAX_SEC,
@@ -928,28 +1035,43 @@ def build_all(
     pd.DataFrame,
     pd.DataFrame,
     dict[str, Any],
+    dict[str, Any],
     dict[str, dict[str, Any]],
     dict[str, Any],
     dict[str, float],
+    dict[str, Any],
 ]:
+    now = now or datetime.now(UTC)
+    close_dt = _market_close_utc(now)
+    minutes_to_close = max(0, int(round((close_dt - now).total_seconds() / 60.0)))
+
     universe = load_universe(universe_path)
     metrics = load_metrics(metrics_parquet, metrics_csv)
     latest = latest_metrics_per_ticker(metrics)
     spots, spot_meta = load_intraday_spots(spot_path)
-    adv = load_adv_latest(volume_path)
+    volume_by_und, volume_meta = load_intraday_volume(intraday_volume_path)
+    adv = load_adv_latest(adv_parquet_path)
     bias_map = load_intraday_bias(bias_path)
     blend_overrides = load_blend_weight_overrides(bias_path)
+    remaining_model = load_remaining_model(remaining_backtest_path)
     nav_forecasts, nav_meta = load_nav_forecast_latest(
         nav_forecast_path, now=now, max_age_sec=nav_max_age_sec,
     )
 
     fund_df = compute_fund_intraday(
         universe, latest, spots,
+        volume_by_und=volume_by_und,
         nav_forecasts=nav_forecasts,
         blend_weight_overrides=blend_overrides,
     )
-    aggregates = aggregate_underlying(fund_df, adv_latest=adv, bias_map=bias_map)
-    return fund_df, aggregates, spot_meta, bias_map, nav_meta, blend_overrides
+    aggregates = aggregate_underlying(
+        fund_df,
+        adv_latest=adv,
+        bias_map=bias_map,
+        remaining_model=remaining_model,
+        minutes_to_close=minutes_to_close,
+    )
+    return fund_df, aggregates, spot_meta, volume_meta, bias_map, nav_meta, blend_overrides, remaining_model
 
 
 def main() -> int:
@@ -958,7 +1080,9 @@ def main() -> int:
     parser.add_argument("--metrics-parquet", type=Path, default=DATA_DIR / "etf_metrics_daily.parquet")
     parser.add_argument("--metrics-csv", type=Path, default=DATA_DIR / "etf_metrics_daily.csv")
     parser.add_argument("--spot", type=Path, default=SPOT_INPUT)
-    parser.add_argument("--volume", type=Path, default=UNDERLYING_VOLUME_PARQUET)
+    parser.add_argument("--intraday-volume", type=Path, default=VOLUME_INPUT)
+    parser.add_argument("--adv-parquet", type=Path, default=UNDERLYING_VOLUME_PARQUET)
+    parser.add_argument("--remaining-backtest", type=Path, default=REMAINING_BACKTEST_JSON)
     parser.add_argument("--bias", type=Path, default=INTRADAY_BIAS_JSON)
     parser.add_argument("--latest-json", type=Path, default=INTRADAY_OUTPUT)
     parser.add_argument("--snapshot-dir", type=Path, default=SNAPSHOT_DIR)
@@ -980,13 +1104,15 @@ def main() -> int:
     )
 
     now = datetime.now(UTC)
-    fund_df, aggregates, spot_meta, bias_map, nav_meta, blend_overrides = build_all(
+    fund_df, aggregates, spot_meta, volume_meta, bias_map, nav_meta, blend_overrides, remaining_model = build_all(
         universe_path=args.universe,
         metrics_parquet=args.metrics_parquet,
         metrics_csv=args.metrics_csv,
         spot_path=args.spot,
-        volume_path=args.volume,
+        adv_parquet_path=args.adv_parquet,
+        intraday_volume_path=args.intraday_volume,
         bias_path=args.bias,
+        remaining_backtest_path=args.remaining_backtest,
         nav_forecast_path=args.nav_forecast,
         now=now,
         nav_max_age_sec=args.nav_max_age_sec,
@@ -994,7 +1120,10 @@ def main() -> int:
     payload = build_payloads(
         fund_df, aggregates, spot_meta,
         now=now, bias_map=bias_map,
-        nav_meta=nav_meta, blend_overrides_count=len(blend_overrides),
+        nav_meta=nav_meta,
+        volume_meta=volume_meta,
+        remaining_model=remaining_model,
+        blend_overrides_count=len(blend_overrides),
     )
     if not args.no_snapshot:
         snap_path = append_snapshot(args.snapshot_dir, payload)
