@@ -1376,6 +1376,8 @@ def build_polygon_options_cache(
             q.get("mark") or nested.get("mark"),
             q.get("last") or nested.get("last"),
             q.get("close") or nested.get("close"),
+            q.get("prevclose") or nested.get("prevclose"),
+            q.get("prev_close") or nested.get("prev_close"),
             nested.get("mid"),
         )
         iv = _pick_iv(
@@ -1972,6 +1974,11 @@ def build_polygon_options_cache(
                         "mid": mid,
                         "iv": iv,
                         "delta": delta,
+                        "bid": quote.get("bid") if quote.get("bid") is not None else opt.get("bid"),
+                        "ask": quote.get("ask") if quote.get("ask") is not None else opt.get("ask"),
+                        "last": opt.get("last") or quote.get("last"),
+                        "close": opt.get("close") or quote.get("close"),
+                        "prevclose": opt.get("prevclose") or quote.get("prevclose"),
                     }
                 )
                 if len(out_rows) >= max(1, TRADIER_CHAIN_MAX_CONTRACTS_PER_SYMBOL):
@@ -2182,6 +2189,45 @@ def build_polygon_options_cache(
         if occ_errors:
             print(f"  [WARN] Held-leg quote errors: {occ_errors[0]}")
 
+    def _backfill_yieldboost_mids_from_chain() -> None:
+        """Fill held-leg mids from chain last/close when live bid/ask are absent (e.g. off-hours)."""
+        from yieldboost_holdings import (
+            backfill_exact_strike_mid_from_chain,
+            load_yieldboost_front_contracts,
+        )
+
+        contracts = load_yieldboost_front_contracts(YIELDBOOST_OPTIONS_TARGET_FILE)
+        filled = 0
+        for c in contracts:
+            sleeve = norm_sym(c.get("sleeve"))
+            expiry = c.get("expiry")
+            strike = _safe_float(c.get("strike"))
+            put_call = str(c.get("put_call") or "P").upper()
+            if not sleeve or strike is None or not expiry:
+                continue
+            try:
+                expiry_date = dt.date.fromisoformat(str(expiry))
+            except ValueError:
+                continue
+            sym_payload = out["symbols"].get(sleeve)
+            if not isinstance(sym_payload, dict):
+                continue
+            rows = sym_payload.get("options") if isinstance(sym_payload.get("options"), list) else []
+            patched = backfill_exact_strike_mid_from_chain(
+                rows, expiry=expiry_date, strike=float(strike), put_call=put_call,
+            )
+            if not patched or patched.get("mid") is None:
+                continue
+            sym_payload["options"] = _merge_option_rows(rows, [patched])
+            sym_payload["updated_at"] = build_time
+            src = str(sym_payload.get("source") or "")
+            if "chain_stale_mid" not in src:
+                sym_payload["source"] = f"{src}+chain_stale_mid" if src else "tradier_chain_stale_mid"
+            filled += 1
+        if filled:
+            out["yieldboost_chain_mid_backfill"] = int(filled)
+            print(f"  YieldBOOST chain mid backfill: {filled} held legs from last/close/prevclose")
+
     def _prefetch_yieldboost_sleeve_chains() -> None:
         """Fetch held-expiry Tradier chains for all YB sleeves before OCC quotes."""
         prefetched = 0
@@ -2213,6 +2259,7 @@ def build_polygon_options_cache(
         _prefetch_yieldboost_sleeve_chains()
         tradier_budget["phase"] = "held"
         _supplement_yieldboost_occ_quotes(force_all_front=True)
+        _backfill_yieldboost_mids_from_chain()
         tradier_budget["phase"] = "chain"
 
     for sym in refresh_symbols:

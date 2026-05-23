@@ -14,6 +14,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from yieldboost_holdings import (  # noqa: E402
+    backfill_exact_strike_mid_from_chain,
     build_occ_symbol_index,
     build_vrp_live_payload,
     build_yieldboost_rv_map,
@@ -438,6 +439,25 @@ def test_build_occ_symbol_index_matches_padded_variants():
     idx = build_occ_symbol_index(pending)
     assert idx["MSTU260526P00006160"]["sleeve"] == "MSTU"
     assert idx["MSTU260526P6160"]["sleeve"] == "MSTU"
+
+
+def test_backfill_exact_strike_mid_from_chain_uses_prevclose():
+    row = backfill_exact_strike_mid_from_chain(
+        [{
+            "expiration_date": "2026-05-26",
+            "contract_type": "put",
+            "strike_price": 6.16,
+            "iv": 1.5,
+            "mid": None,
+            "prevclose": 0.42,
+        }],
+        expiry=date(2026, 5, 26),
+        strike=6.16,
+        put_call="P",
+    )
+    assert row is not None
+    assert row["mid"] == pytest.approx(0.42)
+    assert row["mid_source"] == "prevclose"
 
 
 def test_held_contract_needs_occ_quote_when_expiry_missing():

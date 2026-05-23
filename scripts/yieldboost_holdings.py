@@ -427,6 +427,66 @@ def resolve_occ_ticker_for_contract(
     return format_occ_ticker(sleeve, expiry, put_call, strike)
 
 
+def extract_option_mark_price(row: dict | None) -> tuple[float | None, str | None]:
+    """Best-effort mark from an options row (live mid, last, or prior close)."""
+    if not isinstance(row, dict):
+        return None, None
+    mid = _parse_float(row.get("mid"))
+    if mid is not None and mid > 0:
+        source = str(row.get("mid_source") or "mid")
+        return mid, source
+    for field, source in (
+        ("last", "last"),
+        ("close", "close"),
+        ("prevclose", "prevclose"),
+        ("prev_close", "prevclose"),
+    ):
+        val = _parse_float(row.get(field))
+        if val is not None and val > 0:
+            return val, source
+    bid = _parse_float(row.get("bid"))
+    ask = _parse_float(row.get("ask"))
+    if bid is not None and ask is not None and bid >= 0 and ask >= bid and (bid > 0 or ask > 0):
+        return 0.5 * (bid + ask), "bid_ask"
+    if bid is not None and bid > 0:
+        return bid, "bid"
+    if ask is not None and ask > 0:
+        return ask, "ask"
+    return None, None
+
+
+def backfill_exact_strike_mid_from_chain(
+    chain_rows: Iterable[dict],
+    *,
+    expiry: date,
+    strike: float,
+    put_call: str = "P",
+) -> dict | None:
+    """Return a chain row copy with mid filled from last/close when bid/ask are stale."""
+    expiry_s = expiry.isoformat()
+    target_type = "put" if str(put_call or "P").upper() == "P" else "call"
+    for row in chain_rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("expiration_date")) != expiry_s:
+            continue
+        if str(row.get("contract_type") or "").lower() != target_type:
+            continue
+        cstrike = _parse_float(row.get("strike_price"))
+        if cstrike is None or abs(cstrike - float(strike)) > HELD_STRIKE_EXACT_TOL:
+            continue
+        if _parse_float(row.get("mid")) is not None:
+            return dict(row)
+        mark, source = extract_option_mark_price(row)
+        if mark is None:
+            return dict(row)
+        patched = dict(row)
+        patched["mid"] = mark
+        patched["mid_source"] = source
+        return patched
+    return None
+
+
 def load_yieldboost_front_contracts(
     target_path: Path | str | None = None,
     *,
