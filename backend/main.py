@@ -339,6 +339,11 @@ def _build_records_from_csv():
             ),
             income_latest_distribution=_v2f(row, "income_latest_distribution"),
             income_latest_ex_date=_v2s(row, "income_latest_ex_date"),
+            income_distribution_calibration=(
+                row["income_distribution_calibration"]
+                if isinstance(row.get("income_distribution_calibration"), dict)
+                else None
+            ),
             gross_edge_definition=_v2s(row, "gross_edge_definition"),
             primary_edge_annual=_v2f(row, "primary_edge_annual"),
             gross_for_primary_annual=_v2f(row, "gross_for_primary_annual"),

@@ -239,6 +239,46 @@ The front-end helper `yieldBoostIntrinsicAnnualDecay` survives only as a **fallb
 
 Routing logic: `index.html` → `expectedDecayHeadlineValue(r)` → `expectedDecayDistribution(r)` → `dist.p50` (same as every other class). YB fallback fires only when `dist` is null.
 
+### 4.5.1 YieldBOOST distribution calibration (NAV-normalized capture ratio)
+
+The Scenarios-tab cash projection (`estimateIncomeStyleScenarioReturn`) depends on `d`, the weekly distribution as a fraction of NAV. The original `load_distribution_income_yields` computed `d ≈ Σ$/today_price`, which collapsed under heavy NAV decay — e.g. MTYY's $4.20 NAV reported a ~163% annual yield because cumulative dollars were divided by the post-decay price. That fed the closed form a `d` that was 2x too large, breaking long-TR and net-short across the YB universe.
+
+The fix is calibration, not engine math. The closed form was already correct (validated within +1.9pp of MC by Magis Capital, April 2026 *Bucket 2 Income ETF Structural Decay*).
+
+**Pipeline (`scripts/income_schedule.py`):**
+
+```
+for each YieldBOOST ETF, each historical ex-date i:
+    yield_i  = amount_i / NAV_at_ex_i                        # NAV-normalized
+    bs_i     = expected_put_spread_loss_weekly(0, σ_at_ex_i) # research methodology
+    ratio_i  = yield_i / bs_i                                # ~0.65 cross-fund
+
+fund_ratio_median           = median(ratio_i over trailing 365d)
+confidence                  = high (≥12 events) / medium / low / none
+blended_ratio_used          = w * fund_median + (1-w) * cross_fund_prior
+                              w = min(1, events_used / 12)
+```
+
+`build_data.py` ships an `income_distribution_calibration` block on every YB row with `events_used`, `events_total`, `fund_ratio_median / p25 / p75`, `fund_ratio_confidence`, `blended_ratio_used`, `cadence_label`, `template_yields` (last 12 normalized yields for schedule transparency), and `events_recent` (last 16 normalized events for the Distributions panel). A two-pass build self-calibrates `cross_fund_ratio` from the fleet median over high-confidence funds; absent ≥3 qualifying funds the research constant 0.65 is used as fallback.
+
+**Client (`assets/income_scenario.js`):**
+
+```
+d_weekly_t = blended_ratio_used * expected_put_spread_loss_weekly(0, σ_scenario)
+d_annual_t = d_weekly_t * 52
+```
+
+so the projected cash automatically scales with the scenario σ — increasing into vol shocks (more option premium captured) and falling into vol crashes. `incomeAnnualYieldForScenario(r, lookback, sigma_scenario)` in `index.html` consumes the block when present and falls back to the (now NAV-normalized) `income_yield_trailing_annual` / `income_yield_recent_annual` scalars for one release.
+
+**UI surfaces:**
+
+- **Scenarios tab subheader:** capture-ratio strong/typical/weak/adverse band (thresholds 0.50 / 0.75 / 1.00) + source label (fund vs cross-fund prior) + event count + run-rate annualization.
+- **Cash distributions panel:** appended columns `NAV at ex` / `Yield (NAV-norm)` / `Capture ratio` for the last 16 events when calibration is present.
+
+**Tail-fatness:** `IncomeScenario.DEFAULT_TAIL_ADJUSTMENT_ANNUAL` is `0.0` by default; setting it to `~0.02` adds a constant to closed-form NAV decay to close the lognormal-vs-Student-t gap reported by the research's MC.
+
+**Tests:** `tests/test_income_schedule.py` (Python) and `tests/test_income_scenario.js` (Node) both consume `tests/fixtures/bucket2_research.json` — 8 candidates from the research table validate that the closed form reproduces published outputs within ±4pp NAV decay and ±5pp net short.
+
 ### 4.6 Net edge bootstrap with anchor-shift to expected p50
 
 `screener_v2_fields.enrich_screener_v2_fields` block-bootstraps the daily log-drag time series **and** weighted-resamples the borrow-rate history (with stress correlation grid `ρ ∈ {0.0, 0.2, 0.4}`). On top of the empirical block bootstrap, the realized gross draws are then **anchor-shifted** to re-center their mean on the forward-looking forecast `expected_gross_decay_p50_annual`:

@@ -112,6 +112,12 @@ class ETFRecord(BaseModel):
     income_distribution_count_1y: Optional[int] = None
     income_latest_distribution: Optional[float] = None
     income_latest_ex_date: Optional[str] = None
+    # Bucket 2 NAV-normalized distribution calibration block. Built by
+    # scripts/income_schedule.py and consumed by assets/income_scenario.js.
+    # Replaces the legacy Sum(cash)/current_price scalars (which conflated
+    # NAV decay with cumulative cash). Stored as a free-form dict in the
+    # FastAPI surface to avoid coupling the backend to the engine schema.
+    income_distribution_calibration: Optional[dict] = None
     gross_edge_definition: Optional[str] = None
     primary_edge_annual: Optional[float] = None
     gross_for_primary_annual: Optional[float] = None

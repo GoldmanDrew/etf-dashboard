@@ -1379,6 +1379,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
+<script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v2"></script>
 <script src="assets/pair_backtest.js?v=pb-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
@@ -2575,12 +2576,32 @@ function expectedDecayDisplayLabel(r) {
 
 /**
  * Annual cash distribution yield for income-style scenario math.
- * Prefer trailing/recent from the distributions build; when those are
- * absent (e.g. borrow-only refresh), fall back to annualized ETF cash
- * yield from `dividend_adjustment` for the chart lookback window — same
- * window logic as the non-income dividend add-on.
+ *
+ * Updated (Bucket 2 NAV-normalized calibration, 2026-05): when a scenario
+ * sigma is available and the per-ETF income_distribution_calibration block
+ * is present (`scripts/income_schedule.py`), derive `d` from
+ *     d_weekly = blended_ratio_used * BS_premium(sigma_scenario)
+ * so projected cash scales with the scenario vol per the Magis Capital
+ * "Bucket 2 Income ETF Structural Decay" research.
+ *
+ * Legacy `income_yield_trailing_annual` / `income_yield_recent_annual`
+ * remain as fallbacks for one release (their semantics were also rewritten
+ * to NAV-normalized run-rate by `build_legacy_yield_fields`).
  */
-function incomeAnnualYieldForScenario(r, chartVolLookbackRange) {
+function incomeAnnualYieldForScenario(r, chartVolLookbackRange, scenarioSigma) {
+  const IS = typeof window !== 'undefined' ? window.IncomeScenario : null;
+  const sigmaScenario = Number(scenarioSigma);
+  const calibration = r?.income_distribution_calibration || null;
+  if (IS && Number.isFinite(sigmaScenario) && sigmaScenario > 0 && calibration) {
+    const calib = IS.calibratedWeeklyDistribution({
+      sigmaAnnual: sigmaScenario,
+      calibration,
+      crossFundRatio: IS.DEFAULT_CROSS_FUND_RATIO,
+    });
+    if (calib && Number.isFinite(Number(calib.annualizedDistribution))) {
+      return Number(calib.annualizedDistribution);
+    }
+  }
   const trailing = Number(r?.income_yield_trailing_annual);
   if (Number.isFinite(trailing) && trailing > 0) return trailing;
   const recent = Number(r?.income_yield_recent_annual);
@@ -2594,6 +2615,43 @@ function incomeAnnualYieldForScenario(r, chartVolLookbackRange) {
   const winY = DIV_YIELD_WINDOW_YEARS[vk] ?? 0.5;
   if (!Number.isFinite(yw) || yw <= 0 || !(winY > 0)) return null;
   return yw / winY;
+}
+
+/**
+ * Structural capture-ratio summary for the row (UI column + scenario subhead).
+ * Returns null for non-YB rows or when calibration is absent. Band thresholds
+ * mirror IncomeScenario.RATIO_BANDS (strong < 0.50, typical 0.50-0.75,
+ * weak 0.75-1.00, adverse > 1.00).
+ */
+function captureRatioSummary(r) {
+  if (!isYieldBoostIncomeStrategy(r)) return null;
+  const calib = r?.income_distribution_calibration;
+  if (!calib) return null;
+  const ratio = Number(calib.blended_ratio_used);
+  if (!Number.isFinite(ratio)) return null;
+  const IS = typeof window !== 'undefined' ? window.IncomeScenario : null;
+  const band = IS ? IS.captureRatioBand(ratio) : null;
+  const confidence = String(calib.fund_ratio_confidence || 'none');
+  let source;
+  if (confidence === 'high') source = 'fund (high confidence)';
+  else if (confidence === 'medium') source = 'fund + prior (medium)';
+  else if (confidence === 'low') source = 'fund + prior (low)';
+  else source = 'cross-fund prior';
+  return {
+    ratio,
+    fundMedian: Number(calib.fund_ratio_median),
+    p25: Number(calib.fund_ratio_p25),
+    p75: Number(calib.fund_ratio_p75),
+    crossFund: Number(calib.cross_fund_ratio),
+    eventsUsed: Number(calib.events_used) || 0,
+    eventsTotal: Number(calib.events_total) || 0,
+    confidence,
+    source,
+    band,
+    cadence: String(calib.cadence_label || 'weekly'),
+    periodsPerYear: Number(calib.periods_per_year) || 52,
+    runRateAnnual: Number(calib.run_rate_annual_display),
+  };
 }
 
 function normalCdf(x) {
@@ -2743,7 +2801,7 @@ function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel 
     const modeled = estimateIncomeStyleScenarioReturn({
       underlyingReturn: 0,
       sigmaAnnual: sigma,
-      annualIncomeYield: incomeAnnualYieldForScenario(r, chartVolLookbackRange),
+      annualIncomeYield: incomeAnnualYieldForScenario(r, chartVolLookbackRange, sigma),
       annualBorrowCost: Number(getBorrowRate(r)),
       horizonYears,
     });
@@ -3805,12 +3863,22 @@ function buildWidgetHtml(symbol, compareSymbol, range, interval) {
 }
 
 /** Cash distribution ex-dates for Scenarios tab (same source as Chart / income yield). */
-function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYield }) {
+function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYield, calibration }) {
   const rows = Array.isArray(series) ? series : [];
   const recent = [...rows].slice(-16).reverse();
   const yNote = Number.isFinite(Number(modeledAnnualYield)) && Number(modeledAnnualYield) > 0
     ? `Income scenarios use modeled cash yield ${fmt(Number(modeledAnnualYield))}/yr.`
     : null;
+  // NAV-normalized lookup so the table can show yield/share next to cash/share.
+  const normalizedByExDate = useMemo(() => {
+    const out = {};
+    const events = Array.isArray(calibration?.events_recent) ? calibration.events_recent : [];
+    events.forEach((ev) => {
+      if (ev && ev.ex_date) out[ev.ex_date] = ev;
+    });
+    return out;
+  }, [calibration]);
+  const hasNormalized = Object.keys(normalizedByExDate).length > 0;
   return (
     <div className="scenario-card" style={{ marginTop: 0, marginBottom: 14 }}>
       <div className="scenario-head">
@@ -3821,6 +3889,9 @@ function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYi
               ? `${rows.length} cash event(s) on file for ${etfSym}. Showing last ${recent.length} ex-dates.`
               : `No per-share cash distribution rows on file for ${etfSym}.`}
             {yNote ? ` ${yNote}` : ''}
+            {calibration && hasNormalized ? (
+              <> · NAV-normalized via Bucket 2 calibration ({calibration.events_used || 0}/{calibration.events_total || 0} events, ratio {Number.isFinite(Number(calibration.blended_ratio_used)) ? `${Number(calibration.blended_ratio_used).toFixed(2)}x` : '—'}).</>
+            ) : null}
           </div>
         </div>
       </div>
@@ -3828,15 +3899,37 @@ function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYi
         <div className="scenario-table-wrap">
           <table className="scenario-table">
             <thead>
-              <tr><th>Ex-date</th><th>Cash / share</th></tr>
+              <tr>
+                <th>Ex-date</th>
+                <th>Cash / share</th>
+                {hasNormalized ? (
+                  <>
+                    <th title="NAV at ex-date (issuer NAV, fallback to close).">NAV at ex</th>
+                    <th title="amount / NAV at ex-date — the structural weekly yield.">Yield (NAV-norm)</th>
+                    <th title="amount / NAV / E[BS premium] at current sigma. ~0.65 cross-fund per Bucket 2 research.">Capture ratio</th>
+                  </>
+                ) : null}
+              </tr>
             </thead>
             <tbody>
-              {recent.map((d, i) => (
-                <tr key={`${d.ex_date}-${i}`}>
-                  <td>{d.ex_date || '—'}</td>
-                  <td>{Number.isFinite(Number(d.amount)) ? fmtUsd(Number(d.amount)) : '—'}</td>
-                </tr>
-              ))}
+              {recent.map((d, i) => {
+                const norm = normalizedByExDate[d.ex_date] || null;
+                return (
+                  <tr key={`${d.ex_date}-${i}`}>
+                    <td>{d.ex_date || '—'}</td>
+                    <td>{Number.isFinite(Number(d.amount)) ? fmtUsd(Number(d.amount)) : '—'}</td>
+                    {hasNormalized ? (
+                      <>
+                        <td>{Number.isFinite(Number(norm?.nav_at_ex)) ? fmtUsd(Number(norm.nav_at_ex)) : '—'}</td>
+                        <td>{Number.isFinite(Number(norm?.yield_frac)) ? fmt(Number(norm.yield_frac)) : '—'}</td>
+                        <td title={norm?.bs_premium != null ? `BS premium ${fmt(Number(norm.bs_premium))}` : ''}>
+                          {Number.isFinite(Number(norm?.ratio)) ? `${Number(norm.ratio).toFixed(2)}x` : '—'}
+                        </td>
+                      </>
+                    ) : null}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -5153,7 +5246,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return u ? `${u} adj. close` : 'Und adj. close';
   }, [undSym]);
   const incomeAnnualYieldForChart = useMemo(() => {
-    const precomputed = incomeAnnualYieldForScenario(r);
+    const forecastSigma = Number(forecastVolForScenario(r, '6M')?.sigma);
+    const precomputed = incomeAnnualYieldForScenario(r, '6M', forecastSigma);
     if (precomputed != null) return precomputed;
     const price = Number(latestEtfMetric?.close_price) || Number(latestEtfMetric?.nav);
     if (!Number.isFinite(price) || price <= 0 || !etfDistributionsSeries.length) return null;
@@ -5405,11 +5499,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (scenarioSigmaIsFallback && undObs < minObsForScenario) {
       return { ok: false, error: `Insufficient lookback observations (${undObs}).` };
     }
-    const annualIncomeYield = incomeAnnualYieldForChart;
+    const sigma = Number(scenarioSigmaBest);
+    // Bucket 2 calibrated d: ratio * BS_premium(scenario sigma) so projected
+    // cash scales with the scenario vol. Falls back to legacy scalar yield
+    // when calibration is absent.
+    const annualIncomeYield = incomeAnnualYieldForScenario(r, '6M', sigma);
     if (annualIncomeYield == null || !Number.isFinite(Number(annualIncomeYield)) || Number(annualIncomeYield) < 0) {
       return { ok: false, error: 'Missing distribution yield estimate for income-style scenario.' };
     }
-    const sigma = Number(scenarioSigmaBest);
     const annualBorrowCost = Number.isFinite(Number(annualCarryDrag)) ? Number(annualCarryDrag) : 0;
     const rows = SCENARIO_SHOCK_MULTIPLIERS.map((sigmaMultiple) => {
       const underlyingReturn = Math.exp(sigmaMultiple * sigma * Math.sqrt(horizonYears)) - 1;
@@ -5422,14 +5519,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       });
       return { sigmaMultiple, underlyingReturn, ...(modeled || {}) };
     });
+    const captureRatio = captureRatioSummary(r);
     return {
       ok: true,
       annualIncomeYield: Number(annualIncomeYield),
       annualBorrowCost,
       weeks: Math.max(1, Math.round(horizonYears * 52)),
       rows,
+      captureRatio,
     };
-  }, [isIncomeStrategyScenario, scenarioSigmaBest, horizonYears, undObs, scenarioSigmaIsFallback, minObsForScenario, incomeAnnualYieldForChart, annualCarryDrag]);
+  }, [r, isIncomeStrategyScenario, scenarioSigmaBest, horizonYears, undObs, scenarioSigmaIsFallback, minObsForScenario, annualCarryDrag]);
 
   const mcUpsideThresholds = useMemo(
     () => parseThresholdInput(mcUpsideThresholdsText),
@@ -6309,6 +6408,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             series={etfDistributionsSeries}
             loadError={etfDistributionsError}
             modeledAnnualYield={incomeAnnualYieldForChart}
+            calibration={r?.income_distribution_calibration || null}
           />
           {isIncomeStrategyScenario ? (
             <>
@@ -6325,6 +6425,24 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     <div className="scenario-sub">
                       Weekly 95/88 put on 2× sleeve · <strong>Long ETF</strong> = NAV loss + cash (no borrow) · modeled cash {fmt(incomeScenarioGrid.annualIncomeYield)}/yr · borrow {fmt(incomeScenarioGrid.annualBorrowCost)}/yr on short
                     </div>
+                    {incomeScenarioGrid.captureRatio ? (() => {
+                      const cr = incomeScenarioGrid.captureRatio;
+                      const bandColor = (cr.band === 'strong' && 'var(--positive)')
+                        || (cr.band === 'typical' && 'var(--text-primary)')
+                        || (cr.band === 'weak' && '#b58a00')
+                        || (cr.band === 'adverse' && 'var(--negative)')
+                        || 'var(--text-secondary)';
+                      const fmtRatio = (v) => (Number.isFinite(Number(v)) ? `${Number(v).toFixed(2)}x` : '—');
+                      return (
+                        <div
+                          className="scenario-sub"
+                          title={`Cash / E[BS premium] under physical-measure leveraged drift. Fund median ${fmtRatio(cr.fundMedian)} (p25 ${fmtRatio(cr.p25)} / p75 ${fmtRatio(cr.p75)}, ${cr.eventsUsed} of ${cr.eventsTotal} normalized events) · cross-fund prior ${fmtRatio(cr.crossFund)} · ${cr.cadence} cadence, ${cr.periodsPerYear}/yr.`}
+                        >
+                          Distribution capture ratio: <strong style={{ color: bandColor }}>{fmtRatio(cr.ratio)}</strong> ({cr.source}, {cr.eventsUsed} events) · band: {cr.band}
+                          {Number.isFinite(cr.runRateAnnual) ? <> · run-rate {fmt(cr.runRateAnnual)}/yr</> : null}
+                        </div>
+                      );
+                    })() : null}
                   </div>
                   <div className="tf-group" style={{ marginLeft: 0 }}>
                     {SCENARIO_HORIZONS.map(h => (

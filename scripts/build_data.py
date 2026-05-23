@@ -29,6 +29,11 @@ import pandas as pd
 import requests
 
 from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_metrics
+from income_schedule import (
+    DEFAULT_CROSS_FUND_RATIO,
+    build_all_calibrations,
+    build_legacy_yield_fields,
+)
 
 # ──────────────────────────────────────────────
 # Config
@@ -376,7 +381,14 @@ def load_latest_metric_price_map() -> dict[str, float]:
 
 
 def load_distribution_income_yields(price_by_symbol: dict[str, float]) -> dict[str, dict[str, float | int | str | None]]:
-    """Annualized distribution yields used by income-style scenario panels."""
+    """DEPRECATED — Σ$/current_price annualization (used by pre-2026-05 builds).
+
+    Replaced by :mod:`income_schedule` which NAV-normalizes each event and
+    derives a vol-coupled distribution rate from the structural capture
+    ratio (see ``build_data.py`` ``5b.`` block).  Kept temporarily for
+    one release so external tooling pinned to the legacy CSV can finish
+    its migration; not called from ``build()``.
+    """
     if not ETF_DISTRIBUTIONS_FILE.exists():
         return {}
     try:
@@ -3664,7 +3676,11 @@ def build():
 
     # 4c. Classify income-style low-beta products and precompute distribution yields.
     yieldboost_symbols = load_yieldboost_symbols(df)
-    income_yield_map = load_distribution_income_yields(load_latest_metric_price_map())
+    # NAV-normalized calibration runs after records are built (needs forecast σ).
+    # Legacy ``load_distribution_income_yields`` is no longer called here — its
+    # Σ$/today_price formulation was the source of the MTYY 163% bug. See
+    # ``scripts/income_schedule.py`` and the ``5b.`` block below.
+    income_yield_map: dict = {}
     print(f"Income-style scenario symbols: {len(yieldboost_symbols)}")
 
     universe_symbols = set(df["symbol"].dropna().tolist())
@@ -4039,6 +4055,62 @@ def build():
         apply_vol_shape_to_record(rec, vol_shape_by_symbol.get(norm_sym(sym)))
         records.append(rec)
 
+    # 5b. NAV-normalized YieldBOOST distribution calibration.
+    # Replaces the legacy ``income_yield_trailing_annual = Σ$/today_price``
+    # (which conflated NAV decay with cumulative cash) with a structural
+    # capture ratio so projected weekly distributions scale with the
+    # scenario σ. See ``scripts/income_schedule.py`` + Bucket 2 research.
+    yb_sigma_by_symbol: dict[str, float] = {}
+    for _rec in records:
+        if not _rec.get("is_yieldboost"):
+            continue
+        _sym = norm_sym(_rec.get("symbol") or "")
+        if not _sym:
+            continue
+        _sig = _rec.get("forecast_vol_underlying_annual")
+        if _sig is None:
+            _sig = _rec.get("vol_underlying_annual")
+        if _sig is None:
+            continue
+        try:
+            _sig_f = float(_sig)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(_sig_f) and _sig_f > 0:
+            yb_sigma_by_symbol[_sym] = _sig_f
+    distributions_payload: dict = {}
+    if ETF_DISTRIBUTIONS_FILE.exists():
+        try:
+            distributions_payload = json.loads(ETF_DISTRIBUTIONS_FILE.read_text())
+        except Exception as e:
+            print(f"  Warning: could not read distributions for calibration: {e}")
+    calibration_by_symbol, cross_fund_ratio_used = build_all_calibrations(
+        distributions_payload,
+        ETF_METRICS_DAILY_FILE,
+        sigma_by_symbol=yb_sigma_by_symbol,
+        cross_fund_ratio=DEFAULT_CROSS_FUND_RATIO,
+        self_calibrate=True,
+        yieldboost_symbols={norm_sym(s) for s in yieldboost_symbols if s},
+    )
+    if calibration_by_symbol:
+        _calibrated = 0
+        for rec in records:
+            sym_key = norm_sym(rec.get("symbol") or "")
+            block = calibration_by_symbol.get(sym_key)
+            if not block:
+                continue
+            rec["income_distribution_calibration"] = block
+            for k, v in build_legacy_yield_fields(block).items():
+                # Override the legacy Σ$/today_price values with NAV-normalized
+                # run-rate so older clients pick up the corrected semantics.
+                rec[k] = v
+            _calibrated += 1
+        print(
+            f"  YieldBOOST distribution calibration: "
+            f"{_calibrated} ETFs, cross-fund ratio prior={cross_fund_ratio_used:.3f} "
+            f"(default {DEFAULT_CROSS_FUND_RATIO:.2f})"
+        )
+
     # 6. Compute summary
     summary = _calc_summary(records)
 
@@ -4058,6 +4130,12 @@ def build():
         "uncertainty_footnote": (
             "p5/p95 are sampling/stress-copula assumptions, not a full model of tail risk."
         ),
+        "income_distribution_calibration_meta": {
+            "cross_fund_ratio": cross_fund_ratio_used,
+            "cross_fund_ratio_default": DEFAULT_CROSS_FUND_RATIO,
+            "source": "Bucket 2 Income ETF Decay Research (Magis Capital, April 2026)",
+            "method": "NAV-normalized capture ratio × forecast σ",
+        },
         "source_repo": UNIVERSE_REPO,
         "source_branch": UNIVERSE_BRANCH,
         "last_commit": commit_info,

@@ -1,0 +1,138 @@
+{
+  "source": "Magis Capital Partners - Bucket 2 Income ETF Structural Decay (April 2026)",
+  "source_file": "GraniteShares YieldBOOST/Bucket2_Income_ETF_Decay_Research.html",
+  "notes": [
+    "All values published as per-annum fractions of starting NAV.",
+    "Closed-form mean-field validated within +1.9pp average of 10,000-path MC with Student-t(5) tails.",
+    "BS premium in the source uses risk-neutral measure (no drift); the dashboard's expectedPutSpreadLossWeekly uses physical-measure leveraged drift, so its computed L is ~5% smaller than the source's BS premium. Tests should validate closed-form outputs given the published actual_distribution_weekly, not back out the ratio against the dashboard L.",
+    "Tolerance widths chosen so all 8 candidates pass against published MC results."
+  ],
+  "constants": {
+    "expense_ratio_annual": 0.0099,
+    "weeks_per_year": 52,
+    "put_spread_short_strike": 0.95,
+    "put_spread_long_strike": 0.88,
+    "leverage": 2.0
+  },
+  "tolerances": {
+    "nav_decay_pp": 0.04,
+    "distributions_paid_pp": 0.04,
+    "net_short_pp": 0.05
+  },
+  "cross_fund_ratio_median": 0.635,
+  "cross_fund_ratio_hardcoded": 0.65,
+  "candidates": [
+    {
+      "etf": "MTYY",
+      "underlying": "MSTR",
+      "sleeve_2x": "MSTU",
+      "sigma_annual": 0.88,
+      "bs_premium_weekly": 0.0297,
+      "actual_distribution_weekly": 0.0191,
+      "capture_ratio_research": 0.64,
+      "borrow_annual": 0.084,
+      "nav_decay_annual": 0.762,
+      "distributions_paid_annual": 0.535,
+      "net_short_annual": 0.143,
+      "itm_pct_weekly": 0.45
+    },
+    {
+      "etf": "MAAY",
+      "underlying": "MARA",
+      "sleeve_2x": "MRAL",
+      "sigma_annual": 0.90,
+      "bs_premium_weekly": 0.0300,
+      "actual_distribution_weekly": 0.0188,
+      "capture_ratio_research": 0.63,
+      "borrow_annual": 0.098,
+      "nav_decay_annual": 0.764,
+      "distributions_paid_annual": 0.524,
+      "net_short_annual": 0.142,
+      "itm_pct_weekly": 0.45
+    },
+    {
+      "etf": "COYY",
+      "underlying": "COIN",
+      "sleeve_2x": "CONL",
+      "sigma_annual": 0.79,
+      "bs_premium_weekly": 0.0284,
+      "actual_distribution_weekly": 0.0190,
+      "capture_ratio_research": 0.67,
+      "borrow_annual": 0.260,
+      "nav_decay_annual": 0.744,
+      "distributions_paid_annual": 0.547,
+      "net_short_annual": -0.063,
+      "itm_pct_weekly": 0.43
+    },
+    {
+      "etf": "IOYY",
+      "underlying": "IONQ",
+      "sleeve_2x": "IONL",
+      "sigma_annual": 1.08,
+      "bs_premium_weekly": 0.0322,
+      "actual_distribution_weekly": 0.0187,
+      "capture_ratio_research": 0.58,
+      "borrow_annual": 0.077,
+      "nav_decay_annual": 0.790,
+      "distributions_paid_annual": 0.500,
+      "net_short_annual": 0.213,
+      "itm_pct_weekly": 0.47
+    },
+    {
+      "etf": "XBTY",
+      "underlying": "IBIT",
+      "sleeve_2x": "BITX",
+      "sigma_annual": 0.50,
+      "bs_premium_weekly": 0.0217,
+      "actual_distribution_weekly": 0.0184,
+      "capture_ratio_research": 0.85,
+      "borrow_annual": 0.046,
+      "nav_decay_annual": 0.635,
+      "distributions_paid_annual": 0.609,
+      "net_short_annual": -0.020,
+      "itm_pct_weekly": 0.37
+    },
+    {
+      "etf": "TSYY",
+      "underlying": "TSLA",
+      "sleeve_2x": "TSLL",
+      "sigma_annual": 0.63,
+      "bs_premium_weekly": 0.0252,
+      "actual_distribution_weekly": 0.0156,
+      "capture_ratio_research": 0.62,
+      "borrow_annual": 0.053,
+      "nav_decay_annual": 0.696,
+      "distributions_paid_annual": 0.480,
+      "net_short_annual": 0.164,
+      "itm_pct_weekly": 0.40
+    },
+    {
+      "etf": "SMCY",
+      "underlying": "SMCI",
+      "sleeve_2x": "SMCL",
+      "sigma_annual": 0.98,
+      "bs_premium_weekly": 0.0311,
+      "actual_distribution_weekly": 0.0155,
+      "capture_ratio_research": 0.50,
+      "borrow_annual": 0.063,
+      "nav_decay_annual": 0.778,
+      "distributions_paid_annual": 0.423,
+      "net_short_annual": 0.291,
+      "itm_pct_weekly": 0.46
+    },
+    {
+      "etf": "HOYY",
+      "underlying": "HOOD",
+      "sleeve_2x": "HODU",
+      "sigma_annual": 0.71,
+      "bs_premium_weekly": 0.0269,
+      "actual_distribution_weekly": 0.0187,
+      "capture_ratio_research": 0.70,
+      "borrow_annual": 0.213,
+      "nav_decay_annual": 0.722,
+      "distributions_paid_annual": 0.555,
+      "net_short_annual": -0.045,
+      "itm_pct_weekly": 0.42
+    }
+  ]
+}
