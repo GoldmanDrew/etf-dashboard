@@ -1791,9 +1791,11 @@ function decayRoleSummary(r) {
     expected: {
       role: 'forward',
       label: expectedDecayDisplayLabel(r),
-      detail: dist
-        ? `Forward band (${DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || 'model'}, before borrow).`
-        : 'Forward point estimate from screener (Itô / vol-ETP adj.).',
+      detail: isYieldBoostIncomeStrategy(r)
+        ? 'YieldBOOST: 1Y long net TR (−NAV decay + calibrated cash; borrow excluded).'
+        : dist
+          ? `Forward band (${DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || 'model'}, gross, before borrow).`
+          : 'Forward point estimate from screener (Itô / vol-ETP adj.).',
     },
     netSpot: {
       role: 'realized',
@@ -2457,18 +2459,21 @@ const PASSIVE_LOW_BETA_POLICY_TOOLTIP =
 //     'yieldboost_put_spread' / 'yieldboost_put_spread_point'), so the
 //     same `dist.p50` field carries the put-spread NAV-decay forecast
 //     and matches the Net edge anchor.
-//   - YB client-side intrinsic is only a fallback when the server row
-//     didn't ship the distribution (very short underlying history,
-//     pipeline rerun mid-day, etc.).
-//   - Else legacy model-aware point estimate (Itô / vol-ETP adjusted).
-function expectedDecayHeadlineValue(r) {
+//   - YieldBOOST income rows         →  annual long net TR at 1Y flat underlying
+//     (−NAV decay + calibrated cash distributions), same engine as Exp. ETF
+//     return / Scenarios long TR. Gross put-spread MC band is mapped to a
+//     long-return band by holding the scenario cash leg fixed.
+//   - Other rows                     →  server gross decay p50 / HARQ band.
+function expectedDecayHeadlineValue(r, chartVolLookbackRange) {
   if (!expectedDecayAvailableForRow(r)) return null;
+  if (isYieldBoostIncomeStrategy(r)) {
+    const net = yieldBoostExpectedNetAnnualReturn(r, chartVolLookbackRange || '6M');
+    if (net != null) return net;
+    const yb = yieldBoostIntrinsicAnnualDecay(r);
+    if (yb != null) return null;
+  }
   const dist = expectedDecayDistribution(r);
   if (dist) return dist.p50;
-  if (isYieldBoostIncomeStrategy(r)) {
-    const yb = yieldBoostIntrinsicAnnualDecay(r);
-    if (yb != null) return yb;
-  }
   return expectedDecayDisplayValue(r);
 }
 
@@ -2484,47 +2489,42 @@ const DECAY_DIST_MODEL_LABELS = {
 const isYieldBoostPutSpreadDistModel = m =>
   m === 'yieldboost_put_spread' || m === 'yieldboost_put_spread_point';
 
-function decayDistTooltip(r) {
+function decayDistTooltip(r, chartVolLookbackRange) {
+  const volLookback = chartVolLookbackRange != null && String(chartVolLookbackRange).trim() !== ''
+    ? String(chartVolLookbackRange)
+    : '6M';
   if (!expectedDecayAvailableForRow(r)) {
     return PASSIVE_LOW_BETA_POLICY_TOOLTIP;
   }
+  // YieldBOOST — long net total return at 1Y (NAV path + cash, no borrow).
+  if (isYieldBoostIncomeStrategy(r)) {
+    const band = yieldBoostExpectedNetAnnualBand(r, volLookback);
+    const forecastVol = forecastVolForScenario(r, volLookback);
+    const lines = [
+      'YieldBOOST — 1Y long net total return at flat underlying (−NAV decay + cash).',
+      'Same engine as Exp. ETF return / Scenarios Long TR (borrow excluded).',
+      `σ (forecast): ${fmt(Number(forecastVol?.sigma))} (${r?.forecast_vol_source || 'forecast_vol'}).`,
+    ];
+    if (band) {
+      lines.push(`Median (p50): ${fmt(band.p50)}`);
+      if (band.p10 != null && band.p90 != null) {
+        lines.push(`Long-return band (p10 / p90): ${fmt(band.p10)} / ${fmt(band.p90)}`);
+        lines.push('Band maps gross put-spread MC decay quantiles with the scenario cash leg held fixed.');
+      }
+      if (Number.isFinite(Number(band.navDecay))) {
+        lines.push(`NAV decay (gross sleeve): ${fmt(Number(band.navDecay))}`);
+      }
+      if (Number.isFinite(Number(band.distributionsPaid))) {
+        lines.push(`Cash distributions (1Y): ${fmt(Number(band.distributionsPaid))}`);
+      }
+      if (band.gross) {
+        lines.push(`Gross MC sleeve (server): p50 ${fmt(band.gross.p50)} (${fmt(band.gross.p10)} / ${fmt(band.gross.p90)})`);
+      }
+    }
+    lines.push('Net edge bootstrap still anchors to gross put-spread MC p50 (server).');
+    return lines.join('\n');
+  }
   const dist = expectedDecayDistribution(r);
-  // YB tooltip when server shipped the put-spread MC distribution (preferred path).
-  if (dist && isYieldBoostPutSpreadDistModel(dist.model)) {
-    const sigma = yieldBoostUnderlyingSigmaAnnual(r);
-    const isPoint = dist.model === 'yieldboost_put_spread_point';
-    const lines = [
-      'YieldBOOST — NAV loss from the option sleeve only (before cash payouts; borrow separate).',
-      isPoint
-        ? 'Single σ from trailing realized vol (thin history → p10=p50=p90).'
-        : 'σ drawn from HARQ-Log law → weekly 95/88 put on 2× sleeve, 52× compounded, net of expense (same engine as Scenarios).',
-      `p50 (median):  ${fmt(dist.p50)}`,
-      `p10 / p90:     ${fmt(dist.p10)}  /  ${fmt(dist.p90)}`,
-    ];
-    if (Number.isFinite(sigma) && sigma > 0) {
-      lines.push(`σ (underlying, annual): ${fmt(sigma)}`);
-    }
-    if (dist.mean != null) lines.push(`mean: ${fmt(dist.mean)}`);
-    if (dist.nObs != null) lines.push(`n=${Math.round(dist.nObs)} underlying obs`);
-    lines.push('Net edge is shifted to this p50 as the “location” of gross decay.');
-    lines.push('Cash schedule: Scenarios tab.');
-    return lines.join('\n');
-  }
-  // YB legacy fallback when server distribution is missing.
-  if (isYieldBoostIncomeStrategy(r) && !dist) {
-    const yb = yieldBoostIntrinsicAnnualDecay(r);
-    const sigma = yieldBoostUnderlyingSigmaAnnual(r);
-    const lines = [
-      'YieldBOOST — NAV loss from option sleeve only (cash payouts separate).',
-      'Server band unavailable — client 95/88 weekly put model, one σ.',
-      `52× compound net of ${(YB_DEFAULT_EXPENSE_RATIO_ANNUAL * 100).toFixed(2)}% expense.`,
-    ];
-    if (yb != null) lines.push(`Annualized: ${fmt(yb)}`);
-    if (Number.isFinite(sigma) && sigma > 0) {
-      lines.push(`σ_underlying (annual): ${fmt(sigma)}`);
-    }
-    return lines.join('\n');
-  }
   if (!dist) {
     return isVolatilityEtp(r)
       ? 'Vol ETP: Itô decay + roll/tracking (Itô alone understates VIX futures names).'
@@ -2569,9 +2569,48 @@ function decayDistTooltip(r) {
 
 function expectedDecayDisplayLabel(r) {
   if (!expectedDecayAvailableForRow(r)) return 'Exp. (N/A)';
+  if (isYieldBoostIncomeStrategy(r)) return 'Exp. (long net · 1Y)';
   if (expectedDecayDistribution(r)) return 'Exp. (median)';
-  if (isYieldBoostIncomeStrategy(r)) return 'Exp. (intrinsic)';
   return isVolatilityEtp(r) ? 'Exp. (vol-adj)' : 'Exp. (Itô)';
+}
+
+function renderExpectedDecayCell(r, chartVolLookbackRange) {
+  if (!expectedDecayAvailableForRow(r)) {
+    return <span style={{ color: 'var(--text-muted)' }}>—</span>;
+  }
+  if (isYieldBoostIncomeStrategy(r)) {
+    const band = yieldBoostExpectedNetAnnualBand(r, chartVolLookbackRange || '6M');
+    if (band) {
+      return (
+        <div style={{ lineHeight: 1.15 }}>
+          <div>{fmt(band.p50)}</div>
+          {band.p10 != null && band.p90 != null ? (
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+              long net · {fmt(band.p10)} / {fmt(band.p90)}
+            </div>
+          ) : (
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+              long net · 1Y flat
+            </div>
+          )}
+        </div>
+      );
+    }
+    return <span style={{ color: 'var(--text-muted)' }}>—</span>;
+  }
+  const dist = expectedDecayDistribution(r);
+  if (dist) {
+    const isYbDist = isYieldBoostPutSpreadDistModel(dist.model);
+    return (
+      <div style={{ lineHeight: 1.15 }}>
+        <div>{fmt(dist.p50)}</div>
+        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+          {isYbDist ? 'put-spread · ' : ''}{fmt(dist.p10)} / {fmt(dist.p90)}
+        </div>
+      </div>
+    );
+  }
+  return fmt(expectedDecayDisplayValue(r));
 }
 
 /**
@@ -2787,6 +2826,66 @@ function forecastVolForScenario(r, chartVolLookbackRange) {
  * `chartVolLookbackRange` is only a backward-compatible fallback when older
  * data does not ship forecast_vol_underlying_annual.
  */
+// Annualized YieldBOOST expected return at 1Y flat underlying — same engine as
+// Exp. ETF return / Scenarios long TR: −NAV decay + cash distributions (no borrow).
+function yieldBoostExpectedNetAnnualScenario(r, chartVolLookbackRange, horizonYears = 1) {
+  if (!isYieldBoostIncomeStrategy(r)) return null;
+  const lookback = chartVolLookbackRange != null && String(chartVolLookbackRange).trim() !== ''
+    ? String(chartVolLookbackRange)
+    : '6M';
+  const t = Number(horizonYears);
+  if (!Number.isFinite(t) || t <= 0) return null;
+  const forecastVol = forecastVolForScenario(r, lookback);
+  const sigma = Number(forecastVol?.sigma);
+  if (!Number.isFinite(sigma) || sigma <= 0) return null;
+  const annualIncomeYield = incomeAnnualYieldForScenario(r, lookback, sigma);
+  if (annualIncomeYield == null || !Number.isFinite(Number(annualIncomeYield))) return null;
+  return estimateIncomeStyleScenarioReturn({
+    underlyingReturn: 0,
+    sigmaAnnual: sigma,
+    annualIncomeYield,
+    annualBorrowCost: 0,
+    horizonYears: t,
+  });
+}
+
+function yieldBoostExpectedNetAnnualReturn(r, chartVolLookbackRange) {
+  const modeled = yieldBoostExpectedNetAnnualScenario(r, chartVolLookbackRange);
+  if (!modeled) return null;
+  const lt = Number(modeled.longTotalReturn);
+  return Number.isFinite(lt) ? lt : null;
+}
+
+/** Long net TR band at 1Y: p50 from scenario engine; p10/p90 from gross MC band + same cash leg. */
+function yieldBoostExpectedNetAnnualBand(r, chartVolLookbackRange) {
+  const modeled = yieldBoostExpectedNetAnnualScenario(r, chartVolLookbackRange);
+  if (!modeled) return null;
+  const netP50 = Number(modeled.longTotalReturn);
+  if (!Number.isFinite(netP50)) return null;
+  const dist = Number(modeled.distributionsPaid);
+  const gross = expectedDecayDistribution(r);
+  if (gross && isYieldBoostPutSpreadDistModel(gross.model)
+      && Number.isFinite(dist) && Number.isFinite(gross.p10) && Number.isFinite(gross.p90)) {
+    return {
+      p50: netP50,
+      // High gross-decay quantile → worse long outcome; low quantile → better long outcome.
+      p10: -Number(gross.p90) + dist,
+      p90: -Number(gross.p10) + dist,
+      navDecay: modeled.navDecay,
+      distributionsPaid: dist,
+      gross,
+    };
+  }
+  return {
+    p50: netP50,
+    p10: null,
+    p90: null,
+    navDecay: modeled.navDecay,
+    distributionsPaid: Number.isFinite(dist) ? dist : null,
+    gross: gross || null,
+  };
+}
+
 function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel = '3M') {
   if (suppressScenarioForRow(r)) return null;
   const SR = typeof window !== 'undefined' ? window.ScenarioReturns : null;
@@ -2798,16 +2897,7 @@ function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel 
   const sigma = Number(forecastVol?.sigma);
   if (!Number.isFinite(sigma) || sigma <= 0) return null;
   if (isYieldBoostIncomeStrategy(r)) {
-    const modeled = estimateIncomeStyleScenarioReturn({
-      underlyingReturn: 0,
-      sigmaAnnual: sigma,
-      annualIncomeYield: incomeAnnualYieldForScenario(r, chartVolLookbackRange, sigma),
-      annualBorrowCost: Number(getBorrowRate(r)),
-      horizonYears,
-    });
-    // Long holder: NAV decay from put-spread + expense, **plus** cash
-    // distributions over the horizon (navReturn + distributionsPaid — same
-    // as income Scenarios `longTotalReturn`). Borrow stays out of this cell.
+    const modeled = yieldBoostExpectedNetAnnualScenario(r, chartVolLookbackRange, horizonYears);
     if (!modeled) return null;
     const navR = Number(modeled.navReturn);
     const dist = Number(modeled.distributionsPaid);
@@ -3254,7 +3344,7 @@ const COLS = [
   { key: 'borrow_current', label: 'Borrow Rate', w: 105, hint: 'Spot fee-only borrow on this row (IBKR FTP on full build, else screener CSV). Compare to borrow_history.json tail on chart Borrow tab.' },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, sublabel: 'trailing', hint: 'Realized: trailing annualized hedge drag from ls-algo screener (β·r_U − r_ETF) × 252. Not the forward Exp. decay column.' },
-  { key: 'expected_gross_decay_p50_annual', label: 'Exp. decay', sublabel: 'forward · median', w: 110, hint: 'Forward (screener): gross decay before borrow. Median = HARQ-Log / put-spread MC p50; band = p10/p90. Scenarios use separate forecast σ.' },
+  { key: 'expected_gross_decay_p50_annual', label: 'Exp. decay', sublabel: 'forward · median', w: 110, hint: 'LETF/inverse/vol-ETP: forward gross decay before borrow (HARQ / put-spread MC p50). YieldBOOST income: 1Y long net TR (−NAV decay + cash, no borrow); sub-band maps gross MC quantiles. Borrow excluded.' },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
@@ -3380,7 +3470,7 @@ function ExpectedDecayCalculator() {
 // ── Gross vs net comparison (detail strip): two rails, independent scales ──
 function GrossDecayComparisonStrip({ r }) {
   const gR = Number(r.gross_decay_annual);
-  const gHead = expectedDecayHeadlineValue(r);
+  const gHead = expectedDecayHeadlineValue(r, '6M');
   const gE = gHead != null && Number.isFinite(Number(gHead)) ? Number(gHead) : NaN;
 
   const bAvg = Number(r?.borrow_avg_annual);
@@ -3396,7 +3486,9 @@ function GrossDecayComparisonStrip({ r }) {
       v: gE,
       kind: 'bar',
       cls: 'expected',
-      legShort: `${expectedDecayDisplayLabel(r)} · gross`,
+      legShort: isYieldBoostIncomeStrategy(r)
+        ? `${expectedDecayDisplayLabel(r)} · net`
+        : `${expectedDecayDisplayLabel(r)} · gross`,
     });
   }
 
@@ -5907,9 +5999,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-value">{fmt(r.gross_decay_annual)}</div>
               <div className="cs-sub">realized · ls-algo screener</div>
             </div>
-            <div className="chart-stat" title={decayDistTooltip(r)}>
+            <div className="chart-stat" title={decayDistTooltip(r, chartVolLookbackRange)}>
               <div className="cs-label">Exp. decay</div>
-              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>forward · median · band</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>
+                {isYieldBoostIncomeStrategy(r) ? 'long net · 1Y · band' : 'forward · median · band'}
+              </div>
               {(() => {
                 if (!expectedDecayAvailableForRow(r)) {
                   return (
@@ -5919,28 +6013,32 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     </>
                   );
                 }
+                if (isYieldBoostIncomeStrategy(r)) {
+                  const band = yieldBoostExpectedNetAnnualBand(r, chartVolLookbackRange);
+                  if (band) {
+                    return (
+                      <div style={{ lineHeight: 1.15 }}>
+                        <div className="cs-value">{fmt(band.p50)}</div>
+                        {band.p10 != null && band.p90 != null ? (
+                          <div className="cs-sub" style={{ marginTop: 2 }}>
+                            {fmt(band.p10)} / {fmt(band.p90)}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  }
+                  return <div className="cs-value" style={{ color: 'var(--text-muted)' }}>—</div>;
+                }
                 const dist = expectedDecayDistribution(r);
                 if (dist) {
-                  const isYbDist = isYieldBoostPutSpreadDistModel(dist.model);
                   return (
                     <div style={{ lineHeight: 1.15 }}>
                       <div className="cs-value">{fmt(dist.p50)}</div>
                       <div className="cs-sub" style={{ marginTop: 2 }}>
-                        {isYbDist ? 'put-spread · ' : ''}{fmt(dist.p10)} / {fmt(dist.p90)}
+                        {fmt(dist.p10)} / {fmt(dist.p90)}
                       </div>
                     </div>
                   );
-                }
-                if (isYieldBoostIncomeStrategy(r)) {
-                  const yb = yieldBoostIntrinsicAnnualDecay(r);
-                  if (yb != null) {
-                    return (
-                      <div style={{ lineHeight: 1.15 }}>
-                        <div className="cs-value">{fmt(yb)}</div>
-                        <div className="cs-sub" style={{ marginTop: 2 }}>intrinsic (fallback)</div>
-                      </div>
-                    );
-                  }
                 }
                 return (
                   <>
@@ -8833,12 +8931,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       let av = sortKey === SCENARIO_ETF_3M_FLAT_SORT_KEY
         ? computeScenarioEtf3mFlatUnd(a, chartVolLookbackRange)
         : sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
-        ? expectedDecayHeadlineValue(a)
+        ? expectedDecayHeadlineValue(a, chartVolLookbackRange)
         : a[sortKey];
       let bv = sortKey === SCENARIO_ETF_3M_FLAT_SORT_KEY
         ? computeScenarioEtf3mFlatUnd(b, chartVolLookbackRange)
         : sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
-        ? expectedDecayHeadlineValue(b)
+        ? expectedDecayHeadlineValue(b, chartVolLookbackRange)
         : b[sortKey];
       if (av == null) av = sortDesc ? -Infinity : Infinity;
       if (bv == null) bv = sortDesc ? -Infinity : Infinity;
@@ -9023,7 +9121,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <p style={{ padding: '0 24px 6px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
             <strong style={{ color: 'var(--text-secondary)' }}>Short lens (annual, + better for a β-hedged short):</strong>{' '}
             <strong>Gross (realized)</strong> — trailing hedge drag from daily log returns (β·r<sub>U</sub> − r<sub>ETF</sub>), ×252.{' '}
-            <strong>Exp. decay</strong> — forward <em>median</em> gross decay (distribution when data allow; YieldBOOST → weekly 95/88 put-spread on 2× sleeve; vol-ETPs add roll/tracking).{' '}
+            <strong>Exp. decay</strong> — LETF/inverse/vol-ETP: forward <em>median gross</em> decay (+ = short-favorable). <strong>YieldBOOST income</strong>: 1Y <em>long net</em> TR (−NAV decay + cash, borrow excluded; same engine as Exp. ETF return / Scenarios).{' '}
             <strong>Net edge</strong> — resample past gross paths and borrow, shift level to that forward median, then subtract borrow; dot = median, whisker = tail risk.{' '}
             <strong>LETF vol intuition:</strong>{' '}
             <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text-secondary)' }}>½·β·(β−1)·σ²·T</span> drag in log space (β from regression; σ = forecast for scenarios).
@@ -9043,9 +9141,11 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               <div className="dm-block">
                 <div className="dm-title">Sign convention &amp; column map</div>
                 <p style={{ margin: '0 0 8px', lineHeight: 1.5 }}>
-                  <strong>Gross (realized)</strong>, <strong>Exp. decay</strong>, <strong>Net edge</strong>: <em>short-favorable +</em> means more structural decay vs borrow for a β-hedged short (before your execution costs).
+                  <strong>Gross (realized)</strong> and <strong>Net edge</strong> (non-YB): <em>short-favorable +</em> means more structural decay vs borrow for a β-hedged short.
                   <br /><br />
-                  <strong>Exp. ETF return (3M)</strong>: <em>long</em> total return (NAV path <strong>+</strong> cash), flat underlying, <strong>no borrow</strong>. Sign reads like a long investor (+ up). It can be strongly + on income ETFs when payouts dominate — <strong>do not</strong> line up its sign with the decay columns. <strong>Net edge</strong> is anchored on forward <em>gross decay</em> vs borrow; it is <strong>not</strong> the same object as long total return.
+                  <strong>Exp. decay</strong>: LETF/inverse/vol-ETP → forward <em>gross</em> median (short lens). <strong>YieldBOOST income</strong> → 1Y <em>long net</em> total return (−NAV decay + cash; borrow excluded) — same sign as <strong>Exp. ETF return</strong>.
+                  <br /><br />
+                  <strong>Exp. ETF return (3M)</strong>: long total return at 3M (NAV + cash), flat underlying, no borrow. <strong>Net edge</strong> bootstrap still anchors to server <em>gross</em> put-spread MC p50 for YieldBOOST (not the net TR shown in Exp. decay).
                 </p>
               </div>
               <div className="dm-block">
@@ -9080,15 +9180,17 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                 </p>
               </div>
               <div className="dm-block">
-                <div className="dm-title">Exp. decay — <code>expected_gross_decay_p50_annual</code> (+ band in cell)</div>
+                <div className="dm-title">Exp. decay — forward median (+ band in cell)</div>
                 <p style={{ margin: '0 0 8px', lineHeight: 1.5 }}>
-                  <strong>LETF / inverse</strong>: HARQ-Log decay distribution (or <code>simple_ito_fallback</code> one-σ path).
+                  <strong>LETF / inverse</strong>: HARQ-Log gross decay distribution (<code>expected_gross_decay_p50_annual</code>) or <code>simple_ito_fallback</code>.
                   <br /><br />
                   <strong>Vol ETPs</strong>: Itô core + roll/tracking from screener when present.
                   <br /><br />
-                  <strong>YieldBOOST</strong>: weekly 95/88 put on 2× sleeve, 52× net of expense — MC (<code>yieldboost_put_spread</code>) or single σ (<code>_point</code>).
+                  <strong>YieldBOOST income</strong>: 1Y <em>long net</em> total return at flat underlying —{' '}
+                  <code className="dm-formula">−NAV_decay + distributions</code> using calibrated cash and{' '}
+                  <code>forecast_vol_underlying_annual</code> (same engine as Exp. ETF return / Scenarios Long TR). Sub-band maps gross put-spread MC decay quantiles with the scenario cash leg held fixed. Server still ships gross MC for Net edge anchoring.
                   <br /><br />
-                  <strong>Passive low-β (non-income)</strong>: expected decay hidden; gross (realized) still shows. Legacy CSV point <code>expected_gross_decay_annual</code> exists; grid prefers distributional <strong>p50</strong> when shipped.
+                  <strong>Passive low-β (non-income)</strong>: expected decay hidden; gross (realized) still shows.
                 </p>
               </div>
               <div className="dm-block">
@@ -9169,38 +9271,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         </td>
                         <td>{fmtNum(r.shares_available)}</td>
                         <td title="Realized trailing hedge drag (ls-algo screener)">{fmt(r.gross_decay_annual)}</td>
-                        <td title={decayDistTooltip(r)}>
-                          {(() => {
-                            if (!expectedDecayAvailableForRow(r)) {
-                              return <span style={{ color: 'var(--text-muted)' }}>—</span>;
-                            }
-                            const dist = expectedDecayDistribution(r);
-                            if (dist) {
-                              const isYbDist = isYieldBoostPutSpreadDistModel(dist.model);
-                              return (
-                                <div style={{ lineHeight: 1.15 }}>
-                                  <div>{fmt(dist.p50)}</div>
-                                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
-                                    {isYbDist ? 'put-spread · ' : ''}{fmt(dist.p10)} / {fmt(dist.p90)}
-                                  </div>
-                                </div>
-                              );
-                            }
-                            if (isYieldBoostIncomeStrategy(r)) {
-                              const yb = yieldBoostIntrinsicAnnualDecay(r);
-                              if (yb != null) {
-                                return (
-                                  <div style={{ lineHeight: 1.15 }}>
-                                    <div>{fmt(yb)}</div>
-                                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
-                                      intrinsic (fallback)
-                                    </div>
-                                  </div>
-                                );
-                              }
-                            }
-                            return fmt(expectedDecayDisplayValue(r));
-                          })()}
+                        <td title={decayDistTooltip(r, chartVolLookbackRange)}>
+                          {renderExpectedDecayCell(r, chartVolLookbackRange)}
                         </td>
                         <td style={{ verticalAlign: 'middle' }}>
                           {isPassiveLowBetaRow(r) ? (
