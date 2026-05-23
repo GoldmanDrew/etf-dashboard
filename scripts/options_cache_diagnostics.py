@@ -76,6 +76,19 @@ def main() -> int:
         },
     )
     print("rows_by_source:", dict(by_source))
+    if data.get("polygon_snapshot_status"):
+        print("polygon_snapshot_status:", data.get("polygon_snapshot_status"))
+    if data.get("yieldboost_targeted"):
+        print(
+            "yieldboost_refresh:",
+            {
+                "targeted": data.get("yieldboost_targeted"),
+                "sleeves_only": data.get("yieldboost_sleeves_only"),
+                "refresh_symbols_count": data.get("refresh_symbols_count"),
+                "occ_filled": data.get("yieldboost_occ_quotes_filled"),
+                "occ_filled_mid": data.get("yieldboost_occ_quotes_filled_mid"),
+            },
+        )
 
     errs = data.get("errors_by_symbol") or {}
     if errs:

@@ -349,6 +349,84 @@ def format_occ_ticker(root: str, expiry: date, put_call: str, strike: float) -> 
     return f"{root.upper()}{yy:02d}{expiry.month:02d}{expiry.day:02d}{put_call.upper()}{strike8:08d}"
 
 
+_OCC_SYMBOL_RE = re.compile(r"^([A-Z]{1,6})(\d{6})([PC])(\d{1,8})$")
+
+
+def normalize_occ_symbol(symbol: object) -> str:
+    """Canonical compact OCC symbol for provider matching."""
+    s = str(symbol or "").strip().upper()
+    if s.startswith("O:"):
+        s = s[2:]
+    m = _OCC_SYMBOL_RE.match(s)
+    if not m:
+        return s
+    root, yymmdd, pc, strike_raw = m.groups()
+    strike8 = strike_raw.zfill(8)[-8:]
+    return f"{root}{yymmdd}{pc}{strike8}"
+
+
+def occ_symbol_keys(symbol: object) -> set[str]:
+    """Lookup keys for a provider OCC symbol (handles O: prefix / strike padding)."""
+    norm = normalize_occ_symbol(symbol)
+    if not norm:
+        return set()
+    keys = {norm}
+    m = _OCC_SYMBOL_RE.match(norm)
+    if m:
+        root, yymmdd, pc, strike8 = m.groups()
+        strike_int = int(strike8)
+        keys.add(f"{root}{yymmdd}{pc}{strike_int:08d}")
+        keys.add(f"{root}{yymmdd}{pc}{strike_int}")
+    return keys
+
+
+def build_occ_symbol_index(pending: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map normalized OCC keys -> pending held-leg metadata."""
+    index: dict[str, dict[str, Any]] = {}
+    for meta in pending:
+        occ = str(meta.get("occ") or "")
+        for key in occ_symbol_keys(occ):
+            index[key] = meta
+    return index
+
+
+def resolve_occ_ticker_for_contract(
+    sleeve: str,
+    expiry: date,
+    strike: float,
+    put_call: str,
+    chain_rows: Iterable[dict] | None,
+) -> str:
+    """Prefer Tradier chain ticker; fall back to formatted OCC."""
+    expiry_s = expiry.isoformat()
+    target_type = "put" if str(put_call or "P").upper() == "P" else "call"
+    best_row = None
+    best_dist = None
+    for row in chain_rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("expiration_date")) != expiry_s:
+            continue
+        if str(row.get("contract_type") or "").lower() != target_type:
+            continue
+        cstrike = _parse_float(row.get("strike_price"))
+        if cstrike is None:
+            continue
+        dist = abs(cstrike - float(strike))
+        if dist <= HELD_STRIKE_EXACT_TOL:
+            ticker = normalize_occ_symbol(row.get("ticker"))
+            if ticker:
+                return ticker
+        if best_row is None or dist < best_dist:
+            best_row = row
+            best_dist = dist
+    if best_row is not None and best_dist is not None and best_dist < 0.05:
+        ticker = normalize_occ_symbol(best_row.get("ticker"))
+        if ticker:
+            return ticker
+    return format_occ_ticker(sleeve, expiry, put_call, strike)
+
+
 def load_yieldboost_front_contracts(
     target_path: Path | str | None = None,
     *,

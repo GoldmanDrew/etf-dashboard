@@ -106,6 +106,7 @@ OPTIONS_ONLY_BUCKET3 = os.environ.get("OPTIONS_ONLY_BUCKET3", "1").strip().lower
 OPTIONS_INCLUDE_YIELDBOOST = os.environ.get("OPTIONS_INCLUDE_YIELDBOOST", "1").strip().lower() not in {"0", "false", "no"}
 OPTIONS_INCLUDE_BUCKET3_UNDERLYING = os.environ.get("OPTIONS_INCLUDE_BUCKET3_UNDERLYING", "1").strip().lower() not in {"0", "false", "no"}
 OPTIONS_ACCUMULATE_CACHE = os.environ.get("OPTIONS_ACCUMULATE_CACHE", "1").strip().lower() not in {"0", "false", "no"}
+YIELDBOOST_TRADIER_ONLY = os.environ.get("YIELDBOOST_TRADIER_ONLY", "1").strip().lower() not in {"0", "false", "no"}
 OPTIONS_MAX_ROWS_PER_SYMBOL = int(os.environ.get("OPTIONS_MAX_ROWS_PER_SYMBOL", "1200"))
 POLYGON_FORCE_SYMBOLS_RAW = [
     s.strip()
@@ -1248,7 +1249,12 @@ def build_polygon_options_cache(
     symbols_per_run = max(1, OPTIONS_SYMBOLS_PER_RUN)
     shard_interval_minutes = max(1, OPTIONS_SHARD_INTERVAL_MINUTES)
     if yieldboost_targeted:
-        forced_symbols = sorted(all_symbols)
+        yb_sleeves = sorted(
+            s for s in all_symbols if s in target_strikes_by_sleeve or s in held_expiries_by_sleeve
+        )
+        if yb_sleeves:
+            all_symbols = yb_sleeves
+        forced_symbols = list(all_symbols)
         symbols_per_run = max(symbols_per_run, len(all_symbols))
         shard_count = 1
     else:
@@ -1274,12 +1280,13 @@ def build_polygon_options_cache(
             refresh_symbols.append(s)
         if len(refresh_symbols) >= symbols_per_run:
             break
-    # Guarantee tradier-chain symbols are refreshed each run, then trim.
-    for s in sorted(tradier_chain_symbols):
-        if s in all_symbols and s not in seen_refresh:
-            refresh_symbols.insert(0, s)
-            seen_refresh.add(s)
-    refresh_symbols = refresh_symbols[: max(symbols_per_run, len([s for s in tradier_chain_symbols if s in all_symbols]))]
+    # Guarantee tradier-chain symbols are refreshed each run, then trim (non-yieldboost only).
+    if not yieldboost_targeted:
+        for s in sorted(tradier_chain_symbols):
+            if s in all_symbols and s not in seen_refresh:
+                refresh_symbols.insert(0, s)
+                seen_refresh.add(s)
+        refresh_symbols = refresh_symbols[: max(symbols_per_run, len([s for s in tradier_chain_symbols if s in all_symbols]))]
 
     build_time = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
     out = {
@@ -1293,6 +1300,7 @@ def build_polygon_options_cache(
         "tradier_chain_symbols": sorted(tradier_chain_symbols),
         "refresh_symbols_count": int(len(refresh_symbols)),
         "yieldboost_targeted": bool(yieldboost_targeted),
+        "yieldboost_sleeves_only": bool(yieldboost_targeted),
         "yieldboost_target_sleeves": sorted(target_strikes_by_sleeve.keys()),
         "shard_interval_minutes": int(shard_interval_minutes),
         "polygon_request_limits": {
@@ -1334,6 +1342,28 @@ def build_polygon_options_cache(
         "chain_used": 0,
         "phase": "chain",
     }
+    polygon_snapshot_blocked = False
+    polygon_snapshot_block_reason: str | None = None
+    if yieldboost_targeted:
+        max_held_expiries = max((len(v) for v in held_expiries_by_sleeve.values()), default=1)
+        needed_chain = len(refresh_symbols) * max(1, max_held_expiries) + 2
+        tradier_budget["chain_max"] = max(TRADIER_CHAIN_MAX_TOTAL_REQUESTS, needed_chain)
+    else:
+        tradier_budget["chain_max"] = TRADIER_CHAIN_MAX_TOTAL_REQUESTS
+
+    def _allow_polygon_snapshot() -> bool:
+        if yieldboost_targeted and TRADIER_TOKEN and YIELDBOOST_TRADIER_ONLY:
+            return False
+        return not polygon_snapshot_blocked
+
+    def _note_polygon_block(reason: str) -> None:
+        nonlocal polygon_snapshot_blocked, polygon_snapshot_block_reason
+        if not polygon_snapshot_blocked:
+            polygon_snapshot_blocked = True
+            polygon_snapshot_block_reason = reason
+            out["polygon_snapshot_status"] = reason
+            if reason not in out.get("errors", []):
+                out.setdefault("errors", []).append(f"polygon snapshot disabled: {reason}")
 
     def _tradier_quote_fields(q: dict) -> tuple[float | None, float | None, float | None, dict]:
         nested = q.get("quote") if isinstance(q.get("quote"), dict) else {}
@@ -1741,11 +1771,9 @@ def build_polygon_options_cache(
             if tradier_budget["held_used"] >= TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS:
                 return None, f"tradier held-leg budget exceeded ({TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS})"
         elif active_phase == "chain":
-            if (
-                TRADIER_CHAIN_MAX_TOTAL_REQUESTS > 0
-                and tradier_budget["chain_used"] >= TRADIER_CHAIN_MAX_TOTAL_REQUESTS
-            ):
-                return None, f"tradier chain budget exceeded ({TRADIER_CHAIN_MAX_TOTAL_REQUESTS})"
+            chain_cap = int(tradier_budget.get("chain_max") or TRADIER_CHAIN_MAX_TOTAL_REQUESTS)
+            if chain_cap > 0 and tradier_budget["chain_used"] >= chain_cap:
+                return None, f"tradier chain budget exceeded ({chain_cap})"
         _rate_limit_tradier()
         headers = {
             "Authorization": f"Bearer {TRADIER_TOKEN}",
@@ -1972,9 +2000,11 @@ def build_polygon_options_cache(
     def _supplement_yieldboost_occ_quotes(*, force_all_front: bool = False) -> None:
         """Fetch Tradier OCC quotes for held front legs (runs in held budget phase)."""
         from yieldboost_holdings import (
-            format_occ_ticker,
+            build_occ_symbol_index,
             held_contract_needs_occ_quote,
             load_yieldboost_front_contracts,
+            normalize_occ_symbol,
+            resolve_occ_ticker_for_contract,
         )
 
         def _record_occ_stats(
@@ -2033,7 +2063,11 @@ def build_polygon_options_cache(
                     rows, expiry=expiry_date, strike=float(strike), put_call=put_call,
                 ):
                     continue
-            occ = format_occ_ticker(sleeve, expiry_date, put_call, float(strike))
+            sym_payload = out["symbols"].get(sleeve) if isinstance(out["symbols"].get(sleeve), dict) else {}
+            chain_rows = sym_payload.get("options") if isinstance(sym_payload, dict) else []
+            occ = resolve_occ_ticker_for_contract(
+                sleeve, expiry_date, float(strike), put_call, chain_rows,
+            )
             pending.append({
                 "sleeve": sleeve,
                 "expiry": expiry_date.isoformat(),
@@ -2047,6 +2081,7 @@ def build_polygon_options_cache(
             return
 
         occ_meta = {p["occ"]: p for p in pending}
+        occ_alias_index = build_occ_symbol_index(pending)
         max_requests = (
             TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS
             if force_all_front
@@ -2078,12 +2113,16 @@ def build_polygon_options_cache(
             quotes = ((payload.get("quotes") or {}).get("quote")) or []
             if isinstance(quotes, dict):
                 quotes = [quotes]
+            if not quotes and batch:
+                out["yieldboost_occ_quote_empty_batches"] = int(
+                    out.get("yieldboost_occ_quote_empty_batches") or 0
+                ) + 1
             for q in quotes:
-                occ = _canon_option_ticker(q.get("symbol") or q.get("option_symbol"))
+                occ = normalize_occ_symbol(q.get("symbol") or q.get("option_symbol"))
                 if not occ:
                     continue
                 returned_occs.add(occ)
-                meta = occ_meta.get(occ)
+                meta = occ_alias_index.get(occ) or occ_meta.get(occ)
                 if not meta:
                     continue
                 mid, iv, delta, greeks = _tradier_quote_fields(q)
@@ -2143,7 +2182,35 @@ def build_polygon_options_cache(
         if occ_errors:
             print(f"  [WARN] Held-leg quote errors: {occ_errors[0]}")
 
+    def _prefetch_yieldboost_sleeve_chains() -> None:
+        """Fetch held-expiry Tradier chains for all YB sleeves before OCC quotes."""
+        prefetched = 0
+        for sym in refresh_symbols:
+            nsym = norm_sym(sym)
+            held_exp = sorted(str(e) for e in held_expiries_by_sleeve.get(nsym, set()))
+            if not held_exp or nsym not in target_strikes_by_sleeve:
+                continue
+            tradier_spot = tradier_spot_map.get(sym)
+            tradier_rows, spot_val, held_chain_err = _fetch_tradier_chain(
+                sym, tradier_spot, force_expiries=held_exp, phase="chain",
+            )
+            if tradier_rows:
+                _set_symbol_entry(
+                    sym,
+                    spot_val if spot_val is not None else tradier_spot,
+                    tradier_rows,
+                    "tradier_held_exp",
+                )
+                prefetched += 1
+            elif held_chain_err:
+                out.setdefault("errors_by_symbol", {})
+                out["errors_by_symbol"][sym] = f"tradier_held_exp: {held_chain_err}"
+        if prefetched:
+            print(f"  YieldBOOST held-exp chains prefetched for {prefetched}/{len(refresh_symbols)} sleeves")
+
     if yieldboost_targeted and TRADIER_TOKEN:
+        tradier_budget["phase"] = "chain"
+        _prefetch_yieldboost_sleeve_chains()
         tradier_budget["phase"] = "held"
         _supplement_yieldboost_occ_quotes(force_all_front=True)
         tradier_budget["phase"] = "chain"
@@ -2161,13 +2228,22 @@ def build_polygon_options_cache(
 
             nsym = norm_sym(sym)
             held_exp = sorted(str(e) for e in held_expiries_by_sleeve.get(nsym, set()))
+            prior_payload = out["symbols"].get(sym) if isinstance(out["symbols"].get(sym), dict) else None
+            if (
+                yieldboost_targeted
+                and prior_payload
+                and (prior_payload.get("options") or [])
+            ):
+                continue
             if yieldboost_targeted and held_exp and nsym in target_strikes_by_sleeve:
-                tradier_rows, _, held_chain_err = _fetch_tradier_chain(
+                tradier_rows, spot_val, held_chain_err = _fetch_tradier_chain(
                     sym, tradier_spot, force_expiries=held_exp, phase="chain",
                 )
                 if tradier_rows:
                     rows = tradier_rows
                     symbol_source = "tradier_held_exp"
+                    if spot_val is not None:
+                        tradier_spot = spot_val
                 elif held_chain_err:
                     sym_errors.append(f"tradier_held_exp: {held_chain_err}")
 
@@ -2180,7 +2256,7 @@ def build_polygon_options_cache(
                 elif tradier_chain_err:
                     sym_errors.append(f"tradier_chain: {tradier_chain_err}")
 
-            if not rows:
+            if not rows and _allow_polygon_snapshot():
                 snap_start = f"https://api.polygon.io/v3/snapshot/options/{sym}?{urlencode({'limit': 250, 'apiKey': POLYGON_API_KEY})}"
                 resp, req_err = _polygon_get(snap_start, timeout=25)
                 if req_err and resp is None:
@@ -2205,10 +2281,20 @@ def build_polygon_options_cache(
                             if "HTTP 429" in str(page_err):
                                 snapshot_rate_limited = True
                 elif resp is not None:
-                    msg = payload.get("error") or payload.get("message") or ""
+                    msg = payload.get("error") or payload.get("message") or payload.get("status") or ""
                     sym_errors.append(f"snapshot HTTP {resp.status_code}{f' {msg}' if msg else ''}")
+                    if resp.status_code == 403:
+                        _note_polygon_block(
+                            "HTTP 403 not entitled (Options Snapshot plan required); using Tradier chain"
+                        )
                     if resp.status_code == 429:
                         snapshot_rate_limited = True
+            elif not rows and yieldboost_targeted and YIELDBOOST_TRADIER_ONLY:
+                sym_errors.append("polygon skipped (yieldboost Tradier-only mode)")
+            elif not rows and polygon_snapshot_blocked:
+                sym_errors.append(
+                    f"polygon skipped ({polygon_snapshot_block_reason or 'snapshot blocked'})"
+                )
 
             # Fallback: contracts reference endpoint to at least populate expiries/strikes.
             if not rows and not snapshot_rate_limited and sym not in tradier_chain_symbols:
@@ -2235,7 +2321,11 @@ def build_polygon_options_cache(
                 sym_errors.append("contracts fallback skipped after snapshot 429")
 
             # Secondary fallback to Tradier chains for non-primary symbols that failed Polygon.
-            if not rows and sym not in tradier_chain_symbols:
+            if (
+                not rows
+                and sym not in tradier_chain_symbols
+                and not (yieldboost_targeted and nsym in target_strikes_by_sleeve and held_exp)
+            ):
                 tradier_rows, _, tradier_chain_err = _fetch_tradier_chain(sym, tradier_spot)
                 if tradier_rows:
                     rows = tradier_rows
@@ -2525,11 +2615,13 @@ def get_polygon_force_symbols() -> list[str]:
 
     seen: set[str] = set()
     ordered: list[str] = []
-    yb_symbols = load_yieldboost_force_symbols_from_spreads(YIELDBOOST_PUT_SPREADS_FILE)
-    yb_symbols += load_yieldboost_underlying_symbols_from_spreads(
-        YIELDBOOST_PUT_SPREADS_FILE,
-        front_only=True,
-    )
+    yb_symbols: list[str] = []
+    if OPTIONS_INCLUDE_YIELDBOOST:
+        yb_symbols = load_yieldboost_force_symbols_from_spreads(YIELDBOOST_PUT_SPREADS_FILE)
+        yb_symbols += load_yieldboost_underlying_symbols_from_spreads(
+            YIELDBOOST_PUT_SPREADS_FILE,
+            front_only=True,
+        )
     for s in POLYGON_FORCE_SYMBOLS_RAW + yb_symbols:
         ss = norm_sym(s)
         if ss and ss not in seen:
@@ -3436,18 +3528,14 @@ def refresh_yieldboost_vrp_only() -> None:
     from yieldboost_holdings import load_yieldboost_underlying_symbols_from_spreads
 
     sleeves = load_yieldboost_sleeve_symbols(front_only=True)
-    underlyings = load_yieldboost_underlying_symbols_from_spreads(
-        YIELDBOOST_PUT_SPREADS_FILE,
-        front_only=True,
-    )
     if not sleeves:
         sleeves = sorted(
             norm_sym(s)
             for s in load_yieldboost_option_symbols()
             if s not in {norm_sym(yb) for yb, _ in YIELDBOOST_BUCKET2_PAIRS}
         )
-    if not sleeves and not underlyings:
-        print("[WARN] No YieldBOOST sleeve/underlying symbols found; writing VRP from cached spreads only.")
+    if not sleeves:
+        print("[WARN] No YieldBOOST sleeve symbols found; writing VRP from cached spreads only.")
 
     prior_cache: dict = {}
     if OPTIONS_CACHE_FILE.exists():
@@ -3458,7 +3546,7 @@ def refresh_yieldboost_vrp_only() -> None:
 
     refresh_list: list[str] = []
     seen_refresh: set[str] = set()
-    for sym in sleeves + underlyings:
+    for sym in sleeves:
         ss = norm_sym(sym)
         if ss and ss not in seen_refresh:
             seen_refresh.add(ss)
