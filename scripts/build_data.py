@@ -31,8 +31,11 @@ import requests
 from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_metrics
 from income_schedule import (
     DEFAULT_CROSS_FUND_RATIO,
+    band_to_sigma,
     build_all_calibrations,
     build_legacy_yield_fields,
+    expected_pair_pnl_annual,
+    inverse_variance_blend,
 )
 
 # ──────────────────────────────────────────────
@@ -3941,10 +3944,11 @@ def build():
             ),
             "expected_gross_decay_dist_n_obs": _safe_float(rdict, "expected_gross_decay_dist_n_obs"),
             "expected_gross_decay_dist_horizon_days": _safe_float(rdict, "expected_gross_decay_dist_horizon_days"),
-            # Anchor-shift bootstrap diagnostics: how the realized
-            # net-edge draws were re-centered onto the forward-looking
-            # expected_gross_decay_p50_annual. NaN/None for rows that
-            # were left realized-only (e.g., passive low-β).
+            # Anchor-shift / inverse-variance blend diagnostics. The
+            # screener (``screener_v2_fields.enrich_screener_v2_fields``)
+            # now produces a Bayesian blend of the model-based forward p50
+            # and the block-bootstrapped realized mean; legacy anchor-shift
+            # is retained as the E2 fallback for rows without a usable band.
             "gross_anchor_shift_annual": _safe_float(rdict, "gross_anchor_shift_annual"),
             "gross_anchor_target_annual": _safe_float(rdict, "gross_anchor_target_annual"),
             "gross_anchor_source": (
@@ -3953,6 +3957,16 @@ def build():
                 and str(rdict.get("gross_anchor_source") or "").strip() not in ("", "nan", "None")
                 else None
             ),
+            "gross_blend_method": (
+                str(rdict["gross_blend_method"]).strip()
+                if rdict.get("gross_blend_method")
+                and str(rdict.get("gross_blend_method") or "").strip() not in ("", "nan", "None")
+                else None
+            ),
+            "gross_sigma_forward_annual": _safe_float(rdict, "gross_sigma_forward_annual"),
+            "gross_sigma_realized_annual": _safe_float(rdict, "gross_sigma_realized_annual"),
+            "gross_blend_weight_forward": _safe_float(rdict, "gross_blend_weight_forward"),
+            "gross_realized_mean_annual": _safe_float(rdict, "gross_realized_mean_annual"),
             "net_decay": net_decay,
             "vol_underlying_annual": vol_und,
             "vol_etf_annual": vol_etf,
@@ -4101,7 +4115,7 @@ def build():
                 continue
             rec["income_distribution_calibration"] = block
             for k, v in build_legacy_yield_fields(block).items():
-                # Override the legacy Σ$/today_price values with NAV-normalized
+                # Override the legacy ?$/today_price values with NAV-normalized
                 # run-rate so older clients pick up the corrected semantics.
                 rec[k] = v
             _calibrated += 1
@@ -4109,6 +4123,143 @@ def build():
             f"  YieldBOOST distribution calibration: "
             f"{_calibrated} ETFs, cross-fund ratio prior={cross_fund_ratio_used:.3f} "
             f"(default {DEFAULT_CROSS_FUND_RATIO:.2f})"
+        )
+
+    # 5c. Forward pair-trade P&L + YB-specific net-edge re-blend.
+    # For non-YB rows pair-trade P&L = gross drag (no cash leg) -> mirror
+    # ``expected_gross_decay_p*`` into ``expected_pair_pnl_p*``.
+    # For YB rows we:
+    #   1. Compute pair P&L = NAV decay - calibrated distributions at forecast sigma.
+    #   2. Adjust the realized gross-decay series to pair basis (subtract
+    #      annualized distribution run-rate). This is decision D1.
+    #   3. Re-run the inverse-variance blend on the pair-P&L axis.
+    #   4. Shift the published net-edge histogram + quantiles by
+    #      (new_posterior - old_anchor_target). The bootstrap shape (variance,
+    #      autocorrelation, regime mixing) is preserved; only the level changes.
+    _yb_reblended = 0
+    _yb_skipped_no_diag = 0
+    for rec in records:
+        # Default: pair P&L = gross drag (LETF/inverse/vol-ETP have no cash leg).
+        rec["expected_pair_pnl_p10_annual"] = rec.get("expected_gross_decay_p10_annual")
+        rec["expected_pair_pnl_p50_annual"] = rec.get("expected_gross_decay_p50_annual")
+        rec["expected_pair_pnl_p90_annual"] = rec.get("expected_gross_decay_p90_annual")
+        rec["expected_pair_pnl_source"] = (
+            "gross_drag_pair_identity"
+            if rec.get("expected_gross_decay_p50_annual") is not None
+            else None
+        )
+        if not rec.get("is_yieldboost"):
+            continue
+        calibration = rec.get("income_distribution_calibration") or None
+        if not calibration:
+            continue
+        sigma_forecast = rec.get("forecast_vol_underlying_annual") or rec.get("vol_underlying_annual")
+        if sigma_forecast is None:
+            continue
+        try:
+            sigma_forecast = float(sigma_forecast)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(sigma_forecast) or sigma_forecast <= 0:
+            continue
+        gross_band = {
+            "p10": rec.get("expected_gross_decay_p10_annual"),
+            "p50": rec.get("expected_gross_decay_p50_annual"),
+            "p90": rec.get("expected_gross_decay_p90_annual"),
+        }
+        pair = expected_pair_pnl_annual(
+            calibration=calibration,
+            sigma_annual=sigma_forecast,
+            horizon_years=1.0,
+            gross_band=gross_band,
+        )
+        if pair is None:
+            continue
+        # Pair-P&L band (gross MC quantiles with cash leg held fixed).
+        rec["expected_pair_pnl_p10_annual"] = pair.get("p10")
+        rec["expected_pair_pnl_p50_annual"] = pair.get("p50")
+        rec["expected_pair_pnl_p90_annual"] = pair.get("p90")
+        rec["expected_pair_pnl_nav_decay_annual"] = pair.get("nav_decay")
+        rec["expected_pair_pnl_distributions_annual"] = pair.get("distributions")
+        rec["expected_pair_pnl_sigma_forward_annual"] = pair.get("sigma_forward_annual")
+        rec["expected_pair_pnl_source"] = "yieldboost_calibrated_pair_pnl"
+        # D1: YB-adjusted realized series mean.
+        distributions_annual = float(pair.get("distributions") or 0.0)
+        realized_gross = rec.get("gross_decay_annual")
+        if isinstance(realized_gross, (int, float)) and math.isfinite(float(realized_gross)):
+            rec["gross_decay_annual_pair_adjusted"] = round(
+                float(realized_gross) - distributions_annual, 6
+            )
+        else:
+            rec["gross_decay_annual_pair_adjusted"] = None
+        # Re-blend at pair-P&L level using the screener-provided realized mean
+        # and sigma. If diagnostics are missing (very old screener output),
+        # leave the published net-edge alone.
+        mu_R_raw = rec.get("gross_realized_mean_annual")
+        sigma_R = rec.get("gross_sigma_realized_annual")
+        old_anchor_target = rec.get("gross_anchor_target_annual")
+        if mu_R_raw is None or old_anchor_target is None:
+            _yb_skipped_no_diag += 1
+            continue
+        try:
+            mu_R_pair = float(mu_R_raw) - distributions_annual
+            sigma_R_val = float(sigma_R) if sigma_R is not None else None
+            old_anchor_val = float(old_anchor_target)
+        except (TypeError, ValueError):
+            _yb_skipped_no_diag += 1
+            continue
+        sigma_F_pair = pair.get("sigma_forward_annual")
+        blend = inverse_variance_blend(
+            mu_forward=float(pair["p50"]),
+            sigma_forward=sigma_F_pair,
+            mu_realized=mu_R_pair,
+            sigma_realized=sigma_R_val,
+        )
+        if blend is None:
+            continue
+        posterior_mu = float(blend["posterior_mean"])
+        rec["pair_anchor_target_annual"] = posterior_mu
+        rec["pair_anchor_shift_annual"] = posterior_mu - mu_R_pair
+        rec["pair_blend_method"] = blend["method"]
+        rec["pair_blend_weight_forward"] = blend["weight_forward"]
+        rec["pair_sigma_forward_annual"] = (
+            float(sigma_F_pair) if sigma_F_pair is not None else None
+        )
+        rec["pair_sigma_realized_annual"] = sigma_R_val
+        rec["pair_realized_mean_annual"] = mu_R_pair
+        # Histogram + quantile shift: convert (gross_old_shifted - borrow)
+        # quantiles into (pair_pnl_blended - borrow) quantiles via a single
+        # additive shift = posterior_mu - old_anchor_val.
+        delta = posterior_mu - old_anchor_val
+        if math.isfinite(delta):
+            for q_key in (
+                "net_edge_p05_annual",
+                "net_edge_p25_annual",
+                "net_edge_p50_annual",
+                "net_edge_p75_annual",
+                "net_edge_p95_annual",
+            ):
+                v = rec.get(q_key)
+                if isinstance(v, (int, float)) and math.isfinite(float(v)):
+                    rec[q_key] = round(float(v) + delta, 6)
+            hist_str = rec.get("net_edge_hist_json")
+            if isinstance(hist_str, str) and hist_str.strip():
+                try:
+                    hist = json.loads(hist_str)
+                    edges = hist.get("e")
+                    if isinstance(edges, list):
+                        hist["e"] = [round(float(e) + delta, 6) for e in edges]
+                        rec["net_edge_hist_json"] = json.dumps(
+                            hist, separators=(",", ":")
+                        )
+                except (ValueError, TypeError):
+                    pass
+        _yb_reblended += 1
+    if _yb_reblended or _yb_skipped_no_diag:
+        print(
+            f"  YieldBOOST net-edge re-blend (pair-P&L anchor + D1 adjusted realized): "
+            f"{_yb_reblended} re-blended"
+            + (f", {_yb_skipped_no_diag} skipped (no screener blend diagnostics)" if _yb_skipped_no_diag else "")
         )
 
     # 6. Compute summary

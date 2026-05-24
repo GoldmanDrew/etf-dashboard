@@ -61,7 +61,7 @@ PUT_SPREAD_LEVERAGE = 2.0
 DEFAULT_EXPENSE_RATIO_ANNUAL = 0.0099
 WEEKS_PER_YEAR = 52
 
-# Bucket 2 research section 1: median capture ratio across 8 candidates is 0.635
+# Bucket 2 research -1: median capture ratio across 8 candidates is 0.635
 # under risk-neutral BS pricing. The dashboard uses physical-measure leveraged
 # drift, which gives ~5% higher BS reference; we round the prior to 0.65 so
 # the constant stays close to both interpretations and absorbs measurement
@@ -97,7 +97,7 @@ def expected_put_spread_loss_weekly(
     sigma_annual: float,
     horizon_years: float = 1.0,
 ) -> float:
-    """Expected weekly put-spread loss on the 2x sleeve.
+    """Expected weekly put-spread loss on the 2- sleeve.
 
     Mirror of ``expectedPutSpreadLossWeekly`` in ``index.html`` /
     ``assets/income_scenario.js``. Returns ``NaN`` on invalid input so the
@@ -136,7 +136,7 @@ def expected_put_spread_loss_weekly(
 # NAV / ? history loaders
 # ?????????????????????????????????????????????????????????????????
 def load_nav_series_by_ticker(metrics_path: Path) -> dict[str, list[tuple[str, float]]]:
-    """Return ``{ticker ? [(iso_date, price), ...]}`` sorted ascending.
+    """Return ``{ticker ? [(iso_date, price), -]}`` sorted ascending.
 
     Prefers issuer ``nav`` and falls back to ``close_price`` (for early
     lifecycle rows where the data pipeline only has Yahoo bootstrap close).
@@ -468,6 +468,223 @@ def derive_cross_fund_ratio(
     return round(float(statistics.median(qualifying)), 6)
 
 
+# ?????????????????????????????????????????????????????????????????
+# Forward pair-trade P&L + inverse-variance blend (decisions A3 + B2 + C2).
+# Mirror of `assets/income_scenario.js#expectedPairPnlAnnual` /
+# `inverseVarianceBlend` so build_data.py can re-run the math server-side
+# for YieldBOOST rows (where the anchor target needs to be overridden with
+# calibration data the ls-algo screener does not have access to).
+# ?????????????????????????????????????????????????????????????????
+_BAND_QUANTILE_Z = 1.2815515655446004
+
+
+def band_to_sigma(p10: float | None, p90: float | None) -> float | None:
+    """Normal-equivalent sigma from a symmetric p10/p90 band."""
+    if p10 is None or p90 is None:
+        return None
+    try:
+        lo = float(p10)
+        hi = float(p90)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return None
+    width = abs(hi - lo)
+    if width <= 0:
+        return None
+    sigma = width / (2.0 * _BAND_QUANTILE_Z)
+    if not math.isfinite(sigma) or sigma <= 0:
+        return None
+    return float(sigma)
+
+
+def inverse_variance_blend(
+    *,
+    mu_forward: float,
+    sigma_forward: float | None,
+    mu_realized: float,
+    sigma_realized: float | None,
+) -> dict | None:
+    """Normal-Normal conjugate update on the level estimate.
+
+    Returns ``{"posterior_mean", "weight_forward", "posterior_sigma",
+    "method"}`` or ``None`` when both sigmas are missing / zero.
+
+    * ``method="inverse_variance"``: both sigmas positive, true blend.
+    * ``method="anchor_shift_fallback"``: only forward known, weight_F=1.
+    * ``method="realized_only"``: only realized known, weight_F=0.
+    """
+    try:
+        mu_F = float(mu_forward)
+        mu_R = float(mu_realized)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(mu_F) or not math.isfinite(mu_R):
+        return None
+    sig_F = None
+    sig_R = None
+    if sigma_forward is not None:
+        try:
+            sig_F = float(sigma_forward)
+        except (TypeError, ValueError):
+            sig_F = None
+    if sigma_realized is not None:
+        try:
+            sig_R = float(sigma_realized)
+        except (TypeError, ValueError):
+            sig_R = None
+    sigFok = sig_F is not None and math.isfinite(sig_F) and sig_F > 0
+    sigRok = sig_R is not None and math.isfinite(sig_R) and sig_R > 0
+    if not sigFok and not sigRok:
+        # Neither sigma known: cannot determine a posterior; fall back to the
+        # forward forecast as a confident point estimate (E2 default).
+        if math.isfinite(mu_F):
+            return {
+                "posterior_mean": mu_F,
+                "weight_forward": 1.0,
+                "posterior_sigma": None,
+                "method": "anchor_shift_fallback",
+            }
+        return None
+    if not sigFok:
+        # Forward forecast has no usable band (point estimate). Treat the
+        # forecast as a confident point estimate (sigma_F -> 0) so the
+        # posterior collapses to the forward mean -- this is the legacy
+        # anchor-shift behaviour and the E2 fallback for
+        # ``yieldboost_put_spread_point`` rows.
+        return {
+            "posterior_mean": mu_F,
+            "weight_forward": 1.0,
+            "posterior_sigma": None,
+            "method": "anchor_shift_fallback",
+        }
+    if not sigRok:
+        # Realized dispersion unknown but forward band is present: treat
+        # realized as a low-confidence point estimate (sigma_R -> infinity)
+        # so the forward forecast dominates -- equivalent to anchor-shift.
+        return {
+            "posterior_mean": mu_F,
+            "weight_forward": 1.0,
+            "posterior_sigma": sig_F,
+            "method": "anchor_shift_fallback",
+        }
+    vF = sig_F * sig_F
+    vR = sig_R * sig_R
+    denom = vF + vR
+    if denom <= 0 or not math.isfinite(denom):
+        return None
+    w_F = vR / denom
+    mu = w_F * mu_F + (1.0 - w_F) * mu_R
+    posterior_sigma = math.sqrt((vF * vR) / denom)
+    return {
+        "posterior_mean": float(mu),
+        "weight_forward": float(w_F),
+        "posterior_sigma": float(posterior_sigma),
+        "method": "inverse_variance",
+    }
+
+
+def expected_pair_pnl_annual(
+    *,
+    calibration: dict | None,
+    sigma_annual: float | None,
+    horizon_years: float = 1.0,
+    expense_ratio_annual: float = DEFAULT_EXPENSE_RATIO_ANNUAL,
+    cross_fund_ratio: float = DEFAULT_CROSS_FUND_RATIO,
+    gross_band: dict | None = None,
+    tail_adjustment_annual: float = DEFAULT_TAIL_ADJUSTMENT_ANNUAL,
+) -> dict | None:
+    """Forward gross pair-trade P&L (annualized) for a YieldBOOST row.
+
+    Returns ``{"p50", "p10", "p90", "nav_decay", "distributions",
+              "sigma_forward_annual", "ratio_used", "confidence"}`` or
+    ``None`` when calibration data is missing / invalid.
+
+    Pair-trade P&L = NAV_decay - cash_distributions at flat underlying,
+    before borrow.  Sign convention: short-favorable positive (NAV decay
+    accrues to short, distributions are paid by the short).
+    """
+    if calibration is None:
+        return None
+    if sigma_annual is None:
+        return None
+    try:
+        sigma = float(sigma_annual)
+        t = float(horizon_years)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(sigma) or sigma <= 0:
+        return None
+    if not math.isfinite(t) or t <= 0:
+        return None
+
+    ratio = calibration.get("blended_ratio_used")
+    try:
+        ratio_val = float(ratio) if ratio is not None else None
+    except (TypeError, ValueError):
+        ratio_val = None
+    if ratio_val is None or not math.isfinite(ratio_val) or ratio_val <= 0:
+        ratio_val = float(cross_fund_ratio)
+
+    bs_weekly = expected_put_spread_loss_weekly(0.0, sigma, 1.0)
+    if not math.isfinite(bs_weekly) or bs_weekly <= 0:
+        return None
+    d_weekly = ratio_val * bs_weekly
+    if not math.isfinite(d_weekly) or d_weekly < 0:
+        return None
+
+    weeks = max(1, int(round(t * WEEKS_PER_YEAR)))
+    L = expected_put_spread_loss_weekly(0.0, sigma, t)
+    if not math.isfinite(L):
+        return None
+    weekly_expense = max(0.0, float(expense_ratio_annual)) / WEEKS_PER_YEAR
+    q = 1.0 - L - weekly_expense
+    if not math.isfinite(q):
+        return None
+    q = max(0.0001, min(1.5, q))
+    nav_end_ratio = q ** weeks
+    nav_decay = 1.0 - nav_end_ratio
+    if tail_adjustment_annual is not None and math.isfinite(float(tail_adjustment_annual)):
+        nav_decay += float(tail_adjustment_annual) * t
+    if abs(1.0 - q) < 1e-9:
+        geom_sum = float(weeks)
+    else:
+        geom_sum = (1.0 - q ** weeks) / (1.0 - q)
+    distributions = d_weekly * geom_sum
+
+    pair_p50 = nav_decay - distributions
+
+    pair_p10 = None
+    pair_p90 = None
+    sigma_forward = None
+    if isinstance(gross_band, dict):
+        try:
+            g_p10 = float(gross_band.get("p10")) if gross_band.get("p10") is not None else None
+            g_p90 = float(gross_band.get("p90")) if gross_band.get("p90") is not None else None
+        except (TypeError, ValueError):
+            g_p10 = None
+            g_p90 = None
+        if g_p10 is not None and math.isfinite(g_p10):
+            pair_p10 = g_p10 - distributions
+        if g_p90 is not None and math.isfinite(g_p90):
+            pair_p90 = g_p90 - distributions
+        if pair_p10 is not None and pair_p90 is not None:
+            sigma_forward = band_to_sigma(pair_p10, pair_p90)
+
+    return {
+        "p50": float(pair_p50),
+        "p10": float(pair_p10) if pair_p10 is not None else None,
+        "p90": float(pair_p90) if pair_p90 is not None else None,
+        "nav_decay": float(nav_decay),
+        "distributions": float(distributions),
+        "sigma_forward_annual": float(sigma_forward) if sigma_forward is not None else None,
+        "ratio_used": float(ratio_val),
+        "confidence": calibration.get("fund_ratio_confidence") if isinstance(calibration, dict) else None,
+        "bs_premium_weekly": float(bs_weekly),
+        "weeks": int(weeks),
+    }
+
+
 def build_legacy_yield_fields(
     block: dict | None,
     current_price: float | None = None,
@@ -478,10 +695,10 @@ def build_legacy_yield_fields(
     update) keep working. New meaning:
 
     * ``income_yield_trailing_annual`` = NAV-normalized median weekly yield
-      x periods_per_year (? stable run-rate at current ? regime).
-    * ``income_yield_recent_annual``   = latest NAV-normalized yield x
+      - periods_per_year (? stable run-rate at current ? regime).
+    * ``income_yield_recent_annual``   = latest NAV-normalized yield -
       periods_per_year (? this-week annualized).
-    * Old ``?$/today_price`` and ``x12`` formulations are gone.
+    * Old ``?$/today_price`` and ``-12`` formulations are gone.
     """
     out: dict[str, float | int | str | None] = {}
     if not block:

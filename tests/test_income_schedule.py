@@ -396,3 +396,137 @@ def test_build_all_calibrations_self_calibrates_from_fleet(tmp_path):
     medians = sorted(b["fund_ratio_median"] for b in blocks.values())
     expected_prior = (medians[1] + medians[2]) / 2
     assert prior == pytest.approx(expected_prior, abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Forward pair-trade P&L + inverse-variance blend (decisions A3 + B2 + C2)
+# ---------------------------------------------------------------------------
+def test_band_to_sigma_matches_normal_identity():
+    sig = ic.band_to_sigma(0.20, 0.40)
+    assert sig is not None
+    # (p90 - p10) / 2 = 1.2816 * sigma  =>  sigma = 0.20 / 2.5631
+    assert sig == pytest.approx(0.20 / (2.0 * 1.2815515655446004), rel=1e-9)
+    assert ic.band_to_sigma(None, 0.40) is None
+    assert ic.band_to_sigma(0.40, 0.40) is None
+    assert ic.band_to_sigma(float("nan"), 0.40) is None
+
+
+def test_inverse_variance_blend_limits():
+    res = ic.inverse_variance_blend(
+        mu_forward=0.30, sigma_forward=0.10,
+        mu_realized=0.10, sigma_realized=0.10,
+    )
+    assert res is not None
+    # equal sigmas -> w_F = 0.5 exactly
+    assert res["weight_forward"] == pytest.approx(0.5, abs=1e-12)
+    assert res["posterior_mean"] == pytest.approx(0.20, abs=1e-12)
+    assert res["method"] == "inverse_variance"
+
+    # sigma_F -> 0 forces full forward weight
+    res_f = ic.inverse_variance_blend(
+        mu_forward=0.30, sigma_forward=1e-9,
+        mu_realized=0.10, sigma_realized=0.10,
+    )
+    assert res_f["weight_forward"] > 0.999
+    assert res_f["posterior_mean"] == pytest.approx(0.30, abs=1e-6)
+
+    # sigma_R -> 0 forces full realized weight
+    res_r = ic.inverse_variance_blend(
+        mu_forward=0.30, sigma_forward=0.10,
+        mu_realized=0.10, sigma_realized=1e-9,
+    )
+    assert res_r["weight_forward"] < 1e-3
+    assert res_r["posterior_mean"] == pytest.approx(0.10, abs=1e-6)
+
+    # No forward band (sigma_F=None) -> anchor-shift fallback (E2): treat
+    # forward as a confident point estimate -> w_F = 1, posterior = mu_F.
+    res_only_r = ic.inverse_variance_blend(
+        mu_forward=0.30, sigma_forward=None,
+        mu_realized=0.10, sigma_realized=0.10,
+    )
+    assert res_only_r["method"] == "anchor_shift_fallback"
+    assert res_only_r["weight_forward"] == 1.0
+    assert res_only_r["posterior_mean"] == pytest.approx(0.30, abs=1e-9)
+
+    # No realized sigma (sigma_R=None) but forward band present: also fall
+    # back to anchor-shift (realized treated as low-confidence).
+    res_only_f = ic.inverse_variance_blend(
+        mu_forward=0.30, sigma_forward=0.10,
+        mu_realized=0.10, sigma_realized=None,
+    )
+    assert res_only_f["method"] == "anchor_shift_fallback"
+    assert res_only_f["weight_forward"] == 1.0
+    assert res_only_f["posterior_mean"] == pytest.approx(0.30, abs=1e-9)
+
+    # Both sigmas missing: anchor-shift fallback to forward.
+    res_neither = ic.inverse_variance_blend(
+        mu_forward=0.30, sigma_forward=None,
+        mu_realized=0.10, sigma_realized=None,
+    )
+    assert res_neither["method"] == "anchor_shift_fallback"
+    assert res_neither["weight_forward"] == 1.0
+
+
+def test_expected_pair_pnl_matches_research_net_short_plus_borrow(research):
+    """Forward pair-trade P&L should equal research ``net_short_annual``
+    + ``borrow_annual`` (closed-form identity: pair = navDecay - dist,
+    net_short = pair - borrow*T, so pair = net_short + borrow).
+
+    The research's structural ``capture_ratio_research`` is measured at
+    *their* BS-premium basis (risk-neutral drift); the dashboard uses
+    physical-measure leveraged drift, so the BS premium is ~5% lower and
+    a tighter ratio reproduces the same d_weekly. We back-derive the
+    dashboard-equivalent ratio from the research's actual_distribution_weekly.
+    """
+    tol = float(research["tolerances"]["net_short_pp"])
+    for candidate in research["candidates"]:
+        sigma = float(candidate["sigma_annual"])
+        actual_d_weekly = float(candidate["actual_distribution_weekly"])
+        dashboard_bs_weekly = ic.expected_put_spread_loss_weekly(0.0, sigma, 1.0)
+        assert dashboard_bs_weekly > 0, candidate["etf"]
+        # Back-derive the calibration ratio at dashboard's BS basis so the
+        # implied d_weekly = ratio * BS matches the research's measured cash.
+        ratio = actual_d_weekly / dashboard_bs_weekly
+        calibration = {
+            "blended_ratio_used": ratio,
+            "fund_ratio_median": ratio,
+            "fund_ratio_confidence": "high",
+        }
+        result = ic.expected_pair_pnl_annual(
+            calibration=calibration,
+            sigma_annual=sigma,
+            horizon_years=1.0,
+        )
+        assert result is not None, candidate["etf"]
+        expected_pair = float(candidate["net_short_annual"]) + float(candidate["borrow_annual"])
+        assert abs(result["p50"] - expected_pair) <= tol, (
+            f"{candidate['etf']}: pair P&L {result['p50']:.3f} vs research "
+            f"{expected_pair:.3f}"
+        )
+        # nav_decay - distributions identity (always holds, regardless of ratio)
+        assert result["p50"] == pytest.approx(
+            result["nav_decay"] - result["distributions"], abs=1e-9
+        )
+
+
+def test_expected_pair_pnl_band_holds_cash_fixed():
+    """Band mapping: pair_p10 = gross_p10 - distributions (cash leg fixed)."""
+    calibration = {
+        "blended_ratio_used": 0.65,
+        "fund_ratio_confidence": "high",
+    }
+    gross_band = {"p10": 0.55, "p50": 0.70, "p90": 0.85}
+    result = ic.expected_pair_pnl_annual(
+        calibration=calibration,
+        sigma_annual=0.80,
+        horizon_years=1.0,
+        gross_band=gross_band,
+    )
+    assert result is not None
+    assert result["p10"] == pytest.approx(0.55 - result["distributions"], abs=1e-9)
+    assert result["p90"] == pytest.approx(0.85 - result["distributions"], abs=1e-9)
+    # Band width must equal gross band width (distributions cancel).
+    assert (result["p90"] - result["p10"]) == pytest.approx(0.85 - 0.55, abs=1e-9)
+    assert result["sigma_forward_annual"] == pytest.approx(
+        ic.band_to_sigma(result["p10"], result["p90"]), rel=1e-9
+    )

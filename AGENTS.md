@@ -31,8 +31,9 @@ The dashboard tracks **leveraged, inverse, volatility, and YieldBOOST income ETF
 
 1. **Borrow rate** — what does it cost to short? (IBKR FTP feed, refreshed via `market-hours.yml` ~every 30 min)
 2. **Gross decay** — how fast does the ETF lose value to volatility drag, expense ratio, tracking error, and (for income strategies) put-spread NAV decay? (multiple models, see §4)
-3. **Net edge** — `gross_decay − borrow_cost`, with both sides bootstrapped to give a fan of quantiles. (block bootstrap on log-drag + weighted resample on borrow history)
-4. **Scenario behaviour** — what does the ETF do under a 0%, ±σ, ±3σ underlying shock at 1M / 3M / 6M / 1Y horizons?
+3. **Exp. edge (fwd)** — forward gross pair-trade P&L (short ETF + β-long underlying), before borrow. LETF/inverse/vol-ETP: equals gross vol-drag (no cash leg). YieldBOOST: `NAV_decay − calibrated_distributions` at forecast σ, 1Y horizon. Anchor for the Net edge blend.
+4. **Net edge** — best estimate of edge after borrow. Inverse-variance Bayesian blend of *Exp. edge (fwd)* and the realized bootstrap, minus borrow. Weight `w_F = sigma_R^2 / (sigma_F^2 + sigma_R^2)`.
+5. **Scenario behaviour** — what does the ETF do under a 0%, ±σ, ±3σ underlying shock at 1M / 3M / 6M / 1Y horizons?
 
 Everything else (the News tab, the Stats tab, the Trade Lab, options chains) is supporting context for those four numbers.
 
@@ -62,9 +63,9 @@ data/etf_screened_today.csv  ───►   data/etf_screened_today.csv (cached)
 | Beta + leverage estimation | Bucket assignment for the UI (β cutoffs) |
 | Realized volatility and gross decay calc | Borrow-rate refresh (IBKR FTP) |
 | HARQ-Log distributional decay model | Borrow history reconstruction from git |
-| Net edge bootstrap | Borrow-spike risk model |
+| Net edge — inverse-variance blend | Borrow-spike risk model |
 | `product_class` taxonomy + `expected_decay_available` flag | YieldBOOST put-spread Monte-Carlo decay (server-side, `yieldboost_decay.py`) |
-| Anchor-shift bootstrap (recenters net-edge on expected p50) | Front-end YB intrinsic helper (only used as fallback) |
+| Inverse-variance blend (B2) + anchor-shift fallback (E2) | YB dashboard-side re-blend with pair-P&L anchor (C2 + D1) |
 | Volatility-ETP empirical roll/tracking adjustment | Scenarios tab (vol/shock grid) |
 | Distribution / yield aggregation for income ETFs | Trade Lab + options snapshot integration |
 | `etf_screened_today.csv` schema | `dashboard_data.json` schema |
@@ -279,32 +280,69 @@ so the projected cash automatically scales with the scenario σ — increasing i
 
 **Tests:** `tests/test_income_schedule.py` (Python) and `tests/test_income_scenario.js` (Node) both consume `tests/fixtures/bucket2_research.json` — 8 candidates from the research table validate that the closed form reproduces published outputs within ±4pp NAV decay and ±5pp net short.
 
-### 4.6 Net edge bootstrap with anchor-shift to expected p50
+### 4.6 Net edge — inverse-variance Bayesian blend (decisions A3 + B2 + C2 + D1 + E2)
 
-`screener_v2_fields.enrich_screener_v2_fields` block-bootstraps the daily log-drag time series **and** weighted-resamples the borrow-rate history (with stress correlation grid `ρ ∈ {0.0, 0.2, 0.4}`). On top of the empirical block bootstrap, the realized gross draws are then **anchor-shifted** to re-center their mean on the forward-looking forecast `expected_gross_decay_p50_annual`:
+`screener_v2_fields.enrich_screener_v2_fields` block-bootstraps the daily log-drag time series **and** weighted-resamples the borrow-rate history (with stress correlation grid `ρ ∈ {0.0, 0.2, 0.4}`). The realized gross draws then enter an **inverse-variance Bayesian blend** with the forward forecast:
 
 ```
-gross_draws_shifted = gross_draws − mean(gross_draws) + expected_gross_decay_p50_annual
+sigma_F = (expected_gross_decay_p90 - expected_gross_decay_p10) / (2 · 1.2816)
+sigma_R = std(gross_draws)
+mu_F    = expected_gross_decay_p50_annual
+mu_R    = mean(gross_draws)
+w_F     = sigma_R^2 / (sigma_F^2 + sigma_R^2)       # weight on forward forecast
+posterior_mu = w_F · mu_F + (1 − w_F) · mu_R
+gross_draws_shifted = gross_draws − mu_R + posterior_mu
 ```
 
-The result: dispersion (block autocorrelation, regime mixing, vol clustering) is preserved from history, but the *location* of the distribution is the forecast. For LETF / inverse / volatility_etp the anchor is the HARQ-Log p50; for `income_yieldboost` it is the put-spread MC p50. The shift is gated on `expected_decay_available = True` AND a finite anchor — so `passive_low_delta` rows are deliberately left realized-only ("expected decay is N/A → don't pretend we have a structural edge").
+Conceptually: the **shape** (block autocorrelation, regime mixing, vol clustering) is preserved from history; the **level** is the Normal-Normal posterior of two noisy estimators. Limits:
+- `sigma_F → 0`  ⇒ `w_F → 1` ⇒ pure forward anchor (legacy anchor-shift behaviour).
+- `sigma_R → 0` ⇒ `w_F → 0` ⇒ realized-only (no shift).
+
+When the forward forecast has no usable band (`yieldboost_put_spread_point`: single sigma → p10 = p50 = p90), the blend degenerates to the legacy anchor-shift (B1 / E2 fallback). The shift is gated on `expected_decay_available = True` AND a finite anchor — `passive_low_delta` rows are deliberately left realized-only.
+
+For LETF / inverse / volatility_etp / `income_yieldboost`-with-band: `gross_blend_method = "inverse_variance"`.
+For `yieldboost_put_spread_point` (no band): `gross_blend_method = "anchor_shift_fallback"`.
 
 Diagnostics on every row:
 
-- `gross_anchor_shift_annual` — signed shift applied (NaN if not applied).
-- `gross_anchor_target_annual` — the p50 anchor used (NaN if not applied).
-- `gross_anchor_source` — `harq_log_anchored` / `empirical_lognormal` / `yieldboost_put_spread` / `yieldboost_put_spread_point` / `realized_only_passive_low_delta` / `realized_only_no_anchor`.
-- `copula_note` — appends `anchor_shift_to_expected_p50=±X.XXXX` when the shift fired.
+- `gross_anchor_target_annual` — the **posterior mean** (`posterior_mu`) the bootstrap was shifted to.
+- `gross_anchor_shift_annual` — signed shift (`posterior_mu − mu_R`).
+- `gross_anchor_source` — legacy label (forecast model: `harq_log_anchored` / `empirical_lognormal` / `yieldboost_put_spread` / `yieldboost_put_spread_point`).
+- `gross_blend_method` — `inverse_variance` / `anchor_shift_fallback` / `realized_only` / `""`.
+- `gross_blend_weight_forward` — `w_F` (NaN if not blended).
+- `gross_sigma_forward_annual`, `gross_sigma_realized_annual` — the two sigmas that drove the weight.
+- `gross_realized_mean_annual` — `mu_R` before the shift (lets downstream re-blend with a different anchor).
+- `copula_note` — appends `inverse_variance_blend(w_F=0.XX),shift=±X.XXXX` when the blend fires.
 
-Output (always present):
+#### YieldBOOST anchor override + D1 (dashboard side)
+
+For YieldBOOST rows, `build_data.py` overrides the screener's gross-NAV-decay anchor with a **forward pair-trade P&L** anchor (NAV decay − calibrated distributions at forecast σ, 1Y horizon) and re-blends with a distribution-adjusted realized series (decision D1). This happens in step 5c of the build:
+
+1. Compute `expected_pair_pnl_p10/p50/p90_annual` via `income_schedule.expected_pair_pnl_annual` — band maps the gross MC quantiles with the calibrated cash leg held fixed.
+2. Adjust the realized series: `gross_decay_annual_pair_adjusted = gross_decay_annual − distributions_annual_run_rate`. The published realized mean (`gross_realized_mean_annual`) is also shifted by the same constant before blending.
+3. Re-run the inverse-variance blend on the pair-P&L axis.
+4. Shift the published `net_edge_p05/25/50/75/95_annual` quantiles + `net_edge_hist_json` by `posterior_pair_mu − old_gross_anchor_target` to convert the (gross − borrow) distribution into (pair_pnl − borrow). Shape preserved; level updated.
+
+Diagnostics added per YB row:
+
+- `expected_pair_pnl_p10/p50/p90_annual`, `expected_pair_pnl_nav_decay_annual`, `expected_pair_pnl_distributions_annual`, `expected_pair_pnl_sigma_forward_annual`, `expected_pair_pnl_source` (`yieldboost_calibrated_pair_pnl` or `gross_drag_pair_identity` for non-YB).
+- `gross_decay_annual_pair_adjusted` — YB-adjusted realized series (D1).
+- `pair_anchor_target_annual` — posterior mean on pair axis.
+- `pair_anchor_shift_annual` — shift applied to realized mean.
+- `pair_blend_method` / `pair_blend_weight_forward` / `pair_sigma_forward_annual` / `pair_sigma_realized_annual` / `pair_realized_mean_annual`.
+
+For LETF / inverse / vol-ETP rows: `expected_pair_pnl_p* = expected_gross_decay_p*` by identity (no cash leg) — emitted by `build_data.py` step 5c for schema uniformity.
+
+#### Output (always present)
 
 ```
 net_edge_p05_annual / p25 / p50 / p75 / p95 / hist_json
+expected_pair_pnl_p10_annual / p50 / p90 / nav_decay / distributions / sigma_forward / source
 ```
 
-`net_edge_hist_json` is a compact (bin_centers, counts) histogram of the bootstrap draws — the dashboard's `NetEdgeBootstrapViz` component renders it as a small density curve on the chart page.
+`net_edge_hist_json` is a compact (bin_centers, counts) histogram. For YB rows it has been level-shifted on the dashboard side to the pair-P&L axis; shape comes from the screener.
 
-**Sign convention:** **short-favorable positive**. A `net_edge_p50 = +0.10` means a 10% annual structural edge to the short, after borrow.
+**Sign convention:** **short-favorable positive**. A `net_edge_p50 = +0.10` means a 10% annual posterior best-estimate edge to the short, after borrow.
 
 `gross_edge_definition` per class: `letf` / `inverse` / `volatility_etp` / `income_yieldboost` → `blended_realized_expected`; `passive_low_delta` / `income_put_spread` → `realized_daily_log_drag`.
 

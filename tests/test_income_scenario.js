@@ -19,6 +19,9 @@ const {
   estimateIncomeStyleScenarioFromCalibration,
   simulateIncomeSchedule,
   captureRatioBand,
+  expectedPairPnlAnnual,
+  inverseVarianceBlend,
+  bandToSigma,
   DEFAULT_CROSS_FUND_RATIO,
   WEEKS_PER_YEAR,
 } = require("../assets/income_scenario.js");
@@ -256,4 +259,125 @@ test("estimateIncomeStyleScenarioFromCalibration returns null when weekly d is m
     annualBorrowCost: 0.05,
   });
   assert.equal(out, null);
+});
+
+// ---------------------------------------------------------------------------
+// 9. expectedPairPnlAnnual + inverseVarianceBlend (decisions A3 + B2 + C2)
+// ---------------------------------------------------------------------------
+test("expectedPairPnlAnnual matches research net_short + borrow for each candidate", () => {
+  const tol = FIXTURE.tolerances.net_short_pp;
+  for (const candidate of FIXTURE.candidates) {
+    const sigma = candidate.sigma_annual;
+    const dashboardBs = expectedPutSpreadLossWeekly({
+      underlyingReturn: 0, sigmaAnnual: sigma, horizonYears: 1,
+    });
+    const ratio = candidate.actual_distribution_weekly / dashboardBs;
+    const result = expectedPairPnlAnnual({
+      calibration: {
+        blended_ratio_used: ratio,
+        fund_ratio_median: ratio,
+        fund_ratio_confidence: "high",
+      },
+      sigmaAnnual: sigma,
+      horizonYears: 1,
+    });
+    assert.ok(result, `${candidate.etf}: pair P&L should be computable`);
+    const expectedPair = candidate.net_short_annual + candidate.borrow_annual;
+    assert.ok(
+      Math.abs(result.p50 - expectedPair) <= tol,
+      `${candidate.etf}: pair ${result.p50.toFixed(3)} vs research ${expectedPair.toFixed(3)}`,
+    );
+    // Closed-form identity always holds: pair = navDecay - distributions
+    assert.ok(Math.abs(result.p50 - (result.navDecay - result.distributions)) < 1e-9);
+  }
+});
+
+test("expectedPairPnlAnnual band maps gross MC quantiles with cash leg fixed", () => {
+  const calibration = {
+    blended_ratio_used: 0.65,
+    fund_ratio_confidence: "high",
+  };
+  const grossBand = { p10: 0.55, p50: 0.70, p90: 0.85 };
+  const result = expectedPairPnlAnnual({
+    calibration, sigmaAnnual: 0.80, horizonYears: 1, grossBand,
+  });
+  assert.ok(result);
+  assert.ok(Math.abs(result.p10 - (0.55 - result.distributions)) < 1e-9);
+  assert.ok(Math.abs(result.p90 - (0.85 - result.distributions)) < 1e-9);
+  assert.ok(Math.abs((result.p90 - result.p10) - (0.85 - 0.55)) < 1e-9);
+  assert.ok(result.sigmaForwardAnnual > 0);
+});
+
+test("expectedPairPnlAnnual returns null when sigma is missing", () => {
+  // sigma <= 0 -> can't price; null
+  assert.equal(expectedPairPnlAnnual({ calibration: { blended_ratio_used: 0.65 }, sigmaAnnual: 0 }), null);
+  assert.equal(expectedPairPnlAnnual({ calibration: { blended_ratio_used: 0.65 }, sigmaAnnual: NaN }), null);
+  // calibration absent is OK -- falls back to cross-fund prior (intentional for
+  // new YB funds with no own-fund history yet).
+  const fallback = expectedPairPnlAnnual({ calibration: null, sigmaAnnual: 0.8 });
+  assert.ok(fallback);
+  assert.ok(Number.isFinite(fallback.p50));
+});
+
+test("bandToSigma reproduces the Normal p10/p90 identity", () => {
+  const sig = bandToSigma(0.20, 0.40);
+  const expected = 0.20 / (2 * 1.2815515655446004);
+  assert.ok(Math.abs(sig - expected) < 1e-12);
+  assert.equal(bandToSigma(NaN, 0.40), null);
+  assert.equal(bandToSigma(0.40, 0.40), null);
+});
+
+test("inverseVarianceBlend matches the conjugate identity", () => {
+  const res = inverseVarianceBlend({
+    muForward: 0.30, sigmaForward: 0.10,
+    muRealized: 0.10, sigmaRealized: 0.10,
+  });
+  assert.ok(res);
+  // Equal sigmas => w_F = 0.5 exactly
+  assert.ok(Math.abs(res.weightForward - 0.5) < 1e-12);
+  assert.ok(Math.abs(res.posteriorMean - 0.20) < 1e-12);
+  assert.equal(res.method, "inverse_variance");
+
+  // sigma_F -> 0 forces full forward weight
+  const resF = inverseVarianceBlend({
+    muForward: 0.30, sigmaForward: 1e-9,
+    muRealized: 0.10, sigmaRealized: 0.10,
+  });
+  assert.ok(resF.weightForward > 0.999);
+  assert.ok(Math.abs(resF.posteriorMean - 0.30) < 1e-6);
+
+  // sigma_R -> 0 forces full realized weight
+  const resR = inverseVarianceBlend({
+    muForward: 0.30, sigmaForward: 0.10,
+    muRealized: 0.10, sigmaRealized: 1e-9,
+  });
+  assert.ok(resR.weightForward < 1e-3);
+  assert.ok(Math.abs(resR.posteriorMean - 0.10) < 1e-6);
+
+  // No realized sigma -> anchor-shift fallback (forward dominates)
+  const resA = inverseVarianceBlend({
+    muForward: 0.30, sigmaForward: 0.10,
+    muRealized: 0.10, sigmaRealized: null,
+  });
+  assert.equal(resA.method, "anchor_shift_fallback");
+  assert.equal(resA.weightForward, 1.0);
+  assert.ok(Math.abs(resA.posteriorMean - 0.30) < 1e-9);
+
+  // No forward band (sigma_F=null) -> anchor-shift to forward (E2 fallback
+  // for yieldboost_put_spread_point rows).
+  const resO = inverseVarianceBlend({
+    muForward: 0.30, sigmaForward: null,
+    muRealized: 0.10, sigmaRealized: 0.10,
+  });
+  assert.equal(resO.method, "anchor_shift_fallback");
+  assert.equal(resO.weightForward, 1.0);
+  assert.ok(Math.abs(resO.posteriorMean - 0.30) < 1e-9);
+
+  // Both sigmas missing: still anchor-shift to forward.
+  const resN = inverseVarianceBlend({
+    muForward: 0.30, sigmaForward: null,
+    muRealized: 0.10, sigmaRealized: null,
+  });
+  assert.equal(resN.method, "anchor_shift_fallback");
+  assert.equal(resN.weightForward, 1.0);
 });

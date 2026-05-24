@@ -331,6 +331,170 @@
   }
 
   /**
+   * Forward gross pair-trade P&L (annualized) for a YieldBOOST row.
+   *
+   * Pair-trade P&L = NAV decay - cash distributions at flat underlying,
+   * 1Y horizon, before borrow. This is what a ?-hedged short captures
+   * structurally before borrow cost. It is the "Exp. edge (fwd)" headline
+   * for YB rows and the anchor target for the Net edge inverse-variance
+   * blend (decisions A3 + C2).
+   *
+   * Returns ``{ p50, p10, p90, navDecay, distributions, weeks,
+   *             sigmaForwardAnnual, source }`` or ``null`` when calibration
+   * data is missing.  ``p10``/``p90`` map the gross put-spread MC quantile
+   * band onto the pair-P&L axis by holding the calibrated cash leg fixed:
+   *     pair_p10 = gross_p10 - distributions
+   *     pair_p90 = gross_p90 - distributions
+   * which preserves the band width (sigma_forward = sigma_gross).
+   *
+   * For non-YB callers, use the existing ``expected_gross_decay_p*_annual``
+   * fields directly; gross drag *is* the pair-trade P&L when there is no
+   * cash leg.
+   */
+  function expectedPairPnlAnnual(params) {
+    const sigma = _toNum(params && params.sigmaAnnual);
+    const calibration = (params && params.calibration) || null;
+    const horizonYears = _toNum((params && params.horizonYears) ?? 1);
+    const expenseRatioAnnual = _toNum(
+      (params && params.expenseRatioAnnual) ?? DEFAULT_EXPENSE_RATIO_ANNUAL
+    );
+    const grossBand = (params && params.grossBand) || null; // {p10, p50, p90}
+    const tailAdj = _toNum(
+      (params && params.tailAdjustmentAnnual) ?? DEFAULT_TAIL_ADJUSTMENT_ANNUAL
+    );
+    if (!Number.isFinite(sigma) || sigma <= 0) return null;
+    if (!Number.isFinite(horizonYears) || horizonYears <= 0) return null;
+
+    const calib = calibratedWeeklyDistribution({
+      sigmaAnnual: sigma,
+      calibration,
+      crossFundRatio: DEFAULT_CROSS_FUND_RATIO,
+    });
+    if (!calib || calib.weeklyDistribution == null) return null;
+
+    const scenario = estimateIncomeStyleScenarioFromCalibration({
+      underlyingReturn: 0,
+      sigmaAnnual: sigma,
+      horizonYears,
+      weeklyDistribution: calib.weeklyDistribution,
+      annualBorrowCost: 0,
+      expenseRatioAnnual,
+      tailAdjustmentAnnual: tailAdj,
+    });
+    if (!scenario) return null;
+
+    const navDecay = Number(scenario.navDecay);
+    const distributions = Number(scenario.distributionsPaid);
+    if (!Number.isFinite(navDecay) || !Number.isFinite(distributions)) return null;
+    const pairP50 = navDecay - distributions;
+
+    // Band mapping: hold cash leg fixed, shift gross MC quantiles to pair axis.
+    let pairP10 = null;
+    let pairP90 = null;
+    let sigmaForward = null;
+    if (grossBand) {
+      const gP10 = _toNum(grossBand.p10);
+      const gP90 = _toNum(grossBand.p90);
+      if (Number.isFinite(gP10)) pairP10 = gP10 - distributions;
+      if (Number.isFinite(gP90)) pairP90 = gP90 - distributions;
+      if (Number.isFinite(pairP10) && Number.isFinite(pairP90)) {
+        const width = Math.abs(pairP90 - pairP10);
+        if (width > 0) sigmaForward = width / (2 * 1.2815515655446004);
+      }
+    }
+    return {
+      p50: pairP50,
+      p10: pairP10,
+      p90: pairP90,
+      navDecay,
+      distributions,
+      weeks: scenario.weeks,
+      sigmaForwardAnnual: sigmaForward,
+      source: calib.ratioSource,
+      ratioUsed: calib.ratioUsed,
+      confidence: calib.confidence,
+      bsPremiumWeekly: calib.bsPremiumWeekly,
+    };
+  }
+
+  /**
+   * Inverse-variance Bayesian blend (Normal-Normal conjugate).
+   *
+   * Posterior mean = w_F * mu_F + (1 - w_F) * mu_R where
+   *     w_F = sigma_R^2 / (sigma_F^2 + sigma_R^2).
+   *
+   * Returns ``{ posteriorMean, weightForward, posteriorSigma, method }``
+   * or ``null`` when the inputs are non-finite.  ``method`` is
+   * ``'inverse_variance'`` when both sigmas are positive, or
+   * ``'anchor_shift_fallback'`` when only ``sigma_forward`` is unknown /
+   * zero (degenerate forward forecast  return forward mean, w_F=1).
+   */
+  function inverseVarianceBlend(params) {
+    const muF = _toNum(params && params.muForward);
+    const sigF = _toNum(params && params.sigmaForward);
+    const muR = _toNum(params && params.muRealized);
+    const sigR = _toNum(params && params.sigmaRealized);
+    if (!Number.isFinite(muF) || !Number.isFinite(muR)) return null;
+    const sigFok = Number.isFinite(sigF) && sigF > 0;
+    const sigRok = Number.isFinite(sigR) && sigR > 0;
+    if (!sigFok && !sigRok) {
+      // Neither sigma known: fall back to forward as a confident point estimate.
+      return {
+        posteriorMean: muF,
+        weightForward: 1.0,
+        posteriorSigma: null,
+        method: 'anchor_shift_fallback',
+      };
+    }
+    if (!sigFok) {
+      // Forward forecast has no usable band (point estimate). Treat as
+      // confident point estimate -> anchor-shift to forward (E2 fallback).
+      return {
+        posteriorMean: muF,
+        weightForward: 1.0,
+        posteriorSigma: null,
+        method: 'anchor_shift_fallback',
+      };
+    }
+    if (!sigRok) {
+      // Realized dispersion unknown, but forward band present: treat realized
+      // as low-confidence (sigma_R -> infinity) -> forward dominates.
+      return {
+        posteriorMean: muF,
+        weightForward: 1.0,
+        posteriorSigma: sigF,
+        method: 'anchor_shift_fallback',
+      };
+    }
+    const vF = sigF * sigF;
+    const vR = sigR * sigR;
+    const denom = vF + vR;
+    if (!Number.isFinite(denom) || denom <= 0) return null;
+    const wF = vR / denom;
+    const mu = wF * muF + (1 - wF) * muR;
+    const posteriorSigma = Math.sqrt((vF * vR) / denom);
+    return {
+      posteriorMean: mu,
+      weightForward: wF,
+      posteriorSigma,
+      method: 'inverse_variance',
+    };
+  }
+
+  /**
+   * Convenience: convert a Normal p10/p90 band into a sigma.
+   * Returns ``null`` when the band is missing or degenerate.
+   */
+  function bandToSigma(p10, p90) {
+    const lo = _toNum(p10);
+    const hi = _toNum(p90);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+    const width = Math.abs(hi - lo);
+    if (width <= 0) return null;
+    return width / (2 * 1.2815515655446004);
+  }
+
+  /**
    * Band label for the capture ratio (UI color coding).
    */
   function captureRatioBand(ratio) {
@@ -357,6 +521,9 @@
     estimateIncomeStyleScenarioFromCalibration,
     simulateIncomeSchedule,
     captureRatioBand,
+    expectedPairPnlAnnual,
+    inverseVarianceBlend,
+    bandToSigma,
   };
 
   if (typeof module !== 'undefined' && module.exports) {
