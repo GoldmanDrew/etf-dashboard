@@ -1384,6 +1384,17 @@
 <script src="assets/pair_backtest.js?v=pb-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script>
+window.addEventListener('error', function (ev) {
+  var msg = ev && (ev.message || (ev.error && ev.error.message));
+  if (!msg || (String(msg).indexOf('Babel') === -1 && String(msg).indexOf('Inline Babel') === -1)) return;
+  var root = document.getElementById('root');
+  if (!root) return;
+  root.innerHTML = '<div style="padding:24px;color:#ef4444;font-family:JetBrains Mono,monospace;max-width:960px;margin:40px auto">'
+    + '<strong>Dashboard compile failed</strong><pre style="margin-top:12px;white-space:pre-wrap;color:#fca5a5">'
+    + String(msg).replace(/</g, '&lt;') + '</pre></div>';
+});
+</script>
 
 <script type="text/babel">
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
@@ -5070,52 +5081,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (ageMin <= staleAfter * 6) return { label: `IV aging (${Math.round(ageMin)}m ago)`, cls: 'scenario-warning' };
     return { label: `IV stale (${Math.round(ageMin)}m ago)`, cls: 'scenario-warning' };
   }, [vrpDisplayRow, vrpHealth, vrpIvPending]);
-  // Universe-level health banner: surface when the pipeline as a whole is
-  // returning < 50% IV coverage across YB front spreads. This is the
-  // condition that previously hid behind per-row "—" cells; the operator
-  // should see a coverage outage even if the *displayed* row happens to have
-  // a quote (because the pipeline starvation is sleeve-distributed).
-  const vrpCoverageBanner = useMemo(() => {
-    const cov = Number(vrpHealth?.iv_coverage_front_pct);
-    if (!Number.isFinite(cov)) return null;
-    if (cov >= 0.5) return null;
-    const front = Number(vrpHealth?.spreads_front_count) || 0;
-    const stale = (vrpHealth?.stale_sleeves || []).length;
-    const buildTime = vrpHealth?.build_time || vrpHealth?.last_vrp_refresh;
-    const occ = vrpHealth?.occ_supplement || {};
-    return {
-      coverage: Math.round(cov * 100),
-      stale,
-      front,
-      buildTime,
-      tradierConfigured: occ.tradier_api_configured !== false,
-      occRequested: Number(occ.yieldboost_occ_quotes_requested) || 0,
-      occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
-    };
-  }, [vrpHealth]);
-  // Universe-level health banner: surface when the pipeline as a whole is
-  // returning < 50% IV coverage across YB front spreads. This is the
-  // condition that previously hid behind per-row "—" cells; the operator
-  // should see a coverage outage even if the *displayed* row happens to have
-  // a quote (because the pipeline starvation is sleeve-distributed).
-  const vrpCoverageBanner = useMemo(() => {
-    const cov = Number(vrpHealth?.iv_coverage_front_pct);
-    if (!Number.isFinite(cov)) return null;
-    if (cov >= 0.5) return null;
-    const front = Number(vrpHealth?.spreads_front_count) || 0;
-    const stale = (vrpHealth?.stale_sleeves || []).length;
-    const buildTime = vrpHealth?.build_time || vrpHealth?.last_vrp_refresh;
-    const occ = vrpHealth?.occ_supplement || {};
-    return {
-      coverage: Math.round(cov * 100),
-      stale,
-      front,
-      buildTime,
-      tradierConfigured: occ.tradier_api_configured !== false,
-      occRequested: Number(occ.yieldboost_occ_quotes_requested) || 0,
-      occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
-    };
-  }, [vrpHealth]);
   // Universe-level health banner: surface when the pipeline as a whole is
   // returning < 50% IV coverage across YB front spreads. This is the
   // condition that previously hid behind per-row "—" cells; the operator
