@@ -82,7 +82,16 @@ options_env:
   TRADIER_APLZ_CHAIN_STRIKE_BAND_UP_PCT: "2.50"
   TRADIER_CHAIN_MONEYNESS_MODE: "atm_otm"
   TRADIER_MAX_REQUESTS_PER_MINUTE: "25"
-  TRADIER_MAX_TOTAL_REQUESTS: "180"
+  # Total Tradier budget needs to cover: ~31 YB sleeves x (1 expirations probe +
+  # 1-2 held-expiry chain calls) for chains, ~32 OCC supplement batches, plus
+  # the chain-fallback loop for bucket-3 symbols. Old 180 budget capped at ~14
+  # YB sleeves before MSTU/MULL/NVDL etc. exceeded chain budget.
+  TRADIER_MAX_TOTAL_REQUESTS: "500"
+  # Chain budget bumped to 400: regular options tick now includes YB sleeves
+  # (OPTIONS_INCLUDE_YIELDBOOST=1), so we need enough chain headroom that the
+  # _prefetch_yieldboost_sleeve_chains loop can complete all 31 sleeves
+  # alphabetically without starving the second-half (MSTU onwards).
+  TRADIER_CHAIN_MAX_TOTAL_REQUESTS: "400"
   # Modest YB held-leg budget so the regular options task can still refresh the
   # held front strikes when it picks up YB symbols (12 sleeves x 2 legs ~ a couple
   # of batches).
@@ -112,8 +121,11 @@ yieldboost_env:
   # off-hours sleeves whose chains are sparse (so OCC alias resolution may need
   # a second attempt).
   TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS: "16"
-  TRADIER_CHAIN_MAX_TOTAL_REQUESTS: "80"
-  TRADIER_MAX_TOTAL_REQUESTS: "180"
+  # Chain budget needs to fit 31 YB sleeves x (1 expirations probe + 1-2 chain
+  # calls each) plus retries; previous "80" cap was exceeded around MRAL (the
+  # 14th sleeve alphabetically) leaving MSTU through TSMU with 0 chain rows.
+  TRADIER_CHAIN_MAX_TOTAL_REQUESTS: "400"
+  TRADIER_MAX_TOTAL_REQUESTS: "500"
   YIELDBOOST_OCC_QUOTES_MAX_REQUESTS: "32"
   TRADIER_OPTION_QUOTES_MAX_REQUESTS: "48"
   TRADIER_OPTION_QUOTES_BATCH_SIZE: "50"
