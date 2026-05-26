@@ -185,17 +185,37 @@ def is_stale(task: str, state: dict, config: dict, now: datetime, *, rth: bool =
 
 
 def _pick_rotation_secondary(state: dict, config: dict, now: datetime) -> str | None:
-    """One stale borrow / options / yieldboost task from the RTH rotation."""
+    """One stale borrow / options / yieldboost task from the RTH rotation.
+
+    Prefers the **most stale** task (by ``minutes_since / cadence`` ratio) so
+    no single task can sit idle for many hours while another always pre-empts
+    it under fixed slot ordering. Falls back to rotation-slot order as the
+    tiebreaker when multiple tasks have similar staleness.
+    """
     rotation = list(config.get("rotation_rth") or ["borrow", "options", "yieldboost", "intraday"])
+    candidates = [t for t in rotation if t not in {"intraday", "nav"}]
+    if not candidates:
+        return None
     slot = (int(now.timestamp()) // 900) % max(len(rotation), 1)
 
-    order = [rotation[slot % len(rotation)]] + [t for i, t in enumerate(rotation) if i != slot % len(rotation)]
-    for task in order:
-        if task in {"intraday", "nav"}:
+    scored: list[tuple[float, int, str]] = []
+    for idx, task in enumerate(candidates):
+        if not is_stale(task, state, config, now):
             continue
-        if is_stale(task, state, config, now):
-            return task
-    return None
+        cadence = max(_cadence_minutes(task, config), 1.0)
+        since = minutes_since(state, task, now)
+        ratio = since / cadence if since != float("inf") else float("inf")
+        # Slot-distance tiebreaker: tasks closer to the current rotation slot win.
+        try:
+            rot_idx = rotation.index(task)
+        except ValueError:
+            rot_idx = idx
+        slot_dist = (rot_idx - slot) % max(len(rotation), 1)
+        scored.append((-ratio, slot_dist, task))
+    if not scored:
+        return None
+    scored.sort()
+    return scored[0][2]
 
 
 def pick_auto_tasks(state: dict, config: dict, now: datetime) -> list[str]:
@@ -271,16 +291,24 @@ def execute_task(task: str, config: dict) -> None:
         raise ValueError(f"Unknown task: {task}")
 
 
-def write_github_output(tasks: list[str], skipped: bool, files: list[str]) -> None:
+def write_github_output(
+    tasks: list[str],
+    skipped: bool,
+    files: list[str],
+    *,
+    failures: list[tuple[str, str]] | None = None,
+) -> None:
     out_path = os.environ.get("GITHUB_OUTPUT")
     if not out_path:
         return
     primary = tasks[0] if tasks else "none"
+    fail_str = ",".join(name for name, _ in (failures or []))
     with open(out_path, "a", encoding="utf-8") as f:
         f.write(f"task={primary}\n")
         f.write(f"tasks={' '.join(tasks) if tasks else 'none'}\n")
         f.write(f"skipped={'true' if skipped else 'false'}\n")
         f.write(f"files={' '.join(files)}\n")
+        f.write(f"failures={fail_str}\n")
 
 
 def _task_is_stale(task: str, state: dict, config: dict, now: datetime) -> bool:
@@ -332,16 +360,45 @@ def main() -> int:
             return 0
 
     print(f"[ci_tick] Running task(s)={','.join(tasks)}")
+    succeeded: list[str] = []
+    failed: list[tuple[str, str]] = []
+    now_iso = now.isoformat().replace("+00:00", "Z")
     for task in tasks:
-        execute_task(task, config)
         state_key = "nav" if task == "nav" else task
-        state[f"last_{state_key}_utc"] = now.isoformat().replace("+00:00", "Z")
+        try:
+            execute_task(task, config)
+        except subprocess.CalledProcessError as exc:
+            err_msg = f"exit={exc.returncode}"
+            failed.append((task, err_msg))
+            # Advance the failure marker so we can see the last attempt time and
+            # cool the retry briefly, but do NOT advance ``last_<task>_utc`` --
+            # that should reflect a successful refresh.
+            state[f"last_{state_key}_attempt_utc"] = now_iso
+            state[f"last_{state_key}_error"] = err_msg
+            print(f"[ci_tick] Task '{task}' failed ({err_msg}); continuing with remaining tasks.")
+            continue
+        except Exception as exc:  # pragma: no cover - belt & suspenders
+            err_msg = repr(exc)[:160]
+            failed.append((task, err_msg))
+            state[f"last_{state_key}_attempt_utc"] = now_iso
+            state[f"last_{state_key}_error"] = err_msg
+            print(f"[ci_tick] Task '{task}' crashed ({err_msg}); continuing with remaining tasks.")
+            continue
+        state[f"last_{state_key}_utc"] = now_iso
+        state.pop(f"last_{state_key}_error", None)
+        succeeded.append(task)
 
     save_state(state)
 
-    files = _merge_commit_paths(config, tasks)
+    files = _merge_commit_paths(config, succeeded) if succeeded else []
     print(f"[ci_tick] Commit candidates: {' '.join(files) or '(none)'}")
-    write_github_output(tasks, False, files)
+    write_github_output(succeeded, False, files, failures=failed)
+    if failed:
+        for name, err in failed:
+            # GitHub Actions annotation surfaces in the run summary without
+            # red-flagging the whole workflow; the commit/deploy steps for the
+            # tasks that did succeed are still allowed to run.
+            print(f"::warning title=ci_tick task {name} failed::{err}")
     return 0
 
 

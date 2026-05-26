@@ -66,7 +66,10 @@ options_env:
   OPTIONS_SHARD_INTERVAL_MINUTES: "15"
   OPTIONS_STALE_AFTER_MINUTES: "120"
   OPTIONS_ONLY_BUCKET3: "1"
-  OPTIONS_INCLUDE_YIELDBOOST: "0"
+  # Include YieldBOOST sleeves in regular options sweep so vrp_live.json rebuilds
+  # against fresh chains every options tick. (Was "0", which starved YB until the
+  # dedicated yieldboost task fired -- which under rotation could be > 60 min.)
+  OPTIONS_INCLUDE_YIELDBOOST: "1"
   OPTIONS_INCLUDE_BUCKET3_UNDERLYING: "1"
   OPTIONS_ACCUMULATE_CACHE: "1"
   OPTIONS_MAX_ROWS_PER_SYMBOL: "1500"
@@ -79,7 +82,12 @@ options_env:
   TRADIER_APLZ_CHAIN_STRIKE_BAND_UP_PCT: "2.50"
   TRADIER_CHAIN_MONEYNESS_MODE: "atm_otm"
   TRADIER_MAX_REQUESTS_PER_MINUTE: "25"
-  TRADIER_MAX_TOTAL_REQUESTS: "140"
+  TRADIER_MAX_TOTAL_REQUESTS: "180"
+  # Modest YB held-leg budget so the regular options task can still refresh the
+  # held front strikes when it picks up YB symbols (12 sleeves x 2 legs ~ a couple
+  # of batches).
+  TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS: "8"
+  YIELDBOOST_OCC_QUOTES_MAX_REQUESTS: "16"
 
 yieldboost_env:
   YIELDBOOST_TRADIER_ONLY: "1"
@@ -98,11 +106,17 @@ yieldboost_env:
   POLYGON_CHAIN_STRIKE_BAND_PCT: "0.35"
   POLYGON_CHAIN_MONEYNESS_MODE: "all"
   TRADIER_CHAIN_MONEYNESS_MODE: "all"
-  TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS: "4"
-  TRADIER_CHAIN_MAX_TOTAL_REQUESTS: "40"
-  TRADIER_MAX_TOTAL_REQUESTS: "48"
-  YIELDBOOST_OCC_QUOTES_MAX_REQUESTS: "12"
-  TRADIER_OPTION_QUOTES_MAX_REQUESTS: "25"
+  # Held-leg + OCC quote budgets must comfortably exceed
+  # (front_spreads x 2 / batch_size). With ~62 front legs at batch 50 we need
+  # roughly 2 OCC batches per pass; budget 16 to leave headroom for retries and
+  # off-hours sleeves whose chains are sparse (so OCC alias resolution may need
+  # a second attempt).
+  TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS: "16"
+  TRADIER_CHAIN_MAX_TOTAL_REQUESTS: "80"
+  TRADIER_MAX_TOTAL_REQUESTS: "180"
+  YIELDBOOST_OCC_QUOTES_MAX_REQUESTS: "32"
+  TRADIER_OPTION_QUOTES_MAX_REQUESTS: "48"
+  TRADIER_OPTION_QUOTES_BATCH_SIZE: "50"
   OPTIONS_REFRESH_SLEEP_MS: "200"
 
 nightly_dashboard_files:

@@ -571,6 +571,276 @@ def fair_put_spread_mid_from_iv(
     return float(spread) if math.isfinite(spread) else None
 
 
+def _norm_pdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def bs_put_greeks(
+    spot: float,
+    strike: float,
+    t_years: float,
+    sigma: float,
+    *,
+    risk_free: float = 0.043,
+) -> dict[str, float]:
+    """BS greeks for a single LONG put (delta, gamma, vega, theta_per_year).
+
+    - ``vega`` is per 1.00 change in sigma (so 0.01 = 1 vol point change).
+    - ``theta_per_year`` is per year; divide by ``TRADING_DAYS`` for per-day.
+    """
+    if spot <= 0 or strike <= 0 or sigma <= 0 or t_years <= 0:
+        return {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta_per_year": 0.0}
+    sqrt_t = math.sqrt(t_years)
+    vol_sqrt_t = sigma * sqrt_t
+    d1 = (math.log(spot / strike) + (risk_free + 0.5 * sigma * sigma) * t_years) / vol_sqrt_t
+    d2 = d1 - vol_sqrt_t
+    pdf_d1 = _norm_pdf(d1)
+    delta = -_norm_cdf(-d1)
+    gamma = pdf_d1 / (spot * vol_sqrt_t)
+    vega = spot * pdf_d1 * sqrt_t
+    theta = (-spot * pdf_d1 * sigma) / (2.0 * sqrt_t) + risk_free * strike * math.exp(-risk_free * t_years) * _norm_cdf(-d2)
+    return {
+        "delta": float(delta),
+        "gamma": float(gamma),
+        "vega": float(vega),
+        "theta_per_year": float(theta),
+    }
+
+
+def bs_put_spread_greeks(
+    spot: float,
+    strike_long: float,
+    strike_short: float,
+    t_years: float,
+    sigma: float,
+    *,
+    risk_free: float = 0.043,
+) -> dict[str, float]:
+    """Greeks of a SHORT put spread (short K_short, long K_long).
+
+    Net position: ``-put(K_short) + put(K_long)``. We collected the spread mid
+    as credit; greeks reflect P&L sensitivity *for the seller*. Positive theta
+    means we earn from time decay; negative gamma means we are short convexity.
+    """
+    short_leg = bs_put_greeks(spot, strike_short, t_years, sigma, risk_free=risk_free)
+    long_leg = bs_put_greeks(spot, strike_long, t_years, sigma, risk_free=risk_free)
+    return {
+        "delta": -short_leg["delta"] + long_leg["delta"],
+        "gamma": -short_leg["gamma"] + long_leg["gamma"],
+        "vega": -short_leg["vega"] + long_leg["vega"],
+        "theta_per_year": -short_leg["theta_per_year"] + long_leg["theta_per_year"],
+    }
+
+
+def implied_sigma_for_spread_mid(
+    spot: float,
+    strike_long: float,
+    strike_short: float,
+    horizon_years: float,
+    target_mid: float,
+    *,
+    risk_free: float = 0.043,
+    lo: float = 0.01,
+    hi: float = 5.0,
+    tol: float = 1e-5,
+    max_iter: int = 80,
+) -> float | None:
+    """Bisection: find annualized sigma s.t. fair put-spread mid = ``target_mid``.
+
+    Returns ``None`` when the target is outside the achievable range (e.g.,
+    target > short_strike - long_strike for at-expiry intrinsic, or target < 0).
+    """
+    if spot <= 0 or horizon_years <= 0 or target_mid is None:
+        return None
+    if not (0 < target_mid):
+        return None
+    if strike_long >= strike_short:
+        return None
+    intrinsic_cap = max(0.0, strike_short - strike_long)
+    if target_mid >= intrinsic_cap:
+        # Spread mid can never exceed the strike-distance; flag as out-of-range.
+        return None
+
+    def f(sigma: float) -> float:
+        fair = fair_put_spread_mid_from_iv(spot, strike_long, strike_short, sigma, horizon_years, risk_free=risk_free)
+        if fair is None:
+            return float("nan")
+        return fair - target_mid
+
+    f_lo = f(lo)
+    f_hi = f(hi)
+    if not (math.isfinite(f_lo) and math.isfinite(f_hi)):
+        return None
+    # Both sides same sign => target not bracketed.
+    if f_lo * f_hi > 0:
+        return None
+    a, b = lo, hi
+    for _ in range(max_iter):
+        m = 0.5 * (a + b)
+        fm = f(m)
+        if not math.isfinite(fm):
+            return None
+        if abs(fm) < tol or (b - a) < tol:
+            return float(m)
+        if f_lo * fm <= 0:
+            b = m
+            f_hi = fm
+        else:
+            a = m
+            f_lo = fm
+    return float(0.5 * (a + b))
+
+
+# ── Weekly-cycle put-spread loss helpers ────────────────────────────────────
+# Magis closed-form expected weekly loss for a YB-style short put spread on the
+# 2x sleeve. Per ``Bucket2_Income_ETF_Decay_Research.html``:
+#
+#   ln R_sleeve_T  ~  N((2μ_und − 2σ_und²) τ , (2σ_und √τ)² )
+#
+# With μ_und = 0 (week is roughly drift-free at this horizon) and τ = 5/252,
+# the expected put-spread *loss* L collected at expiry equals the BS fair value
+# of the spread under risk-neutral discounting set to 1.0 — i.e. the same
+# function the dashboard already uses to score ``put_spread_fair_event_aware``
+# when applied with the SLEEVE-level sigma (``2 σ_underlying``) at horizon τ.
+WEEKLY_TAU_YEARS = 5.0 / TRADING_DAYS
+
+
+def compute_vrp_row_extras(
+    *,
+    spot: float | None,
+    strike_long: float | None,
+    strike_short: float | None,
+    horizon_years: float | None,
+    iv_full_sleeve: float | None,
+    iv_base_sleeve: float | None,
+    rv_2x_full: float | None,
+    rv_2x_base: float | None,
+    spread_mid: float | None,
+    risk_free: float = 0.043,
+) -> dict[str, Any]:
+    """Compute the §4.1 'shippable today' VRP metrics for a single front spread.
+
+    Every output is keyed so it can be ``dict.update``'d onto a vrp_live row.
+    Missing inputs propagate as ``None`` -- callers should not crash on absent
+    fields. Greeks are quoted *per single spread structure* (1 short put + 1
+    long put), so they can be multiplied by sizing on the consumer side.
+    """
+    out: dict[str, Any] = {}
+
+    iv_for_bs = (
+        _parse_float(iv_full_sleeve)
+        or _parse_float(iv_base_sleeve)
+        or _parse_float(rv_2x_full)
+        or _parse_float(rv_2x_base)
+    )
+    iv_source = None
+    if _parse_float(iv_full_sleeve):
+        iv_source = "iv_full_sleeve"
+    elif _parse_float(iv_base_sleeve):
+        iv_source = "iv_base_sleeve"
+    elif _parse_float(rv_2x_full):
+        iv_source = "rv_2x_full"
+    elif _parse_float(rv_2x_base):
+        iv_source = "rv_2x_base"
+
+    # 1. β=2 inversion: sleeve sigma -> underlying sigma. (Diffusive component
+    #    only; the 4x event variance is already stripped elsewhere if present.)
+    if _parse_float(iv_full_sleeve):
+        out["iv_underlying_implied"] = round(iv_full_sleeve / LEVERAGE_BETA, 6)
+    elif _parse_float(iv_base_sleeve):
+        out["iv_underlying_implied"] = round(iv_base_sleeve / LEVERAGE_BETA, 6)
+    else:
+        out["iv_underlying_implied"] = None
+
+    # 2 & 3. Implied weekly 1σ move (sleeve and underlying scale).
+    tau = WEEKLY_TAU_YEARS
+    if iv_for_bs:
+        out["iv_implied_weekly_move_2x_pct"] = round(iv_for_bs * math.sqrt(tau) * 100.0, 4)
+        out["iv_implied_weekly_move_underlying_pct"] = round(
+            (iv_for_bs / LEVERAGE_BETA) * math.sqrt(tau) * 100.0, 4,
+        )
+    else:
+        out["iv_implied_weekly_move_2x_pct"] = None
+        out["iv_implied_weekly_move_underlying_pct"] = None
+
+    # 4. Fair-value / expected loss at the chosen σ (IV preferred, RV fallback).
+    s = _parse_float(spot)
+    kl = _parse_float(strike_long)
+    ks = _parse_float(strike_short)
+    h = _parse_float(horizon_years) or tau
+    h = max(h, 1.0 / TRADING_DAYS)
+    fair_diff = None
+    if s and kl and ks and iv_for_bs:
+        fair_diff = fair_put_spread_mid_from_iv(s, kl, ks, iv_for_bs, h, risk_free=risk_free)
+    out["bs_put_spread_fair_diffusion"] = round(fair_diff, 6) if fair_diff is not None else None
+    out["bs_put_spread_sigma_source"] = iv_source if fair_diff is not None else None
+    if fair_diff is not None and s and s > 0:
+        out["expected_weekly_loss_pct_of_spot"] = round(fair_diff / s * 100.0, 4)
+    else:
+        out["expected_weekly_loss_pct_of_spot"] = None
+
+    # 5. Breakeven sigma from spread mid (the σ at which IV pricing = realized).
+    sm = _parse_float(spread_mid)
+    be_sigma = None
+    if s and kl and ks and sm and sm > 0:
+        be_sigma = implied_sigma_for_spread_mid(s, kl, ks, h, sm, risk_free=risk_free)
+    out["spread_breakeven_sigma_annual"] = round(be_sigma, 6) if be_sigma is not None else None
+    # Net edge "in vol terms": iv_full minus breakeven sigma. Positive means
+    # the market is paying more than the structure's expected loss at that σ.
+    if be_sigma is not None and _parse_float(iv_full_sleeve):
+        out["iv_minus_breakeven_sigma"] = round(iv_full_sleeve - be_sigma, 6)
+    else:
+        out["iv_minus_breakeven_sigma"] = None
+
+    # 6 & 7. BS greeks of the SHORT put spread (per single structure).
+    if s and kl and ks and iv_for_bs:
+        gks = bs_put_spread_greeks(s, kl, ks, h, iv_for_bs, risk_free=risk_free)
+        out["bs_delta_spread"] = round(gks["delta"], 6)
+        out["bs_gamma_spread"] = round(gks["gamma"], 8)
+        out["bs_vega_spread"] = round(gks["vega"], 6)
+        out["bs_theta_spread_per_day"] = round(gks["theta_per_year"] / TRADING_DAYS, 6)
+        # Dollar gamma per 1% sleeve move = γ · S² · (0.01)². Express as $/spread.
+        out["bs_dollar_gamma_per_1pct_sleeve"] = round(gks["gamma"] * s * s * 0.0001, 6)
+        # Translate sleeve gamma -> underlying 1% move: 2x sleeve moves 2% per
+        # 1% underlying => $-gamma at 1% underlying = γ · (2S)² · (0.01)² · 4
+        # but here we already use sleeve S, so the underlying-equivalent is x4.
+        out["bs_dollar_gamma_per_1pct_underlying"] = round(
+            gks["gamma"] * s * s * 0.0001 * (LEVERAGE_BETA * LEVERAGE_BETA), 6,
+        )
+    else:
+        out["bs_delta_spread"] = None
+        out["bs_gamma_spread"] = None
+        out["bs_vega_spread"] = None
+        out["bs_theta_spread_per_day"] = None
+        out["bs_dollar_gamma_per_1pct_sleeve"] = None
+        out["bs_dollar_gamma_per_1pct_underlying"] = None
+
+    # 8. Simple Itô variance drag for 2x daily-rebalanced sleeve (per year).
+    rv_und_proxy = None
+    iv_u = out.get("iv_underlying_implied")
+    if iv_u is not None and iv_u > 0:
+        rv_und_proxy = iv_u
+    elif _parse_float(rv_2x_full):
+        rv_und_proxy = rv_2x_full / LEVERAGE_BETA
+    elif _parse_float(rv_2x_base):
+        rv_und_proxy = rv_2x_base / LEVERAGE_BETA
+    if rv_und_proxy is not None:
+        # x=2 daily-rebalanced exponent: A_T / A_0 = (S_T/S_0)^2 · exp(-σ² T)
+        # so the *gross* drag is σ_underlying² per year for x=2.
+        out["sleeve_diffusion_drag_annual"] = round(rv_und_proxy * rv_und_proxy, 6)
+        # Inverse-LETF analog (x = -2) for the Bucket-4 short-pair view: 3σ².
+        out["inverse_sleeve_drag_annual_x_minus2"] = round(3.0 * rv_und_proxy * rv_und_proxy, 6)
+    else:
+        out["sleeve_diffusion_drag_annual"] = None
+        out["inverse_sleeve_drag_annual_x_minus2"] = None
+
+    return out
+
+
 def calendar_is_stale(payload: dict[str, Any] | None, *, max_age_hours: float = 24.0) -> bool:
     if not payload or not payload.get("build_time"):
         return True
@@ -666,14 +936,43 @@ def enrich_vrp_row_with_events(
     return out
 
 
+# Rotating User-Agent strings: GitHub Actions cloud IPs are routinely rate-limited
+# (or 403'd) by Nasdaq/Yahoo when sending a thin ``Mozilla/5.0`` header. Cycling
+# through plausible browser UAs and adding a normal ``Accept``/``Accept-Language``
+# header pair dramatically improves the success rate without any auth setup.
+_BROWSER_USER_AGENTS: tuple[str, ...] = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+)
+
+
+def _browser_headers(*, accept: str = "application/json,text/plain,*/*", referer: str | None = None) -> dict[str, str]:
+    """Stable-but-rotated header set for public-API GETs."""
+    idx = abs(hash(datetime.now(timezone.utc).isoformat()[:10])) % len(_BROWSER_USER_AGENTS)
+    headers = {
+        "User-Agent": _BROWSER_USER_AGENTS[idx],
+        "Accept": accept,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+    }
+    if referer:
+        headers["Referer"] = referer
+    return headers
+
+
 def fetch_yahoo_earnings_dates(symbol: str, *, timeout: int = 15) -> list[date]:
     """Upcoming/recent earnings dates from Yahoo chart meta (best-effort)."""
     sym = str(symbol).upper().strip()
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
-        f"?interval=1d&range=6mo&events=earnings"
+        f"?interval=1d&range=2y&events=earnings"
     )
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    req = urllib.request.Request(url, headers=_browser_headers(
+        accept="application/json,text/plain,*/*",
+        referer=f"https://finance.yahoo.com/quote/{sym}",
+    ))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
@@ -697,10 +996,10 @@ def fetch_nasdaq_earnings_by_date(day: date, *, timeout: int = 20) -> dict[str, 
     url = f"https://api.nasdaq.com/api/calendar/earnings?date={day.isoformat()}"
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-        },
+        headers=_browser_headers(
+            accept="application/json,text/plain,*/*",
+            referer="https://www.nasdaq.com/market-activity/earnings",
+        ),
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -739,3 +1038,56 @@ def fetch_nasdaq_earnings_window(
                 found[sym].append(d)
         time.sleep(sleep_sec)
     return {k: sorted(set(v)) for k, v in found.items() if v}
+
+
+# Calendar quarter heuristic: most US large-caps report on a ~90-day cadence
+# (~63 trading days). When upstream APIs return nothing we project the next
+# expected earnings date forward from the most recent historical earnings date
+# (if known) and flag the entry as ``confirmation: projected``.
+EARNINGS_CADENCE_DAYS = 91
+
+
+def project_next_earnings_date(
+    last_known: date,
+    *,
+    today: date | None = None,
+    cadence_days: int = EARNINGS_CADENCE_DAYS,
+) -> date | None:
+    """Project the next earnings date by stepping cadence forward until it's >= today."""
+    if not last_known:
+        return None
+    cur = today or date.today()
+    nxt = last_known
+    safety = 0
+    while nxt < cur and safety < 12:
+        nxt = nxt + timedelta(days=cadence_days)
+        safety += 1
+    return nxt if nxt >= cur else None
+
+
+def load_earnings_seed(path: Path | str) -> dict[str, list[dict[str, Any]]]:
+    """Load a per-underlying seed of upcoming earnings (used when live feeds fail).
+
+    Schema (JSON):
+      {"updated_at": "2026-05-26", "items": [
+          {"underlying": "MSTR", "event_date": "2026-07-30",
+           "confirmation": "projected", "source": "seed_quarterly",
+           "historical_move_pct_mad": 0.063},
+          ...]}
+    """
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in payload.get("items") or []:
+        if not isinstance(row, dict):
+            continue
+        und = str(row.get("underlying") or "").upper().strip()
+        if not und:
+            continue
+        out.setdefault(und, []).append(row)
+    return out

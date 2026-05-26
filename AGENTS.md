@@ -1021,6 +1021,39 @@ python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-
 
 The UI falls back to `yieldboost_put_spreads_latest.json` when `vrp_live.json` is missing, so users still see Granite-reported strikes with an **IV pending** badge instead of a raw HTTP error.
 
+#### Additive VRP row fields (event_vol.compute_vrp_row_extras)
+
+`refresh_yieldboost_vrp_files` adds the following per-row keys on top of the
+event-decomposition fields (`iv_full_proxy`, `iv_base_proxy`, …). They are
+*best-effort*: any input missing flows through as `null` rather than erroring.
+
+| Field | Meaning |
+|---|---|
+| `iv_underlying_implied` | Sleeve IV inverted to underlying space via β=2 (`σ_sleeve / 2`). The like-for-like vol to compare to `rv_30d_underlying`. |
+| `iv_implied_weekly_move_2x_pct` | `σ_sleeve · √(5/252) · 100`. The implied 1σ one-week move on the **sleeve** at current IV. |
+| `iv_implied_weekly_move_underlying_pct` | Same but on the **underlying** (1× space). |
+| `bs_put_spread_fair_diffusion` | BS fair value (short K_short − long K_long) at the chosen σ. Diffusion only — no event-jump component. |
+| `bs_put_spread_sigma_source` | Which σ fed the BS fair value: `iv_full_sleeve` › `iv_base_sleeve` › `rv_2x_full` › `rv_2x_base`. |
+| `expected_weekly_loss_pct_of_spot` | `bs_put_spread_fair_diffusion / spot_2x · 100`. Headline "how much NAV does this spread bleed per week at the current σ". |
+| `spread_breakeven_sigma_annual` | Annualized σ that makes `BS_fair(σ) == spread_mid_market`. The IV at which the structure is "fair" — if `iv_full_sleeve > breakeven_sigma`, the market is paying you more than expected loss. |
+| `iv_minus_breakeven_sigma` | `iv_full_sleeve − breakeven_sigma`. Net short-vol edge in σ-space (positive = sell). |
+| `bs_delta_spread`, `bs_gamma_spread`, `bs_vega_spread`, `bs_theta_spread_per_day` | Greeks of the **short** put-spread per 1 structure (combine with sizing on the consumer side). Theta typically positive (we collect decay); gamma typically negative (short convexity). |
+| `bs_dollar_gamma_per_1pct_sleeve` | `γ · S² · 0.0001` — dollar P&L acceleration per 1% sleeve move. |
+| `bs_dollar_gamma_per_1pct_underlying` | Above × 4 (variance-of-leverage scaling for x=2 sleeve). |
+| `sleeve_diffusion_drag_annual` | `σ_underlying²` — the simple Itô gross decay for x=2 daily-rebalanced. |
+| `inverse_sleeve_drag_annual_x_minus2` | `3 σ_underlying²` — equivalent drag for the Bucket-4 short pair (`x = −2`). |
+
+#### Earnings calendar seed fallback (`data/earnings_calendar_seed.json`)
+
+`ingest_event_calendar.py::build_known_calendar` chains:
+
+1. **Nasdaq** earnings window (21 days fwd) — `confirmed`.
+2. **Yahoo** chart-meta earnings — `confirmed`.
+3. **Seed JSON** at `data/earnings_calendar_seed.json` — `projected`. Hand-curated next earnings date per YB underlying, refreshed weekly.
+4. **Quarterly projection** from `etf_metrics_daily.csv` last-known earnings + 91 calendar days — `projected`.
+
+Each item now carries a `confirmation: "confirmed" | "projected"` field plus a `source_stats` rollup so the UI can badge projected dates separately. The seed file should be regenerated whenever a YB earnings date is missed or shifted — the file is small (25 rows) and committed alongside the data artifacts.
+
 ---
 
 ## 13. Gotchas & pitfalls

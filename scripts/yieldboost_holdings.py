@@ -1292,6 +1292,13 @@ def build_vrp_live_payload(
             event_mod = enrich_vrp_row_with_events
         except ImportError:
             event_mod = None
+    extras_mod = None
+    try:
+        from event_vol import TRADING_DAYS as _TD, compute_vrp_row_extras
+        extras_mod = compute_vrp_row_extras
+        trading_days = _TD
+    except ImportError:
+        trading_days = 252
     for s in spreads:
         if not s.is_front:
             continue
@@ -1364,6 +1371,28 @@ def build_vrp_live_payload(
                 rv_map_base=rv_map_base,
                 as_of=today,
             )
+        if extras_mod is not None:
+            # Horizon in years from today to held expiry; clamp to >=1 trading day
+            # so off-hours 0-DTE rows still produce finite greeks (the actual
+            # decay/value is dominated by intrinsic at that point).
+            days_to_exp = max(0, (s.expiry - today).days)
+            horizon_years = max(days_to_exp / trading_days, 1.0 / trading_days)
+            iv_full = row.get("iv_full_proxy") if "iv_full_proxy" in row else iv_spread_proxy
+            iv_base = row.get("iv_base_proxy")
+            rv_full = row.get("rv_30d_2x_full") if "rv_30d_2x_full" in row else rv_2x
+            rv_base_row = row.get("rv_30d_2x_base")
+            extras = extras_mod(
+                spot=spot,
+                strike_long=s.strike_long,
+                strike_short=s.strike_short,
+                horizon_years=horizon_years,
+                iv_full_sleeve=iv_full,
+                iv_base_sleeve=iv_base,
+                rv_2x_full=rv_full,
+                rv_2x_base=rv_base_row,
+                spread_mid=row.get("spread_mid_market"),
+            )
+            row.update(extras)
         rows.append(row)
     return {
         "build_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
