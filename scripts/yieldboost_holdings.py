@@ -1486,6 +1486,51 @@ def build_vrp_live_payload(
             iv_base = row.get("iv_base_proxy")
             rv_full = row.get("rv_30d_2x_full") if "rv_30d_2x_full" in row else rv_2x
             rv_base_row = row.get("rv_30d_2x_base")
+
+            # Pull the per-underlying next-event date + historical MAD-move from
+            # the event_calendar payload. Both are on the *underlying* scale;
+            # ``compute_vrp_row_extras`` knows the β=2 sleeve→underlying inversion.
+            evt_implied_und = None
+            evt_hist_und = None
+            evt_days = None
+            evt_in_window = False
+            if und_key and event_calendar:
+                items = (event_calendar.get("items") or [])
+                # Earliest upcoming earnings event for this underlying.
+                soonest = None
+                for it in items:
+                    if (
+                        str(it.get("event_type") or "").lower() == "earnings"
+                        and str(it.get("underlying") or "").upper() == und_key
+                    ):
+                        try:
+                            ed = date.fromisoformat(str(it.get("event_date")))
+                        except Exception:
+                            continue
+                        if ed < today:
+                            continue
+                        if soonest is None or ed < soonest[0]:
+                            soonest = (ed, it)
+                if soonest is not None:
+                    ed, it = soonest
+                    evt_days = (ed - today).days
+                    evt_in_window = ed <= s.expiry
+                    hist = it.get("historical_move_pct_mad")
+                    if hist is not None:
+                        try:
+                            evt_hist_und = float(hist)
+                        except (TypeError, ValueError):
+                            evt_hist_und = None
+                # Convert sleeve event_implied_move_pct → underlying via β=2.
+                # `event_implied_move_pct` is already on the sleeve scale; the
+                # underlying expected jump-1σ is sleeve/2 in absolute % terms.
+                ev_pct = row.get("event_implied_move_pct")
+                if ev_pct is not None:
+                    try:
+                        evt_implied_und = float(ev_pct) / 2.0 / 100.0  # pct → fraction
+                    except (TypeError, ValueError):
+                        evt_implied_und = None
+
             extras = extras_mod(
                 spot=spot,
                 strike_long=s.strike_long,
@@ -1496,6 +1541,10 @@ def build_vrp_live_payload(
                 rv_2x_full=rv_full,
                 rv_2x_base=rv_base_row,
                 spread_mid=row.get("spread_mid_market"),
+                event_implied_move_pct_underlying=evt_implied_und,
+                historical_event_move_pct_underlying=evt_hist_und,
+                days_to_event=evt_days,
+                event_in_horizon=evt_in_window,
             )
             row.update(extras)
         rows.append(row)

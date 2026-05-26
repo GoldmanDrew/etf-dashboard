@@ -721,6 +721,10 @@ def compute_vrp_row_extras(
     rv_2x_base: float | None,
     spread_mid: float | None,
     risk_free: float = 0.043,
+    event_implied_move_pct_underlying: float | None = None,
+    historical_event_move_pct_underlying: float | None = None,
+    days_to_event: int | None = None,
+    event_in_horizon: bool = False,
 ) -> dict[str, Any]:
     """Compute the §4.1 'shippable today' VRP metrics for a single front spread.
 
@@ -837,6 +841,61 @@ def compute_vrp_row_extras(
     else:
         out["sleeve_diffusion_drag_annual"] = None
         out["inverse_sleeve_drag_annual_x_minus2"] = None
+
+    # 9. Event-week decomposition: compare implied event-day 1σ move to the
+    #    historical MAD of |return| on prior earnings days. Both inputs are
+    #    quoted on the *underlying* scale (sleeve = 2x just doubles them; the
+    #    rich/cheap signal is invariant under that constant rescale).
+    #
+    #    `event_move_richness_pct` = (implied / historical) − 1.
+    #      ≥ +0.30  market is paying 30%+ premium over historical → SELL the move
+    #      ≤ −0.20  market is underpricing the move vs history → BUY the move
+    #
+    #    `event_jump_share_of_variance` = how much of the full IV variance over
+    #    the held horizon is attributed to the single event-day jump. ≥ 0.40
+    #    means BS diffusion-only pricing is structurally wrong and the event
+    #    overlay dominates the trade thesis.
+    out["event_implied_move_pct_underlying"] = (
+        round(float(event_implied_move_pct_underlying) * 100.0, 4)
+        if event_implied_move_pct_underlying is not None
+        else None
+    )
+    out["event_historical_move_pct_underlying"] = (
+        round(float(historical_event_move_pct_underlying) * 100.0, 4)
+        if historical_event_move_pct_underlying is not None
+        else None
+    )
+    if (
+        event_implied_move_pct_underlying is not None
+        and historical_event_move_pct_underlying is not None
+        and float(historical_event_move_pct_underlying) > 0
+    ):
+        rich = (
+            float(event_implied_move_pct_underlying)
+            / float(historical_event_move_pct_underlying)
+            - 1.0
+        )
+        out["event_move_richness_pct"] = round(rich, 4)
+    else:
+        out["event_move_richness_pct"] = None
+
+    # Share of held-horizon variance attributable to the event jump (sleeve
+    # scale; the ratio is invariant under sleeve rescaling).
+    iv_full = _parse_float(iv_full_sleeve)
+    iv_base = _parse_float(iv_base_sleeve)
+    if iv_full is not None and iv_base is not None and iv_full > 0:
+        var_full = iv_full * iv_full * h
+        var_base = iv_base * iv_base * h
+        if var_full > 0:
+            share = max(0.0, var_full - var_base) / var_full
+            out["event_jump_share_of_variance"] = round(share, 4)
+        else:
+            out["event_jump_share_of_variance"] = None
+    else:
+        out["event_jump_share_of_variance"] = None
+
+    out["days_to_event"] = int(days_to_event) if days_to_event is not None else None
+    out["event_in_held_horizon"] = bool(event_in_horizon)
 
     return out
 

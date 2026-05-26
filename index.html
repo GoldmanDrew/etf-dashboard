@@ -8714,6 +8714,9 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
               <Th k="bs_theta_spread_per_day" label="θ/day" hint="Theta per calendar day (positive = collecting)" />
               <Th k="days_to_exp" label="DTE" hint="Days to held expiry" />
               <Th k="days_to_earnings" label="DT-Earn" hint="Days to next known earnings event (combined calendar)" />
+              <Th k="event_implied_move_pct_underlying" label="Impl. evt%" hint="Implied event-day 1σ move on the underlying (from IV variance split, β=2 inverted)" />
+              <Th k="event_historical_move_pct_underlying" label="Hist. evt%" hint="Historical MAD of |return| on prior earnings days (underlying scale)" />
+              <Th k="event_move_richness_pct" label="Rich%" hint="(implied / historical) − 1. Positive = market overpaying event move (SELL), negative = underpaying (BUY)" />
               <Th k="iv_expiry_skew_days" label="Skew" hint="|held - chain| expiry days; the IV-term-structure interpolation gap" />
               <Th k="iv_source" label="IV src" align="left" hint="How IV was resolved" />
             </tr>
@@ -8805,6 +8808,28 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                       >{r.days_to_earnings}d</span>
                     ) : '—'}
                   </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
+                    {r.event_implied_move_pct_underlying != null
+                      ? `${Number(r.event_implied_move_pct_underlying).toFixed(2)}%`
+                      : '—'}
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--text-muted)' }}>
+                    {r.event_historical_move_pct_underlying != null
+                      ? `${Number(r.event_historical_move_pct_underlying).toFixed(2)}%`
+                      : '—'}
+                  </td>
+                  <td style={{
+                    padding: '5px 8px', textAlign: 'right', fontWeight: 600,
+                    color: r.event_move_richness_pct == null ? 'var(--text-muted)'
+                      : (Number(r.event_move_richness_pct) >= 0.30 ? '#10b981'
+                        : (Number(r.event_move_richness_pct) <= -0.20 ? '#ef4444'
+                          : 'var(--text-muted)')),
+                  }}>
+                    {r.event_move_richness_pct != null
+                      ? (Number(r.event_move_richness_pct) >= 0 ? '+' : '')
+                        + (Number(r.event_move_richness_pct) * 100).toFixed(0) + '%'
+                      : '—'}
+                  </td>
                   <td style={{
                     padding: '5px 8px', textAlign: 'right',
                     color: skewColor(r.iv_expiry_skew_days),
@@ -8816,7 +8841,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
               );
             })}
             {sorted.length === 0 && (
-              <tr><td colSpan={15} style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>
+              <tr><td colSpan={18} style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>
                 No rows match current filters.
               </td></tr>
             )}

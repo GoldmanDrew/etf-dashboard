@@ -4,6 +4,8 @@ This file is the **single source of truth** for any future agent (AI or human) w
 
 If you only have time for one section, read **§3 Data Flow** and **§5 Product Taxonomy**.
 
+For the **trader-facing** complement to this engineering doc (entry/exit rules, sizing from greeks, earnings-week playbook, risk caveats), see [`STRATEGY.md`](STRATEGY.md). The two files are deliberately separate: AGENTS.md explains *how the pipeline works*; STRATEGY.md explains *how to act on what it produces*.
+
 ---
 
 ## Contents
@@ -1042,6 +1044,12 @@ event-decomposition fields (`iv_full_proxy`, `iv_base_proxy`, …). They are
 | `bs_dollar_gamma_per_1pct_underlying` | Above × 4 (variance-of-leverage scaling for x=2 sleeve). |
 | `sleeve_diffusion_drag_annual` | `σ_underlying²` — the simple Itô gross decay for x=2 daily-rebalanced. |
 | `inverse_sleeve_drag_annual_x_minus2` | `3 σ_underlying²` — equivalent drag for the Bucket-4 short pair (`x = −2`). |
+| `event_implied_move_pct_underlying` | Implied 1σ event-day move on the **underlying** scale (from the variance split between `iv_full_proxy` and `iv_base_proxy`, β=2 inverted). Quoted as %. |
+| `event_historical_move_pct_underlying` | Mean absolute deviation of \|return\| on prior earnings days for this underlying, from the combined event calendar's `historical_move_pct_mad`. Quoted as %. |
+| `event_move_richness_pct` | `(event_implied / event_historical) − 1`. ≥+30% = market over-paying the move (SELL the event premium); ≤−20% = market under-paying (BUY the move). |
+| `event_jump_share_of_variance` | `(var_full − var_base) / var_full` over the held horizon. ≥0.40 means the event jump dominates IV — `bs_put_spread_fair_diffusion` is structurally wrong, use `put_spread_fair_event_aware` instead. |
+| `days_to_event` | Calendar days until the next earnings event for this underlying (combined-calendar earliest upcoming, with seed/projection fallback). |
+| `event_in_held_horizon` | `true` if the next event date ≤ held expiry. UI flags these rows red — diffusion BS is invalid. |
 
 #### Earnings calendar seed fallback (`data/earnings_calendar_seed.json`)
 
@@ -1062,7 +1070,7 @@ Each item now carries a `confirmation: "confirmed" | "projected"` field plus a `
 
 1. **`holdings_exact`** — exact expiry + exact strike (within ~$0.01).
 2. **`holdings_nearest_strike`** — exact expiry + nearest listed strike.
-3. **`holdings_nearest_expiry`** — held expiry not listed; fall back to the nearest listed expiry within 14 calendar days, then nearest strike at that expiry.
+3. **`holdings_nearest_expiry`** — held expiry not listed; fall back to the nearest listed expiry within 35 calendar days, then nearest strike at that expiry.
 
 Tier 3 exists because Granite's holdings file references off-cycle (Wednesday/Tuesday) expirations and non-round strikes (e.g. `47.89`) that are OTC structures, not exchange-listed. Without the fallback every YB row reported `iv_source: holdings_missing_chain` and `iv: null`, which collapsed every BS-fair and breakeven-σ derivation downstream. The interpolated IV is honest about the proxy via the `iv_source_chain` audit list returned by `lookup_contract_iv` and the `holdings_nearest_expiry` enum surfaced in the SPA's `vrpIvSourceLabel`.
 
