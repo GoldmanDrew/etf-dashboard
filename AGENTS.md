@@ -1054,6 +1054,20 @@ event-decomposition fields (`iv_full_proxy`, `iv_base_proxy`, …). They are
 
 Each item now carries a `confirmation: "confirmed" | "projected"` field plus a `source_stats` rollup so the UI can badge projected dates separately. The seed file should be regenerated whenever a YB earnings date is missed or shifted — the file is small (25 rows) and committed alongside the data artifacts.
 
+**Staleness semantics.** `event_vol.calendar_is_stale` returns `True` not just when `build_time` ages out (>24h by default) but **also when the payload is empty and `source_stats` shows no successful fetch**. This matters because a 403 from Nasdaq/Yahoo combined with a missing seed file would otherwise write a fresh-timestamped empty file and lock out `refresh_event_pipeline` for 24h. The check distinguishes "build attempted, genuinely nothing upcoming" (e.g. `projected > 0` but no events in the 21-day window) from "build failed silently".
+
+#### Held-leg IV: nearest-expiry fallback
+
+`yieldboost_holdings.lookup_contract_iv` resolves IV/mid in three tiers:
+
+1. **`holdings_exact`** — exact expiry + exact strike (within ~$0.01).
+2. **`holdings_nearest_strike`** — exact expiry + nearest listed strike.
+3. **`holdings_nearest_expiry`** — held expiry not listed; fall back to the nearest listed expiry within 14 calendar days, then nearest strike at that expiry.
+
+Tier 3 exists because Granite's holdings file references off-cycle (Wednesday/Tuesday) expirations and non-round strikes (e.g. `47.89`) that are OTC structures, not exchange-listed. Without the fallback every YB row reported `iv_source: holdings_missing_chain` and `iv: null`, which collapsed every BS-fair and breakeven-σ derivation downstream. The interpolated IV is honest about the proxy via the `iv_source_chain` audit list returned by `lookup_contract_iv` and the `holdings_nearest_expiry` enum surfaced in the SPA's `vrpIvSourceLabel`.
+
+If the user actually wants the *exact* held-contract IV they need OTC quotes (broker, not Tradier) — the chain-side fallback is the best we can do from public data.
+
 ---
 
 ## 13. Gotchas & pitfalls
