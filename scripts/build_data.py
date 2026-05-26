@@ -2257,8 +2257,22 @@ def build_polygon_options_cache(
             print(f"  YieldBOOST chain mid backfill: {filled} held legs from last/close/prevclose")
 
     def _prefetch_yieldboost_sleeve_chains() -> None:
-        """Fetch held-expiry Tradier chains for all YB sleeves before OCC quotes."""
+        """Fetch Tradier chains for all YB sleeves before OCC quotes.
+
+        Two-pass strategy:
+          1. Try the **held expiries** only (cheap, exact-match for IV / mid).
+          2. If pass 1 returns nothing -- e.g. the held date is a market
+             holiday (5/26 Memorial Day), the sleeve only lists monthlies,
+             or the OTC-style Granite expiry is genuinely not on Tradier --
+             fall back to the **broader chain** (`force_expiries=None`)
+             so the nearest-expiry lookup in `yieldboost_holdings.lookup_
+             contract_iv` has at least one weekly/monthly to interpolate
+             from. Without this the 18 sleeves with monthly-only listings
+             (MSTU, MULL, NUGT, NVDL, PTIR, …) would never enter the cache
+             under YB-targeted mode.
+        """
         prefetched = 0
+        prefetched_fallback = 0
         for sym in refresh_symbols:
             nsym = norm_sym(sym)
             held_exp = sorted(str(e) for e in held_expiries_by_sleeve.get(nsym, set()))
@@ -2276,11 +2290,32 @@ def build_polygon_options_cache(
                     "tradier_held_exp",
                 )
                 prefetched += 1
-            elif held_chain_err:
-                out.setdefault("errors_by_symbol", {})
-                out["errors_by_symbol"][sym] = f"tradier_held_exp: {held_chain_err}"
-        if prefetched:
-            print(f"  YieldBOOST held-exp chains prefetched for {prefetched}/{len(refresh_symbols)} sleeves")
+                continue
+            # Pass 2: held expiries returned empty (or errored). Try the broader
+            # chain so the dashboard-side nearest-expiry fallback has data.
+            tradier_rows, spot_val, fallback_err = _fetch_tradier_chain(
+                sym, tradier_spot, phase="chain",
+            )
+            if tradier_rows:
+                _set_symbol_entry(
+                    sym,
+                    spot_val if spot_val is not None else tradier_spot,
+                    tradier_rows,
+                    "tradier_chain_nearest_expiry_fallback",
+                )
+                prefetched_fallback += 1
+            else:
+                if fallback_err or held_chain_err:
+                    out.setdefault("errors_by_symbol", {})
+                    out["errors_by_symbol"][sym] = (
+                        f"tradier_held_exp: {held_chain_err or 'empty'}; "
+                        f"tradier_chain: {fallback_err or 'empty'}"
+                    )
+        if prefetched or prefetched_fallback:
+            print(
+                f"  YieldBOOST chains prefetched: {prefetched} held-exp + "
+                f"{prefetched_fallback} fallback / {len(refresh_symbols)} sleeves"
+            )
 
     if yieldboost_targeted and TRADIER_TOKEN:
         tradier_budget["phase"] = "chain"
