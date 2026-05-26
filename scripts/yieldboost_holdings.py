@@ -1200,7 +1200,7 @@ def lookup_contract_iv(
     strike: float,
     put_call: str = "P",
     *,
-    nearest_expiry_max_days: int = 14,
+    nearest_expiry_max_days: int = 35,
 ) -> dict[str, Any]:
     """Resolve a held contract's IV/mid from the cached chain.
 
@@ -1208,13 +1208,20 @@ def lookup_contract_iv(
       1. Exact expiry + exact strike (within ``HELD_STRIKE_EXACT_TOL``).
       2. Exact expiry + nearest strike.
       3. **Nearest expiry** within ``nearest_expiry_max_days`` calendar days
-         + nearest strike at that expiry. This case handles Granite's
-         off-cycle (Wednesday / Tuesday) holdings where the contracts are
-         actually OTC -- no Tradier-listed contract matches the exact
-         expiry, but the adjacent Friday weekly is a reasonable IV proxy.
+         + nearest strike at that expiry. This case handles two distinct
+         scenarios:
+           a. Off-cycle (Wed/Tue) Granite expiries that are OTC structures
+              not listed on Tradier (nearest is the adjacent Friday weekly,
+              ~2-4 days away).
+           b. Newer 2x sleeves (AMZZ, BABX, FBL, …) that only have monthly
+              expirations -- nearest is the next 3rd-Friday, up to ~30 days
+              away. The IV-term-structure error is real for monthly-out
+              interpolation on a 1-day-out spread; the UI should warn the
+              user on large ``expiry_skew_days`` values.
 
     The returned ``iv_source_chain`` field documents which tier produced the
-    quote so the UI can badge interpolated rows distinctly.
+    quote and ``expiry_skew_days`` is the |held - chain| calendar-day gap
+    (always non-negative) so consumers can flag risky interpolations.
     """
     sym = str(symbol).upper()
     entry = (options_cache.get("symbols") or {}).get(sym) or {}
@@ -1303,12 +1310,21 @@ def lookup_contract_iv(
             "mid": None,
             "options_as_of": entry.get("updated_at"),
             "iv_source_chain": iv_source_chain,
+            "expiry_skew_days": None,
         }
+    skew_days: int | None = None
+    if chain_expiry_used is not None:
+        try:
+            used_dt = datetime.strptime(chain_expiry_used, "%Y-%m-%d").date()
+            skew_days = abs((used_dt - expiry).days)
+        except ValueError:
+            skew_days = None
     return {
         "matched": exact or (best_dist is not None and best_dist < 0.05),
         "exact_strike": exact and chain_expiry_used == expiry_s,
         "expiry_in_chain": expiry_in_chain,
         "chain_expiry_used": chain_expiry_used,
+        "expiry_skew_days": skew_days,
         "strike_used": _parse_float(best.get("strike_price")),
         "strike_interp": not exact and best_dist is not None and best_dist >= HELD_STRIKE_EXACT_TOL,
         "iv": _norm_iv(best.get("iv")),
@@ -1414,6 +1430,17 @@ def build_vrp_live_payload(
             if iv_spread_proxy is not None and rv_2x is not None
             else None
         )
+        # Choose the larger of the two leg skews for headline warning (consumer
+        # cares about the worst-case interpolation gap, not the average).
+        skew_l = long_q.get("expiry_skew_days")
+        skew_s = short_q.get("expiry_skew_days")
+        if skew_l is None and skew_s is None:
+            chain_skew_days = None
+        else:
+            chain_skew_days = max(v for v in (skew_l, skew_s) if v is not None)
+        # If both legs landed on the same chain expiry use it directly;
+        # otherwise expose both so a UI can decide.
+        chain_expiry_used = long_q.get("chain_expiry_used") or short_q.get("chain_expiry_used")
         row = {
             "yb_etf": s.yb_etf,
             "underlying": s.underlying,
@@ -1435,6 +1462,8 @@ def build_vrp_live_payload(
             "vrp_vol_2x": vrp_2x,
             "rv_30d_source": "dashboard_1m" if rv_2x is not None else None,
             "iv_source": resolve_iv_source(long_q, short_q),
+            "iv_chain_expiry_used": chain_expiry_used,
+            "iv_expiry_skew_days": chain_skew_days,
             "holdings_as_of": s.holdings_as_of.isoformat(),
             "options_as_of": long_q.get("options_as_of") or short_q.get("options_as_of"),
             "days_to_exp": s.days_to_exp,

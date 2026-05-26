@@ -7888,6 +7888,27 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <tr><td>Moneyness long / short</td><td>{vrpDisplayRow.moneyness_long_pct != null ? `${vrpDisplayRow.moneyness_long_pct.toFixed(2)}%` : '—'} / {vrpDisplayRow.moneyness_short_pct != null ? `${vrpDisplayRow.moneyness_short_pct.toFixed(2)}%` : '—'}</td></tr>
                       <tr><td>Event var source</td><td>{vrpDisplayRow.event_var_source || 'none'}{vrpDisplayRow.event_calendar_stale ? ' · calendar stale' : ''}</td></tr>
                       <tr><td>IV source</td><td>{vrpIvPending ? 'holdings (IV pending)' : vrpIvSourceLabel}</td></tr>
+                      {vrpDisplayRow?.iv_chain_expiry_used && vrpDisplayRow.iv_chain_expiry_used !== vrpDisplayRow.expiry && (
+                        <tr title="When the held expiry isn't listed (off-cycle Granite spread or sleeve only listing monthlies), IV is taken from the nearest listed expiry. Skew = |held - chain| calendar days. >7d skew means the IV-term-structure interpolation error is meaningful; >21d ~= using monthly IV for a weekly spread (treat the resulting BS fair value as a regime indicator only).">
+                          <td>Chain expiry used</td>
+                          <td>
+                            {vrpDisplayRow.iv_chain_expiry_used}
+                            {Number.isFinite(Number(vrpDisplayRow.iv_expiry_skew_days)) && (
+                              <span style={{
+                                marginLeft: 6,
+                                fontSize: 10,
+                                color: Number(vrpDisplayRow.iv_expiry_skew_days) > 21
+                                  ? 'var(--red, #ef4444)'
+                                  : (Number(vrpDisplayRow.iv_expiry_skew_days) > 7
+                                    ? 'var(--amber, #f59e0b)'
+                                    : 'var(--text-muted)'),
+                              }}>
+                                ({vrpDisplayRow.iv_expiry_skew_days}d skew)
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 </div>
