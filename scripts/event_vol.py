@@ -842,14 +842,39 @@ def compute_vrp_row_extras(
 
 
 def calendar_is_stale(payload: dict[str, Any] | None, *, max_age_hours: float = 24.0) -> bool:
+    """Stale if missing, age > max_age_hours, OR empty (item_count == 0).
+
+    The empty-but-fresh case happens when ``ingest_event_calendar.build_known_calendar``
+    runs while Nasdaq/Yahoo are blocking the cloud-IP: it writes a payload with a
+    fresh ``build_time`` but ``item_count: 0``. Treating that as fresh causes
+    ``refresh_event_pipeline`` to skip the rebuild forever, blocking the seed /
+    quarterly-projection fallback we explicitly added for that scenario.
+    """
     if not payload or not payload.get("build_time"):
         return True
     try:
         bt = datetime.fromisoformat(str(payload["build_time"]).replace("Z", "+00:00"))
         age_h = (datetime.now(timezone.utc) - bt).total_seconds() / 3600.0
-        return age_h > max_age_hours
+        if age_h > max_age_hours:
+            return True
     except Exception:
         return True
+    # Semantic staleness: even a "fresh" payload is stale if it ingested zero
+    # items. Items >= 1 OR items list present-and-empty + an explicit non-zero
+    # ``source_stats`` block (e.g., ``missing: N``) is taken as "build attempted,
+    # genuinely no events upcoming" -- don't loop on those.
+    items = payload.get("items")
+    if isinstance(items, list) and len(items) == 0:
+        stats = payload.get("source_stats") or {}
+        if not stats:
+            return True
+        # If we recorded any successful source for at least one underlying we
+        # trust the empty result; otherwise it's an outright failure and we
+        # should retry on the next pipeline run.
+        ok = (stats.get("nasdaq") or 0) + (stats.get("yahoo") or 0) + (stats.get("seed") or 0) + (stats.get("projected") or 0)
+        if ok == 0:
+            return True
+    return False
 
 
 def enrich_vrp_row_with_events(

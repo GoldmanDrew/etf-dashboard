@@ -1199,37 +1199,100 @@ def lookup_contract_iv(
     expiry: date,
     strike: float,
     put_call: str = "P",
+    *,
+    nearest_expiry_max_days: int = 14,
 ) -> dict[str, Any]:
+    """Resolve a held contract's IV/mid from the cached chain.
+
+    Resolution order:
+      1. Exact expiry + exact strike (within ``HELD_STRIKE_EXACT_TOL``).
+      2. Exact expiry + nearest strike.
+      3. **Nearest expiry** within ``nearest_expiry_max_days`` calendar days
+         + nearest strike at that expiry. This case handles Granite's
+         off-cycle (Wednesday / Tuesday) holdings where the contracts are
+         actually OTC -- no Tradier-listed contract matches the exact
+         expiry, but the adjacent Friday weekly is a reasonable IV proxy.
+
+    The returned ``iv_source_chain`` field documents which tier produced the
+    quote so the UI can badge interpolated rows distinctly.
+    """
     sym = str(symbol).upper()
     entry = (options_cache.get("symbols") or {}).get(sym) or {}
     spot = _parse_float(entry.get("spot"))
     target_type = "put" if put_call.upper() == "P" else "call"
     expiry_s = expiry.isoformat()
-    expiry_in_chain = any(
-        str(c.get("expiration_date")) == expiry_s
-        for c in (entry.get("options") or [])
-        if isinstance(c, dict)
-    )
-    exact_row = None
-    nearest_row = None
-    nearest_dist = None
-    for c in entry.get("options") or []:
-        if str(c.get("expiration_date")) != expiry_s:
-            continue
-        if str(c.get("contract_type", "")).lower() != target_type:
-            continue
-        cstrike = _parse_float(c.get("strike_price"))
-        if cstrike is None:
-            continue
-        dist = abs(cstrike - float(strike))
-        if dist <= HELD_STRIKE_EXACT_TOL:
-            exact_row = c
+    chain = [c for c in (entry.get("options") or []) if isinstance(c, dict)]
+    expiry_in_chain = any(str(c.get("expiration_date")) == expiry_s for c in chain)
+
+    def _best_at_expiry(exp_str: str) -> tuple[dict | None, float | None, bool]:
+        """Return (best_row, best_dist, was_exact) for ``exp_str`` in this chain."""
+        exact_row = None
+        nearest_row = None
+        nearest_dist = None
+        for c in chain:
+            if str(c.get("expiration_date")) != exp_str:
+                continue
+            if str(c.get("contract_type", "")).lower() != target_type:
+                continue
+            cstrike = _parse_float(c.get("strike_price"))
+            if cstrike is None:
+                continue
+            dist = abs(cstrike - float(strike))
+            if dist <= HELD_STRIKE_EXACT_TOL:
+                exact_row = c
+                break
+            if nearest_row is None or dist < nearest_dist:
+                nearest_row = c
+                nearest_dist = dist
+        if exact_row is not None:
+            return exact_row, 0.0, True
+        return nearest_row, nearest_dist, False
+
+    iv_source_chain: list[str] = []
+    best: dict | None = None
+    best_dist: float | None = None
+    exact = False
+    chain_expiry_used: str | None = None
+
+    # Tier 1 / 2: exact expiry.
+    if expiry_in_chain:
+        best, best_dist, exact = _best_at_expiry(expiry_s)
+        chain_expiry_used = expiry_s
+        iv_source_chain.append("holdings_exact" if exact else "holdings_nearest_strike")
+
+    # Tier 3: nearest expiry (only when exact expiry yielded no usable IV/mid).
+    iv_at_best = _norm_iv(best.get("iv")) if best is not None else None
+    mid_at_best = _parse_float(best.get("mid")) if best is not None else None
+    if (best is None or (iv_at_best is None and mid_at_best is None)) and chain:
+        candidate_expiries: list[tuple[int, str]] = []
+        for c in chain:
+            exp_other = str(c.get("expiration_date") or "")
+            if not exp_other or exp_other == expiry_s:
+                continue
+            try:
+                exp_dt = datetime.strptime(exp_other, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            delta_days = abs((exp_dt - expiry).days)
+            if delta_days > nearest_expiry_max_days:
+                continue
+            candidate_expiries.append((delta_days, exp_other))
+        candidate_expiries.sort()
+        for _delta, exp_alt in candidate_expiries:
+            alt_row, alt_dist, alt_exact = _best_at_expiry(exp_alt)
+            if alt_row is None:
+                continue
+            alt_iv = _norm_iv(alt_row.get("iv"))
+            alt_mid = _parse_float(alt_row.get("mid"))
+            if alt_iv is None and alt_mid is None:
+                continue
+            best = alt_row
+            best_dist = alt_dist
+            exact = False
+            chain_expiry_used = exp_alt
+            iv_source_chain.append("holdings_nearest_expiry")
             break
-        if nearest_row is None or dist < nearest_dist:
-            nearest_row = c
-            nearest_dist = dist
-    best = exact_row or nearest_row
-    best_dist = 0.0 if exact_row is not None else nearest_dist
+
     if best is None:
         return {
             "matched": False,
@@ -1239,27 +1302,42 @@ def lookup_contract_iv(
             "iv": None,
             "mid": None,
             "options_as_of": entry.get("updated_at"),
+            "iv_source_chain": iv_source_chain,
         }
-    exact = exact_row is not None
     return {
         "matched": exact or (best_dist is not None and best_dist < 0.05),
-        "exact_strike": exact,
-        "expiry_in_chain": True,
+        "exact_strike": exact and chain_expiry_used == expiry_s,
+        "expiry_in_chain": expiry_in_chain,
+        "chain_expiry_used": chain_expiry_used,
         "strike_used": _parse_float(best.get("strike_price")),
         "strike_interp": not exact and best_dist is not None and best_dist >= HELD_STRIKE_EXACT_TOL,
         "iv": _norm_iv(best.get("iv")),
         "mid": _parse_float(best.get("mid")),
         "spot": spot,
         "options_as_of": entry.get("updated_at"),
+        "iv_source_chain": iv_source_chain,
     }
 
 
 def resolve_iv_source(long_q: dict[str, Any], short_q: dict[str, Any]) -> str:
-    """Label how held-leg IV was resolved from the options cache."""
+    """Label how held-leg IV was resolved from the options cache.
+
+    Priority order (best first):
+      ``holdings_exact`` -> ``holdings_nearest_strike`` -> ``holdings_nearest_expiry``
+      -> ``holdings_missing_quote`` -> ``holdings_missing_chain``.
+    """
     if long_q.get("iv") is None and short_q.get("iv") is None:
-        if not long_q.get("expiry_in_chain") or not short_q.get("expiry_in_chain"):
+        if not long_q.get("expiry_in_chain") and not short_q.get("expiry_in_chain"):
+            # Note: the nearest-expiry fallback in ``lookup_contract_iv`` may
+            # still have produced quotes; if so we'd already have IVs above.
             return "holdings_missing_chain"
         return "holdings_missing_quote"
+    # If either leg used the nearest-expiry fallback, label it as such -- this
+    # is the most honest label since the IV is an interpolation across expiries.
+    chain_l = long_q.get("iv_source_chain") or []
+    chain_s = short_q.get("iv_source_chain") or []
+    if "holdings_nearest_expiry" in chain_l or "holdings_nearest_expiry" in chain_s:
+        return "holdings_nearest_expiry"
     if (
         long_q.get("exact_strike")
         and short_q.get("exact_strike")
@@ -1267,8 +1345,6 @@ def resolve_iv_source(long_q: dict[str, Any], short_q: dict[str, Any]) -> str:
         and short_q.get("matched")
     ):
         return "holdings_exact"
-    if long_q.get("matched") and short_q.get("matched"):
-        return "holdings_nearest_strike"
     return "holdings_nearest_strike"
 
 
