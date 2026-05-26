@@ -1442,6 +1442,29 @@ const fmtPct = v => {
   const n = Number(v) * 100;
   return (n >= 0 ? '+' : '') + n.toFixed(0) + '%';
 };
+// Convert a continuous-compounding annual rate to the equivalent
+// 1Y simple return, e.g. +1.20 log/yr -> +232% simple. NaN-safe.
+function logToSimpleAnnual(x) {
+  if (x == null || !Number.isFinite(Number(x))) return null;
+  return Math.expm1(Number(x));
+}
+/** Headline cell for forward pair P&L: median simple % + p10/p90 band. */
+function renderForwardPairPnlCell(pair) {
+  if (!pair || !Number.isFinite(Number(pair.p50))) return null;
+  const p50Simple = logToSimpleAnnual(pair.p50);
+  const p10Simple = logToSimpleAnnual(pair.p10);
+  const p90Simple = logToSimpleAnnual(pair.p90);
+  return (
+    <div style={{ lineHeight: 1.15 }}>
+      <div>{fmt(p50Simple)}</div>
+      {p10Simple != null && p90Simple != null ? (
+        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+          {fmt(p10Simple)} / {fmt(p90Simple)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 /** Whole-share counts (ETF shares outstanding, etc.): integer separators only — avoids 87,333.079 misread as 87,333,079. */
 const fmtSharesCount = v => (
   v == null || !Number.isFinite(Number(v)) ? '—' : Math.round(Number(v)).toLocaleString('en-US')
@@ -2467,13 +2490,6 @@ function expectedPairPnlDistribution(r) {
   };
 }
 
-// Convert a continuous-compounding annual rate to the equivalent
-// 1Y simple return, e.g. +1.20 log/yr -> +232% simple. NaN-safe.
-function logToSimpleAnnual(x) {
-  if (!Number.isFinite(x)) return null;
-  return Math.expm1(x);
-}
-
 // Annualized intrinsic NAV decay for YieldBOOST income-style products.
 // Income ETFs sell weekly 95/88 SPX-style put-spreads; the put-spread
 // premium decays the NAV before any distributions are paid out. We
@@ -2581,23 +2597,21 @@ function decayDistTooltip(r, chartVolLookbackRange) {
     if (pair) {
       const p50Simple = logToSimpleAnnual(pair.p50);
       const lines = [
-        'Exp. edge (fwd) — 1Y median forward pair P&L on the weekly-rebalanced compound axis.',
-        'Pair = short ETF + beta-long underlying. Sign: short-favorable positive.',
+        'Exp. edge (fwd) — 1Y median forward pair P&L (weekly-rebalanced short pair).',
+        'Pair = short ETF + beta-long underlying. Sign: short-favorable positive (+ = profit).',
         'YieldBOOST: path-dependent MC over forecast sigma; distributions wash under weekly rebalance.',
         `sigma (forecast): ${fmt(Number(forecastVol?.sigma))} (${r?.forecast_vol_source || 'forecast_vol'}).`,
-        `Median (p50): ${fmtLogYr(pair.p50)} log/yr (${fmtPct(p50Simple)} simple)`,
+        `Median (p50): ${fmt(p50Simple)}/yr`,
       ];
       if (pair.p10 != null && pair.p90 != null) {
-        lines.push(`Band (p10 / p90): ${fmtLogYr(pair.p10)} / ${fmtLogYr(pair.p90)} log/yr`);
+        lines.push(`Band (p10 / p90): ${fmt(logToSimpleAnnual(pair.p10))} / ${fmt(logToSimpleAnnual(pair.p90))}`);
       }
       const sr = pair.sigmaRegime || {};
       if (sr.lo != null && sr.hi != null) {
         const mults = sr.multipliers || [0.7, 1.0, 1.3];
         lines.push(
-          `sigma-regime p50 ` +
-          `(x${mults[0]} / x${mults[1]} / x${mults[2]}): ` +
-          `${fmtLogYr(sr.lo)} / ${fmtLogYr(sr.mid)} / ${fmtLogYr(sr.hi)} log/yr ` +
-          `(gamma-scalp sensitivity)`
+          `Vol sensitivity (p50 at ${mults[0]}× / ${mults[1]}× / ${mults[2]}× forecast σ): ` +
+          `${fmt(logToSimpleAnnual(sr.lo))} / ${fmt(logToSimpleAnnual(sr.mid))} / ${fmt(logToSimpleAnnual(sr.hi))}`
         );
       }
       if (Number.isFinite(pair.std)) {
@@ -2666,87 +2680,34 @@ function expectedDecayDisplayLabel(r) {
   return isVolatilityEtp(r) ? 'Edge (vol-adj)' : 'Edge (Ito)';
 }
 
-// σ-regime column: forward edge p50 at sigma * (lo, mid, hi) multipliers,
-// stacked vertically. Renders '—' when MC sensitivity is unavailable
-// (LETF rows: only mid is meaningful; lo/hi available too via row.std?).
-function sigmaRegimeTooltip(r) {
-  const pair = expectedPairPnlDistribution(r);
-  if (!pair) return '';
-  const sr = pair.sigmaRegime || {};
-  const m = sr.multipliers || [0.7, 1.0, 1.3];
-  const lines = [
-    'Forward edge p50 (log/yr) at sigma multipliers of the forecast vol.',
-    'Same MC engine and seed as the headline cell; only sigma is rescaled.',
-    `lo (×${m[0]}): ${fmtLogYr(sr.lo)} log/yr`,
-    `mid (×${m[1]}): ${fmtLogYr(sr.mid)} log/yr (= headline)`,
-    `hi (×${m[2]}): ${fmtLogYr(sr.hi)} log/yr`,
-  ];
-  if (sr.lo != null && sr.hi != null) {
-    lines.push('');
-    lines.push('Higher vol -> more weekly put-spread payoff captured -> more positive');
-    lines.push('forward edge. Rally-then-chop is the most profitable regime.');
-  }
-  return lines.join('\n');
-}
-
-function renderSigmaRegimeCell(r) {
-  if (!expectedDecayAvailableForRow(r)) {
-    return <span style={{ color: 'var(--text-muted)' }}>—</span>;
-  }
-  const pair = expectedPairPnlDistribution(r);
-  if (!pair) return <span style={{ color: 'var(--text-muted)' }}>—</span>;
-  const sr = pair.sigmaRegime || {};
-  if (sr.lo == null && sr.hi == null) {
-    // LETF rows: only the headline mid value is populated; show it
-    // simply without the triplet label.
-    return (
-      <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title="No sigma sensitivity for this product class">
-        {fmtLogYr(sr.mid)}
-      </span>
-    );
-  }
-  return (
-    <div style={{ lineHeight: 1.15, fontSize: 11 }}>
-      <div style={{ color: 'var(--text-muted)' }}>{fmtLogYr(sr.lo)} <span style={{ fontSize: 9, opacity: 0.7 }}>lo</span></div>
-      <div style={{ fontWeight: 600 }}>{fmtLogYr(sr.mid)} <span style={{ fontSize: 9, color: 'var(--text-muted)', opacity: 0.7 }}>mid</span></div>
-      <div style={{ color: 'var(--text-muted)' }}>{fmtLogYr(sr.hi)} <span style={{ fontSize: 9, opacity: 0.7 }}>hi</span></div>
-    </div>
-  );
-}
-
 function renderExpectedDecayCell(r, chartVolLookbackRange) {
   if (!expectedDecayAvailableForRow(r)) {
     return <span style={{ color: 'var(--text-muted)' }}>—</span>;
   }
   const pair = expectedPairPnlDistribution(r);
   if (pair) {
-    const simple = logToSimpleAnnual(pair.p50);
-    return (
-      <div style={{ lineHeight: 1.15 }}>
-        <div>{fmtLogYr(pair.p50)}<span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>log/yr</span></div>
-        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
-          {simple != null ? `${fmtPct(simple)} simple` : '1Y fwd'}
-          {pair.p10 != null && pair.p90 != null
-            ? ` · ${fmtLogYr(pair.p10)}/${fmtLogYr(pair.p90)}`
-            : ''}
-        </div>
-      </div>
-    );
+    const cell = renderForwardPairPnlCell(pair);
+    if (cell) return cell;
   }
   // Legacy fall-through: gross-decay distribution from pre-migration JSON.
   const dist = expectedDecayDistribution(r);
   if (dist) {
     const isYbDist = isYieldBoostPutSpreadDistModel(dist.model);
+    const p50Simple = logToSimpleAnnual(dist.p50);
+    const p10Simple = logToSimpleAnnual(dist.p10);
+    const p90Simple = logToSimpleAnnual(dist.p90);
     return (
       <div style={{ lineHeight: 1.15 }}>
-        <div>{fmt(dist.p50)}</div>
+        <div>{fmt(p50Simple)}</div>
         <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
-          {isYbDist ? 'gross · ' : ''}{fmt(dist.p10)} / {fmt(dist.p90)}
+          {isYbDist ? 'gross · ' : ''}{fmt(p10Simple)} / {fmt(p90Simple)}
         </div>
       </div>
     );
   }
-  return fmt(expectedDecayDisplayValue(r));
+  const legacy = expectedDecayDisplayValue(r);
+  const legacySimple = logToSimpleAnnual(legacy);
+  return fmt(legacySimple != null ? legacySimple : legacy);
 }
 
 /**
@@ -3443,8 +3404,7 @@ const COLS = [
   { key: 'borrow_current', label: 'Borrow Rate', w: 105, hint: 'Spot fee-only borrow on this row (IBKR FTP on full build, else screener CSV). Compare to borrow_history.json tail on chart Borrow tab.' },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, sublabel: 'trailing', hint: 'Realized: trailing annualized hedge drag from ls-algo screener (β·r_U − r_ETF) × 252. Not the forward Exp. decay column.' },
-  { key: 'expected_pair_pnl_p50_annual', label: 'Exp. edge (fwd)', sublabel: 'pair · 1Y log/yr', w: 138, hint: 'Median 1Y log-rate of weekly-rebalanced delta-hedged short pair (short ETF + beta-long underlying), MC over forecast vol. Same axis as Realized: Stahl beta·log(R_und_TR) − log(R_etf_TR). Short-favorable positive. LETF/inverse/vol-ETP: equals gross vol-drag (no cash leg). YieldBOOST: path-dependent MC (n=20k) where each Friday short notional resets to current equity, long resets to beta·equity, and the 95/88 put-spread payoff accrues to the short. Distributions wash. Anchor for the Net edge inverse-variance blend.' },
-  { key: 'expected_pair_pnl_at_sigma_mid_p50_annual', label: 'σ-regime', sublabel: 'lo · mid · hi', w: 96, hint: 'Forward edge p50 (log/yr) at sigma multipliers 0.7× / 1.0× / 1.3× of the forecast vol. Illustrates gamma-scalp sensitivity: higher realized vol -> more put-spread payoff captured weekly -> more positive forward edge. Sort runs on the mid value (= headline). YB-only column; LETF rows show single mid value.' },
+  { key: 'expected_pair_pnl_p50_annual', label: 'Exp. edge (fwd)', sublabel: 'pair · 1Y', w: 118, hint: 'Median 1Y forward pair P&L as a simple annual % (short ETF + beta-long underlying, weekly rebalance, MC over forecast vol). Short-favorable positive. Sub-row is p10/p90 band. Hover for vol sensitivity at 0.7×/1.0×/1.3× forecast σ. LETF/inverse/vol-ETP: equals gross vol-drag (no cash leg). YieldBOOST: path-dependent MC; distributions wash. Anchor for Net edge blend.' },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
@@ -6297,12 +6257,15 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 }
                 const pair = expectedPairPnlDistribution(r);
                 if (pair) {
+                  const p50Simple = logToSimpleAnnual(pair.p50);
+                  const p10Simple = logToSimpleAnnual(pair.p10);
+                  const p90Simple = logToSimpleAnnual(pair.p90);
                   return (
                     <div style={{ lineHeight: 1.15 }}>
-                      <div className="cs-value">{fmt(pair.p50)}</div>
-                      {pair.p10 != null && pair.p90 != null ? (
+                      <div className="cs-value">{fmt(p50Simple)}</div>
+                      {p10Simple != null && p90Simple != null ? (
                         <div className="cs-sub" style={{ marginTop: 2 }}>
-                          {fmt(pair.p10)} / {fmt(pair.p90)}
+                          {fmt(p10Simple)} / {fmt(p90Simple)}
                         </div>
                       ) : null}
                     </div>
@@ -6310,11 +6273,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 }
                 const dist = expectedDecayDistribution(r);
                 if (dist) {
+                  const p50Simple = logToSimpleAnnual(dist.p50);
+                  const p10Simple = logToSimpleAnnual(dist.p10);
+                  const p90Simple = logToSimpleAnnual(dist.p90);
                   return (
                     <div style={{ lineHeight: 1.15 }}>
-                      <div className="cs-value">{fmt(dist.p50)}</div>
+                      <div className="cs-value">{fmt(p50Simple)}</div>
                       <div className="cs-sub" style={{ marginTop: 2 }}>
-                        {fmt(dist.p10)} / {fmt(dist.p90)}
+                        {fmt(p10Simple)} / {fmt(p90Simple)}
                       </div>
                     </div>
                   );
@@ -9585,9 +9551,6 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         <td title="Realized trailing hedge drag (ls-algo screener)">{fmt(r.gross_decay_annual)}</td>
                         <td title={decayDistTooltip(r, chartVolLookbackRange)}>
                           {renderExpectedDecayCell(r, chartVolLookbackRange)}
-                        </td>
-                        <td title={sigmaRegimeTooltip(r)}>
-                          {renderSigmaRegimeCell(r)}
                         </td>
                         <td style={{ verticalAlign: 'middle' }}>
                           {isPassiveLowBetaRow(r) ? (
