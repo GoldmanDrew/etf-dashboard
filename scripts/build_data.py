@@ -31,12 +31,25 @@ import requests
 from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_metrics
 from income_schedule import (
     DEFAULT_CROSS_FUND_RATIO,
+    DEFAULT_EXPENSE_RATIO_ANNUAL,
     band_to_sigma,
     build_all_calibrations,
     build_legacy_yield_fields,
     expected_pair_pnl_annual,
     inverse_variance_blend,
+    scenario_grid_pair_pnl,
+    simulate_weekly_compound_pair_pnl,
+    stable_seed_from_symbol,
 )
+
+# schema_v=4 + weekly-rebalanced compound MC: tunable knobs for the new
+# headline forward edge and Scenarios-tab heatmap. See AGENTS.md
+# §4.5 / §4.5.1 for the model.
+PAIR_MC_PATHS = int(os.environ.get("PAIR_MC_PATHS", "20000"))
+PAIR_MC_GRID_PATHS = int(os.environ.get("PAIR_MC_GRID_PATHS", "5000"))
+PAIR_SIGMA_REGIME_MULTIPLIERS = (0.7, 1.0, 1.3)
+PAIR_SCENARIO_SIGMA_MULTIPLIERS = (0.5, 0.7, 1.0, 1.3, 1.5)
+PAIR_SCENARIO_DRIFTS = (-0.50, -0.25, 0.00, 0.25, 0.50)
 
 # ──────────────────────────────────────────────
 # Config
@@ -4125,76 +4138,230 @@ def build():
             f"(default {DEFAULT_CROSS_FUND_RATIO:.2f})"
         )
 
-    # 5c. Forward pair-trade P&L + YB-specific net-edge re-blend.
-    # For non-YB rows pair-trade P&L = gross drag (no cash leg) -> mirror
-    # ``expected_gross_decay_p*`` into ``expected_pair_pnl_p*``.
-    # For YB rows we:
-    #   1. Compute pair P&L = NAV decay - calibrated distributions at forecast sigma.
-    #   2. Adjust the realized gross-decay series to pair basis (subtract
-    #      annualized distribution run-rate). This is decision D1.
-    #   3. Re-run the inverse-variance blend on the pair-P&L axis.
-    #   4. Shift the published net-edge histogram + quantiles by
-    #      (new_posterior - old_anchor_target). The bootstrap shape (variance,
-    #      autocorrelation, regime mixing) is preserved; only the level changes.
-    _yb_reblended = 0
+    # 5c. Forward pair-trade P&L on the **weekly-rebalanced compound** axis.
+    #
+    # As of schema_v=4 every row carries:
+    #   - expected_pair_pnl_p{10,25,50,75,90}_annual (log_continuous_annual)
+    #   - expected_pair_pnl_mean_annual / std_annual (used as sigma_F for the blend)
+    #   - expected_pair_pnl_at_sigma_{lo,mid,hi}_p50_annual (vol-regime sensitivity)
+    #   - pair_scenario_grid (5x5 sigma_mult x drift)
+    #
+    # YieldBOOST forward = path-dependent MC of a delta-hedged short pair on
+    # the weekly compounding axis, same as the screener's gross_decay_annual.
+    # Distributions wash on this axis (q' = 1 - L - f/52 - d cancels), so
+    # capture_ratio is recorded but does NOT enter the per-week pair P&L.
+    #
+    # LETF / inverse / vol-ETP forward = identity (cash leg absent), so we
+    # mirror expected_gross_decay_p* into expected_pair_pnl_p* and analytically
+    # compute the scenario grid as (beta^2 - beta)/2 * (k*sigma)^2 + beta*mu.
+    #
+    # Net edge: the inverse-variance blend now consumes (forward_mc, realized)
+    # both pre-borrow on the same log axis, then borrow is subtracted once at
+    # net_edge time (via the existing screener pipeline). The historical D1
+    # 'gross_decay_annual - distributions_annual' subtraction is removed --
+    # gross_decay_annual is already pair-axis (TR-based, distributions in
+    # adjclose), so subtracting distributions a second time double-counted.
+    _yb_mc = 0
+    _yb_skipped_no_inputs = 0
     _yb_skipped_no_diag = 0
+    _letf_grid_filled = 0
     for rec in records:
-        # Default: pair P&L = gross drag (LETF/inverse/vol-ETP have no cash leg).
+        # ---------- Default: LETF-style identity + analytic grid ----------
         rec["expected_pair_pnl_p10_annual"] = rec.get("expected_gross_decay_p10_annual")
+        rec["expected_pair_pnl_p25_annual"] = None  # only YB MC fills this
         rec["expected_pair_pnl_p50_annual"] = rec.get("expected_gross_decay_p50_annual")
+        rec["expected_pair_pnl_p75_annual"] = None
         rec["expected_pair_pnl_p90_annual"] = rec.get("expected_gross_decay_p90_annual")
+        rec["expected_pair_pnl_mean_annual"] = rec.get("expected_gross_decay_mean_annual")
+        rec["expected_pair_pnl_std_annual"] = rec.get("gross_sigma_forward_annual")
+        rec["expected_pair_pnl_units"] = "log_continuous_annual"
+        rec["expected_pair_pnl_basis"] = (
+            "weekly_rebalanced_compound" if rec.get("is_yieldboost") else "log_drag_identity"
+        )
         rec["expected_pair_pnl_source"] = (
             "gross_drag_pair_identity"
             if rec.get("expected_gross_decay_p50_annual") is not None
             else None
         )
+        # Drop any deprecated YB-only fields lingering from an older build.
+        rec.pop("expected_pair_pnl_simple_p10_annual", None)
+        rec.pop("expected_pair_pnl_simple_p50_annual", None)
+        rec.pop("expected_pair_pnl_simple_p90_annual", None)
+        rec.pop("gross_decay_annual_pair_adjusted", None)
+
+        beta_v = rec.get("delta") if rec.get("delta") is not None else rec.get("beta")
+        try:
+            beta_v_f = float(beta_v) if beta_v is not None else None
+        except (TypeError, ValueError):
+            beta_v_f = None
+        sigma_forecast = rec.get("forecast_vol_underlying_annual") or rec.get("vol_underlying_annual")
+        try:
+            sigma_forecast_f = float(sigma_forecast) if sigma_forecast is not None else None
+        except (TypeError, ValueError):
+            sigma_forecast_f = None
+        sigma_ok = (
+            sigma_forecast_f is not None
+            and math.isfinite(sigma_forecast_f)
+            and sigma_forecast_f > 0
+        )
+        beta_ok = beta_v_f is not None and math.isfinite(beta_v_f)
+
+        # ---------- LETF / inverse / vol-ETP analytic scenario grid ------
+        if not rec.get("is_yieldboost") and sigma_ok and beta_ok:
+            sigma_mults = list(PAIR_SCENARIO_SIGMA_MULTIPLIERS)
+            drifts = list(PAIR_SCENARIO_DRIFTS)
+            cb = (beta_v_f * beta_v_f - beta_v_f) / 2.0
+            grid = []
+            und_grid = []
+            for k in sigma_mults:
+                row_g = []
+                row_u = []
+                sigma_k = sigma_forecast_f * k
+                drag_k = cb * sigma_k * sigma_k
+                for mu in drifts:
+                    cell = drag_k + beta_v_f * mu
+                    row_g.append(round(float(cell), 6))
+                    # Underlying simple-return diagnostic for tooltip
+                    row_u.append(round(math.expm1(mu), 6))
+                grid.append(row_g)
+                und_grid.append(row_u)
+            rec["pair_scenario_grid"] = {
+                "sigma_multipliers": sigma_mults,
+                "drifts": drifts,
+                "p50_log_grid": grid,
+                "und_p50_simple_grid": und_grid,
+                "borrow_annual": 0.0,
+                "expense_ratio_annual": 0.0,
+                "n_paths_per_cell": 0,
+                "axis": "log_continuous_annual",
+                "basis": "letf_ito_analytic",
+                "engine": "ito_closed_form",
+            }
+            _letf_grid_filled += 1
+            continue
+
         if not rec.get("is_yieldboost"):
             continue
+
+        # ---------- YieldBOOST weekly-rebalanced compound MC -------------
         calibration = rec.get("income_distribution_calibration") or None
-        if not calibration:
+        if calibration is None or not sigma_ok or not beta_ok:
+            _yb_skipped_no_inputs += 1
             continue
-        sigma_forecast = rec.get("forecast_vol_underlying_annual") or rec.get("vol_underlying_annual")
-        if sigma_forecast is None:
-            continue
-        try:
-            sigma_forecast = float(sigma_forecast)
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(sigma_forecast) or sigma_forecast <= 0:
-            continue
-        gross_band = {
-            "p10": rec.get("expected_gross_decay_p10_annual"),
-            "p50": rec.get("expected_gross_decay_p50_annual"),
-            "p90": rec.get("expected_gross_decay_p90_annual"),
-        }
+
+        sym = norm_sym(rec.get("symbol") or "")
+        seed_base = stable_seed_from_symbol(sym)
+        capture_ratio_used = float(
+            calibration.get("blended_ratio_used") or DEFAULT_CROSS_FUND_RATIO
+        )
+
         pair = expected_pair_pnl_annual(
             calibration=calibration,
-            sigma_annual=sigma_forecast,
+            sigma_annual=sigma_forecast_f,
+            beta=beta_v_f,
+            mu_annual=0.0,
             horizon_years=1.0,
-            gross_band=gross_band,
+            expense_ratio_annual=DEFAULT_EXPENSE_RATIO_ANNUAL,
+            borrow_annual=0.0,  # pre-borrow forward; borrow subtracted at net-edge
+            n_paths=PAIR_MC_PATHS,
+            seed=seed_base,
         )
         if pair is None:
+            _yb_skipped_no_inputs += 1
             continue
-        # Pair-P&L band (gross MC quantiles with cash leg held fixed).
-        rec["expected_pair_pnl_p10_annual"] = pair.get("p10")
-        rec["expected_pair_pnl_p50_annual"] = pair.get("p50")
-        rec["expected_pair_pnl_p90_annual"] = pair.get("p90")
-        rec["expected_pair_pnl_nav_decay_annual"] = pair.get("nav_decay")
-        rec["expected_pair_pnl_distributions_annual"] = pair.get("distributions")
-        rec["expected_pair_pnl_sigma_forward_annual"] = pair.get("sigma_forward_annual")
-        rec["expected_pair_pnl_source"] = "yieldboost_calibrated_pair_pnl"
-        # D1: YB-adjusted realized series mean.
-        distributions_annual = float(pair.get("distributions") or 0.0)
-        realized_gross = rec.get("gross_decay_annual")
-        if isinstance(realized_gross, (int, float)) and math.isfinite(float(realized_gross)):
-            rec["gross_decay_annual_pair_adjusted"] = round(
-                float(realized_gross) - distributions_annual, 6
+
+        # ---- Headline log-axis quantiles (schema_v=4) -------------------
+        rec["expected_pair_pnl_p10_annual"] = round(float(pair["p10_log"]), 6)
+        rec["expected_pair_pnl_p25_annual"] = round(float(pair["p25_log"]), 6)
+        rec["expected_pair_pnl_p50_annual"] = round(float(pair["p50_log"]), 6)
+        rec["expected_pair_pnl_p75_annual"] = round(float(pair["p75_log"]), 6)
+        rec["expected_pair_pnl_p90_annual"] = round(float(pair["p90_log"]), 6)
+        rec["expected_pair_pnl_mean_annual"] = round(float(pair["mean_log"]), 6)
+        rec["expected_pair_pnl_std_annual"] = round(float(pair["std_log"]), 6)
+        rec["expected_pair_pnl_units"] = "log_continuous_annual"
+        rec["expected_pair_pnl_basis"] = "weekly_rebalanced_compound"
+        rec["expected_pair_pnl_source"] = "yieldboost_weekly_compound_mc"
+        rec["expected_pair_pnl_n_paths"] = int(pair["n_paths"])
+        # Sigma actually fed to the MC for back-trace (forecast vol).
+        rec["expected_pair_pnl_sigma_forward_annual"] = round(float(sigma_forecast_f), 6)
+        # Magis closed-form simple-return diagnostics (panel only, NOT headline).
+        rec["expected_pair_pnl_nav_decay_annual"] = round(
+            float(pair["nav_decay_simple_annual"]), 6
+        )
+        rec["expected_pair_pnl_distributions_annual"] = round(
+            float(pair["distributions_simple_annual"]), 6
+        )
+        rec["expected_pair_pnl_capture_ratio_used"] = round(capture_ratio_used, 6)
+
+        # ---- Vol-regime sensitivity triplet -----------------------------
+        sigma_regime = {}
+        for mult in PAIR_SIGMA_REGIME_MULTIPLIERS:
+            label = "lo" if mult < 1.0 else "hi" if mult > 1.0 else "mid"
+            if abs(mult - 1.0) < 1e-9:
+                # Mid is just the headline, no need to resimulate.
+                sigma_regime[label] = float(pair["p50_log"])
+                continue
+            mc_k = simulate_weekly_compound_pair_pnl(
+                sigma_annual=sigma_forecast_f * mult,
+                mu_annual=0.0,
+                beta=beta_v_f,
+                capture_ratio=capture_ratio_used,
+                expense_ratio_annual=DEFAULT_EXPENSE_RATIO_ANNUAL,
+                borrow_annual=0.0,
+                n_paths=PAIR_MC_PATHS,
+                seed=seed_base ^ int(mult * 1000),
             )
-        else:
-            rec["gross_decay_annual_pair_adjusted"] = None
-        # Re-blend at pair-P&L level using the screener-provided realized mean
-        # and sigma. If diagnostics are missing (very old screener output),
-        # leave the published net-edge alone.
+            sigma_regime[label] = (
+                float(mc_k["p50_log"]) if mc_k is not None else None
+            )
+        rec["expected_pair_pnl_at_sigma_lo_p50_annual"] = (
+            round(sigma_regime["lo"], 6) if sigma_regime.get("lo") is not None else None
+        )
+        rec["expected_pair_pnl_at_sigma_mid_p50_annual"] = (
+            round(sigma_regime["mid"], 6) if sigma_regime.get("mid") is not None else None
+        )
+        rec["expected_pair_pnl_at_sigma_hi_p50_annual"] = (
+            round(sigma_regime["hi"], 6) if sigma_regime.get("hi") is not None else None
+        )
+        rec["expected_pair_pnl_sigma_regime_multipliers"] = list(PAIR_SIGMA_REGIME_MULTIPLIERS)
+
+        # ---- 2D Scenarios-tab grid (sigma_mult x drift) ------------------
+        grid = scenario_grid_pair_pnl(
+            sigma_annual=sigma_forecast_f,
+            beta=beta_v_f,
+            capture_ratio=capture_ratio_used,
+            sigma_multipliers=PAIR_SCENARIO_SIGMA_MULTIPLIERS,
+            drifts=PAIR_SCENARIO_DRIFTS,
+            expense_ratio_annual=DEFAULT_EXPENSE_RATIO_ANNUAL,
+            borrow_annual=0.0,
+            n_paths=PAIR_MC_GRID_PATHS,
+            seed=seed_base,
+        )
+        if grid is not None:
+            rec["pair_scenario_grid"] = {
+                "sigma_multipliers": grid["sigma_multipliers"],
+                "drifts": grid["drifts"],
+                "p50_log_grid": [
+                    [round(v, 6) if v is not None else None for v in row]
+                    for row in grid["p50_log_grid"]
+                ],
+                "und_p50_simple_grid": [
+                    [round(v, 6) if v is not None else None for v in row]
+                    for row in grid["und_p50_simple_grid"]
+                ],
+                "borrow_annual": grid["borrow_annual"],
+                "expense_ratio_annual": grid["expense_ratio_annual"],
+                "n_paths_per_cell": grid["n_paths_per_cell"],
+                "axis": grid["axis"],
+                "basis": grid["basis"],
+                "engine": grid["engine"],
+            }
+        _yb_mc += 1
+
+        # ---- Net-edge re-blend on the new log axis ----------------------
+        # Forward sigma is the MC standard deviation (path-level). Realized
+        # sigma + mean come from the screener. NO D1 distribution subtraction:
+        # gross_decay_annual is already pair-axis (TR-based via adjclose).
         mu_R_raw = rec.get("gross_realized_mean_annual")
         sigma_R = rec.get("gross_sigma_realized_annual")
         old_anchor_target = rec.get("gross_anchor_target_annual")
@@ -4202,15 +4369,15 @@ def build():
             _yb_skipped_no_diag += 1
             continue
         try:
-            mu_R_pair = float(mu_R_raw) - distributions_annual
+            mu_R_pair = float(mu_R_raw)
             sigma_R_val = float(sigma_R) if sigma_R is not None else None
             old_anchor_val = float(old_anchor_target)
         except (TypeError, ValueError):
             _yb_skipped_no_diag += 1
             continue
-        sigma_F_pair = pair.get("sigma_forward_annual")
+        sigma_F_pair = float(pair["std_log"]) if pair["std_log"] > 0 else None
         blend = inverse_variance_blend(
-            mu_forward=float(pair["p50"]),
+            mu_forward=float(pair["p50_log"]),
             sigma_forward=sigma_F_pair,
             mu_realized=mu_R_pair,
             sigma_realized=sigma_R_val,
@@ -4218,18 +4385,21 @@ def build():
         if blend is None:
             continue
         posterior_mu = float(blend["posterior_mean"])
-        rec["pair_anchor_target_annual"] = posterior_mu
-        rec["pair_anchor_shift_annual"] = posterior_mu - mu_R_pair
+        rec["pair_anchor_target_annual"] = round(posterior_mu, 6)
+        rec["pair_anchor_shift_annual"] = round(posterior_mu - mu_R_pair, 6)
         rec["pair_blend_method"] = blend["method"]
-        rec["pair_blend_weight_forward"] = blend["weight_forward"]
+        rec["pair_blend_weight_forward"] = round(float(blend["weight_forward"]), 6)
         rec["pair_sigma_forward_annual"] = (
-            float(sigma_F_pair) if sigma_F_pair is not None else None
+            round(float(sigma_F_pair), 6) if sigma_F_pair is not None else None
         )
-        rec["pair_sigma_realized_annual"] = sigma_R_val
-        rec["pair_realized_mean_annual"] = mu_R_pair
-        # Histogram + quantile shift: convert (gross_old_shifted - borrow)
-        # quantiles into (pair_pnl_blended - borrow) quantiles via a single
-        # additive shift = posterior_mu - old_anchor_val.
+        rec["pair_sigma_realized_annual"] = (
+            round(sigma_R_val, 6) if sigma_R_val is not None else None
+        )
+        rec["pair_realized_mean_annual"] = round(mu_R_pair, 6)
+        # Histogram + quantile shift: net_edge bootstrap was anchored on the
+        # OLD gross-axis posterior; shift it onto the NEW pair-axis posterior.
+        # Both anchors are pre-borrow on the same log axis, so this is a
+        # single additive shift = posterior_mu - old_anchor_val.
         delta = posterior_mu - old_anchor_val
         if math.isfinite(delta):
             for q_key in (
@@ -4254,12 +4424,12 @@ def build():
                         )
                 except (ValueError, TypeError):
                     pass
-        _yb_reblended += 1
-    if _yb_reblended or _yb_skipped_no_diag:
+    if _yb_mc or _letf_grid_filled or _yb_skipped_no_inputs or _yb_skipped_no_diag:
         print(
-            f"  YieldBOOST net-edge re-blend (pair-P&L anchor + D1 adjusted realized): "
-            f"{_yb_reblended} re-blended"
-            + (f", {_yb_skipped_no_diag} skipped (no screener blend diagnostics)" if _yb_skipped_no_diag else "")
+            f"  Pair-PnL forward (schema_v=4): {_yb_mc} YB MC, "
+            f"{_letf_grid_filled} LETF analytic grid"
+            + (f", {_yb_skipped_no_inputs} YB skipped (missing inputs)" if _yb_skipped_no_inputs else "")
+            + (f", {_yb_skipped_no_diag} YB skipped re-blend (no screener diag)" if _yb_skipped_no_diag else "")
         )
 
     # 6. Compute summary
@@ -4276,8 +4446,23 @@ def build():
 
     output = {
         "build_time": build_time,
-        "schema_v": 2,
+        "schema_v": 4,
         "edge_sign_convention": "short_favorable_positive",
+        "expected_pair_pnl_units": "log_continuous_annual",
+        "expected_pair_pnl_basis": {
+            "yieldboost": "weekly_rebalanced_compound_mc",
+            "letf": "ito_analytic",
+        },
+        "pair_scenario_grid_meta": {
+            "sigma_multipliers": list(PAIR_SCENARIO_SIGMA_MULTIPLIERS),
+            "drifts": list(PAIR_SCENARIO_DRIFTS),
+            "axis": "log_continuous_annual",
+            "yieldboost_engine": "weekly_rebalanced_compound_mc",
+            "letf_engine": "ito_analytic",
+            "n_paths_yb_grid": int(PAIR_MC_GRID_PATHS),
+            "n_paths_yb_headline": int(PAIR_MC_PATHS),
+            "sigma_regime_multipliers": list(PAIR_SIGMA_REGIME_MULTIPLIERS),
+        },
         "uncertainty_footnote": (
             "p5/p95 are sampling/stress-copula assumptions, not a full model of tail risk."
         ),

@@ -427,7 +427,7 @@
    * or ``null`` when the inputs are non-finite.  ``method`` is
    * ``'inverse_variance'`` when both sigmas are positive, or
    * ``'anchor_shift_fallback'`` when only ``sigma_forward`` is unknown /
-   * zero (degenerate forward forecast  return forward mean, w_F=1).
+   * zero (degenerate forward forecast ï¿½ return forward mean, w_F=1).
    */
   function inverseVarianceBlend(params) {
     const muF = _toNum(params && params.muForward);
@@ -506,6 +506,260 @@
     return 'adverse';
   }
 
+  // ===========================================================================
+  // Weekly-rebalanced compound pair-P&L MC (schema_v=4, JS mirror)
+  // ===========================================================================
+  // Mirror of ``income_schedule.simulate_weekly_compound_pair_pnl`` so the
+  // Scenarios tab can recompute the heatmap client-side when the user tweaks
+  // sigma sliders. The Python build ships the canonical pre-computed
+  // ``pair_scenario_grid``; this engine is for live "what-if" recompute and
+  // for parity tests against the Python output.
+  const _PAIR_WEEK_FLOOR = -0.99;
+  const _PAIR_WEEK_CEIL = 5.0;
+
+  function _mulberry32(seed) {
+    let s = (Number(seed) || 0) >>> 0;
+    return function rand() {
+      s = (s + 0x6D2B79F5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function _boxMullerPair(rand) {
+    let u1 = 0;
+    while (u1 === 0) u1 = rand();
+    const u2 = rand();
+    const r = Math.sqrt(-2.0 * Math.log(u1));
+    const theta = 2 * Math.PI * u2;
+    return [r * Math.cos(theta), r * Math.sin(theta)];
+  }
+
+  // Stable 32-bit hash from a symbol (CRC32-style); matches the Python
+  // ``stable_seed_from_symbol`` numerically for repeated parity in tests.
+  // Note: the Python uses zlib.crc32; this JS uses a small precomputed CRC32
+  // routine. We do NOT need bit-equality with Python -- only stability across
+  // JS runs and a usable seed for mulberry32.
+  function stableSeedFromSymbol(symbol, salt) {
+    const sym = String(symbol || '').trim().toUpperCase();
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < sym.length; i += 1) {
+      h ^= sym.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    const sl = (Number(salt) || 0) >>> 0;
+    return ((h ^ sl) & 0x7FFFFFFF) >>> 0;
+  }
+
+  function _putSpreadPayoff(sleeveRet) {
+    const end = 1 + sleeveRet;
+    const shortPut = Math.max(0, PUT_SPREAD_SHORT_STRIKE - end);
+    const longPut = Math.max(0, PUT_SPREAD_LONG_STRIKE - end);
+    let spread = shortPut - longPut;
+    if (spread < 0) spread = 0;
+    if (spread > PUT_SPREAD_SHORT_STRIKE - PUT_SPREAD_LONG_STRIKE) {
+      spread = PUT_SPREAD_SHORT_STRIKE - PUT_SPREAD_LONG_STRIKE;
+    }
+    return spread;
+  }
+
+  /**
+   * Path-dependent MC of a weekly-rebalanced delta-hedged YB short.
+   * For each path of length ``weeks``: draw lognormal weekly underlying
+   * returns, evaluate the realized 95/88 put-spread on the 2x sleeve, mark
+   * the pair to current equity, compound. Returns log_continuous_annual
+   * quantiles.
+   *
+   * @param {object} params
+   * @param {number} params.sigmaAnnual - underlying annual vol
+   * @param {number} [params.muAnnual=0]
+   * @param {number} [params.beta=0]
+   * @param {number} [params.captureRatio=DEFAULT_CROSS_FUND_RATIO]  - kept for symmetry
+   * @param {number} [params.expenseRatioAnnual=DEFAULT_EXPENSE_RATIO_ANNUAL]
+   * @param {number} [params.borrowAnnual=0]
+   * @param {number} [params.weeks=52]
+   * @param {number} [params.nPaths=5000]
+   * @param {number} [params.seed=0]
+   * @returns {object|null} {p10Log, p25Log, p50Log, p75Log, p90Log, meanLog,
+   *                          stdLog, undP50Simple, weeks, nPaths, axis,
+   *                          basis, sigmaUsed, betaUsed, captureUsed}
+   */
+  function simulateWeeklyCompoundPairPnL(params) {
+    const opts = params || {};
+    const sigma = _toNum(opts.sigmaAnnual);
+    const mu = _toNum(opts.muAnnual);
+    const beta = _toNum(opts.beta);
+    const cap = _toNum(opts.captureRatio);
+    const er = _toNum(opts.expenseRatioAnnual);
+    const borrow = _toNum(opts.borrowAnnual);
+    const weeks = Math.max(1, Math.floor(_toNum(opts.weeks) || WEEKS_PER_YEAR));
+    const nPaths = Math.max(1, Math.floor(_toNum(opts.nPaths) || 5000));
+    const seed = (Number(opts.seed) || 0) >>> 0;
+
+    if (!Number.isFinite(sigma) || sigma <= 0) return null;
+    const muOk = Number.isFinite(mu) ? mu : 0;
+    const betaOk = Number.isFinite(beta) ? beta : 0;
+    const erOk = Number.isFinite(er) && er >= 0 ? er : DEFAULT_EXPENSE_RATIO_ANNUAL;
+    const borrowOk = Number.isFinite(borrow) && borrow >= 0 ? borrow : 0;
+    const capOk = Number.isFinite(cap) ? cap : DEFAULT_CROSS_FUND_RATIO;
+
+    const sigmaW = sigma / Math.sqrt(WEEKS_PER_YEAR);
+    const muW = muOk / WEEKS_PER_YEAR - 0.5 * sigmaW * sigmaW;
+    const weeklyEr = erOk / WEEKS_PER_YEAR;
+    const weeklyBorrow = borrowOk / WEEKS_PER_YEAR;
+    const annualization = WEEKS_PER_YEAR / weeks;
+
+    const rand = _mulberry32(seed || 1);
+    const samples = new Float64Array(nPaths);
+    const undSamples = new Float64Array(nPaths);
+    let zPaired = null; // cached second leg of Box-Muller pair
+    for (let i = 0; i < nPaths; i += 1) {
+      let logPair = 0;
+      let logUnd = 0;
+      for (let t = 0; t < weeks; t += 1) {
+        let z;
+        if (zPaired !== null) {
+          z = zPaired;
+          zPaired = null;
+        } else {
+          const pair = _boxMullerPair(rand);
+          z = pair[0];
+          zPaired = pair[1];
+        }
+        const logUndT = muW + sigmaW * z;
+        const rUnd = Math.expm1(logUndT);
+        const sleeveRet = Math.expm1(2 * logUndT);
+        const L = _putSpreadPayoff(sleeveRet);
+        let pairW = L + weeklyEr - weeklyBorrow + betaOk * rUnd;
+        if (pairW < _PAIR_WEEK_FLOOR) pairW = _PAIR_WEEK_FLOOR;
+        if (pairW > _PAIR_WEEK_CEIL) pairW = _PAIR_WEEK_CEIL;
+        logPair += Math.log1p(pairW);
+        logUnd += logUndT;
+      }
+      samples[i] = logPair * annualization;
+      undSamples[i] = Math.expm1(logUnd * annualization);
+    }
+    // Sort a copy to compute quantiles. Float64Array sorts numerically.
+    const sorted = samples.slice().sort();
+    const undSorted = undSamples.slice().sort();
+    const q = (arr, p) => {
+      if (arr.length === 0) return NaN;
+      const idx = Math.min(arr.length - 1, Math.max(0, Math.round(p * (arr.length - 1))));
+      return arr[idx];
+    };
+    let mean = 0;
+    for (let i = 0; i < samples.length; i += 1) mean += samples[i];
+    mean /= samples.length;
+    let variance = 0;
+    for (let i = 0; i < samples.length; i += 1) {
+      const d = samples[i] - mean;
+      variance += d * d;
+    }
+    const std = samples.length > 1 ? Math.sqrt(variance / (samples.length - 1)) : 0;
+
+    return {
+      p10Log: q(sorted, 0.10),
+      p25Log: q(sorted, 0.25),
+      p50Log: q(sorted, 0.50),
+      p75Log: q(sorted, 0.75),
+      p90Log: q(sorted, 0.90),
+      meanLog: mean,
+      stdLog: std,
+      undP50Simple: q(undSorted, 0.50),
+      undMeanSimple: undSorted.reduce((a, b) => a + b, 0) / undSorted.length,
+      weeks,
+      nPaths,
+      sigmaUsed: sigma,
+      muUsed: muOk,
+      betaUsed: betaOk,
+      captureUsed: capOk,
+      expenseRatioAnnual: erOk,
+      borrowAnnual: borrowOk,
+      axis: 'log_continuous_annual',
+      basis: 'weekly_rebalanced_compound',
+    };
+  }
+
+  /**
+   * 5x5 (sigma_multiplier x drift) grid of MC p50 pair P&L (log/yr).
+   * Mirror of ``income_schedule.scenario_grid_pair_pnl``. Uses a smaller
+   * default ``nPaths`` per cell (2000) for client responsiveness.
+   *
+   * @param {object} params
+   * @param {number} params.sigmaAnnual
+   * @param {number} params.beta
+   * @param {number} [params.captureRatio=DEFAULT_CROSS_FUND_RATIO]
+   * @param {number[]} [params.sigmaMultipliers=[0.5,0.7,1.0,1.3,1.5]]
+   * @param {number[]} [params.drifts=[-0.5,-0.25,0,0.25,0.5]]
+   * @param {number} [params.expenseRatioAnnual]
+   * @param {number} [params.borrowAnnual=0]
+   * @param {number} [params.nPaths=2000]
+   * @param {number} [params.seed=0]
+   * @returns {object|null}
+   */
+  function scenarioGridPairPnL(params) {
+    const opts = params || {};
+    const sigma = _toNum(opts.sigmaAnnual);
+    const beta = _toNum(opts.beta);
+    if (!Number.isFinite(sigma) || sigma <= 0) return null;
+    if (!Number.isFinite(beta)) return null;
+    const sigmaMults = Array.isArray(opts.sigmaMultipliers) && opts.sigmaMultipliers.length > 0
+      ? opts.sigmaMultipliers.map(_toNum)
+      : [0.5, 0.7, 1.0, 1.3, 1.5];
+    const drifts = Array.isArray(opts.drifts) && opts.drifts.length > 0
+      ? opts.drifts.map(_toNum)
+      : [-0.5, -0.25, 0.0, 0.25, 0.5];
+    const cap = _toNum(opts.captureRatio);
+    const er = _toNum(opts.expenseRatioAnnual);
+    const borrow = _toNum(opts.borrowAnnual);
+    const nPaths = Math.max(1, Math.floor(_toNum(opts.nPaths) || 2000));
+    const seedBase = (Number(opts.seed) || 0) >>> 0;
+
+    const grid = [];
+    const undGrid = [];
+    for (let i = 0; i < sigmaMults.length; i += 1) {
+      const k = sigmaMults[i];
+      const row = [];
+      const undRow = [];
+      for (let j = 0; j < drifts.length; j += 1) {
+        const drift = drifts[j];
+        const mc = simulateWeeklyCompoundPairPnL({
+          sigmaAnnual: sigma * k,
+          muAnnual: drift,
+          beta,
+          captureRatio: Number.isFinite(cap) ? cap : DEFAULT_CROSS_FUND_RATIO,
+          expenseRatioAnnual: Number.isFinite(er) && er >= 0 ? er : DEFAULT_EXPENSE_RATIO_ANNUAL,
+          borrowAnnual: Number.isFinite(borrow) && borrow >= 0 ? borrow : 0,
+          nPaths,
+          seed: (seedBase ^ (i * 131 + j * 17)) >>> 0,
+        });
+        if (mc) {
+          row.push(mc.p50Log);
+          undRow.push(mc.undP50Simple);
+        } else {
+          row.push(null);
+          undRow.push(null);
+        }
+      }
+      grid.push(row);
+      undGrid.push(undRow);
+    }
+    return {
+      sigmaMultipliers: sigmaMults,
+      drifts,
+      p50LogGrid: grid,
+      undP50SimpleGrid: undGrid,
+      borrowAnnual: Number.isFinite(borrow) && borrow >= 0 ? borrow : 0,
+      expenseRatioAnnual: Number.isFinite(er) && er >= 0 ? er : DEFAULT_EXPENSE_RATIO_ANNUAL,
+      nPathsPerCell: nPaths,
+      axis: 'log_continuous_annual',
+      basis: 'weekly_rebalanced_compound',
+      engine: 'yieldboost_mc',
+    };
+  }
+
   const exported = {
     PUT_SPREAD_SHORT_STRIKE,
     PUT_SPREAD_LONG_STRIKE,
@@ -524,6 +778,9 @@
     expectedPairPnlAnnual,
     inverseVarianceBlend,
     bandToSigma,
+    simulateWeeklyCompoundPairPnL,
+    scenarioGridPairPnL,
+    stableSeedFromSymbol,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

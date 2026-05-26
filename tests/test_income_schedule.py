@@ -233,7 +233,7 @@ def test_build_income_calibration_row_full_flow():
     assert block["nav_missing_count"] == 0
     # Template captures the last 12 events
     assert len(block["template_yields"]) == 12
-    # Run-rate ? median weekly ù 52
+    # Run-rate ? median weekly ÔøΩ 52
     assert block["run_rate_annual_display"] is not None
     assert 0.5 < block["run_rate_annual_display"] < 1.2
     # Latest event references the last entry
@@ -316,7 +316,7 @@ def test_build_legacy_yield_fields_rewrites_with_corrected_semantics():
     }
     out = ic.build_legacy_yield_fields(block)
     assert out["income_yield_trailing_annual"] == pytest.approx(0.78, abs=1e-9)
-    # latest weekly ù 52 ? 0.7836
+    # latest weekly ÔøΩ 52 ? 0.7836
     assert out["income_yield_recent_annual"] == pytest.approx(0.78364, rel=1e-4)
     assert out["income_distribution_count_1y"] == 12
     assert out["income_latest_distribution"] == pytest.approx(0.064, abs=1e-9)
@@ -467,16 +467,13 @@ def test_inverse_variance_blend_limits():
     assert res_neither["weight_forward"] == 1.0
 
 
-def test_expected_pair_pnl_matches_research_net_short_plus_borrow(research):
-    """Forward pair-trade P&L should equal research ``net_short_annual``
-    + ``borrow_annual`` (closed-form identity: pair = navDecay - dist,
-    net_short = pair - borrow*T, so pair = net_short + borrow).
+def test_expected_pair_pnl_simple_diagnostics_match_research(research):
+    """Magis simple-return diagnostics on ``expected_pair_pnl_annual`` must
+    still reproduce the research closed form within tolerance, even though
+    they are no longer the headline forward (schema_v=4 ships the MC
+    log-axis quantiles instead).
 
-    The research's structural ``capture_ratio_research`` is measured at
-    *their* BS-premium basis (risk-neutral drift); the dashboard uses
-    physical-measure leveraged drift, so the BS premium is ~5% lower and
-    a tighter ratio reproduces the same d_weekly. We back-derive the
-    dashboard-equivalent ratio from the research's actual_distribution_weekly.
+    pair_simple = nav_decay_simple - distributions_simple = net_short + borrow.
     """
     tol = float(research["tolerances"]["net_short_pp"])
     for candidate in research["candidates"]:
@@ -484,8 +481,6 @@ def test_expected_pair_pnl_matches_research_net_short_plus_borrow(research):
         actual_d_weekly = float(candidate["actual_distribution_weekly"])
         dashboard_bs_weekly = ic.expected_put_spread_loss_weekly(0.0, sigma, 1.0)
         assert dashboard_bs_weekly > 0, candidate["etf"]
-        # Back-derive the calibration ratio at dashboard's BS basis so the
-        # implied d_weekly = ratio * BS matches the research's measured cash.
         ratio = actual_d_weekly / dashboard_bs_weekly
         calibration = {
             "blended_ratio_used": ratio,
@@ -495,38 +490,215 @@ def test_expected_pair_pnl_matches_research_net_short_plus_borrow(research):
         result = ic.expected_pair_pnl_annual(
             calibration=calibration,
             sigma_annual=sigma,
+            beta=0.4,
             horizon_years=1.0,
+            n_paths=2_000,
+            seed=ic.stable_seed_from_symbol(candidate["etf"]),
         )
         assert result is not None, candidate["etf"]
+        pair_simple = result["nav_decay_simple_annual"] - result["distributions_simple_annual"]
         expected_pair = float(candidate["net_short_annual"]) + float(candidate["borrow_annual"])
-        assert abs(result["p50"] - expected_pair) <= tol, (
-            f"{candidate['etf']}: pair P&L {result['p50']:.3f} vs research "
+        assert abs(pair_simple - expected_pair) <= tol, (
+            f"{candidate['etf']}: Magis pair simple {pair_simple:.3f} vs research "
             f"{expected_pair:.3f}"
         )
-        # nav_decay - distributions identity (always holds, regardless of ratio)
-        assert result["p50"] == pytest.approx(
-            result["nav_decay"] - result["distributions"], abs=1e-9
+
+
+# ---------------------------------------------------------------------------
+# 9. Weekly-rebalanced compound MC headline (schema_v=4)
+# ---------------------------------------------------------------------------
+MTYY_BASE = dict(
+    sigma_annual=0.674, mu_annual=0.0, beta=0.372, capture_ratio=0.80,
+    expense_ratio_annual=0.0099, borrow_annual=0.0,
+)
+
+
+def test_simulate_mc_quantiles_strictly_monotone_and_finite():
+    out = ic.simulate_weekly_compound_pair_pnl(
+        **MTYY_BASE, weeks=52, n_paths=10_000,
+        seed=ic.stable_seed_from_symbol("MTYY"),
+    )
+    assert out is not None
+    for k in ("p10_log", "p25_log", "p50_log", "p75_log", "p90_log",
+              "mean_log", "std_log"):
+        assert math.isfinite(out[k]), k
+    assert out["p10_log"] < out["p25_log"] < out["p50_log"] < out["p75_log"] < out["p90_log"]
+    assert out["std_log"] > 0
+    assert out["axis"] == "log_continuous_annual"
+    assert out["basis"] == "weekly_rebalanced_compound"
+
+
+def test_simulate_mc_mtyy_anchor_within_band():
+    """MTYY (sigma=0.674, beta=0.372, capR=0.80) headline p50 must land
+    in the documented [+1.10, +1.30] log/yr band with 20k paths and the
+    canonical seed. This is the regression anchor the rest of the
+    sigma-regime triplet is measured against.
+    """
+    out = ic.simulate_weekly_compound_pair_pnl(
+        **MTYY_BASE, weeks=52, n_paths=20_000,
+        seed=ic.stable_seed_from_symbol("MTYY"),
+    )
+    assert 1.10 <= out["p50_log"] <= 1.30, out["p50_log"]
+    assert 0.85 <= out["p10_log"] <= 1.15, out["p10_log"]
+    assert 1.25 <= out["p90_log"] <= 1.45, out["p90_log"]
+    # Sanity: mean roughly equals median for a not-too-skew distribution
+    assert abs(out["mean_log"] - out["p50_log"]) < 0.10
+
+
+def test_simulate_mc_distributions_wash():
+    """Capture ratio drops out of per-week pair P&L when rebalancing
+    weekly (distributions are paid by short to lender but collected
+    back via the q' = 1 - L - f/52 - d price drop). Same seed ->
+    p50 should be bit-identical across capR values.
+    """
+    seeds = ic.stable_seed_from_symbol("MTYY")
+    p50s = []
+    for cap in (0.50, 0.65, 0.80, 1.00):
+        out = ic.simulate_weekly_compound_pair_pnl(
+            sigma_annual=0.674, mu_annual=0.0, beta=0.372, capture_ratio=cap,
+            expense_ratio_annual=0.0099, borrow_annual=0.0,
+            weeks=52, n_paths=5_000, seed=seeds,
         )
+        p50s.append(out["p50_log"])
+    spread = max(p50s) - min(p50s)
+    assert spread < 1e-9, p50s
 
 
-def test_expected_pair_pnl_band_holds_cash_fixed():
-    """Band mapping: pair_p10 = gross_p10 - distributions (cash leg fixed)."""
-    calibration = {
-        "blended_ratio_used": 0.65,
-        "fund_ratio_confidence": "high",
-    }
-    gross_band = {"p10": 0.55, "p50": 0.70, "p90": 0.85}
-    result = ic.expected_pair_pnl_annual(
+def test_simulate_mc_sigma_zero_limit_collapses_to_er_minus_borrow():
+    """At sigma -> 0 the put-spread is always OTM (L_t = 0), and the
+    underlying is deterministic at mu = 0, so per-week pair = ER/52 -
+    borrow/52. Annualized log return -> ER - borrow.
+    """
+    out = ic.simulate_weekly_compound_pair_pnl(
+        sigma_annual=1e-4, mu_annual=0.0, beta=0.4, capture_ratio=0.5,
+        expense_ratio_annual=0.0099, borrow_annual=0.0,
+        weeks=52, n_paths=2_000, seed=42,
+    )
+    assert out["p50_log"] == pytest.approx(0.0099, abs=0.0005)
+
+    out_b = ic.simulate_weekly_compound_pair_pnl(
+        sigma_annual=1e-4, mu_annual=0.0, beta=0.4, capture_ratio=0.5,
+        expense_ratio_annual=0.0099, borrow_annual=0.05,
+        weeks=52, n_paths=2_000, seed=42,
+    )
+    assert out_b["p50_log"] == pytest.approx(0.0099 - 0.05, abs=0.0005)
+
+
+def test_simulate_mc_sigma_monotone_p50():
+    """Higher realized vol -> more put-spread payoff captured -> higher
+    p50 pair P&L (weekly gamma scalp). Strict monotonicity at MTYY
+    parameters with shared seed.
+    """
+    seeds = ic.stable_seed_from_symbol("MTYY")
+    sigmas = [0.674 * k for k in (0.5, 0.7, 1.0, 1.3, 1.5)]
+    p50s = []
+    for s in sigmas:
+        out = ic.simulate_weekly_compound_pair_pnl(
+            sigma_annual=s, mu_annual=0.0, beta=0.372, capture_ratio=0.8,
+            expense_ratio_annual=0.0099, borrow_annual=0.0,
+            weeks=52, n_paths=5_000, seed=seeds,
+        )
+        p50s.append(out["p50_log"])
+    diffs = [p50s[i + 1] - p50s[i] for i in range(len(p50s) - 1)]
+    assert all(d > 0 for d in diffs), p50s
+
+
+def test_simulate_mc_reproducible():
+    """Same seed -> bit-identical output. Different seed -> different draws."""
+    a = ic.simulate_weekly_compound_pair_pnl(**MTYY_BASE, weeks=52, n_paths=2_000, seed=11)
+    b = ic.simulate_weekly_compound_pair_pnl(**MTYY_BASE, weeks=52, n_paths=2_000, seed=11)
+    c = ic.simulate_weekly_compound_pair_pnl(**MTYY_BASE, weeks=52, n_paths=2_000, seed=12)
+    assert a["p50_log"] == b["p50_log"]
+    assert a["mean_log"] == b["mean_log"]
+    assert a["p50_log"] != c["p50_log"]
+
+
+def test_simulate_mc_invalid_inputs_return_none():
+    assert ic.simulate_weekly_compound_pair_pnl(sigma_annual=None) is None
+    assert ic.simulate_weekly_compound_pair_pnl(sigma_annual=-0.5) is None
+    assert ic.simulate_weekly_compound_pair_pnl(sigma_annual=float("nan")) is None
+    assert ic.simulate_weekly_compound_pair_pnl(sigma_annual=0.5, beta=float("nan")) is None
+
+
+def test_stable_seed_from_symbol_is_deterministic():
+    a = ic.stable_seed_from_symbol("MTYY")
+    b = ic.stable_seed_from_symbol("mtyy")
+    c = ic.stable_seed_from_symbol("MTYY", salt=1)
+    d = ic.stable_seed_from_symbol("FBYY")
+    assert a == b  # case-insensitive
+    assert a != c  # salt differentiates
+    assert a != d  # different ticker
+    assert 0 <= a < 2 ** 31
+
+
+# ---------------------------------------------------------------------------
+# 10. Scenario grid (sigma_multiplier x drift)
+# ---------------------------------------------------------------------------
+def test_scenario_grid_shape_and_axes():
+    grid = ic.scenario_grid_pair_pnl(
+        sigma_annual=0.674, beta=0.372, capture_ratio=0.80,
+        n_paths=2_000, seed=ic.stable_seed_from_symbol("MTYY"),
+    )
+    assert grid is not None
+    assert grid["sigma_multipliers"] == [0.5, 0.7, 1.0, 1.3, 1.5]
+    assert grid["drifts"] == [-0.5, -0.25, 0.0, 0.25, 0.5]
+    assert len(grid["p50_log_grid"]) == 5
+    for row in grid["p50_log_grid"]:
+        assert len(row) == 5
+        for v in row:
+            assert math.isfinite(v)
+    assert grid["axis"] == "log_continuous_annual"
+    assert grid["engine"] == "yieldboost_mc"
+
+
+def test_scenario_grid_sigma_axis_is_monotone_at_zero_drift():
+    """Holding drift at 0, p50 must be increasing in sigma_multiplier
+    (more vol -> more gamma scalp on the weekly put-spread roll).
+    """
+    grid = ic.scenario_grid_pair_pnl(
+        sigma_annual=0.674, beta=0.372, capture_ratio=0.80,
+        n_paths=2_500, seed=ic.stable_seed_from_symbol("MTYY"),
+    )
+    drift_idx = grid["drifts"].index(0.0)
+    col = [row[drift_idx] for row in grid["p50_log_grid"]]
+    assert all(col[i + 1] > col[i] for i in range(len(col) - 1)), col
+
+
+def test_scenario_grid_returns_none_for_bad_inputs():
+    assert ic.scenario_grid_pair_pnl(sigma_annual=None, beta=0.5) is None
+    assert ic.scenario_grid_pair_pnl(sigma_annual=0.5, beta=None) is None
+    assert ic.scenario_grid_pair_pnl(sigma_annual=-0.1, beta=0.5) is None
+
+
+# ---------------------------------------------------------------------------
+# 11. expected_pair_pnl_annual: log-axis headline + simple-return diagnostics
+# ---------------------------------------------------------------------------
+def test_expected_pair_pnl_annual_returns_log_axis_headline():
+    calibration = {"blended_ratio_used": 0.80, "fund_ratio_confidence": "high"}
+    out = ic.expected_pair_pnl_annual(
         calibration=calibration,
-        sigma_annual=0.80,
+        sigma_annual=0.674,
+        beta=0.372,
         horizon_years=1.0,
-        gross_band=gross_band,
+        n_paths=5_000,
+        seed=ic.stable_seed_from_symbol("MTYY"),
     )
-    assert result is not None
-    assert result["p10"] == pytest.approx(0.55 - result["distributions"], abs=1e-9)
-    assert result["p90"] == pytest.approx(0.85 - result["distributions"], abs=1e-9)
-    # Band width must equal gross band width (distributions cancel).
-    assert (result["p90"] - result["p10"]) == pytest.approx(0.85 - 0.55, abs=1e-9)
-    assert result["sigma_forward_annual"] == pytest.approx(
-        ic.band_to_sigma(result["p10"], result["p90"]), rel=1e-9
+    assert out is not None
+    for k in ("p10_log", "p50_log", "p90_log", "mean_log", "std_log",
+              "nav_decay_simple_annual", "distributions_simple_annual"):
+        assert k in out
+    assert out["p10_log"] < out["p50_log"] < out["p90_log"]
+    assert out["axis"] == "log_continuous_annual"
+    assert out["basis"] == "weekly_rebalanced_compound"
+    # Magis diagnostics are simple returns (always between 0 and ~1)
+    assert 0.0 < out["nav_decay_simple_annual"] < 1.5
+    assert 0.0 <= out["distributions_simple_annual"] < 1.5
+
+
+def test_expected_pair_pnl_annual_requires_beta():
+    calibration = {"blended_ratio_used": 0.80, "fund_ratio_confidence": "high"}
+    out = ic.expected_pair_pnl_annual(
+        calibration=calibration, sigma_annual=0.674,
+        beta=None, n_paths=200, seed=1,
     )
+    assert out is None

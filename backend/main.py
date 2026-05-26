@@ -723,16 +723,29 @@ def get_github_sync_status():
     return GITHUB_SYNC_STATUS or {"success": False, "error": "No sync has run yet"}
 
 
-# ── Serve Frontend ─────────────────────────────
+# ── Serve Frontend + static data (production SPA) ─────────────────────────────
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
 
 @app.get("/", response_class=HTMLResponse)
 def serve_index():
-    index = FRONTEND_DIR / "index.html"
+    """Serve the production SPA (root index.html), not frontend/index.html."""
+    index = ROOT_DIR / "index.html"
     if index.exists():
-        return index.read_text()
-    return "<h1>ETF Borrow Dashboard</h1><p>Frontend not found. Check frontend/index.html</p>"
+        return FileResponse(index, media_type="text/html")
+    legacy = ROOT_DIR / "frontend" / "index.html"
+    if legacy.exists():
+        return legacy.read_text()
+    return "<h1>ETF Borrow Dashboard</h1><p>index.html not found.</p>"
+
+
+_data_dir = ROOT_DIR / "data"
+_assets_dir = ROOT_DIR / "assets"
+if _data_dir.is_dir():
+    app.mount("/data", StaticFiles(directory=_data_dir), name="data")
+if _assets_dir.is_dir():
+    app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
 
 
 # ──────────────────────────────────────────────
