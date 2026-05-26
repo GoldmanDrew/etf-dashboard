@@ -1384,17 +1384,6 @@
 <script src="assets/pair_backtest.js?v=pb-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
-<script>
-window.addEventListener('error', function (ev) {
-  var msg = ev && (ev.message || (ev.error && ev.error.message));
-  if (!msg || (String(msg).indexOf('Babel') === -1 && String(msg).indexOf('Inline Babel') === -1)) return;
-  var root = document.getElementById('root');
-  if (!root) return;
-  root.innerHTML = '<div style="padding:24px;color:#ef4444;font-family:JetBrains Mono,monospace;max-width:960px;margin:40px auto">'
-    + '<strong>Dashboard compile failed</strong><pre style="margin-top:12px;white-space:pre-wrap;color:#fca5a5">'
-    + String(msg).replace(/</g, '&lt;') + '</pre></div>';
-});
-</script>
 
 <script type="text/babel">
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
@@ -5104,6 +5093,52 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
     };
   }, [vrpHealth]);
+  // Universe-level health banner: surface when the pipeline as a whole is
+  // returning < 50% IV coverage across YB front spreads. This is the
+  // condition that previously hid behind per-row "—" cells; the operator
+  // should see a coverage outage even if the *displayed* row happens to have
+  // a quote (because the pipeline starvation is sleeve-distributed).
+  const vrpCoverageBanner = useMemo(() => {
+    const cov = Number(vrpHealth?.iv_coverage_front_pct);
+    if (!Number.isFinite(cov)) return null;
+    if (cov >= 0.5) return null;
+    const front = Number(vrpHealth?.spreads_front_count) || 0;
+    const stale = (vrpHealth?.stale_sleeves || []).length;
+    const buildTime = vrpHealth?.build_time || vrpHealth?.last_vrp_refresh;
+    const occ = vrpHealth?.occ_supplement || {};
+    return {
+      coverage: Math.round(cov * 100),
+      stale,
+      front,
+      buildTime,
+      tradierConfigured: occ.tradier_api_configured !== false,
+      occRequested: Number(occ.yieldboost_occ_quotes_requested) || 0,
+      occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
+    };
+  }, [vrpHealth]);
+  // Universe-level health banner: surface when the pipeline as a whole is
+  // returning < 50% IV coverage across YB front spreads. This is the
+  // condition that previously hid behind per-row "—" cells; the operator
+  // should see a coverage outage even if the *displayed* row happens to have
+  // a quote (because the pipeline starvation is sleeve-distributed).
+  const vrpCoverageBanner = useMemo(() => {
+    const cov = Number(vrpHealth?.iv_coverage_front_pct);
+    if (!Number.isFinite(cov)) return null;
+    if (cov >= 0.5) return null;
+    const front = Number(vrpHealth?.spreads_front_count) || 0;
+    const stale = (vrpHealth?.stale_sleeves || []).length;
+    const buildTime = vrpHealth?.build_time || vrpHealth?.last_vrp_refresh;
+    const occ = vrpHealth?.occ_supplement || {};
+    return {
+      coverage: Math.round(cov * 100),
+      stale,
+      front,
+      buildTime,
+      tradierConfigured: occ.tradier_api_configured !== false,
+      occRequested: Number(occ.yieldboost_occ_quotes_requested) || 0,
+      occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
+    };
+  }, [vrpHealth]);
   const showBacktestPanel = Boolean(String(undSym || '').trim());
   useEffect(() => {
     if (hideScenarios && activePanel === 'scenarios') setActivePanel('chart');
@@ -8371,6 +8406,436 @@ function NewsCard({ item, bucketOf, onNavigate, eventsById }) {
   );
 }
 
+// ── YieldBOOST σ-space Edge Ranking page ───────────────────────────────────
+//
+// Headline analytical view across the entire YB universe. Reads
+// `data/vrp_live.json` (33 sleeves × 16 new derived metrics) plus
+// `data/event_calendar_combined.json` (Nasdaq → Yahoo → seed → projected
+// earnings dates). Renders a single sortable table ranked by σ-space
+// edge (iv_full_sleeve − breakeven_σ) with signal classification, weekly
+// $-P&L estimate, gamma/theta, and an earnings-in-window badge.
+//
+// Signal buckets (σ-space):
+//   ≥ +30pp  STRONG SELL  (market massively overpaying for the spread)
+//   ≥ +10pp  sell         (clean short-vol edge)
+//   ≥   0pp  lean sell    (positive edge, small)
+//   ≥ -10pp  lean avoid   (slightly negative edge)
+//        else AVOID       (market significantly underpaying expected loss --
+//                           selling would be a structural carry tax)
+function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
+  const [vrpLive, setVrpLive] = useState(null);
+  const [vrpHealth, setVrpHealth] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [sortKey, setSortKey] = useState('iv_minus_breakeven_sigma');
+  const [sortDesc, setSortDesc] = useState(true);
+  const [filterEdgeOnly, setFilterEdgeOnly] = useState(false);
+  const [filterEarningsOnly, setFilterEarningsOnly] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+    Promise.all([
+      fetch(`data/vrp_live.json${cacheBust}`, { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+      fetch(`data/vrp_health.json${cacheBust}`, { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ]).then(([live, health]) => {
+      if (cancelled) return;
+      if (!live) {
+        setLoadError('vrp_live.json unavailable');
+      } else {
+        setVrpLive(live);
+      }
+      if (health) setVrpHealth(health);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Build {underlying → next event} from combined calendar (front-most first).
+  const earningsByUnderlying = useMemo(() => {
+    const m = {};
+    const items = (eventCalendar?.items) || [];
+    // Sort by date asc so earliest wins
+    const sorted = [...items]
+      .filter((it) => String(it.event_type || '').toLowerCase() === 'earnings')
+      .sort((a, b) => String(a.event_date).localeCompare(String(b.event_date)));
+    for (const it of sorted) {
+      const u = String(it.underlying || '').toUpperCase();
+      if (!u || m[u]) continue;
+      m[u] = {
+        eventDate: it.event_date,
+        confirmation: it.confirmation || 'unknown',
+        historicalMovePctMad: it.historical_move_pct_mad,
+        source: it.source,
+      };
+    }
+    return m;
+  }, [eventCalendar]);
+
+  const enriched = useMemo(() => {
+    const rows = (vrpLive?.rows) || [];
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    return rows.map((r) => {
+      const u = String(r.underlying || '').toUpperCase();
+      const ev = earningsByUnderlying[u] || null;
+      let daysToEarnings = null;
+      let eventInHeldWindow = false;
+      if (ev?.eventDate) {
+        const eDate = new Date(ev.eventDate + 'T00:00:00Z');
+        daysToEarnings = Math.round((eDate.getTime() - today.getTime()) / 86400000);
+        if (r.expiry) {
+          const hDate = new Date(r.expiry + 'T00:00:00Z');
+          if (eDate <= hDate && eDate >= today) eventInHeldWindow = true;
+        }
+      }
+      // Implied event move (if both base & full IV known, sleeve scale).
+      // The fraction of variance attributed to the event over the held horizon
+      // is the difference of variances; we report the implied 1σ move on the
+      // underlying for the event day specifically.
+      const ivFull = Number(r.iv_full_proxy);
+      const ivBase = Number(r.iv_base_proxy);
+      const dte = Math.max(1, Number(r.days_to_exp) || 1);
+      let impliedEventMovePct = null;
+      if (Number.isFinite(ivFull) && Number.isFinite(ivBase) && ivFull > ivBase) {
+        const varFull = ivFull * ivFull * (dte / 252);
+        const varBase = ivBase * ivBase * (dte / 252);
+        const eventVar = Math.max(0, varFull - varBase);
+        const eventSigmaUnderlying = Math.sqrt(eventVar) / 2; // beta=2 inversion
+        impliedEventMovePct = eventSigmaUnderlying * 100;
+      }
+      // Weekly $-P&L estimate per 1 spread structure = expected weekly fair
+      // value of the BS-fair spread (i.e. the credit the seller collects on
+      // average per week from theta + variance harvest).
+      const weeklyFairUsd = Number.isFinite(Number(r.bs_put_spread_fair_diffusion))
+        ? Number(r.bs_put_spread_fair_diffusion) * 100 // standard option contract = 100 sh
+        : null;
+      return {
+        ...r,
+        days_to_earnings: daysToEarnings,
+        event_in_held_window: eventInHeldWindow,
+        earnings_event_date: ev?.eventDate || null,
+        earnings_confirmation: ev?.confirmation || null,
+        earnings_historical_move_mad: ev?.historicalMovePctMad ?? null,
+        implied_event_move_pct_underlying: impliedEventMovePct,
+        weekly_pnl_per_spread_usd: weeklyFairUsd,
+      };
+    });
+  }, [vrpLive, earningsByUnderlying]);
+
+  const filtered = useMemo(() => {
+    let out = enriched;
+    if (filterEdgeOnly) {
+      out = out.filter((r) => r.iv_minus_breakeven_sigma != null);
+    }
+    if (filterEarningsOnly) {
+      out = out.filter((r) => r.event_in_held_window);
+    }
+    return out;
+  }, [enriched, filterEdgeOnly, filterEarningsOnly]);
+
+  const sorted = useMemo(() => {
+    const out = [...filtered];
+    const cmp = (a, b) => {
+      const va = a[sortKey];
+      const vb = b[sortKey];
+      const an = (va == null || !Number.isFinite(Number(va))) ? null : Number(va);
+      const bn = (vb == null || !Number.isFinite(Number(vb))) ? null : Number(vb);
+      if (an == null && bn == null) return 0;
+      if (an == null) return 1; // nulls last
+      if (bn == null) return -1;
+      return sortDesc ? bn - an : an - bn;
+    };
+    out.sort(cmp);
+    return out;
+  }, [filtered, sortKey, sortDesc]);
+
+  const stats = useMemo(() => {
+    const withEdge = enriched.filter((r) => r.iv_minus_breakeven_sigma != null);
+    const positiveEdge = withEdge.filter((r) => r.iv_minus_breakeven_sigma > 0);
+    const strongSell = withEdge.filter((r) => r.iv_minus_breakeven_sigma >= 0.30);
+    const avoid = withEdge.filter((r) => r.iv_minus_breakeven_sigma < -0.10);
+    const eventInWindow = enriched.filter((r) => r.event_in_held_window);
+    return {
+      total: enriched.length,
+      with_edge: withEdge.length,
+      positive_edge: positiveEdge.length,
+      strong_sell: strongSell.length,
+      avoid: avoid.length,
+      events_in_window: eventInWindow.length,
+    };
+  }, [enriched]);
+
+  const signalFor = (edge) => {
+    if (edge == null || !Number.isFinite(Number(edge))) {
+      return { label: '—', color: 'var(--text-muted)', bg: 'transparent', weight: 400 };
+    }
+    const e = Number(edge);
+    if (e >= 0.30) return { label: 'STRONG SELL', color: '#fff', bg: '#10b981', weight: 700 };
+    if (e >= 0.10) return { label: 'sell', color: '#10b981', bg: 'rgba(16,185,129,0.15)', weight: 600 };
+    if (e >= 0) return { label: 'lean sell', color: '#10b981', bg: 'transparent', weight: 500 };
+    if (e >= -0.10) return { label: 'lean avoid', color: '#f59e0b', bg: 'transparent', weight: 500 };
+    return { label: 'AVOID', color: '#fff', bg: '#ef4444', weight: 700 };
+  };
+
+  const skewColor = (skew) => {
+    const v = Number(skew);
+    if (!Number.isFinite(v)) return 'var(--text-muted)';
+    if (v <= 7) return 'var(--text-muted)';
+    if (v <= 21) return '#f59e0b';
+    return '#ef4444';
+  };
+
+  const Th = ({ k, label, hint, align = 'right', width = null }) => (
+    <th
+      title={hint}
+      onClick={() => {
+        if (sortKey === k) setSortDesc((d) => !d);
+        else { setSortKey(k); setSortDesc(true); }
+      }}
+      style={{
+        textAlign: align,
+        cursor: 'pointer',
+        userSelect: 'none',
+        whiteSpace: 'nowrap',
+        padding: '6px 8px',
+        borderBottom: '1px solid var(--border)',
+        position: 'sticky',
+        top: 0,
+        background: 'var(--bg-card)',
+        zIndex: 1,
+        width: width != null ? width : 'auto',
+      }}
+    >
+      {label}{sortKey === k ? (sortDesc ? ' ↓' : ' ↑') : ''}
+    </th>
+  );
+
+  if (loadError && !vrpLive) {
+    return (
+      <div style={{ padding: 20 }}>
+        <button onClick={onBack} className="topbar-btn" style={{ marginBottom: 12 }}>← Back</button>
+        <div className="scenario-warning">{loadError}</div>
+      </div>
+    );
+  }
+
+  if (!vrpLive) {
+    return (
+      <div style={{ padding: 20 }}>
+        <div className="scenario-sub">Loading YB edge ranking…</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: '16px 20px', maxWidth: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+        <button onClick={onBack} className="topbar-btn">← Back</button>
+        <h1 style={{ margin: 0, fontSize: 20 }}>YieldBOOST σ-space Edge Ranking</h1>
+      </div>
+      <div className="scenario-sub" style={{ marginBottom: 16, lineHeight: 1.5 }}>
+        For each YB sleeve, the table compares the live IV at the held front spread against the
+        Black-Scholes breakeven σ that would make the BS fair value equal to today's spread mid.
+        <strong> Positive σ-edge (IV − BE σ &gt; 0)</strong> means the market is paying you more
+        than expected loss to short the spread — a clean structural sell.
+        <strong> Negative σ-edge</strong> means the market is underpaying expected loss; you
+        would carry a structural deficit. Earnings events inside the held window invalidate the
+        diffusion-only fair value (BS doesn't price jumps), so those rows get a red badge.
+      </div>
+
+      {/* Headline strip */}
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+        <SummaryCard label="Total YB sleeves" value={fmtNum(stats.total)} />
+        <SummaryCard label="With σ-edge signal" value={fmtNum(stats.with_edge)} sub={`of ${stats.total}`} />
+        <SummaryCard
+          label="Positive σ-edge"
+          value={fmtNum(stats.positive_edge)}
+          color="var(--positive)"
+        />
+        <SummaryCard
+          label="STRONG SELL"
+          value={fmtNum(stats.strong_sell)}
+          color="var(--positive)"
+        />
+        <SummaryCard
+          label="AVOID"
+          value={fmtNum(stats.avoid)}
+          color="var(--negative)"
+        />
+        <SummaryCard
+          label="Earnings in held window"
+          value={fmtNum(stats.events_in_window)}
+          color="var(--warning)"
+          sub="diffusion fair voided"
+        />
+        {vrpHealth && Number.isFinite(Number(vrpHealth.iv_coverage_front_pct)) && (
+          <SummaryCard
+            label="IV coverage"
+            value={`${Math.round(Number(vrpHealth.iv_coverage_front_pct) * 100)}%`}
+            color={Number(vrpHealth.iv_coverage_front_pct) >= 0.8 ? 'var(--positive)'
+              : (Number(vrpHealth.iv_coverage_front_pct) >= 0.5 ? 'var(--warning)' : 'var(--negative)')}
+            sub={`${(vrpHealth.stale_sleeves || []).length} missing`}
+          />
+        )}
+      </div>
+
+      {/* Filters */}
+      <div style={{ display: 'flex', gap: 14, alignItems: 'center', marginBottom: 12, fontSize: 13 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+          <input type="checkbox" checked={filterEdgeOnly} onChange={(e) => setFilterEdgeOnly(e.target.checked)} />
+          Edge signal only
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+          <input type="checkbox" checked={filterEarningsOnly} onChange={(e) => setFilterEarningsOnly(e.target.checked)} />
+          Earnings in held window only
+        </label>
+        <div style={{ color: 'var(--text-muted)', marginLeft: 'auto' }}>
+          Showing {sorted.length} of {enriched.length} sleeves · click column headers to sort
+        </div>
+      </div>
+
+      <div style={{ overflowX: 'auto', maxHeight: '70vh', border: '1px solid var(--border)', borderRadius: 6 }}>
+        <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, fontSize: 12 }}>
+          <thead>
+            <tr>
+              <Th k="signal" label="Signal" align="left" hint="σ-space edge classification" />
+              <Th k="yb_etf" label="YB" align="left" hint="YieldBOOST ETF ticker" />
+              <Th k="underlying" label="Und." align="left" hint="Single-stock underlying" />
+              <Th k="iv_minus_breakeven_sigma" label="IV − BEσ" hint="Sleeve IV minus BS breakeven σ. Positive = market overpaying expected loss." />
+              <Th k="iv_full_proxy" label="IV (sleeve)" hint="Spread-leg IV average (full, not event-stripped)" />
+              <Th k="spread_breakeven_sigma_annual" label="BE σ" hint="σ that makes BS_fair == spread_mid_market" />
+              <Th k="spread_mid_market" label="Mid" hint="Current spread mid-market price (short K_short − long K_long)" />
+              <Th k="bs_put_spread_fair_diffusion" label="BS fair" hint="BS short-spread fair value at sigma_source. Diffusion only." />
+              <Th k="expected_weekly_loss_pct_of_spot" label="Wk loss %" hint="Expected weekly NAV bleed at current σ" />
+              <Th k="bs_dollar_gamma_per_1pct_underlying" label="$-γ /1%U" hint="$ P&L per 1% underlying move (short = negative)" />
+              <Th k="bs_theta_spread_per_day" label="θ/day" hint="Theta per calendar day (positive = collecting)" />
+              <Th k="days_to_exp" label="DTE" hint="Days to held expiry" />
+              <Th k="days_to_earnings" label="DT-Earn" hint="Days to next known earnings event (combined calendar)" />
+              <Th k="iv_expiry_skew_days" label="Skew" hint="|held - chain| expiry days; the IV-term-structure interpolation gap" />
+              <Th k="iv_source" label="IV src" align="left" hint="How IV was resolved" />
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((r) => {
+              const sig = signalFor(r.iv_minus_breakeven_sigma);
+              const edge = r.iv_minus_breakeven_sigma;
+              const edgeFmt = (v) => (v == null || !Number.isFinite(Number(v))) ? '—'
+                : (Number(v) >= 0 ? '+' : '') + (Number(v) * 100).toFixed(1) + 'pp';
+              return (
+                <tr key={`${r.yb_etf}-${r.expiry}`} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={{ padding: '5px 8px' }}>
+                    <span style={{
+                      display: 'inline-block',
+                      padding: '2px 8px',
+                      borderRadius: 12,
+                      fontSize: 10,
+                      fontWeight: sig.weight,
+                      color: sig.color,
+                      background: sig.bg,
+                      letterSpacing: 0.3,
+                      whiteSpace: 'nowrap',
+                    }}>{sig.label}</span>
+                  </td>
+                  <td style={{ padding: '5px 8px', fontWeight: 600 }}>
+                    <a
+                      href={`#/chart/${encodeURIComponent(r.yb_etf)}/vrp`}
+                      onClick={(e) => {
+                        if (typeof onNavigateToChart === 'function') {
+                          e.preventDefault();
+                          onNavigateToChart(r.yb_etf, 'vrp');
+                        }
+                      }}
+                      style={{ color: 'var(--text-link, #60a5fa)' }}
+                    >{r.yb_etf}</a>
+                  </td>
+                  <td style={{ padding: '5px 8px', color: 'var(--text-muted)' }}>{r.underlying || '—'}</td>
+                  <td style={{
+                    padding: '5px 8px',
+                    textAlign: 'right',
+                    fontWeight: 600,
+                    color: edge == null ? 'var(--text-muted)'
+                      : (Number(edge) > 0 ? '#10b981' : (Number(edge) < -0.05 ? '#ef4444' : 'var(--text-muted)')),
+                  }}>{edgeFmt(edge)}</td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
+                    {r.iv_full_proxy != null ? `${(r.iv_full_proxy * 100).toFixed(1)}%` : '—'}
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
+                    {r.spread_breakeven_sigma_annual != null ? `${(r.spread_breakeven_sigma_annual * 100).toFixed(1)}%` : '—'}
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
+                    {r.spread_mid_market != null ? `${Number(r.spread_mid_market).toFixed(2)}` : '—'}
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
+                    {r.bs_put_spread_fair_diffusion != null ? Number(r.bs_put_spread_fair_diffusion).toFixed(3) : '—'}
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
+                    {r.expected_weekly_loss_pct_of_spot != null
+                      ? `${Number(r.expected_weekly_loss_pct_of_spot).toFixed(2)}%`
+                      : '—'}
+                  </td>
+                  <td style={{
+                    padding: '5px 8px', textAlign: 'right',
+                    color: r.bs_dollar_gamma_per_1pct_underlying != null && r.bs_dollar_gamma_per_1pct_underlying < 0
+                      ? '#ef4444' : undefined,
+                  }}>
+                    {r.bs_dollar_gamma_per_1pct_underlying != null ? Number(r.bs_dollar_gamma_per_1pct_underlying).toFixed(3) : '—'}
+                  </td>
+                  <td style={{
+                    padding: '5px 8px', textAlign: 'right',
+                    color: r.bs_theta_spread_per_day != null && r.bs_theta_spread_per_day > 0 ? '#10b981' : undefined,
+                  }}>
+                    {r.bs_theta_spread_per_day != null
+                      ? (Number(r.bs_theta_spread_per_day) >= 0 ? '+' : '') + Number(r.bs_theta_spread_per_day).toFixed(3)
+                      : '—'}
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>{r.days_to_exp ?? '—'}</td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
+                    {r.days_to_earnings != null ? (
+                      <span style={{
+                        padding: r.event_in_held_window ? '1px 6px' : 0,
+                        borderRadius: r.event_in_held_window ? 8 : 0,
+                        background: r.event_in_held_window ? 'rgba(239,68,68,0.20)' : 'transparent',
+                        color: r.event_in_held_window ? '#ef4444' : 'var(--text-muted)',
+                        fontWeight: r.event_in_held_window ? 600 : 400,
+                      }}
+                      title={`Next earnings ${r.earnings_event_date} (${r.earnings_confirmation || 'unknown'}). ${r.event_in_held_window ? 'INSIDE held window — diffusion BS fair is invalid (no jump term).' : 'Outside held window.'}`}
+                      >{r.days_to_earnings}d</span>
+                    ) : '—'}
+                  </td>
+                  <td style={{
+                    padding: '5px 8px', textAlign: 'right',
+                    color: skewColor(r.iv_expiry_skew_days),
+                  }}>{r.iv_expiry_skew_days != null ? `${r.iv_expiry_skew_days}d` : '—'}</td>
+                  <td style={{ padding: '5px 8px', color: 'var(--text-muted)', fontSize: 11 }}>
+                    {r.iv_source || '—'}
+                  </td>
+                </tr>
+              );
+            })}
+            {sorted.length === 0 && (
+              <tr><td colSpan={15} style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>
+                No rows match current filters.
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ marginTop: 14, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+        <strong>How to read:</strong> Sort by <em>IV − BEσ</em> (default) to see the cleanest sells at the top.
+        Filter "Edge signal only" to drop rows whose breakeven σ couldn't be solved (e.g. spread mid below intrinsic).
+        Cross-check the <em>Skew</em> column: rows with &gt;21d skew used a monthly chain to imply a weekly IV; treat
+        them as regime indicators, not tradable BS fair values. Rows with red <em>DT-Earn</em> have earnings inside
+        the held window — diffusion-only fair is invalid (BS doesn't price the jump). For those, the proper edge
+        is in the <em>event-aware</em> spread VRP shown on the per-ETF Vol/VRP tab.
+      </div>
+    </div>
+  );
+}
+
 function NewsPage({
   eventsPayload,
   newsPayload,
@@ -9151,6 +9616,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [showInfo, setShowInfo] = useState(false);
   const [showNews, setShowNews] = useState(false);
   const [showFlow, setShowFlow] = useState(false);
+  const [showYbEdge, setShowYbEdge] = useState(false);
+  const [eventCalendar, setEventCalendar] = useState(null);
   const [letfFlowsCache, setLetfFlowsCache] = useState(LETF_REBALANCE_FLOWS_CACHE);
   const [letfIntradayCache, setLetfIntradayCache] = useState(LETF_INTRADAY_FLOWS_CACHE);
   const [letfIntradayError, setLetfIntradayError] = useState(null);
@@ -9287,7 +9754,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   useEffect(() => {
     const handleHash = () => {
       const hash = window.location.hash;
-      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest|flow|trade))?$/i.exec(hash);
+      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest|flow|trade|vrp))?$/i.exec(hash);
       if (chartMatch && data) {
         const sym = decodeURIComponent(chartMatch[1]).toUpperCase();
         const rec = (data.records || []).find(r => r.symbol === sym);
@@ -9296,12 +9763,14 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           setShowInfo(false);
           setShowNews(false);
           setShowFlow(false);
+          setShowYbEdge(false);
           const panel = String(chartMatch[2] || '').toLowerCase();
           setChartDefaultPanel(
             panel === 'backtest' ? 'backtest'
               : panel === 'flow' ? 'flow'
                 : panel === 'trade' ? 'trade'
-                  : 'chart',
+                  : panel === 'vrp' ? 'vrp'
+                    : 'chart',
           );
           return;
         }
@@ -9311,6 +9780,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowInfo(false);
         setShowNews(true);
         setShowFlow(false);
+        setShowYbEdge(false);
         return;
       }
       if (hash === '#/flow') {
@@ -9318,6 +9788,15 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowInfo(false);
         setShowNews(false);
         setShowFlow(true);
+        setShowYbEdge(false);
+        return;
+      }
+      if (hash === '#/yb-edge') {
+        setChartRecord(null);
+        setShowInfo(false);
+        setShowNews(false);
+        setShowFlow(false);
+        setShowYbEdge(true);
         return;
       }
       if (hash === '#/backtest') {
@@ -9327,6 +9806,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       setChartRecord(null);
       setShowNews(false);
       setShowFlow(false);
+      setShowYbEdge(false);
       setChartDefaultPanel('chart');
     };
     handleHash();
@@ -9349,6 +9829,22 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const navigateToFlow = useCallback(() => {
     window.location.hash = '/flow';
   }, []);
+
+  const navigateToYbEdge = useCallback(() => {
+    window.location.hash = '/yb-edge';
+  }, []);
+
+  // Lazy-load the combined event calendar once when the YB Edge page is first
+  // opened; the file is small (~6 KB after seed fallback) so refreshing it on
+  // every page open is unnecessary.
+  useEffect(() => {
+    if (!showYbEdge || eventCalendar) return;
+    const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+    fetch(`data/event_calendar_combined.json${cacheBust}`, { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((p) => { if (p) setEventCalendar(p); })
+      .catch(() => { /* best-effort; YB edge page still works without */ });
+  }, [showYbEdge, eventCalendar]);
 
   const navigateBack = useCallback(() => {
     window.location.hash = '';
@@ -9474,6 +9970,13 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             </>
           )}
           <button
+            className={cls('topbar-btn', showYbEdge && !chartRecord && 'active')}
+            onClick={() => { if (showYbEdge) navigateBack(); else navigateToYbEdge(); }}
+            title="YieldBOOST σ-space edge ranking + earnings overlay"
+          >
+            ◆ YB Edge
+          </button>
+          <button
             className={cls('topbar-btn', showFlow && !chartRecord && 'active')}
             onClick={() => { if (showFlow) navigateBack(); else navigateToFlow(); }}
             title="LETF rebalance flow ranked by underlying"
@@ -9486,7 +9989,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           >
             ▦ News
           </button>
-          <button className={cls('topbar-btn', showInfo && !chartRecord && !showNews && !showFlow && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
+          <button className={cls('topbar-btn', showInfo && !chartRecord && !showNews && !showFlow && !showYbEdge && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
             ◉ Info
           </button>
         </div>
@@ -9506,6 +10009,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           dashboardBuildTime={data.build_time}
           intradayFlows={letfIntradayCache}
           intradayFlowsError={letfIntradayError}
+        />
+      ) : showYbEdge ? (
+        <YbEdgePage
+          onNavigateToChart={navigateToChart}
+          onBack={navigateBack}
+          eventCalendar={eventCalendar}
         />
       ) : showFlow ? (
         <FlowPage
