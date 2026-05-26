@@ -1448,20 +1448,19 @@ function logToSimpleAnnual(x) {
   if (x == null || !Number.isFinite(Number(x))) return null;
   return Math.expm1(Number(x));
 }
-/** Headline cell for forward pair P&L: median simple % + p10/p90 band. */
+/** Headline cell for forward pair P&L: log/yr median + p10/p90 band (same axis as Gross/Net). */
 function renderForwardPairPnlCell(pair) {
   if (!pair || !Number.isFinite(Number(pair.p50))) return null;
   const p50Simple = logToSimpleAnnual(pair.p50);
-  const p10Simple = logToSimpleAnnual(pair.p10);
-  const p90Simple = logToSimpleAnnual(pair.p90);
   return (
     <div style={{ lineHeight: 1.15 }}>
-      <div>{fmt(p50Simple)}</div>
-      {p10Simple != null && p90Simple != null ? (
-        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
-          {fmt(p10Simple)} / {fmt(p90Simple)}
-        </div>
-      ) : null}
+      <div>{fmtLogYr(pair.p50)}<span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>log/yr</span></div>
+      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+        {pair.p10 != null && pair.p90 != null
+          ? `${fmtLogYr(pair.p10)} / ${fmtLogYr(pair.p90)}`
+          : null}
+        {p50Simple != null ? `${pair.p10 != null ? ' · ' : ''}${fmtPct(p50Simple)} simple` : null}
+      </div>
     </div>
   );
 }
@@ -2595,23 +2594,22 @@ function decayDistTooltip(r, chartVolLookbackRange) {
     const pair = expectedPairPnlDistribution(r);
     const forecastVol = forecastVolForScenario(r, volLookback);
     if (pair) {
-      const p50Simple = logToSimpleAnnual(pair.p50);
       const lines = [
         'Exp. edge (fwd) — 1Y median forward pair P&L (weekly-rebalanced short pair).',
         'Pair = short ETF + beta-long underlying. Sign: short-favorable positive (+ = profit).',
         'YieldBOOST: path-dependent MC over forecast sigma; distributions wash under weekly rebalance.',
         `sigma (forecast): ${fmt(Number(forecastVol?.sigma))} (${r?.forecast_vol_source || 'forecast_vol'}).`,
-        `Median (p50): ${fmt(p50Simple)}/yr`,
+        `Median (p50): ${fmtLogYr(pair.p50)} log/yr (${fmtPct(logToSimpleAnnual(pair.p50))} simple)`,
       ];
       if (pair.p10 != null && pair.p90 != null) {
-        lines.push(`Band (p10 / p90): ${fmt(logToSimpleAnnual(pair.p10))} / ${fmt(logToSimpleAnnual(pair.p90))}`);
+        lines.push(`Band (p10 / p90): ${fmtLogYr(pair.p10)} / ${fmtLogYr(pair.p90)} log/yr`);
       }
       const sr = pair.sigmaRegime || {};
       if (sr.lo != null && sr.hi != null) {
         const mults = sr.multipliers || [0.7, 1.0, 1.3];
         lines.push(
           `Vol sensitivity (p50 at ${mults[0]}× / ${mults[1]}× / ${mults[2]}× forecast σ): ` +
-          `${fmt(logToSimpleAnnual(sr.lo))} / ${fmt(logToSimpleAnnual(sr.mid))} / ${fmt(logToSimpleAnnual(sr.hi))}`
+          `${fmtLogYr(sr.lo)} / ${fmtLogYr(sr.mid)} / ${fmtLogYr(sr.hi)} log/yr`
         );
       }
       if (Number.isFinite(pair.std)) {
@@ -2693,21 +2691,16 @@ function renderExpectedDecayCell(r, chartVolLookbackRange) {
   const dist = expectedDecayDistribution(r);
   if (dist) {
     const isYbDist = isYieldBoostPutSpreadDistModel(dist.model);
-    const p50Simple = logToSimpleAnnual(dist.p50);
-    const p10Simple = logToSimpleAnnual(dist.p10);
-    const p90Simple = logToSimpleAnnual(dist.p90);
     return (
       <div style={{ lineHeight: 1.15 }}>
-        <div>{fmt(p50Simple)}</div>
+        <div>{fmt(dist.p50)}</div>
         <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
-          {isYbDist ? 'gross · ' : ''}{fmt(p10Simple)} / {fmt(p90Simple)}
+          {isYbDist ? 'gross · ' : ''}{fmt(dist.p10)} / {fmt(dist.p90)}
         </div>
       </div>
     );
   }
-  const legacy = expectedDecayDisplayValue(r);
-  const legacySimple = logToSimpleAnnual(legacy);
-  return fmt(legacySimple != null ? legacySimple : legacy);
+  return fmt(expectedDecayDisplayValue(r));
 }
 
 /**
@@ -3404,7 +3397,7 @@ const COLS = [
   { key: 'borrow_current', label: 'Borrow Rate', w: 105, hint: 'Spot fee-only borrow on this row (IBKR FTP on full build, else screener CSV). Compare to borrow_history.json tail on chart Borrow tab.' },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, sublabel: 'trailing', hint: 'Realized: trailing annualized hedge drag from ls-algo screener (β·r_U − r_ETF) × 252. Not the forward Exp. decay column.' },
-  { key: 'expected_pair_pnl_p50_annual', label: 'Exp. edge (fwd)', sublabel: 'pair · 1Y', w: 118, hint: 'Median 1Y forward pair P&L as a simple annual % (short ETF + beta-long underlying, weekly rebalance, MC over forecast vol). Short-favorable positive. Sub-row is p10/p90 band. Hover for vol sensitivity at 0.7×/1.0×/1.3× forecast σ. LETF/inverse/vol-ETP: equals gross vol-drag (no cash leg). YieldBOOST: path-dependent MC; distributions wash. Anchor for Net edge blend.' },
+  { key: 'expected_pair_pnl_p50_annual', label: 'Exp. edge (fwd)', sublabel: 'pair · 1Y log/yr', w: 128, hint: 'Median 1Y forward pair P&L on the log-continuous-annual axis (same as Gross realiz. and Net edge). Short ETF + beta-long underlying, weekly rebalance, MC over forecast vol. Sub-row: p10/p90 band in log/yr plus simple % for intuition. Hover for vol sensitivity. YieldBOOST: path-dependent MC; distributions wash.' },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
@@ -5076,6 +5069,75 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (ageMin <= staleAfter * 6) return { label: `IV aging (${Math.round(ageMin)}m ago)`, cls: 'scenario-warning' };
     return { label: `IV stale (${Math.round(ageMin)}m ago)`, cls: 'scenario-warning' };
   }, [vrpDisplayRow, vrpHealth, vrpIvPending]);
+  // Universe-level health banner: surface when the pipeline as a whole is
+  // returning < 50% IV coverage across YB front spreads. This is the
+  // condition that previously hid behind per-row "—" cells; the operator
+  // should see a coverage outage even if the *displayed* row happens to have
+  // a quote (because the pipeline starvation is sleeve-distributed).
+  const vrpCoverageBanner = useMemo(() => {
+    const cov = Number(vrpHealth?.iv_coverage_front_pct);
+    if (!Number.isFinite(cov)) return null;
+    if (cov >= 0.5) return null;
+    const front = Number(vrpHealth?.spreads_front_count) || 0;
+    const stale = (vrpHealth?.stale_sleeves || []).length;
+    const buildTime = vrpHealth?.build_time || vrpHealth?.last_vrp_refresh;
+    const occ = vrpHealth?.occ_supplement || {};
+    return {
+      coverage: Math.round(cov * 100),
+      stale,
+      front,
+      buildTime,
+      tradierConfigured: occ.tradier_api_configured !== false,
+      occRequested: Number(occ.yieldboost_occ_quotes_requested) || 0,
+      occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
+    };
+  }, [vrpHealth]);
+  // Universe-level health banner: surface when the pipeline as a whole is
+  // returning < 50% IV coverage across YB front spreads. This is the
+  // condition that previously hid behind per-row "—" cells; the operator
+  // should see a coverage outage even if the *displayed* row happens to have
+  // a quote (because the pipeline starvation is sleeve-distributed).
+  const vrpCoverageBanner = useMemo(() => {
+    const cov = Number(vrpHealth?.iv_coverage_front_pct);
+    if (!Number.isFinite(cov)) return null;
+    if (cov >= 0.5) return null;
+    const front = Number(vrpHealth?.spreads_front_count) || 0;
+    const stale = (vrpHealth?.stale_sleeves || []).length;
+    const buildTime = vrpHealth?.build_time || vrpHealth?.last_vrp_refresh;
+    const occ = vrpHealth?.occ_supplement || {};
+    return {
+      coverage: Math.round(cov * 100),
+      stale,
+      front,
+      buildTime,
+      tradierConfigured: occ.tradier_api_configured !== false,
+      occRequested: Number(occ.yieldboost_occ_quotes_requested) || 0,
+      occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
+    };
+  }, [vrpHealth]);
+  // Universe-level health banner: surface when the pipeline as a whole is
+  // returning < 50% IV coverage across YB front spreads. This is the
+  // condition that previously hid behind per-row "—" cells; the operator
+  // should see a coverage outage even if the *displayed* row happens to have
+  // a quote (because the pipeline starvation is sleeve-distributed).
+  const vrpCoverageBanner = useMemo(() => {
+    const cov = Number(vrpHealth?.iv_coverage_front_pct);
+    if (!Number.isFinite(cov)) return null;
+    if (cov >= 0.5) return null;
+    const front = Number(vrpHealth?.spreads_front_count) || 0;
+    const stale = (vrpHealth?.stale_sleeves || []).length;
+    const buildTime = vrpHealth?.build_time || vrpHealth?.last_vrp_refresh;
+    const occ = vrpHealth?.occ_supplement || {};
+    return {
+      coverage: Math.round(cov * 100),
+      stale,
+      front,
+      buildTime,
+      tradierConfigured: occ.tradier_api_configured !== false,
+      occRequested: Number(occ.yieldboost_occ_quotes_requested) || 0,
+      occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
+    };
+  }, [vrpHealth]);
   const showBacktestPanel = Boolean(String(undSym || '').trim());
   useEffect(() => {
     if (hideScenarios && activePanel === 'scenarios') setActivePanel('chart');
@@ -6258,14 +6320,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 const pair = expectedPairPnlDistribution(r);
                 if (pair) {
                   const p50Simple = logToSimpleAnnual(pair.p50);
-                  const p10Simple = logToSimpleAnnual(pair.p10);
-                  const p90Simple = logToSimpleAnnual(pair.p90);
                   return (
                     <div style={{ lineHeight: 1.15 }}>
-                      <div className="cs-value">{fmt(p50Simple)}</div>
-                      {p10Simple != null && p90Simple != null ? (
+                      <div className="cs-value">{fmtLogYr(pair.p50)}<span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>log/yr</span></div>
+                      {pair.p10 != null && pair.p90 != null ? (
                         <div className="cs-sub" style={{ marginTop: 2 }}>
-                          {fmt(p10Simple)} / {fmt(p90Simple)}
+                          {fmtLogYr(pair.p10)} / {fmtLogYr(pair.p90)}
+                          {p50Simple != null ? ` · ${fmtPct(p50Simple)} simple` : null}
                         </div>
                       ) : null}
                     </div>
@@ -6273,14 +6334,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 }
                 const dist = expectedDecayDistribution(r);
                 if (dist) {
-                  const p50Simple = logToSimpleAnnual(dist.p50);
-                  const p10Simple = logToSimpleAnnual(dist.p10);
-                  const p90Simple = logToSimpleAnnual(dist.p90);
                   return (
                     <div style={{ lineHeight: 1.15 }}>
-                      <div className="cs-value">{fmt(p50Simple)}</div>
+                      <div className="cs-value">{fmt(dist.p50)}</div>
                       <div className="cs-sub" style={{ marginTop: 2 }}>
-                        {fmt(p10Simple)} / {fmt(p90Simple)}
+                        {fmt(dist.p10)} / {fmt(dist.p90)}
                       </div>
                     </div>
                   );
@@ -7736,6 +7794,32 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               </div>
             </div>
             {vrpLiveError && !vrpDisplayRow && <div className="scenario-warning">{vrpLiveError}</div>}
+            {vrpCoverageBanner && (
+              <div
+                style={{
+                  marginBottom: 8,
+                  padding: '8px 10px',
+                  borderLeft: '3px solid #f59e0b',
+                  background: 'rgba(245,158,11,0.10)',
+                  color: '#fbbf24',
+                  borderRadius: 4,
+                  fontSize: 12,
+                  lineHeight: 1.35,
+                }}
+                title="vrp_health.iv_coverage_front_pct < 50%: pipeline-wide IV coverage is degraded. Individual rows may still show quotes from the cache but the universe-level signal should be treated with caution. See AGENTS.md §12.8."
+              >
+                <strong>Vol / VRP coverage degraded — {vrpCoverageBanner.coverage}%</strong>
+                {' '}({vrpCoverageBanner.stale}/{vrpCoverageBanner.front} sleeves missing IV)
+                {vrpCoverageBanner.tradierConfigured === false
+                  ? <> · Tradier token not configured</>
+                  : (vrpCoverageBanner.occRequested > 0
+                    ? <> · OCC supplement filled {vrpCoverageBanner.occFilled}/{vrpCoverageBanner.occRequested}</>
+                    : null)}
+                {vrpCoverageBanner.buildTime && (
+                  <> · build {String(vrpCoverageBanner.buildTime).replace('T', ' ').slice(0, 16)}Z</>
+                )}
+              </div>
+            )}
             {vrpIvPending && (
               <div className="scenario-sub" style={{ marginBottom: 8 }}>
                 IV pending — options refresh in progress. Holdings strikes below are from Granite XLS.
@@ -7803,6 +7887,145 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <tr><td>Moneyness long / short</td><td>{vrpDisplayRow.moneyness_long_pct != null ? `${vrpDisplayRow.moneyness_long_pct.toFixed(2)}%` : '—'} / {vrpDisplayRow.moneyness_short_pct != null ? `${vrpDisplayRow.moneyness_short_pct.toFixed(2)}%` : '—'}</td></tr>
                       <tr><td>Event var source</td><td>{vrpDisplayRow.event_var_source || 'none'}{vrpDisplayRow.event_calendar_stale ? ' · calendar stale' : ''}</td></tr>
                       <tr><td>IV source</td><td>{vrpIvPending ? 'holdings (IV pending)' : vrpIvSourceLabel}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="borrow-card">
+                  <div className="scenario-title" style={{ fontSize: 13 }}>Implied move &amp; edge</div>
+                  <div className="scenario-sub" style={{ marginBottom: 6 }}>
+                    Sleeve IV inverted to underlying space (β=2). Breakeven σ inverts the spread mid through Black–Scholes — if IV &gt; BE σ, the market is paying more than expected loss.
+                  </div>
+                  <table className="scenario-table">
+                    <tbody>
+                      <tr title="Sleeve full IV divided by leverage (β=2). The like-for-like vol to compare with rv_30d_underlying.">
+                        <td>Underlying IV (β=2 inv.)</td>
+                        <td>{vrpDisplayRow.iv_underlying_implied != null ? fmt(vrpDisplayRow.iv_underlying_implied) : '—'}</td>
+                      </tr>
+                      <tr title="σ · √(5/252) · 100. The implied 1σ one-week price move on the 2× sleeve at the chosen σ source.">
+                        <td>Implied weekly move (sleeve)</td>
+                        <td>
+                          {vrpDisplayRow.iv_implied_weekly_move_2x_pct != null
+                            ? `${Number(vrpDisplayRow.iv_implied_weekly_move_2x_pct).toFixed(2)}%`
+                            : '—'}
+                        </td>
+                      </tr>
+                      <tr title="(σ / 2) · √(5/252) · 100. Implied 1σ one-week move on the *underlying*.">
+                        <td>Implied weekly move (underlying)</td>
+                        <td>
+                          {vrpDisplayRow.iv_implied_weekly_move_underlying_pct != null
+                            ? `${Number(vrpDisplayRow.iv_implied_weekly_move_underlying_pct).toFixed(2)}%`
+                            : '—'}
+                        </td>
+                      </tr>
+                      <tr title="Annualized σ that makes BS_fair(σ) = spread_mid_market. Solved via bisection. If iv_full_sleeve > breakeven_sigma, the structure has positive σ-space edge for the seller.">
+                        <td>Breakeven σ (annual)</td>
+                        <td>{vrpDisplayRow.spread_breakeven_sigma_annual != null ? fmt(vrpDisplayRow.spread_breakeven_sigma_annual) : '—'}</td>
+                      </tr>
+                      <tr title="iv_full_sleeve − breakeven_sigma. Positive = short-vol edge (sell); negative = market is underpricing the spread.">
+                        <td>Net edge in σ-space</td>
+                        <td>
+                          {vrpDisplayRow.iv_minus_breakeven_sigma != null ? (
+                            <strong style={{
+                              color: vrpDisplayRow.iv_minus_breakeven_sigma >= 0
+                                ? 'var(--green, #10b981)'
+                                : 'var(--red, #ef4444)',
+                            }}>
+                              {vrpDisplayRow.iv_minus_breakeven_sigma >= 0 ? '+' : ''}
+                              {fmt(vrpDisplayRow.iv_minus_breakeven_sigma)}
+                            </strong>
+                          ) : '—'}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="borrow-card">
+                  <div className="scenario-title" style={{ fontSize: 13 }}>Diffusion fair value &amp; drag</div>
+                  <div className="scenario-sub" style={{ marginBottom: 6 }}>
+                    BS fair value using IV (preferred) → base IV → RV fallback. Weekly loss is the fraction of NAV bled per week at the chosen σ.
+                  </div>
+                  <table className="scenario-table">
+                    <tbody>
+                      <tr title="BS short-K_short minus long-K_long put-spread fair value using the chosen σ (no event-jump component).">
+                        <td>BS fair (diffusion only)</td>
+                        <td>{vrpDisplayRow.bs_put_spread_fair_diffusion != null ? fmtSpreadMid(vrpDisplayRow.bs_put_spread_fair_diffusion, vrpDisplayRow.spot_2x) : '—'}</td>
+                      </tr>
+                      <tr title="Which σ was used to compute the BS fair value: iv_full_sleeve preferred, then iv_base_sleeve, then rv_2x_full, then rv_2x_base.">
+                        <td>σ source</td>
+                        <td>{vrpDisplayRow.bs_put_spread_sigma_source || '—'}</td>
+                      </tr>
+                      <tr title="BS fair / spot · 100. Expected weekly NAV bleed at current σ. Read as: 'this spread is structurally a {x}%/wk drag at IV-pricing'.">
+                        <td>Expected weekly loss (% spot)</td>
+                        <td>
+                          {vrpDisplayRow.expected_weekly_loss_pct_of_spot != null
+                            ? `${Number(vrpDisplayRow.expected_weekly_loss_pct_of_spot).toFixed(3)}%`
+                            : '—'}
+                        </td>
+                      </tr>
+                      <tr title="σ_underlying² — the simple Itô variance drag for an x=2 daily-rebalanced sleeve (per year). This is the pure variance bleed before any option-spread effect.">
+                        <td>Itô gross drag (x=2, /yr)</td>
+                        <td>{vrpDisplayRow.sleeve_diffusion_drag_annual != null ? fmt(vrpDisplayRow.sleeve_diffusion_drag_annual) : '—'}</td>
+                      </tr>
+                      <tr title="3σ_underlying² — equivalent Itô drag for the Bucket-4 short-pair (x = −2). The short side of an inverse pair monetizes this drag.">
+                        <td>Inverse drag (x=-2, /yr)</td>
+                        <td>{vrpDisplayRow.inverse_sleeve_drag_annual_x_minus2 != null ? fmt(vrpDisplayRow.inverse_sleeve_drag_annual_x_minus2) : '—'}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="borrow-card">
+                  <div className="scenario-title" style={{ fontSize: 13 }}>Greeks (short put-spread, per structure)</div>
+                  <div className="scenario-sub" style={{ marginBottom: 6 }}>
+                    Greeks of the SHORT spread (we sold it for a credit). Theta &gt; 0 = we collect decay. Gamma &lt; 0 = we are short convexity (event-week danger zone). Sleeve $-γ × 4 = underlying-equivalent $-γ.
+                  </div>
+                  <table className="scenario-table">
+                    <tbody>
+                      <tr title="Position delta of the short put-spread vs. the SLEEVE price. Typically positive (we lose if spot crashes).">
+                        <td>Δ (sleeve)</td>
+                        <td>
+                          {vrpDisplayRow.bs_delta_spread != null ? Number(vrpDisplayRow.bs_delta_spread).toFixed(4) : '—'}
+                        </td>
+                      </tr>
+                      <tr title="Position gamma of the short put-spread. Typically negative (short convexity) — this is what 'lights up' on an event-week move.">
+                        <td>Γ (sleeve)</td>
+                        <td>
+                          {vrpDisplayRow.bs_gamma_spread != null ? (
+                            <span style={{
+                              color: Number(vrpDisplayRow.bs_gamma_spread) < 0 ? 'var(--red, #ef4444)' : undefined,
+                            }}>
+                              {Number(vrpDisplayRow.bs_gamma_spread).toFixed(6)}
+                            </span>
+                          ) : '—'}
+                        </td>
+                      </tr>
+                      <tr title="Position vega (per 1.00 change in σ; multiply by 0.01 for per vol-point sensitivity). Typically negative because we are net short vol.">
+                        <td>ν (per 1σ)</td>
+                        <td>{vrpDisplayRow.bs_vega_spread != null ? Number(vrpDisplayRow.bs_vega_spread).toFixed(4) : '—'}</td>
+                      </tr>
+                      <tr title="Position theta per calendar day. Positive = we earn from decay.">
+                        <td>Θ per day</td>
+                        <td>
+                          {vrpDisplayRow.bs_theta_spread_per_day != null ? (
+                            <span style={{
+                              color: Number(vrpDisplayRow.bs_theta_spread_per_day) > 0 ? 'var(--green, #10b981)' : undefined,
+                            }}>
+                              {Number(vrpDisplayRow.bs_theta_spread_per_day) >= 0 ? '+' : ''}
+                              {Number(vrpDisplayRow.bs_theta_spread_per_day).toFixed(4)}
+                            </span>
+                          ) : '—'}
+                        </td>
+                      </tr>
+                      <tr title="γ · S² · 0.0001 — $ P&L acceleration per 1% move in the *sleeve*. Negative because we are short convexity.">
+                        <td>$-Γ per 1% sleeve</td>
+                        <td>{vrpDisplayRow.bs_dollar_gamma_per_1pct_sleeve != null ? Number(vrpDisplayRow.bs_dollar_gamma_per_1pct_sleeve).toFixed(4) : '—'}</td>
+                      </tr>
+                      <tr title="Above × 4 (variance-of-leverage scaling: 2× sleeve moves 2× per 1% underlying, so the dollar effect on the spread scales by 4 per 1% underlying move).">
+                        <td>$-Γ per 1% underlying</td>
+                        <td>{vrpDisplayRow.bs_dollar_gamma_per_1pct_underlying != null ? Number(vrpDisplayRow.bs_dollar_gamma_per_1pct_underlying).toFixed(4) : '—'}</td>
+                      </tr>
                     </tbody>
                   </table>
                 </div>
