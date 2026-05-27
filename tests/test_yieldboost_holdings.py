@@ -19,6 +19,7 @@ from yieldboost_holdings import (  # noqa: E402
     build_vrp_health_payload,
     build_vrp_live_payload,
     build_yieldboost_rv_map,
+    data_grade,
     extract_rv_30d_annual,
     format_occ_ticker,
     held_contract_needs_occ_quote,
@@ -909,3 +910,212 @@ def test_spreads_json_to_put_spread_legs_roundtrip():
     legs = spreads_json_to_put_spread_legs(payload)
     assert len(legs) == 1
     assert legs[0].strike_long == pytest.approx(27.89)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# data_grade() — PM-grade A/B/C/D classification
+# ───────────────────────────────────────────────────────────────────────────
+
+import datetime as _dt
+
+
+def _now_ts(minutes_ago: int = 0) -> str:
+    t = _dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc) - _dt.timedelta(minutes=minutes_ago)
+    return t.isoformat().replace("+00:00", "Z")
+
+
+def test_data_grade_A_for_fresh_exact_holdings_today():
+    grade, _ = data_grade(
+        options_as_of=_now_ts(15),
+        underlying_options_as_of=_now_ts(20),
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_exact",
+        iv_expiry_skew_days=0,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "A"
+
+
+def test_data_grade_B_for_nearest_expiry_with_3d_skew_and_2h_quote():
+    grade, reason = data_grade(
+        options_as_of=_now_ts(120),
+        underlying_options_as_of=_now_ts(60),
+        holdings_as_of="2026-05-26",  # 1cd old
+        iv_source="holdings_nearest_expiry",
+        iv_expiry_skew_days=3,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "B"
+    assert "quote 120m" in reason or "holdings" in reason or "skew" in reason or "src=" in reason
+
+
+def test_data_grade_C_for_az_imputed_iv():
+    grade, reason = data_grade(
+        options_as_of=_now_ts(60),
+        underlying_options_as_of=_now_ts(60),
+        holdings_as_of="2026-05-27",
+        iv_source="az_imputed_from_underlying",
+        iv_expiry_skew_days=2,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "C"
+    assert "AZ-imputed" in reason
+
+
+def test_data_grade_C_for_skew_above_7_days():
+    grade, reason = data_grade(
+        options_as_of=_now_ts(30),
+        underlying_options_as_of=_now_ts(30),
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_nearest_expiry",
+        iv_expiry_skew_days=14,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "C"
+    assert "skew" in reason
+
+
+def test_data_grade_D_when_holdings_older_than_2cd():
+    grade, reason = data_grade(
+        options_as_of=_now_ts(30),
+        underlying_options_as_of=_now_ts(30),
+        holdings_as_of="2026-05-22",  # 5cd old
+        iv_source="holdings_exact",
+        iv_expiry_skew_days=0,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "D"
+    assert "holdings" in reason and "5cd" in reason
+
+
+def test_data_grade_D_when_quote_older_than_24h():
+    grade, reason = data_grade(
+        options_as_of=_now_ts(30),
+        underlying_options_as_of=_now_ts(30 * 60),  # 30h ago
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_exact",
+        iv_expiry_skew_days=0,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "D"
+    assert "quote" in reason
+
+
+def test_data_grade_D_when_chain_missing():
+    grade, reason = data_grade(
+        options_as_of=_now_ts(15),
+        underlying_options_as_of=_now_ts(15),
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_missing_chain",
+        iv_expiry_skew_days=0,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "D"
+    assert "missing chain" in reason
+
+
+def test_data_grade_D_when_skew_above_21_days():
+    grade, _ = data_grade(
+        options_as_of=_now_ts(15),
+        underlying_options_as_of=_now_ts(15),
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_nearest_expiry",
+        iv_expiry_skew_days=25,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "D"
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Canonical (BS-free) public field names
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_build_vrp_live_payload_emits_canonical_kernel_aware_fields():
+    """vrp_live rows must carry model_name, model_fair, edge_pp_of_max_loss,
+    dollar_gamma_per_1pct_underlying, theta_per_day, expected_weekly_carry_usd,
+    greeks_kernel, and data_grade — the canonical BS-free public schema."""
+    expiry = date(2026, 5, 27)
+    spread = _build_amyy_az_spread(expiry=expiry)
+    options_cache = {
+        "symbols": {
+            "AMDL": {
+                "spot": 66.9,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 47.89, "iv": 2.50, "mid": 0.12},
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 50.55, "iv": 1.90, "mid": 0.25},
+                ],
+            },
+            "AMD": {
+                "spot": 467.5,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": k, "iv": 0.68}
+                    for k in (380, 390, 395, 400, 405, 410, 420)
+                ],
+            },
+        },
+    }
+    payload = build_vrp_live_payload(
+        spread, options_cache, rv_map={"AMD": 0.6, "AMDL": 1.2}, as_of=expiry,
+    )
+    row = payload["rows"][0]
+    # Canonical names (kernel-agnostic; UI consumes these).
+    assert "model_name" in row and row["model_name"] in {"az", "heston", "bates", None}
+    assert "model_fair" in row
+    assert "edge_pp_of_max_loss" in row
+    assert "expected_weekly_carry_usd" in row
+    assert "dollar_gamma_per_1pct_underlying" in row
+    assert "theta_per_day" in row
+    assert row.get("greeks_kernel") in {"bs_proxy", None}
+    assert "data_grade" in row and row["data_grade"] in {"A", "B", "C", "D"}
+    assert "data_grade_reason" in row
+    # When a model fair was computed, expected_weekly_carry_usd = model_fair * 100.
+    if row["model_fair"] is not None:
+        assert row["expected_weekly_carry_usd"] == pytest.approx(row["model_fair"] * 100, rel=1e-3)
+
+
+def test_build_vrp_live_payload_model_disagreement_when_multiple_kernels_fire():
+    """When AZ + Heston both succeed, model_disagreement_pp_of_max_loss surfaces."""
+    expiry = date(2026, 5, 27)
+    spread = _build_amyy_az_spread(expiry=expiry)
+    # Big underlying chain so Heston has enough points to calibrate.
+    options_cache = {
+        "symbols": {
+            "AMDL": {
+                "spot": 66.9,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 47.89, "iv": 2.50, "mid": 0.12},
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 50.55, "iv": 1.90, "mid": 0.25},
+                ],
+            },
+            "AMD": {
+                "spot": 467.5,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": k, "iv": iv}
+                    for k, iv in [
+                        (360, 0.80), (380, 0.72), (400, 0.66), (420, 0.62),
+                        (440, 0.60), (460, 0.58), (480, 0.59), (500, 0.61),
+                    ]
+                ],
+            },
+        },
+    }
+    payload = build_vrp_live_payload(
+        spread, options_cache, rv_map={"AMD": 0.6, "AMDL": 1.2}, as_of=expiry,
+    )
+    row = payload["rows"][0]
+    # az should always fire; heston may or may not depending on COS convergence.
+    assert row["model_name"] in {"az", "heston", "bates"}
+    # disagreement is None when only 1 model fires, otherwise a non-negative pp number
+    if row.get("model_disagreement_pp_of_max_loss") is not None:
+        assert row["model_disagreement_pp_of_max_loss"] >= 0

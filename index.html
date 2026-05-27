@@ -7866,24 +7866,38 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="scenario-sub">No front spread for {etfSym} yet. Run Update ETF Metrics (Granite XLS holdings) then Build &amp; Deploy.</div>
             ) : (
               <div className="borrow-grid">
+                {/* ── Trade card — the "should I sell this?" answer ─────────── */}
                 <div className="borrow-card">
-                  <div className="scenario-sub">Holdings as of {vrpDisplayRow.holdings_as_of || '—'} · Expiry {vrpDisplayRow.expiry || '—'}</div>
+                  <div className="scenario-title" style={{ fontSize: 13 }}>Trade</div>
+                  <div className="scenario-sub" style={{ marginBottom: 6 }}>
+                    Holdings as of {vrpDisplayRow.holdings_as_of || '—'} · Expiry {vrpDisplayRow.expiry || '—'} · Grade <strong style={{
+                      color: vrpDisplayRow.data_grade === 'A' || vrpDisplayRow.data_grade === 'B' ? 'var(--green, #10b981)'
+                        : vrpDisplayRow.data_grade === 'C' ? 'var(--amber, #f59e0b)' : 'var(--red, #ef4444)',
+                    }} title={vrpDisplayRow.data_grade_reason || ''}>{vrpDisplayRow.data_grade || '?'}</strong>
+                  </div>
                   <table className="scenario-table">
                     <tbody>
                       <tr><td>2× sleeve</td><td><strong>{vrpDisplayRow.sleeve_2x || '—'}</strong></td></tr>
-                      <tr><td>Long put strike</td><td>{vrpDisplayRow.strike_long ?? '—'}</td></tr>
-                      <tr><td>Short put strike</td><td>{vrpDisplayRow.strike_short ?? '—'}</td></tr>
-                      <tr><td>IV long / short (full)</td><td>{vrpDisplayRow.iv_put_long != null ? fmt(vrpDisplayRow.iv_put_long) : '—'} / {vrpDisplayRow.iv_put_short != null ? fmt(vrpDisplayRow.iv_put_short) : '—'}</td></tr>
-                      <tr><td>IV base (event-stripped)</td><td>{vrpDisplayRow.iv_base_proxy != null ? fmt(vrpDisplayRow.iv_base_proxy) : '—'}</td></tr>
                       <tr>
-                        <td>Events in window</td>
+                        <td>Long put strike</td>
                         <td>
-                          {(vrpDisplayRow.event_count_in_window || 0) > 0
-                            ? `${vrpDisplayRow.event_count_in_window} (${(vrpDisplayRow.event_types_in_window || []).join(', ') || 'event'})`
-                            : 'none'}
-                          {vrpDisplayRow.event_implied_move_pct != null
-                            ? ` · implied move ${(Number(vrpDisplayRow.event_implied_move_pct) * 100).toFixed(1)}%`
-                            : ''}
+                          {vrpDisplayRow.strike_long ?? '—'}
+                          {vrpDisplayRow.moneyness_long_pct != null && (
+                            <span style={{ marginLeft: 8, color: 'var(--text-muted)', fontSize: 11 }}>
+                              ({vrpDisplayRow.moneyness_long_pct >= 0 ? '+' : ''}{vrpDisplayRow.moneyness_long_pct.toFixed(1)}%)
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>Short put strike</td>
+                        <td>
+                          {vrpDisplayRow.strike_short ?? '—'}
+                          {vrpDisplayRow.moneyness_short_pct != null && (
+                            <span style={{ marginLeft: 8, color: 'var(--text-muted)', fontSize: 11 }}>
+                              ({vrpDisplayRow.moneyness_short_pct >= 0 ? '+' : ''}{vrpDisplayRow.moneyness_short_pct.toFixed(1)}%)
+                            </span>
+                          )}
                         </td>
                       </tr>
                       <tr>
@@ -7896,177 +7910,210 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                               : '—')}
                         </td>
                       </tr>
-                      <tr className="vrp-field-note">
-                        <td colSpan={2}>{VRP_SPREAD_MID_NOTE}</td>
+                      <tr title={`Model fair value from the chosen pricing kernel (${vrpDisplayRow.model_name || 'no model'}). Bates > Heston > AZ priority. No Black-Scholes.`}>
+                        <td>Fair value ({vrpDisplayRow.model_name || '—'})</td>
+                        <td>{vrpDisplayRow.model_fair != null ? fmtSpreadMid(vrpDisplayRow.model_fair, vrpDisplayRow.spot_2x) : '—'}</td>
                       </tr>
-                      <tr><td>Fair spread mid (base IV)</td><td>{vrpDisplayRow.put_spread_fair_event_aware != null ? fmtSpreadMid(vrpDisplayRow.put_spread_fair_event_aware, vrpDisplayRow.spot_2x) : '—'}</td></tr>
-                      <tr><td>RV 30d (2× full)</td><td>{vrpDisplayRow.rv_30d_2x_full != null ? fmt(vrpDisplayRow.rv_30d_2x_full) : (vrpDisplayRow.rv_30d_2x != null ? fmt(vrpDisplayRow.rv_30d_2x) : '—')}</td></tr>
-                      <tr><td>RV 30d (2× base)</td><td>{vrpDisplayRow.rv_30d_2x_base != null ? fmt(vrpDisplayRow.rv_30d_2x_base) : '—'}</td></tr>
-                      <tr><td>VRP vol base (headline)</td><td><strong>{vrpDisplayRow.vrp_vol_2x_base != null ? fmt(vrpDisplayRow.vrp_vol_2x_base) : '—'}</strong></td></tr>
-                      <tr><td>VRP vol full (legacy)</td><td>{vrpDisplayRow.vrp_vol_2x_full != null ? fmt(vrpDisplayRow.vrp_vol_2x_full) : (vrpDisplayRow.vrp_vol_2x != null ? fmt(vrpDisplayRow.vrp_vol_2x) : '—')}</td></tr>
-                      <tr><td>Spread VRP (event-aware)</td><td>{vrpDisplayRow.put_spread_vrp_event_aware != null ? fmtSpreadMid(vrpDisplayRow.put_spread_vrp_event_aware, vrpDisplayRow.spot_2x) : (vrpDisplayRow.put_spread_fair_event_aware != null ? '— (needs market mid)' : '—')}</td></tr>
-                      <tr><td>Moneyness long / short</td><td>{vrpDisplayRow.moneyness_long_pct != null ? `${vrpDisplayRow.moneyness_long_pct.toFixed(2)}%` : '—'} / {vrpDisplayRow.moneyness_short_pct != null ? `${vrpDisplayRow.moneyness_short_pct.toFixed(2)}%` : '—'}</td></tr>
-                      <tr><td>Event var source</td><td>{vrpDisplayRow.event_var_source || 'none'}{vrpDisplayRow.event_calendar_stale ? ' · calendar stale' : ''}</td></tr>
-                      <tr><td>IV source</td><td>{vrpIvPending ? 'holdings (IV pending)' : vrpIvSourceLabel}</td></tr>
-                      {vrpDisplayRow?.iv_chain_expiry_used && vrpDisplayRow.iv_chain_expiry_used !== vrpDisplayRow.expiry && (
-                        <tr title="When the held expiry isn't listed (off-cycle Granite spread or sleeve only listing monthlies), IV is taken from the nearest listed expiry. Skew = |held - chain| calendar days. >7d skew means the IV-term-structure interpolation error is meaningful; >21d ~= using monthly IV for a weekly spread (treat the resulting BS fair value as a regime indicator only).">
-                          <td>Chain expiry used</td>
-                          <td>
-                            {vrpDisplayRow.iv_chain_expiry_used}
-                            {Number.isFinite(Number(vrpDisplayRow.iv_expiry_skew_days)) && (
-                              <span style={{
-                                marginLeft: 6,
-                                fontSize: 10,
-                                color: Number(vrpDisplayRow.iv_expiry_skew_days) > 21
-                                  ? 'var(--red, #ef4444)'
-                                  : (Number(vrpDisplayRow.iv_expiry_skew_days) > 7
-                                    ? 'var(--amber, #f59e0b)'
-                                    : 'var(--text-muted)'),
-                              }}>
-                                ({vrpDisplayRow.iv_expiry_skew_days}d skew)
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="borrow-card">
-                  <div className="scenario-title" style={{ fontSize: 13 }}>Implied move &amp; edge</div>
-                  <div className="scenario-sub" style={{ marginBottom: 6 }}>
-                    Sleeve IV inverted to underlying space (β=2). Breakeven σ inverts the spread mid through Black–Scholes — if IV &gt; BE σ, the market is paying more than expected loss.
-                  </div>
-                  <table className="scenario-table">
-                    <tbody>
-                      <tr title="Sleeve full IV divided by leverage (β=2). The like-for-like vol to compare with rv_30d_underlying.">
-                        <td>Underlying IV (β=2 inv.)</td>
-                        <td>{vrpDisplayRow.iv_underlying_implied != null ? fmt(vrpDisplayRow.iv_underlying_implied) : '—'}</td>
-                      </tr>
-                      <tr title="σ · √(5/252) · 100. The implied 1σ one-week price move on the 2× sleeve at the chosen σ source.">
-                        <td>Implied weekly move (sleeve)</td>
+                      <tr title="(mid − model_fair) / max_loss × 100. Positive ⇒ market overpaying ⇒ SELL the spread.">
+                        <td>Edge ($ space)</td>
                         <td>
-                          {vrpDisplayRow.iv_implied_weekly_move_2x_pct != null
-                            ? `${Number(vrpDisplayRow.iv_implied_weekly_move_2x_pct).toFixed(2)}%`
-                            : '—'}
-                        </td>
-                      </tr>
-                      <tr title="(σ / 2) · √(5/252) · 100. Implied 1σ one-week move on the *underlying*.">
-                        <td>Implied weekly move (underlying)</td>
-                        <td>
-                          {vrpDisplayRow.iv_implied_weekly_move_underlying_pct != null
-                            ? `${Number(vrpDisplayRow.iv_implied_weekly_move_underlying_pct).toFixed(2)}%`
-                            : '—'}
-                        </td>
-                      </tr>
-                      <tr title="Annualized σ that makes BS_fair(σ) = spread_mid_market. Solved via bisection. If iv_full_sleeve > breakeven_sigma, the structure has positive σ-space edge for the seller.">
-                        <td>Breakeven σ (annual)</td>
-                        <td>{vrpDisplayRow.spread_breakeven_sigma_annual != null ? fmt(vrpDisplayRow.spread_breakeven_sigma_annual) : '—'}</td>
-                      </tr>
-                      <tr title="iv_full_sleeve − breakeven_sigma. Positive = short-vol edge (sell); negative = market is underpricing the spread.">
-                        <td>Net edge in σ-space</td>
-                        <td>
-                          {vrpDisplayRow.iv_minus_breakeven_sigma != null ? (
+                          {vrpDisplayRow.edge_pp_of_max_loss != null ? (
                             <strong style={{
-                              color: vrpDisplayRow.iv_minus_breakeven_sigma >= 0
-                                ? 'var(--green, #10b981)'
+                              color: vrpDisplayRow.edge_pp_of_max_loss >= 10 ? 'var(--green, #10b981)'
+                                : vrpDisplayRow.edge_pp_of_max_loss >= 0 ? 'var(--text-muted)'
+                                : vrpDisplayRow.edge_pp_of_max_loss >= -10 ? 'var(--amber, #f59e0b)'
                                 : 'var(--red, #ef4444)',
                             }}>
-                              {vrpDisplayRow.iv_minus_breakeven_sigma >= 0 ? '+' : ''}
-                              {fmt(vrpDisplayRow.iv_minus_breakeven_sigma)}
+                              {vrpDisplayRow.edge_pp_of_max_loss >= 0 ? '+' : ''}{Number(vrpDisplayRow.edge_pp_of_max_loss).toFixed(1)}pp of max-loss
                             </strong>
                           ) : '—'}
                         </td>
                       </tr>
+                      <tr title="model_fair × 100 = expected $ carry per OCC contract per week of holding the short spread.">
+                        <td>Expected carry / wk</td>
+                        <td>{vrpDisplayRow.expected_weekly_carry_usd != null ? `$${Number(vrpDisplayRow.expected_weekly_carry_usd).toFixed(2)} / spread` : '—'}</td>
+                      </tr>
                     </tbody>
                   </table>
                 </div>
 
+                {/* ── Models card — disagreement check across AZ/Heston/Bates ──── */}
                 <div className="borrow-card">
-                  <div className="scenario-title" style={{ fontSize: 13 }}>Diffusion fair value &amp; drag</div>
+                  <div className="scenario-title" style={{ fontSize: 13 }}>Models</div>
                   <div className="scenario-sub" style={{ marginBottom: 6 }}>
-                    BS fair value using IV (preferred) → base IV → RV fallback. Weekly loss is the fraction of NAV bled per week at the chosen σ.
+                    Calibrated kernels with AHJ propagation to the 2× sleeve. Black-Scholes is not used (cannot price LETF vol drag, skew, or jumps).
                   </div>
                   <table className="scenario-table">
                     <tbody>
-                      <tr title="BS short-K_short minus long-K_long put-spread fair value using the chosen σ (no event-jump component).">
-                        <td>BS fair (diffusion only)</td>
-                        <td>{vrpDisplayRow.bs_put_spread_fair_diffusion != null ? fmtSpreadMid(vrpDisplayRow.bs_put_spread_fair_diffusion, vrpDisplayRow.spot_2x) : '—'}</td>
+                      <tr title="Avellaneda–Zhang sleeve fair: rescale held strikes to underlying-equivalent strikes, look up IV on the underlying chain, price the spread in sleeve space.">
+                        <td>AZ fair</td>
+                        <td>{vrpDisplayRow.az_put_spread_fair != null ? Number(vrpDisplayRow.az_put_spread_fair).toFixed(3) : '—'}</td>
                       </tr>
-                      <tr title="Which σ was used to compute the BS fair value: iv_full_sleeve preferred, then iv_base_sleeve, then rv_2x_full, then rv_2x_base.">
-                        <td>σ source</td>
-                        <td>{vrpDisplayRow.bs_put_spread_sigma_source || '—'}</td>
-                      </tr>
-                      <tr title="BS fair / spot · 100. Expected weekly NAV bleed at current σ. Read as: 'this spread is structurally a {x}%/wk drag at IV-pricing'.">
-                        <td>Expected weekly loss (% spot)</td>
+                      <tr title="Sleeve IV minus AZ-implied sleeve IV (|β|·σ_underlying at mapped strike). Positive = sleeve trades rich vs underlying surface = cross-surface arb signal.">
+                        <td>AZ cone (Δσ)</td>
                         <td>
-                          {vrpDisplayRow.expected_weekly_loss_pct_of_spot != null
-                            ? `${Number(vrpDisplayRow.expected_weekly_loss_pct_of_spot).toFixed(3)}%`
-                            : '—'}
+                          {vrpDisplayRow.az_cone_residual_iv != null ? (
+                            <strong style={{
+                              color: vrpDisplayRow.az_cone_residual_iv >= 0.05 ? 'var(--green, #10b981)'
+                                : vrpDisplayRow.az_cone_residual_iv <= -0.05 ? 'var(--red, #ef4444)'
+                                : 'var(--text-muted)',
+                            }}>
+                              {vrpDisplayRow.az_cone_residual_iv >= 0 ? '+' : ''}{(vrpDisplayRow.az_cone_residual_iv * 100).toFixed(1)}pp
+                            </strong>
+                          ) : '—'}
                         </td>
                       </tr>
-                      <tr title="σ_underlying² — the simple Itô variance drag for an x=2 daily-rebalanced sleeve (per year). This is the pure variance bleed before any option-spread effect.">
-                        <td>Itô gross drag (x=2, /yr)</td>
+                      <tr title={vrpDisplayRow.heston_sleeve_params
+                        ? `Sleeve Heston params: κ=${vrpDisplayRow.heston_sleeve_params.kappa}, θ=${vrpDisplayRow.heston_sleeve_params.theta}, γ=${vrpDisplayRow.heston_sleeve_params.gamma}, ρ=${vrpDisplayRow.heston_sleeve_params.rho}, v₀=${vrpDisplayRow.heston_sleeve_params.v0}`
+                        : 'Heston calibration unavailable (thin chain or convergence failure)'}>
+                        <td>Heston fair</td>
+                        <td>{vrpDisplayRow.heston_put_spread_fair != null ? Number(vrpDisplayRow.heston_put_spread_fair).toFixed(3) : '—'}</td>
+                      </tr>
+                      <tr title={vrpDisplayRow.bates_sleeve_params
+                        ? `Sleeve Bates params: λ=${vrpDisplayRow.bates_sleeve_params.lambda}, μ_jump=${vrpDisplayRow.bates_sleeve_params.mu_jump}, σ_jump=${vrpDisplayRow.bates_sleeve_params.sigma_jump}`
+                        : 'Bates not calibrated (index sleeve, thin chain, or no pre-event window).'}>
+                        <td>Bates fair</td>
+                        <td>{vrpDisplayRow.bates_put_spread_fair != null ? Number(vrpDisplayRow.bates_put_spread_fair).toFixed(3) : '—'}</td>
+                      </tr>
+                      <tr title="Max − min model fair across calibrated kernels, in % of max-loss. >20pp = model uncertainty; size at half band or skip.">
+                        <td>Disagreement</td>
+                        <td>
+                          {vrpDisplayRow.model_disagreement_pp_of_max_loss != null ? (
+                            <span style={{
+                              color: vrpDisplayRow.model_disagreement_pp_of_max_loss > 20
+                                ? 'var(--amber, #f59e0b)' : 'var(--text-muted)',
+                            }}>
+                              {Number(vrpDisplayRow.model_disagreement_pp_of_max_loss).toFixed(1)}pp
+                            </span>
+                          ) : 'single model'}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* ── Greeks card — sizing-relevant only ───────────────────── */}
+                <div className="borrow-card">
+                  <div className="scenario-title" style={{ fontSize: 13 }}>Greeks (short spread, per structure)</div>
+                  <div className="scenario-sub" style={{ marginBottom: 6 }}>
+                    Sizing inputs for the short pair. <em>{vrpDisplayRow.greeks_kernel === 'bs_proxy'
+                      ? 'BS finite-diff at sleeve IV (kernel-derivative greeks pending).'
+                      : 'Kernel finite-diff on model_fair.'}</em>
+                  </div>
+                  <table className="scenario-table">
+                    <tbody>
+                      <tr title="$ P&L per 1% adverse move in the underlying. Use to cap loss at a target gap-down tolerance: spreads = floor(VaR / (|$-γ| · gap² / 2)).">
+                        <td>$-γ per 1% underlying</td>
+                        <td>
+                          {vrpDisplayRow.dollar_gamma_per_1pct_underlying != null ? (
+                            <strong style={{
+                              color: Number(vrpDisplayRow.dollar_gamma_per_1pct_underlying) < 0 ? 'var(--red, #ef4444)' : 'var(--text-muted)',
+                            }}>
+                              {Number(vrpDisplayRow.dollar_gamma_per_1pct_underlying).toFixed(3)}
+                            </strong>
+                          ) : '—'}
+                        </td>
+                      </tr>
+                      <tr title="Theta per calendar day. + = we collect decay.">
+                        <td>θ / day</td>
+                        <td>
+                          {vrpDisplayRow.theta_per_day != null ? (
+                            <span style={{
+                              color: Number(vrpDisplayRow.theta_per_day) > 0 ? 'var(--green, #10b981)' : undefined,
+                            }}>
+                              {Number(vrpDisplayRow.theta_per_day) >= 0 ? '+' : ''}{Number(vrpDisplayRow.theta_per_day).toFixed(3)}
+                            </span>
+                          ) : '—'}
+                        </td>
+                      </tr>
+                      <tr title="Carry-to-tail rule of thumb: θ × DTE should be ≥ 0.5 × |$-γ × 25 / 2| for a 5% gap reference. If carry < tail, you're being paid too little for the risk.">
+                        <td>Carry vs 5% tail</td>
+                        <td>
+                          {(() => {
+                            const dgam = vrpDisplayRow.dollar_gamma_per_1pct_underlying;
+                            const theta = vrpDisplayRow.theta_per_day;
+                            const dte = vrpDisplayRow.days_to_exp;
+                            if (dgam == null || theta == null || dte == null) return '—';
+                            const tail = Math.abs(Number(dgam) * 25 / 2);
+                            const carry = Number(theta) * Math.max(1, Number(dte));
+                            if (!Number.isFinite(tail) || !Number.isFinite(carry) || tail === 0) return '—';
+                            const ratio = carry / tail;
+                            const color = ratio >= 0.5 ? 'var(--green, #10b981)'
+                              : ratio >= 0.2 ? 'var(--amber, #f59e0b)' : 'var(--red, #ef4444)';
+                            return <span style={{ color }}>{ratio.toFixed(2)}× tail</span>;
+                          })()}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* ── Pair carry — bucket-2 (short YB + long underlying) view ── */}
+                <div className="borrow-card">
+                  <div className="scenario-title" style={{ fontSize: 13 }}>Pair carry (bucket-2)</div>
+                  <div className="scenario-sub" style={{ marginBottom: 6 }}>
+                    Variance drag + realized vol + σ-space VRP for the short-YB + long-underlying pair.
+                  </div>
+                  <table className="scenario-table">
+                    <tbody>
+                      <tr title="σ² Itô drag for a 2× daily-rebalanced sleeve. The decay edge of the short pair.">
+                        <td>Itô drag (x=2, /yr)</td>
                         <td>{vrpDisplayRow.sleeve_diffusion_drag_annual != null ? fmt(vrpDisplayRow.sleeve_diffusion_drag_annual) : '—'}</td>
                       </tr>
-                      <tr title="3σ_underlying² — equivalent Itô drag for the Bucket-4 short-pair (x = −2). The short side of an inverse pair monetizes this drag.">
-                        <td>Inverse drag (x=-2, /yr)</td>
+                      <tr title="3σ² Itô drag for an x=−2 inverse pair. Mirror of the long-sleeve drag.">
+                        <td>Itô drag (x=−2, /yr)</td>
                         <td>{vrpDisplayRow.inverse_sleeve_drag_annual_x_minus2 != null ? fmt(vrpDisplayRow.inverse_sleeve_drag_annual_x_minus2) : '—'}</td>
+                      </tr>
+                      <tr><td>RV 30d (sleeve)</td><td>{vrpDisplayRow.rv_30d_2x_full != null ? fmt(vrpDisplayRow.rv_30d_2x_full) : (vrpDisplayRow.rv_30d_2x != null ? fmt(vrpDisplayRow.rv_30d_2x) : '—')}</td></tr>
+                      <tr title="VRP in σ-space (sleeve IV − sleeve RV), event-stripped where event variance was identified.">
+                        <td>VRP σ (event-stripped)</td>
+                        <td><strong>{vrpDisplayRow.vrp_vol_2x_base != null ? fmt(vrpDisplayRow.vrp_vol_2x_base) : '—'}</strong></td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
 
+                {/* ── Event card — earnings exposure for the held window ─────── */}
                 <div className="borrow-card">
-                  <div className="scenario-title" style={{ fontSize: 13 }}>Greeks (short put-spread, per structure)</div>
+                  <div className="scenario-title" style={{ fontSize: 13 }}>Event</div>
                   <div className="scenario-sub" style={{ marginBottom: 6 }}>
-                    Greeks of the SHORT spread (we sold it for a credit). Theta &gt; 0 = we collect decay. Gamma &lt; 0 = we are short convexity (event-week danger zone). Sleeve $-γ × 4 = underlying-equivalent $-γ.
+                    Next earnings vs implied / historical move. Use Bates for inside-window pricing.
                   </div>
                   <table className="scenario-table">
                     <tbody>
-                      <tr title="Position delta of the short put-spread vs. the SLEEVE price. Typically positive (we lose if spot crashes).">
-                        <td>Δ (sleeve)</td>
+                      <tr>
+                        <td>Days to next earnings</td>
                         <td>
-                          {vrpDisplayRow.bs_delta_spread != null ? Number(vrpDisplayRow.bs_delta_spread).toFixed(4) : '—'}
-                        </td>
-                      </tr>
-                      <tr title="Position gamma of the short put-spread. Typically negative (short convexity) — this is what 'lights up' on an event-week move.">
-                        <td>Γ (sleeve)</td>
-                        <td>
-                          {vrpDisplayRow.bs_gamma_spread != null ? (
-                            <span style={{
-                              color: Number(vrpDisplayRow.bs_gamma_spread) < 0 ? 'var(--red, #ef4444)' : undefined,
+                          {vrpDisplayRow.days_to_event != null ? (
+                            <strong style={{
+                              color: vrpDisplayRow.event_in_held_horizon ? 'var(--red, #ef4444)' : 'var(--text-muted)',
                             }}>
-                              {Number(vrpDisplayRow.bs_gamma_spread).toFixed(6)}
-                            </span>
+                              {vrpDisplayRow.days_to_event}d{vrpDisplayRow.event_in_held_horizon ? ' (INSIDE)' : ''}
+                            </strong>
                           ) : '—'}
                         </td>
                       </tr>
-                      <tr title="Position vega (per 1.00 change in σ; multiply by 0.01 for per vol-point sensitivity). Typically negative because we are net short vol.">
-                        <td>ν (per 1σ)</td>
-                        <td>{vrpDisplayRow.bs_vega_spread != null ? Number(vrpDisplayRow.bs_vega_spread).toFixed(4) : '—'}</td>
+                      <tr title="(var_full − var_base)^0.5 / β. The 1σ event-day move implied by the IV variance split, on the underlying scale.">
+                        <td>Implied move (underlying)</td>
+                        <td>{vrpDisplayRow.event_implied_move_pct_underlying != null ? `${Number(vrpDisplayRow.event_implied_move_pct_underlying).toFixed(2)}%` : '—'}</td>
                       </tr>
-                      <tr title="Position theta per calendar day. Positive = we earn from decay.">
-                        <td>Θ per day</td>
+                      <tr title="Median absolute |return| on prior earnings days for this underlying. The historical baseline the implied is compared against.">
+                        <td>Historical MAD</td>
+                        <td>{vrpDisplayRow.event_historical_move_pct_underlying != null ? `${Number(vrpDisplayRow.event_historical_move_pct_underlying).toFixed(2)}%` : '—'}</td>
+                      </tr>
+                      <tr title="(implied / historical) − 1. ≥ +30% market overpays the event (SELL); ≤ −20% market underpays (BUY).">
+                        <td>Richness</td>
                         <td>
-                          {vrpDisplayRow.bs_theta_spread_per_day != null ? (
-                            <span style={{
-                              color: Number(vrpDisplayRow.bs_theta_spread_per_day) > 0 ? 'var(--green, #10b981)' : undefined,
+                          {vrpDisplayRow.event_move_richness_pct != null ? (
+                            <strong style={{
+                              color: vrpDisplayRow.event_move_richness_pct >= 0.30 ? 'var(--green, #10b981)'
+                                : vrpDisplayRow.event_move_richness_pct <= -0.20 ? 'var(--red, #ef4444)'
+                                : 'var(--text-muted)',
                             }}>
-                              {Number(vrpDisplayRow.bs_theta_spread_per_day) >= 0 ? '+' : ''}
-                              {Number(vrpDisplayRow.bs_theta_spread_per_day).toFixed(4)}
-                            </span>
+                              {vrpDisplayRow.event_move_richness_pct >= 0 ? '+' : ''}{(vrpDisplayRow.event_move_richness_pct * 100).toFixed(0)}%
+                            </strong>
                           ) : '—'}
                         </td>
-                      </tr>
-                      <tr title="γ · S² · 0.0001 — $ P&L acceleration per 1% move in the *sleeve*. Negative because we are short convexity.">
-                        <td>$-Γ per 1% sleeve</td>
-                        <td>{vrpDisplayRow.bs_dollar_gamma_per_1pct_sleeve != null ? Number(vrpDisplayRow.bs_dollar_gamma_per_1pct_sleeve).toFixed(4) : '—'}</td>
-                      </tr>
-                      <tr title="Above × 4 (variance-of-leverage scaling: 2× sleeve moves 2× per 1% underlying, so the dollar effect on the spread scales by 4 per 1% underlying move).">
-                        <td>$-Γ per 1% underlying</td>
-                        <td>{vrpDisplayRow.bs_dollar_gamma_per_1pct_underlying != null ? Number(vrpDisplayRow.bs_dollar_gamma_per_1pct_underlying).toFixed(4) : '—'}</td>
                       </tr>
                     </tbody>
                   </table>
@@ -8446,9 +8493,15 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
   const [vrpLive, setVrpLive] = useState(null);
   const [vrpHealth, setVrpHealth] = useState(null);
   const [loadError, setLoadError] = useState(null);
-  const [sortKey, setSortKey] = useState('iv_minus_breakeven_sigma');
+  // Default sort: kernel-aware price-space edge from the chosen model
+  // (Bates > Heston > AZ). No Black-Scholes. The legacy `iv_minus_breakeven_sigma`
+  // sort key has been removed because BS is not the right kernel for LETF puts.
+  const [sortKey, setSortKey] = useState('edge_pp_of_max_loss');
   const [sortDesc, setSortDesc] = useState(true);
-  const [filterEdgeOnly, setFilterEdgeOnly] = useState(false);
+  // Filters: default to A/B grade only (tradeable today). C is monitor-only;
+  // D is display-only and hidden unless the operator opens the full view.
+  const [includeGradeC, setIncludeGradeC] = useState(true);
+  const [includeGradeD, setIncludeGradeD] = useState(false);
   const [filterEarningsOnly, setFilterEarningsOnly] = useState(false);
 
   useEffect(() => {
@@ -8494,10 +8547,11 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
     return m;
   }, [eventCalendar]);
 
-  // P0a freshness gating: a row is "stale" when the held-leg options snapshot,
-  // the underlying chain snapshot, or the holdings file fall outside the
-  // tradeable freshness band. STRONG SELL / sell signals are hard-blocked on
-  // stale rows: traders should not act on the σ-edge until the inputs refresh.
+  // Freshness pill is driven by the server-side `data_grade` (A/B/C/D), which
+  // collapses sleeve quote age × underlying quote age × holdings age × IV
+  // source × expiry skew into one PM-grade letter. See
+  // `scripts/yieldboost_holdings.py::data_grade()` for the rule. The UI
+  // doesn't recompute thresholds — it consumes the grade and renders.
   const freshnessFor = (r) => {
     const optMs = r.options_as_of ? new Date(r.options_as_of).getTime() : null;
     const undMs = r.underlying_options_as_of ? new Date(r.underlying_options_as_of).getTime() : null;
@@ -8506,31 +8560,24 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
     const undAge = undMs ? Math.max(0, Math.round((Date.now() - undMs) / 60000)) : null;
     const holdingsDays = hMs ? Math.max(0, Math.floor((Date.now() - hMs) / 86400000)) : null;
     const worst = Math.max(optAge ?? 0, undAge ?? 0);
-    const skew = Number(r.iv_expiry_skew_days) || 0;
-    const ivExact = String(r.iv_source) === 'holdings_exact';
-    // Block trading recommendations when:
-    //  (a) any quote > 24h stale  → outright stale
-    //  (b) holdings > 2 trading days → strike-set may have rolled
-    //  (c) IV source is not exact AND expiry skew > 7 days → interpolated IV
-    //  (d) iv_source = holdings_missing_chain (no IV available)
-    const blockStale = (worst >= 24 * 60)
-      || (holdingsDays != null && holdingsDays > 2)
-      || (!ivExact && skew > 7)
-      || (String(r.iv_source) === 'holdings_missing_chain');
-    const warnStale = (worst >= 60) || (holdingsDays != null && holdingsDays > 1) || (skew > 14);
+    const grade = String(r.data_grade || '').toUpperCase() || '?';
+    // Display label for worst-of quote age (informational; grade is the gate).
     let label;
-    let className;
-    if (worst >= 24 * 60) {
-      label = `${Math.round(worst / 60)}h old`;
-      className = 'fresh-bad';
-    } else if (worst >= 60) {
-      label = `${Math.round(worst / 60)}h old`;
-      className = 'fresh-warn';
-    } else {
-      label = `${worst}m old`;
-      className = 'fresh-good';
-    }
-    return { optAge, undAge, holdingsDays, worst, label, className, blockStale, warnStale, skew };
+    if (worst >= 24 * 60) label = `${Math.round(worst / 60)}h old`;
+    else if (worst >= 60) label = `${Math.round(worst / 60)}h old`;
+    else label = `${worst}m old`;
+    // Tone derives strictly from grade; freshness label is supporting detail.
+    const tone = grade === 'A' ? 'good' : grade === 'B' ? 'good'
+      : grade === 'C' ? 'warn' : 'bad';
+    const className = tone === 'good' ? 'fresh-good' : tone === 'warn' ? 'fresh-warn' : 'fresh-bad';
+    // Hard-block SELL signals on grade C or D. C still shows the row (monitor),
+    // D is filtered out by default.
+    const blockSignal = grade === 'C' || grade === 'D';
+    return {
+      optAge, undAge, holdingsDays, worst, label, className,
+      grade, blockSignal, reason: r.data_grade_reason || '',
+      skew: Number(r.iv_expiry_skew_days) || 0,
+    };
   };
 
   const enriched = useMemo(() => {
@@ -8574,12 +8621,9 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
         const eventSigmaUnderlying = Math.sqrt(eventVar) / 2; // beta=2 inversion
         impliedEventMovePct = eventSigmaUnderlying * 100;
       }
-      // Weekly $-P&L estimate per 1 spread structure = expected weekly fair
-      // value of the BS-fair spread (i.e. the credit the seller collects on
-      // average per week from theta + variance harvest).
-      const weeklyFairUsd = Number.isFinite(Number(r.bs_put_spread_fair_diffusion))
-        ? Number(r.bs_put_spread_fair_diffusion) * 100 // standard option contract = 100 sh
-        : null;
+      // Weekly $-P&L estimate per 1 spread structure ($-carry per OCC contract)
+      // is now produced server-side as `expected_weekly_carry_usd` from the
+      // chosen pricing kernel's fair value (not from Black-Scholes).
       const fr = freshnessFor(r);
       return {
         ...r,
@@ -8589,23 +8633,26 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
         earnings_confirmation: ev?.confirmation || null,
         earnings_historical_move_mad: ev?.historicalMovePctMad ?? null,
         implied_event_move_pct_underlying: impliedEventMovePct,
-        weekly_pnl_per_spread_usd: weeklyFairUsd,
         _freshness: fr,
-        _block_stale: fr.blockStale,
+        _block_signal: fr.blockSignal,
       };
     });
   }, [vrpLive, earningsByUnderlying]);
 
   const filtered = useMemo(() => {
     let out = enriched;
-    if (filterEdgeOnly) {
-      out = out.filter((r) => r.iv_minus_breakeven_sigma != null);
-    }
+    // Grade gating: A/B always shown; C optional (default on); D optional (default off).
+    out = out.filter((r) => {
+      const g = String(r.data_grade || '').toUpperCase();
+      if (g === 'A' || g === 'B') return true;
+      if (g === 'C') return includeGradeC;
+      return includeGradeD; // 'D' or unknown
+    });
     if (filterEarningsOnly) {
       out = out.filter((r) => r.event_in_held_window);
     }
     return out;
-  }, [enriched, filterEdgeOnly, filterEarningsOnly]);
+  }, [enriched, includeGradeC, includeGradeD, filterEarningsOnly]);
 
   const sorted = useMemo(() => {
     const out = [...filtered];
@@ -8624,37 +8671,57 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
   }, [filtered, sortKey, sortDesc]);
 
   const stats = useMemo(() => {
-    const withEdge = enriched.filter((r) => r.iv_minus_breakeven_sigma != null);
-    const positiveEdge = withEdge.filter((r) => r.iv_minus_breakeven_sigma > 0);
-    const strongSell = withEdge.filter((r) => r.iv_minus_breakeven_sigma >= 0.30);
-    const avoid = withEdge.filter((r) => r.iv_minus_breakeven_sigma < -0.10);
+    const withEdge = enriched.filter((r) => r.edge_pp_of_max_loss != null);
+    const positiveEdge = withEdge.filter((r) => r.edge_pp_of_max_loss > 0);
+    const strongSell = withEdge.filter((r) => r.edge_pp_of_max_loss >= 30);
+    const fade = withEdge.filter((r) => r.edge_pp_of_max_loss <= -10);
     const eventInWindow = enriched.filter((r) => r.event_in_held_window);
+    const gradeCounts = enriched.reduce((acc, r) => {
+      const g = String(r.data_grade || '').toUpperCase() || '?';
+      acc[g] = (acc[g] || 0) + 1;
+      return acc;
+    }, {});
+    const tradeable = (gradeCounts.A || 0) + (gradeCounts.B || 0);
     return {
       total: enriched.length,
       with_edge: withEdge.length,
       positive_edge: positiveEdge.length,
       strong_sell: strongSell.length,
-      avoid: avoid.length,
+      fade: fade.length,
       events_in_window: eventInWindow.length,
+      grade_counts: gradeCounts,
+      tradeable,
     };
   }, [enriched]);
 
-  const signalFor = (edge, opts = {}) => {
-    if (edge == null || !Number.isFinite(Number(edge))) {
+  // Price-space signal taxonomy (% of max-loss). NO σ-space, NO Black-Scholes.
+  // Thresholds match the sizing rules in scripts/income_schedule.py.
+  const signalFor = (edgePp, opts = {}) => {
+    if (edgePp == null || !Number.isFinite(Number(edgePp))) {
       return { label: '—', color: 'var(--text-muted)', bg: 'transparent', weight: 400 };
     }
-    const e = Number(edge);
-    // P0a hard-block: stale inputs degrade SELL → AVOID-DATA so traders never
-    // act on a positive σ-edge that is built on >24h-old quotes or a holdings
-    // file that has rolled past the displayed strikes.
-    if (opts.blockStale && e > 0) {
+    const e = Number(edgePp);
+    if (opts.blockSignal && e > 0) {
+      // Grade C or D — model says sell but inputs are stale or imputed.
       return { label: 'AVOID DATA', color: '#fff', bg: '#6b7280', weight: 700 };
     }
-    if (e >= 0.30) return { label: 'STRONG SELL', color: '#fff', bg: '#10b981', weight: 700 };
-    if (e >= 0.10) return { label: 'sell', color: '#10b981', bg: 'rgba(16,185,129,0.15)', weight: 600 };
+    if (e >= 30) return { label: 'STRONG SELL', color: '#fff', bg: '#10b981', weight: 700 };
+    if (e >= 10) return { label: 'sell', color: '#10b981', bg: 'rgba(16,185,129,0.15)', weight: 600 };
     if (e >= 0) return { label: 'lean sell', color: '#10b981', bg: 'transparent', weight: 500 };
-    if (e >= -0.10) return { label: 'lean avoid', color: '#f59e0b', bg: 'transparent', weight: 500 };
-    return { label: 'AVOID', color: '#fff', bg: '#ef4444', weight: 700 };
+    if (e >= -10) return { label: 'lean fade', color: '#f59e0b', bg: 'transparent', weight: 500 };
+    return { label: 'fade', color: '#fff', bg: '#ef4444', weight: 700 };
+  };
+
+  // Grade pill rendering helper — shared with the per-ETF Vol/VRP tab (Phase
+  // 4 will extract this into a top-level component reused on both routes).
+  const gradePill = (grade) => {
+    const g = String(grade || '?').toUpperCase();
+    const tone = g === 'A' ? { color: '#fff', bg: '#10b981' }
+      : g === 'B' ? { color: '#10b981', bg: 'rgba(16,185,129,0.15)' }
+      : g === 'C' ? { color: '#f59e0b', bg: 'rgba(245,158,11,0.15)' }
+      : g === 'D' ? { color: '#fff', bg: '#6b7280' }
+      : { color: 'var(--text-muted)', bg: 'transparent' };
+    return tone;
   };
 
   const skewColor = (skew) => {
@@ -8711,42 +8778,49 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
     <div style={{ padding: '16px 20px', maxWidth: '100%' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
         <button onClick={onBack} className="topbar-btn">← Back</button>
-        <h1 style={{ margin: 0, fontSize: 20 }}>YieldBOOST σ-space Edge Ranking</h1>
+        <h1 style={{ margin: 0, fontSize: 20 }}>YieldBOOST · Most attractive shorts</h1>
       </div>
       <div className="scenario-sub" style={{ marginBottom: 16, lineHeight: 1.5 }}>
-        For each YB sleeve, the table compares the live IV at the held front spread against the
-        Black-Scholes breakeven σ that would make the BS fair value equal to today's spread mid.
-        <strong> Positive σ-edge (IV − BE σ &gt; 0)</strong> means the market is paying you more
-        than expected loss to short the spread — a clean structural sell.
-        <strong> Negative σ-edge</strong> means the market is underpaying expected loss; you
-        would carry a structural deficit. Earnings events inside the held window invalidate the
-        diffusion-only fair value (BS doesn't price jumps), so those rows get a red badge.
+        For each YB sleeve, the table shows the kernel-aware <strong>price-space edge</strong> (model fair value
+        vs market spread mid, in % of max-loss). The pricing kernel is chosen per row:
+        <strong> Bates</strong> (jump-diffusion) for single-stock sleeves with earnings risk,
+        <strong> Heston</strong> (stochastic vol) for index sleeves, and
+        <strong> AZ rescale</strong> when the sleeve chain is thin or missing.
+        Black-Scholes is not used: it cannot price the vol drag, skew, or jump risk that drive
+        these spreads. Rows are gated by a single server-side <strong>data grade</strong>
+        (A/B/C/D); A/B are tradeable today, C is monitor-only, D is hidden by default.
       </div>
 
-      {/* Headline strip */}
+      {/* Headline strip — PM-style "actionable today" view */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-        <SummaryCard label="Total YB sleeves" value={fmtNum(stats.total)} />
-        <SummaryCard label="With σ-edge signal" value={fmtNum(stats.with_edge)} sub={`of ${stats.total}`} />
         <SummaryCard
-          label="Positive σ-edge"
+          label="Tradeable today (A+B)"
+          value={fmtNum(stats.tradeable)}
+          sub={`of ${stats.total} sleeves`}
+          color="var(--positive)"
+        />
+        <SummaryCard
+          label="STRONG SELL (model)"
+          value={fmtNum(stats.strong_sell)}
+          color="var(--positive)"
+          sub="edge ≥ +30pp"
+        />
+        <SummaryCard
+          label="Positive model edge"
           value={fmtNum(stats.positive_edge)}
           color="var(--positive)"
         />
         <SummaryCard
-          label="STRONG SELL"
-          value={fmtNum(stats.strong_sell)}
-          color="var(--positive)"
-        />
-        <SummaryCard
-          label="AVOID"
-          value={fmtNum(stats.avoid)}
+          label="Fade / avoid"
+          value={fmtNum(stats.fade)}
           color="var(--negative)"
+          sub="edge ≤ −10pp"
         />
         <SummaryCard
           label="Earnings in held window"
           value={fmtNum(stats.events_in_window)}
           color="var(--warning)"
-          sub="diffusion fair voided"
+          sub="size with caution"
         />
         {vrpHealth && Number.isFinite(Number(vrpHealth.iv_coverage_front_pct)) && (
           <SummaryCard
@@ -8757,13 +8831,22 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
             sub={`${(vrpHealth.stale_sleeves || []).length} missing`}
           />
         )}
+        <SummaryCard
+          label="Data grades"
+          value={`A:${stats.grade_counts.A || 0} B:${stats.grade_counts.B || 0} C:${stats.grade_counts.C || 0} D:${stats.grade_counts.D || 0}`}
+          sub="A/B tradeable · C monitor · D blocked"
+        />
       </div>
 
       {/* Filters */}
       <div style={{ display: 'flex', gap: 14, alignItems: 'center', marginBottom: 12, fontSize: 13 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-          <input type="checkbox" checked={filterEdgeOnly} onChange={(e) => setFilterEdgeOnly(e.target.checked)} />
-          Edge signal only
+          <input type="checkbox" checked={includeGradeC} onChange={(e) => setIncludeGradeC(e.target.checked)} />
+          Include grade C (monitor)
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+          <input type="checkbox" checked={includeGradeD} onChange={(e) => setIncludeGradeD(e.target.checked)} />
+          Include grade D (display only)
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
           <input type="checkbox" checked={filterEarningsOnly} onChange={(e) => setFilterEarningsOnly(e.target.checked)} />
@@ -8778,46 +8861,66 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
         <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, fontSize: 12 }}>
           <thead>
             <tr>
-              <Th k="signal" label="Signal" align="left" hint="σ-space edge classification" />
-              <Th k="yb_etf" label="YB" align="left" hint="YieldBOOST ETF ticker" />
-              <Th k="underlying" label="Und." align="left" hint="Single-stock underlying" />
-              <Th k="iv_minus_breakeven_sigma" label="BS edge" hint="Sleeve IV minus BS breakeven σ. Positive = market overpaying expected loss. Diffusion-only baseline." />
-              <Th k="best_model_edge_pp_of_max_loss" label="Model edge" hint="Best non-BS model edge (% of max-loss): Bates (single-stock) > Heston (index) > AZ-imputed. Positive = market mid above model fair = SELL." />
-              <Th k="az_cone_residual_iv" label="AZ cone" hint="Sleeve IV minus AZ-implied sleeve IV from underlying 1× chain at mapped strike. Positive = sleeve trades rich vs underlying surface (cross-surface arb signal)." />
-              <Th k="iv_full_proxy" label="IV (sleeve)" hint="Spread-leg IV average (full, not event-stripped)" />
-              <Th k="spread_breakeven_sigma_annual" label="BE σ" hint="σ that makes BS_fair == spread_mid_market" />
+              <Th k="data_grade" label="Grade" align="center" hint="Server-side A/B/C/D from data_grade(): collapses sleeve quote age × underlying quote age × holdings age × IV source × expiry skew into one PM-grade letter. A = full size · B = half size · C = monitor only · D = blocked." />
+              <Th k="signal" label="Signal" align="left" hint="Price-space edge classification on the kernel-aware model edge. STRONG SELL ≥ +30pp · sell ≥ +10pp · lean sell ≥ 0 · lean fade ≥ -10 · fade < -10. Grade C/D rows with positive edge show 'AVOID DATA'." />
+              <Th k="yb_etf" label="YB" align="left" hint="YieldBOOST ETF ticker — click to open per-ETF Vol/VRP tab." />
+              <Th k="underlying" label="Und." align="left" hint="Underlying single-stock or index" />
+              <Th k="model_name" label="Model" align="left" hint="Pricing kernel actually used for this row: Bates (single-stock + jumps) > Heston (stochastic vol) > AZ (cross-surface rescale). No Black-Scholes." />
+              <Th k="edge_pp_of_max_loss" label="Edge ($)" hint="(spread mid − model fair) / max loss · 100. Price-space, kernel-aware. Positive = market pays more than the model says it should = SELL." />
+              <Th k="az_cone_residual_iv" label="AZ cone" hint="Sleeve IV minus AZ-implied sleeve IV from underlying chain at mapped strike. Positive = sleeve trades rich vs underlying surface (cross-surface arb signal)." />
+              <Th k="model_fair" label="Fair" hint="Model fair value of the short spread (sleeve currency). Hover shows AZ/Heston/Bates side by side when multiple kernels fired." />
               <Th k="spread_mid_market" label="Mid" hint="Current spread mid-market price (short K_short − long K_long)" />
-              <Th k="bs_put_spread_fair_diffusion" label="BS fair" hint="BS short-spread fair value at sigma_source. Diffusion only." />
-              <Th k="heston_put_spread_fair" label="Heston fair" hint="Heston + AHJ-propagated sleeve fair (Carr-Madan / COS). Uses calibrated underlying surface; absent for thin chains." />
-              <Th k="bates_put_spread_fair" label="Bates fair" hint="Bates jump-diffusion + AHJ truncation sleeve fair. Single-stock sleeves only; captures earnings-event jump premium absent from BS/Heston." />
-              <Th k="expected_weekly_loss_pct_of_spot" label="Wk loss %" hint="Expected weekly NAV bleed at current σ" />
-              <Th k="bs_dollar_gamma_per_1pct_underlying" label="$-γ /1%U" hint="$ P&L per 1% underlying move (short = negative)" />
-              <Th k="bs_theta_spread_per_day" label="θ/day" hint="Theta per calendar day (positive = collecting)" />
+              <Th k="iv_full_proxy" label="IV" hint="Sleeve IV — average of leg IVs (chain input to the model, not a fair value)" />
+              <Th k="dollar_gamma_per_1pct_underlying" label="$-γ /1%U" hint="$ P&L per 1% underlying gap-down (short = negative). Sizes the position to a tolerable tail loss." />
+              <Th k="theta_per_day" label="θ/day" hint="Theta per calendar day (positive = collecting carry). Greeks are BS-proxy at sleeve IV until kernel-derivative greeks ship." />
+              <Th k="expected_weekly_carry_usd" label="Carry/wk" hint="model_fair × 100 = $ per OCC contract of expected weekly carry" />
               <Th k="days_to_exp" label="DTE" hint="Days to held expiry" />
-              <Th k="days_to_earnings" label="DT-Earn" hint="Days to next known earnings event (combined calendar)" />
-              <Th k="event_implied_move_pct_underlying" label="Impl. evt%" hint="Implied event-day 1σ move on the underlying (from IV variance split, β=2 inverted)" />
-              <Th k="event_historical_move_pct_underlying" label="Hist. evt%" hint="Historical MAD of |return| on prior earnings days (underlying scale)" />
-              <Th k="event_move_richness_pct" label="Rich%" hint="(implied / historical) − 1. Positive = market overpaying event move (SELL), negative = underpaying (BUY)" />
-              <Th k="iv_expiry_skew_days" label="Skew" hint="|held - chain| expiry days; the IV-term-structure interpolation gap" />
-              <Th k="iv_source" label="IV src" align="left" hint="How IV was resolved (holdings_exact best; az_imputed_from_underlying = AZ rescale)" />
-              <Th k="_freshness.worst" label="Quote age" hint="Worst-of sleeve and underlying options quote age (min). Hard-blocks SELL signals above 24h. P0a freshness rail." />
+              <Th k="days_to_earnings" label="Event" hint="Days to next known earnings. Red badge = INSIDE held window — Bates is the only kernel that prices the jump. Hover for implied/historical move + richness." />
             </tr>
           </thead>
           <tbody>
             {sorted.map((r) => {
-              const fr = r._freshness || { label: '—', className: 'fresh-warn', worst: null, blockStale: false };
-              const sig = signalFor(r.iv_minus_breakeven_sigma, { blockStale: fr.blockStale });
-              const edge = r.iv_minus_breakeven_sigma;
-              const edgeFmt = (v) => (v == null || !Number.isFinite(Number(v))) ? '—'
-                : (Number(v) >= 0 ? '+' : '') + (Number(v) * 100).toFixed(1) + 'pp';
+              const fr = r._freshness || { label: '—', className: 'fresh-warn', worst: null, blockSignal: false, grade: '?' };
+              const sig = signalFor(r.edge_pp_of_max_loss, { blockSignal: fr.blockSignal });
+              const edgePp = r.edge_pp_of_max_loss;
               const ppFmt = (v) => (v == null || !Number.isFinite(Number(v))) ? '—'
                 : (Number(v) >= 0 ? '+' : '') + Number(v).toFixed(1) + 'pp';
-              const freshColor = fr.className === 'fresh-bad' ? '#ef4444'
-                : fr.className === 'fresh-warn' ? '#f59e0b' : '#10b981';
-              const freshBg = fr.className === 'fresh-bad' ? 'rgba(239,68,68,0.18)'
-                : fr.className === 'fresh-warn' ? 'rgba(245,158,11,0.18)' : 'rgba(16,185,129,0.12)';
+              const ivFmt = (v) => (v == null || !Number.isFinite(Number(v))) ? '—'
+                : (Number(v) >= 0 ? '+' : '') + (Number(v) * 100).toFixed(1) + 'pp';
+              const grade = gradePill(fr.grade);
+              const fairs = [
+                ['AZ', r.az_put_spread_fair],
+                ['Heston', r.heston_put_spread_fair],
+                ['Bates', r.bates_put_spread_fair],
+              ].filter(([, v]) => v != null && Number.isFinite(Number(v)));
+              const fairHover = fairs.length > 0
+                ? fairs.map(([n, v]) => `${n}: ${Number(v).toFixed(3)}`).join(' · ')
+                : 'No model fair available';
+              const eventRich = r.event_move_richness_pct;
+              const eventHover = r.days_to_earnings != null
+                ? `Next earnings: ${r.earnings_event_date || '?'} (${r.earnings_confirmation || 'unknown'})`
+                  + (r.event_implied_move_pct_underlying != null
+                    ? ` · implied ${Number(r.event_implied_move_pct_underlying).toFixed(2)}%` : '')
+                  + (r.event_historical_move_pct_underlying != null
+                    ? ` · hist ${Number(r.event_historical_move_pct_underlying).toFixed(2)}%` : '')
+                  + (eventRich != null
+                    ? ` · richness ${(Number(eventRich) >= 0 ? '+' : '') + (Number(eventRich) * 100).toFixed(0)}%` : '')
+                  + (r.event_in_held_window ? ' · INSIDE held window — use Bates fair' : '')
+                : 'No known earnings event for this underlying';
               return (
                 <tr key={`${r.yb_etf}-${r.expiry}`} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={{ padding: '5px 8px', textAlign: 'center' }}>
+                    <span style={{
+                      display: 'inline-block',
+                      width: 22,
+                      padding: '2px 0',
+                      borderRadius: 4,
+                      fontSize: 10,
+                      fontWeight: 700,
+                      color: grade.color,
+                      background: grade.bg,
+                    }} title={r.data_grade_reason || `data_grade = ${fr.grade}`}>{fr.grade}</span>
+                  </td>
                   <td style={{ padding: '5px 8px' }}>
                     <span style={{
                       display: 'inline-block',
@@ -8830,9 +8933,9 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                       letterSpacing: 0.3,
                       whiteSpace: 'nowrap',
                     }}
-                    title={fr.blockStale
-                      ? `Stale inputs: quote age ${fr.label}, holdings ${fr.holdingsDays ?? '?'}d, skew ${fr.skew}d, src ${r.iv_source}. SELL recommendations hard-blocked until refresh.`
-                      : 'Edge signal computed against current quote, holdings, and IV source.'}>{sig.label}</span>
+                    title={fr.blockSignal
+                      ? `Grade ${fr.grade}: ${r.data_grade_reason || 'stale or imputed inputs'}. SELL recommendations hard-blocked.`
+                      : `Price-space edge ${ppFmt(edgePp)} via ${r.model_name || 'no model'}.`}>{sig.label}</span>
                   </td>
                   <td style={{ padding: '5px 8px', fontWeight: 600 }}>
                     <a
@@ -8847,24 +8950,22 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                     >{r.yb_etf}</a>
                   </td>
                   <td style={{ padding: '5px 8px', color: 'var(--text-muted)' }}>{r.underlying || '—'}</td>
-                  <td style={{
-                    padding: '5px 8px',
-                    textAlign: 'right',
-                    fontWeight: 600,
-                    color: edge == null ? 'var(--text-muted)'
-                      : (Number(edge) > 0 ? '#10b981' : (Number(edge) < -0.05 ? '#ef4444' : 'var(--text-muted)')),
-                  }} title="BS-baseline edge (IV − BEσ). Diffusion only.">{edgeFmt(edge)}</td>
+                  <td style={{ padding: '5px 8px', color: 'var(--text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.3 }}
+                      title={`Pricing kernel chosen for this row. Bates > Heston > AZ in priority. Disagreement across kernels: ${
+                        r.model_disagreement_pp_of_max_loss != null
+                          ? ppFmt(r.model_disagreement_pp_of_max_loss)
+                          : 'single model only'
+                      }`}>
+                    {r.model_name || '—'}
+                  </td>
                   <td style={{
                     padding: '5px 8px', textAlign: 'right', fontWeight: 600,
-                    color: r.best_model_edge_pp_of_max_loss == null ? 'var(--text-muted)'
-                      : (Number(r.best_model_edge_pp_of_max_loss) > 0 ? '#10b981'
-                        : (Number(r.best_model_edge_pp_of_max_loss) < -10 ? '#ef4444' : 'var(--text-muted)')),
+                    color: edgePp == null ? 'var(--text-muted)'
+                      : (Number(edgePp) > 0 ? '#10b981'
+                        : (Number(edgePp) < -10 ? '#ef4444' : 'var(--text-muted)')),
                   }}
-                  title={`Best non-BS model: ${r.best_model_name || 'none'}. Edge in % of max-loss; positive = market mid above ${r.best_model_name || 'model'} fair = SELL.`}>
-                    {ppFmt(r.best_model_edge_pp_of_max_loss)}
-                    <div style={{ fontSize: 9, color: 'var(--text-muted)', fontWeight: 400 }}>
-                      {r.best_model_name || '—'}
-                    </div>
+                  title={`Edge = (mid − ${r.model_name || 'model'} fair) / max-loss · 100. Positive => market overpaying => SELL the spread.`}>
+                    {ppFmt(edgePp)}
                   </td>
                   <td style={{
                     padding: '5px 8px', textAlign: 'right',
@@ -8872,44 +8973,39 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                       : (Number(r.az_cone_residual_iv) > 0.05 ? '#10b981'
                         : (Number(r.az_cone_residual_iv) < -0.05 ? '#ef4444' : 'var(--text-muted)')),
                   }} title="Sleeve IV minus AZ-implied sleeve IV (|β|·σ_underlying at mapped strike). Cross-surface arbitrage signal.">
-                    {r.az_cone_residual_iv != null ? edgeFmt(r.az_cone_residual_iv) : '—'}
+                    {r.az_cone_residual_iv != null ? ivFmt(r.az_cone_residual_iv) : '—'}
                   </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
-                    {r.iv_full_proxy != null ? `${(r.iv_full_proxy * 100).toFixed(1)}%` : '—'}
-                  </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
-                    {r.spread_breakeven_sigma_annual != null ? `${(r.spread_breakeven_sigma_annual * 100).toFixed(1)}%` : '—'}
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }} title={fairHover}>
+                    {r.model_fair != null ? Number(r.model_fair).toFixed(3) : '—'}
                   </td>
                   <td style={{ padding: '5px 8px', textAlign: 'right' }}>
                     {r.spread_mid_market != null ? `${Number(r.spread_mid_market).toFixed(2)}` : '—'}
                   </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
-                    {r.bs_put_spread_fair_diffusion != null ? Number(r.bs_put_spread_fair_diffusion).toFixed(3) : '—'}
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}
+                      title={`Long leg IV ${r.iv_put_long != null ? (Number(r.iv_put_long) * 100).toFixed(1) + '%' : '—'} · Short leg IV ${r.iv_put_short != null ? (Number(r.iv_put_short) * 100).toFixed(1) + '%' : '—'} · Source ${r.iv_source || '—'} · Skew ${r.iv_expiry_skew_days != null ? r.iv_expiry_skew_days + 'd' : '?'}`}>
+                    {r.iv_full_proxy != null ? `${(r.iv_full_proxy * 100).toFixed(1)}%` : '—'}
                   </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'right' }} title={r.heston_sleeve_params ? `Sleeve Heston: kappa=${r.heston_sleeve_params.kappa}, theta=${r.heston_sleeve_params.theta}, gamma=${r.heston_sleeve_params.gamma}, rho=${r.heston_sleeve_params.rho}, v0=${r.heston_sleeve_params.v0}` : 'Heston calibration unavailable (thin chain or convergence failure)'}>
-                    {r.heston_put_spread_fair != null ? Number(r.heston_put_spread_fair).toFixed(3) : '—'}
+                  <td style={{
+                    padding: '5px 8px', textAlign: 'right',
+                    color: r.dollar_gamma_per_1pct_underlying != null && r.dollar_gamma_per_1pct_underlying < 0
+                      ? '#ef4444' : undefined,
+                  }} title={r.greeks_kernel === 'bs_proxy'
+                    ? 'Greeks via BS finite-diff at sleeve IV (kernel-derivative greeks pending).'
+                    : 'Greeks via kernel finite-diff on model_fair.'}>
+                    {r.dollar_gamma_per_1pct_underlying != null ? Number(r.dollar_gamma_per_1pct_underlying).toFixed(3) : '—'}
                   </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'right' }} title={r.bates_sleeve_params ? `Sleeve Bates: lambda=${r.bates_sleeve_params.lambda}, mu_jump=${r.bates_sleeve_params.mu_jump}, sigma_jump=${r.bates_sleeve_params.sigma_jump}` : 'Bates not calibrated (index sleeve, thin chain, or pre-event window absent).'}>
-                    {r.bates_put_spread_fair != null ? Number(r.bates_put_spread_fair).toFixed(3) : '—'}
-                  </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
-                    {r.expected_weekly_loss_pct_of_spot != null
-                      ? `${Number(r.expected_weekly_loss_pct_of_spot).toFixed(2)}%`
+                  <td style={{
+                    padding: '5px 8px', textAlign: 'right',
+                    color: r.theta_per_day != null && r.theta_per_day > 0 ? '#10b981' : undefined,
+                  }}>
+                    {r.theta_per_day != null
+                      ? (Number(r.theta_per_day) >= 0 ? '+' : '') + Number(r.theta_per_day).toFixed(3)
                       : '—'}
                   </td>
-                  <td style={{
-                    padding: '5px 8px', textAlign: 'right',
-                    color: r.bs_dollar_gamma_per_1pct_underlying != null && r.bs_dollar_gamma_per_1pct_underlying < 0
-                      ? '#ef4444' : undefined,
-                  }}>
-                    {r.bs_dollar_gamma_per_1pct_underlying != null ? Number(r.bs_dollar_gamma_per_1pct_underlying).toFixed(3) : '—'}
-                  </td>
-                  <td style={{
-                    padding: '5px 8px', textAlign: 'right',
-                    color: r.bs_theta_spread_per_day != null && r.bs_theta_spread_per_day > 0 ? '#10b981' : undefined,
-                  }}>
-                    {r.bs_theta_spread_per_day != null
-                      ? (Number(r.bs_theta_spread_per_day) >= 0 ? '+' : '') + Number(r.bs_theta_spread_per_day).toFixed(3)
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}
+                      title="model_fair × 100 = $ per OCC contract per week of expected carry">
+                    {r.expected_weekly_carry_usd != null
+                      ? `$${Number(r.expected_weekly_carry_usd).toFixed(2)}`
                       : '—'}
                   </td>
                   <td style={{ padding: '5px 8px', textAlign: 'right' }}>{r.days_to_exp ?? '—'}</td>
@@ -8919,56 +9015,23 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                         padding: r.event_in_held_window ? '1px 6px' : 0,
                         borderRadius: r.event_in_held_window ? 8 : 0,
                         background: r.event_in_held_window ? 'rgba(239,68,68,0.20)' : 'transparent',
-                        color: r.event_in_held_window ? '#ef4444' : 'var(--text-muted)',
-                        fontWeight: r.event_in_held_window ? 600 : 400,
+                        color: r.event_in_held_window ? '#ef4444'
+                          : eventRich != null && Number(eventRich) >= 0.30 ? '#10b981'
+                          : eventRich != null && Number(eventRich) <= -0.20 ? '#ef4444'
+                          : 'var(--text-muted)',
+                        fontWeight: (r.event_in_held_window || eventRich != null) ? 600 : 400,
                       }}
-                      title={`Next earnings ${r.earnings_event_date} (${r.earnings_confirmation || 'unknown'}). ${r.event_in_held_window ? 'INSIDE held window — diffusion BS fair is invalid (no jump term).' : 'Outside held window.'}`}
-                      >{r.days_to_earnings}d</span>
+                      title={eventHover}
+                      >{r.days_to_earnings}d{eventRich != null
+                        ? ` · ${(Number(eventRich) >= 0 ? '+' : '') + (Number(eventRich) * 100).toFixed(0)}%`
+                        : ''}</span>
                     ) : '—'}
-                  </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
-                    {r.event_implied_move_pct_underlying != null
-                      ? `${Number(r.event_implied_move_pct_underlying).toFixed(2)}%`
-                      : '—'}
-                  </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--text-muted)' }}>
-                    {r.event_historical_move_pct_underlying != null
-                      ? `${Number(r.event_historical_move_pct_underlying).toFixed(2)}%`
-                      : '—'}
-                  </td>
-                  <td style={{
-                    padding: '5px 8px', textAlign: 'right', fontWeight: 600,
-                    color: r.event_move_richness_pct == null ? 'var(--text-muted)'
-                      : (Number(r.event_move_richness_pct) >= 0.30 ? '#10b981'
-                        : (Number(r.event_move_richness_pct) <= -0.20 ? '#ef4444'
-                          : 'var(--text-muted)')),
-                  }}>
-                    {r.event_move_richness_pct != null
-                      ? (Number(r.event_move_richness_pct) >= 0 ? '+' : '')
-                        + (Number(r.event_move_richness_pct) * 100).toFixed(0) + '%'
-                      : '—'}
-                  </td>
-                  <td style={{
-                    padding: '5px 8px', textAlign: 'right',
-                    color: skewColor(r.iv_expiry_skew_days),
-                  }}>{r.iv_expiry_skew_days != null ? `${r.iv_expiry_skew_days}d` : '—'}</td>
-                  <td style={{ padding: '5px 8px', color: 'var(--text-muted)', fontSize: 11 }}>
-                    {r.iv_source || '—'}
-                  </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
-                    <span style={{
-                      display: 'inline-block', padding: '2px 7px', borderRadius: 10,
-                      color: freshColor, background: freshBg, fontSize: 10, fontWeight: 600,
-                      whiteSpace: 'nowrap',
-                    }} title={`Sleeve quote: ${fr.optAge != null ? fr.optAge + 'm' : '?'}, Underlying quote: ${fr.undAge != null ? fr.undAge + 'm' : '?'}, Holdings: ${fr.holdingsDays != null ? fr.holdingsDays + 'd' : '?'}.${fr.blockStale ? ' SELL signals hard-blocked.' : ''}`}>
-                      {fr.label}
-                    </span>
                   </td>
                 </tr>
               );
             })}
             {sorted.length === 0 && (
-              <tr><td colSpan={22} style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>
+              <tr><td colSpan={15} style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>
                 No rows match current filters.
               </td></tr>
             )}
@@ -8977,17 +9040,14 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
       </div>
 
       <div style={{ marginTop: 14, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-        <strong>How to read:</strong> Sort by <em>Model edge</em> to use the best non-BS pricing model per row
-        (Bates for single-stock sleeves, Heston for index sleeves, AZ-imputed otherwise). The legacy <em>BS edge</em>
-        column is kept for parity but trusts flat-σ Black-Scholes — it will be wrong on rows with calibrated jump
-        kernels. <em>AZ cone</em> is the structural cross-surface arbitrage signal (sleeve IV vs |β|·σ_underlying at
-        the AZ-mapped strike); positive means the sleeve trades rich vs its own underlying surface. The <em>Quote
-        age</em> column shows the worst-of sleeve + underlying quote freshness — rows that flip <strong>SELL → AVOID
-        DATA</strong> are hard-blocked because their inputs (quote &gt; 24h stale, holdings &gt; 2 trading days, or
-        IV interpolated &gt;7d through the term structure) are no longer tradable. Rows with red <em>DT-Earn</em>
-        have earnings inside the held window — switch to the per-ETF Vol/VRP tab for the event-aware spread VRP,
-        or read the <em>Bates fair</em> column for the jump-diffusion alternative on single-stock names. P0a/P1/P2/P3
-        of the roadmap are now live in the pipeline (see <code>scripts/letf_options_models.py</code>).
+        <strong>How to read:</strong> The headline <em>Edge ($)</em> column is the kernel-aware price-space edge — fraction
+        of max-loss between today's spread mid and the chosen model's fair value. Positive ⇒ market overpays vs the model ⇒
+        SELL the spread. The <em>Model</em> column tells you which kernel produced the fair value (Bates for single-stock
+        sleeves with earnings risk, Heston for index sleeves, AZ rescale otherwise). The <em>AZ cone</em> column is the
+        structural cross-surface arbitrage signal (sleeve IV vs |β|·σ_underlying at the AZ-mapped strike); positive means the
+        sleeve trades rich vs its own underlying surface. Black-Scholes is not used: it cannot price LETF vol drag, skew, or
+        jumps. The <em>Grade</em> column is the server-side data quality (A full size, B half size, C monitor, D blocked); rows
+        flipped <strong>SELL → AVOID DATA</strong> have positive edge but stale or imputed inputs that hard-block recommendations.
       </div>
     </div>
   );

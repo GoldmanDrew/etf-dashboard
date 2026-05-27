@@ -786,6 +786,12 @@ def compute_vrp_row_extras(
         out["iv_implied_weekly_move_underlying_pct"] = None
 
     # 4. Fair-value / expected loss at the chosen σ (IV preferred, RV fallback).
+    # Black-Scholes is NOT the production kernel for LETF put-spreads -- AZ,
+    # Heston, and Bates (below) are. The BS outputs are kept under
+    # ``debug["bs"]`` purely for regression-checking and disagreement audits.
+    # The bare ``bs_*`` keys at the row level were removed when the UI
+    # finished migrating to kernel-agnostic field names.
+    bs_debug: dict[str, Any] = {}
     s = _parse_float(spot)
     kl = _parse_float(strike_long)
     ks = _parse_float(strike_short)
@@ -794,48 +800,52 @@ def compute_vrp_row_extras(
     fair_diff = None
     if s and kl and ks and iv_for_bs:
         fair_diff = fair_put_spread_mid_from_iv(s, kl, ks, iv_for_bs, h, risk_free=risk_free)
-    out["bs_put_spread_fair_diffusion"] = round(fair_diff, 6) if fair_diff is not None else None
-    out["bs_put_spread_sigma_source"] = iv_source if fair_diff is not None else None
+    bs_debug["put_spread_fair_diffusion"] = round(fair_diff, 6) if fair_diff is not None else None
+    bs_debug["put_spread_sigma_source"] = iv_source if fair_diff is not None else None
     if fair_diff is not None and s and s > 0:
-        out["expected_weekly_loss_pct_of_spot"] = round(fair_diff / s * 100.0, 4)
+        bs_debug["expected_weekly_loss_pct_of_spot"] = round(fair_diff / s * 100.0, 4)
     else:
-        out["expected_weekly_loss_pct_of_spot"] = None
+        bs_debug["expected_weekly_loss_pct_of_spot"] = None
 
     # 5. Breakeven sigma from spread mid (the σ at which IV pricing = realized).
     sm = _parse_float(spread_mid)
     be_sigma = None
     if s and kl and ks and sm and sm > 0:
         be_sigma = implied_sigma_for_spread_mid(s, kl, ks, h, sm, risk_free=risk_free)
-    out["spread_breakeven_sigma_annual"] = round(be_sigma, 6) if be_sigma is not None else None
-    # Net edge "in vol terms": iv_full minus breakeven sigma. Positive means
-    # the market is paying more than the structure's expected loss at that σ.
+    bs_debug["spread_breakeven_sigma_annual"] = round(be_sigma, 6) if be_sigma is not None else None
+    # σ-space edge (BS-only, kept under debug for diagnostics; the production
+    # signal is ``edge_pp_of_max_loss`` in price space).
     if be_sigma is not None and _parse_float(iv_full_sleeve):
-        out["iv_minus_breakeven_sigma"] = round(iv_full_sleeve - be_sigma, 6)
+        bs_debug["iv_minus_breakeven_sigma"] = round(iv_full_sleeve - be_sigma, 6)
     else:
-        out["iv_minus_breakeven_sigma"] = None
+        bs_debug["iv_minus_breakeven_sigma"] = None
 
-    # 6 & 7. BS greeks of the SHORT put spread (per single structure).
+    # 6 & 7. BS greeks of the SHORT put spread. These remain the source of the
+    # canonical ``dollar_gamma_per_1pct_underlying`` and ``theta_per_day`` fields
+    # below (flagged ``greeks_kernel="bs_proxy"``) until kernel-derivative
+    # greeks ship in the follow-up PR.
     if s and kl and ks and iv_for_bs:
         gks = bs_put_spread_greeks(s, kl, ks, h, iv_for_bs, risk_free=risk_free)
-        out["bs_delta_spread"] = round(gks["delta"], 6)
-        out["bs_gamma_spread"] = round(gks["gamma"], 8)
-        out["bs_vega_spread"] = round(gks["vega"], 6)
-        out["bs_theta_spread_per_day"] = round(gks["theta_per_year"] / TRADING_DAYS, 6)
-        # Dollar gamma per 1% sleeve move = γ · S² · (0.01)². Express as $/spread.
-        out["bs_dollar_gamma_per_1pct_sleeve"] = round(gks["gamma"] * s * s * 0.0001, 6)
-        # Translate sleeve gamma -> underlying 1% move: 2x sleeve moves 2% per
-        # 1% underlying => $-gamma at 1% underlying = γ · (2S)² · (0.01)² · 4
-        # but here we already use sleeve S, so the underlying-equivalent is x4.
-        out["bs_dollar_gamma_per_1pct_underlying"] = round(
+        bs_debug["delta_spread"] = round(gks["delta"], 6)
+        bs_debug["gamma_spread"] = round(gks["gamma"], 8)
+        bs_debug["vega_spread"] = round(gks["vega"], 6)
+        bs_debug["theta_spread_per_day"] = round(gks["theta_per_year"] / TRADING_DAYS, 6)
+        bs_debug["dollar_gamma_per_1pct_sleeve"] = round(gks["gamma"] * s * s * 0.0001, 6)
+        bs_debug["dollar_gamma_per_1pct_underlying"] = round(
             gks["gamma"] * s * s * 0.0001 * (LEVERAGE_BETA * LEVERAGE_BETA), 6,
         )
     else:
-        out["bs_delta_spread"] = None
-        out["bs_gamma_spread"] = None
-        out["bs_vega_spread"] = None
-        out["bs_theta_spread_per_day"] = None
-        out["bs_dollar_gamma_per_1pct_sleeve"] = None
-        out["bs_dollar_gamma_per_1pct_underlying"] = None
+        bs_debug["delta_spread"] = None
+        bs_debug["gamma_spread"] = None
+        bs_debug["vega_spread"] = None
+        bs_debug["theta_spread_per_day"] = None
+        bs_debug["dollar_gamma_per_1pct_sleeve"] = None
+        bs_debug["dollar_gamma_per_1pct_underlying"] = None
+
+    # Stash BS-only outputs in a single debug sub-object. The bare ``bs_*``
+    # keys are intentionally NOT added to ``out``; if you need them for a
+    # diagnostic, pull from ``row["debug"]["bs"]``.
+    out["debug"] = {"bs": bs_debug}
 
     # 8. Simple Itô variance drag for 2x daily-rebalanced sleeve (per year).
     rv_und_proxy = None
@@ -941,6 +951,28 @@ def compute_vrp_row_extras(
             out.update(model_extras)
         except Exception as exc:  # pragma: no cover — guard against any pricing regression
             out.setdefault("letf_model_error", str(exc)[:200])
+
+    # ── Canonical (BS-free) public field names ──────────────────────────────
+    # Black-Scholes is the wrong kernel for LETF put-spreads. The UI consumes
+    # these short, kernel-agnostic names; BS-only outputs live under
+    # ``out["debug"]["bs"]`` for diagnostics only.
+    #
+    # Greeks v1: sourced from BS finite-diff at sleeve IV (flagged
+    # ``greeks_kernel="bs_proxy"``). For AZ that's the AZ-implied sleeve IV;
+    # for Heston/Bates it's the chain IV (per-strike-effective-vol from the
+    # calibrated surface). Kernel-derivative greeks ship in a follow-up.
+    bs_only = out.get("debug", {}).get("bs", {}) if isinstance(out.get("debug"), dict) else {}
+    out["dollar_gamma_per_1pct_underlying"] = bs_only.get("dollar_gamma_per_1pct_underlying")
+    out["theta_per_day"] = bs_only.get("theta_spread_per_day")
+    out["greeks_kernel"] = "bs_proxy" if bs_only.get("theta_spread_per_day") is not None else None
+
+    # Carry in $ per OCC contract (one spread structure = 100 shares). Pulls
+    # from the chosen kernel's ``model_fair`` if any non-BS kernel succeeded.
+    model_fair_val = out.get("model_fair")
+    if model_fair_val is not None and _parse_float(model_fair_val) is not None:
+        out["expected_weekly_carry_usd"] = round(float(model_fair_val) * 100.0, 4)
+    else:
+        out["expected_weekly_carry_usd"] = None
 
     return out
 
