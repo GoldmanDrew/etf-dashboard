@@ -1206,10 +1206,17 @@ def build_polygon_options_cache(
     symbols: list[str],
     *,
     yieldboost_targeted: bool = False,
+    prior_cache: dict | None = None,
 ) -> dict:
     """
     Build delayed options snapshot cache from Polygon for UI consumption.
     Returns a JSON-serializable dict with per-symbol spot + option rows.
+
+    When ``prior_cache`` is supplied (e.g. after a bucket-3 sweep), its
+    ``symbols`` map is carried forward and only ``refresh_symbols`` are
+    re-fetched — use this for the targeted YieldBOOST second pass so a
+    budget-limited first pass cannot wipe MSTU/MULL chains with empty
+    ``spot_only`` rows.
     """
     from yieldboost_holdings import (
         held_strike_band,
@@ -1220,12 +1227,13 @@ def build_polygon_options_cache(
     target_strikes_by_sleeve = load_yieldboost_target_strikes_by_sleeve(YIELDBOOST_OPTIONS_TARGET_FILE)
     held_expiries_by_sleeve = load_yieldboost_held_expiries_by_sleeve(YIELDBOOST_OPTIONS_TARGET_FILE)
 
-    prior_cache = {}
-    if OPTIONS_CACHE_FILE.exists():
-        try:
-            prior_cache = json.loads(OPTIONS_CACHE_FILE.read_text(encoding="utf-8")) or {}
-        except Exception:
-            prior_cache = {}
+    if prior_cache is None:
+        prior_cache = {}
+        if OPTIONS_CACHE_FILE.exists():
+            try:
+                prior_cache = json.loads(OPTIONS_CACHE_FILE.read_text(encoding="utf-8")) or {}
+            except Exception:
+                prior_cache = {}
 
     tradier_chain_symbols = {norm_sym(s) for s in TRADIER_CHAIN_SYMBOLS_RAW if str(s).strip()}
     all_symbols = sorted({norm_sym(s) for s in symbols if str(s).strip()})
@@ -2562,7 +2570,31 @@ def build_polygon_options_cache(
                     if spot_err:
                         sym_errors.append(spot_err)
                 if spot_only is not None:
-                    _set_symbol_entry(sym, spot_only, [], "spot_only")
+                    # Do not replace a good YB sleeve chain with spot_only + [] when
+                    # this run hit Tradier budget / missing held expiry — nightly
+                    # bucket-3 sweeps used to wipe MSTU/MULL here after a successful
+                    # yieldboost tick earlier in the day.
+                    nsym = norm_sym(sym)
+                    is_yb_sleeve = nsym in target_strikes_by_sleeve
+                    kept_rows: list[dict] = []
+                    kept_source = "spot_only"
+                    if (
+                        OPTIONS_ACCUMULATE_CACHE
+                        and is_yb_sleeve
+                        and isinstance(prior_payload, dict)
+                    ):
+                        pr = prior_payload.get("options")
+                        if isinstance(pr, list) and pr:
+                            kept_rows = pr
+                            kept_source = str(
+                                prior_payload.get("source") or "prior_cache_preserved",
+                            )
+                    _set_symbol_entry(
+                        sym,
+                        spot_only,
+                        kept_rows[: max(100, OPTIONS_MAX_ROWS_PER_SYMBOL)],
+                        kept_source,
+                    )
                     if sym_errors:
                         out["errors_by_symbol"][sym] = "; ".join(sym_errors[:4])
                     continue
@@ -2747,6 +2779,30 @@ def load_yieldboost_sleeve_symbols(*, front_only: bool = True) -> list[str]:
     return load_yieldboost_sleeve_symbols_from_spreads(
         YIELDBOOST_PUT_SPREADS_FILE,
         front_only=front_only,
+    )
+
+
+def refresh_yieldboost_options_targeted_slice(prior_cache: dict) -> dict:
+    """Second-pass options refresh for all YB 2x sleeves (held-exp + chain fallback).
+
+    Call after a budget-limited bucket-3 ``build_polygon_options_cache`` sweep so
+    MSTU/MULL/etc. get ``yieldboost_targeted=True`` prefetch without being
+    overwritten by ``spot_only`` rows when the first pass runs out of Tradier budget.
+    """
+    sleeves = load_yieldboost_sleeve_symbols(front_only=True)
+    if not sleeves:
+        return prior_cache
+    if not TRADIER_TOKEN:
+        print("[WARN] TRADIER_TOKEN missing; skipping targeted YieldBOOST options slice")
+        return prior_cache
+    print(
+        f"  Targeted YieldBOOST chain refresh for {len(sleeves)} sleeves "
+        f"(after bucket-3 sweep)…"
+    )
+    return build_polygon_options_cache(
+        sleeves,
+        yieldboost_targeted=True,
+        prior_cache=prior_cache,
     )
 
 
@@ -3580,6 +3636,8 @@ def refresh_options_only() -> None:
 
     symbols_for_options = select_symbols_for_polygon_cache(records)
     options_cache = build_polygon_options_cache(symbols_for_options)
+    if OPTIONS_INCLUDE_YIELDBOOST:
+        options_cache = refresh_yieldboost_options_targeted_slice(options_cache)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(options_cache, f, indent=None, separators=(",", ":"))
@@ -3663,7 +3721,11 @@ def refresh_yieldboost_vrp_only() -> None:
             refresh_list.append(ss)
     options_cache = prior_cache
     if refresh_list:
-        options_cache = build_polygon_options_cache(refresh_list, yieldboost_targeted=True)
+        options_cache = build_polygon_options_cache(
+            refresh_list,
+            yieldboost_targeted=True,
+            prior_cache=prior_cache,
+        )
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(options_cache, f, indent=None, separators=(",", ":"))
@@ -4543,6 +4605,8 @@ def build():
         print(f"  [OK] Borrow spike predictions snapshot -> {_bp}")
     symbols_for_options = select_symbols_for_polygon_cache(records)
     options_cache = build_polygon_options_cache(symbols_for_options)
+    if OPTIONS_INCLUDE_YIELDBOOST:
+        options_cache = refresh_yieldboost_options_targeted_slice(options_cache)
     with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(options_cache, f, indent=None, separators=(",", ":"))
     vrp_meta = refresh_yieldboost_vrp_files(options_cache, realized_vol_map=realized_vol_map)

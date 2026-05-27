@@ -1100,6 +1100,10 @@ The schema of `etf_screened_today.csv` is the contract between `ls-algo` and `et
 
 `continue-on-error: true` on `Build dashboard data`. A failed build does **not** prevent the Pages deploy — it just deploys the previous JSON. This is intentional (rate-limit-friendly), but it means you must verify a successful build pushed before assuming your change is live. Check the workflow log AND `data/dashboard_data.json` git history.
 
+**YieldBOOST options cache:** the full `build()` path now runs a **second** `build_polygon_options_cache(..., yieldboost_targeted=True)` pass after the bucket-3 sweep, and preserves prior YB sleeve chains when a budget-limited sweep would otherwise write `spot_only` + `[]`. The nightly workflow's Tradier env must stay aligned with `config/ci.yaml` (`TRADIER_MAX_TOTAL_REQUESTS=500`, `TRADIER_CHAIN_MAX_TOTAL_REQUESTS=400`) — a low cap (e.g. 140) starves sleeves alphabetically after ~MRAL and blanks MTYY/MSTU in `vrp_live.json`.
+
+**Second Tradier API key:** only helps if Tradier's **per-token rate limit** (25 req/min) is the binding constraint. Our outages were mostly the **in-repo request budgets** and the non-targeted nightly sweep overwriting good YB chains — fix those first. A second key is optional sharding (e.g. bucket-3 on key A, YB sleeves on key B) if you later parallelize fetches.
+
 ### 13.6 `commit-data` snapshots before rebasing onto `origin/main`
 
 Build steps modify `data/*.json` in the working tree. The shared **`.github/actions/commit-data`** action must **never** run `git checkout` on a dirty tree — it backs up artifacts to a temp dir, `git reset --hard origin/<branch>`, restores the backup, then commits. Without that order, concurrent pushes produce `would be overwritten by checkout` and the workflow fails after a successful build.

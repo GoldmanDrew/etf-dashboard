@@ -101,6 +101,7 @@ jobs:
           OPTIONS_STALE_AFTER_MINUTES: "120"
           OPTIONS_ONLY_BUCKET3: "1"
           OPTIONS_INCLUDE_BUCKET3_UNDERLYING: "1"
+          OPTIONS_INCLUDE_YIELDBOOST: "1"
           OPTIONS_ACCUMULATE_CACHE: "1"
           OPTIONS_MAX_ROWS_PER_SYMBOL: "1500"
           TRADIER_CHAIN_SYMBOLS: ""
@@ -112,7 +113,12 @@ jobs:
           TRADIER_APLZ_CHAIN_STRIKE_BAND_UP_PCT: "2.50"
           TRADIER_CHAIN_MONEYNESS_MODE: "atm_otm"
           TRADIER_MAX_REQUESTS_PER_MINUTE: "25"
-          TRADIER_MAX_TOTAL_REQUESTS: "140"
+          # Match config/ci.yaml options_env — old 140 cap stopped chain fetches at
+          # ~136 requests and wrote spot_only rows that wiped YB sleeve chains.
+          TRADIER_MAX_TOTAL_REQUESTS: "500"
+          TRADIER_CHAIN_MAX_TOTAL_REQUESTS: "400"
+          TRADIER_HELD_LEG_QUOTES_MAX_REQUESTS: "16"
+          YIELDBOOST_OCC_QUOTES_MAX_REQUESTS: "32"
         run: python scripts/build_data.py
 
       - name: Score borrow spike predictions
