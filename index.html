@@ -5093,52 +5093,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
     };
   }, [vrpHealth]);
-  // Universe-level health banner: surface when the pipeline as a whole is
-  // returning < 50% IV coverage across YB front spreads. This is the
-  // condition that previously hid behind per-row "—" cells; the operator
-  // should see a coverage outage even if the *displayed* row happens to have
-  // a quote (because the pipeline starvation is sleeve-distributed).
-  const vrpCoverageBanner = useMemo(() => {
-    const cov = Number(vrpHealth?.iv_coverage_front_pct);
-    if (!Number.isFinite(cov)) return null;
-    if (cov >= 0.5) return null;
-    const front = Number(vrpHealth?.spreads_front_count) || 0;
-    const stale = (vrpHealth?.stale_sleeves || []).length;
-    const buildTime = vrpHealth?.build_time || vrpHealth?.last_vrp_refresh;
-    const occ = vrpHealth?.occ_supplement || {};
-    return {
-      coverage: Math.round(cov * 100),
-      stale,
-      front,
-      buildTime,
-      tradierConfigured: occ.tradier_api_configured !== false,
-      occRequested: Number(occ.yieldboost_occ_quotes_requested) || 0,
-      occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
-    };
-  }, [vrpHealth]);
-  // Universe-level health banner: surface when the pipeline as a whole is
-  // returning < 50% IV coverage across YB front spreads. This is the
-  // condition that previously hid behind per-row "—" cells; the operator
-  // should see a coverage outage even if the *displayed* row happens to have
-  // a quote (because the pipeline starvation is sleeve-distributed).
-  const vrpCoverageBanner = useMemo(() => {
-    const cov = Number(vrpHealth?.iv_coverage_front_pct);
-    if (!Number.isFinite(cov)) return null;
-    if (cov >= 0.5) return null;
-    const front = Number(vrpHealth?.spreads_front_count) || 0;
-    const stale = (vrpHealth?.stale_sleeves || []).length;
-    const buildTime = vrpHealth?.build_time || vrpHealth?.last_vrp_refresh;
-    const occ = vrpHealth?.occ_supplement || {};
-    return {
-      coverage: Math.round(cov * 100),
-      stale,
-      front,
-      buildTime,
-      tradierConfigured: occ.tradier_api_configured !== false,
-      occRequested: Number(occ.yieldboost_occ_quotes_requested) || 0,
-      occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
-    };
-  }, [vrpHealth]);
   const showBacktestPanel = Boolean(String(undSym || '').trim());
   useEffect(() => {
     if (hideScenarios && activePanel === 'scenarios') setActivePanel('chart');
