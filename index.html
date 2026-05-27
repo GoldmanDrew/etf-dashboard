@@ -2109,21 +2109,87 @@ function defaultNetGrossTolerancePct(record) {
   if (pc === 'income_yieldboost' || pc.includes('yieldboost')) return 2;
   return 5;
 }
-const getFreshness = (data) => {
+// Worst-of freshness: the badge can NEVER claim the dataset is fresher
+// than the oldest feed actually says. We aggregate (build_time,
+// last_options_refresh, last_holdings_refresh, worst per-row options_as_of,
+// worst per-row underlying_options_as_of, holdings_age) and surface whichever
+// is the oldest. The headline label shows that bottleneck explicitly so users
+// trading off this dashboard know *which* feed is the bottleneck. See
+// `LETF_Options_Pricing_and_Edge_Roadmap.md` Phase 0a.
+function _ageMinutesSince(isoLike) {
+  if (!isoLike) return null;
+  const t = new Date(isoLike).getTime();
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.round((Date.now() - t) / 60000));
+}
+function _holdingsAgeDays(isoDate) {
+  if (!isoDate) return null;
+  const t = new Date(`${isoDate}T16:00:00-04:00`).getTime();  // assume close ET
+  if (!Number.isFinite(t)) return null;
+  const ms = Date.now() - t;
+  return Math.max(0, Math.round(ms / (24 * 3600 * 1000)));
+}
+const getFreshness = (data, vrpHealth) => {
   const built = data?.build_time ? new Date(data.build_time) : null;
   if (!built || Number.isNaN(built.getTime())) {
-    return { label: 'Freshness: Unknown', className: 'fresh-warn' };
+    return { label: 'Freshness: Unknown', className: 'fresh-warn', detail: 'no build_time' };
   }
-  const ageMin = Math.max(0, Math.round((Date.now() - built.getTime()) / 60000));
+  const buildMin = _ageMinutesSince(data.build_time);
+  const optMin = _ageMinutesSince(vrpHealth?.last_options_refresh);
+  const worstSleeveOptMin = Number.isFinite(vrpHealth?.worst_sleeve_options_age_minutes)
+    ? Number(vrpHealth.worst_sleeve_options_age_minutes) : null;
+  const worstUndOptMin = Number.isFinite(vrpHealth?.worst_underlying_options_age_minutes)
+    ? Number(vrpHealth.worst_underlying_options_age_minutes) : null;
+  const holdingsDays = vrpHealth?.holdings_age_trading_days != null
+    ? Number(vrpHealth.holdings_age_trading_days)
+    : _holdingsAgeDays(vrpHealth?.holdings_as_of);
   const target = Number(data?.borrow_refresh_interval_minutes) > 0
     ? Number(data.borrow_refresh_interval_minutes)
     : 30;
+  const ftpOk = Boolean(data?.ibkr_ftp_success);
+  // Find the bottleneck.
+  let bottleneck = { kind: 'build', minutes: buildMin };
+  const candidates = [
+    { kind: 'options_cache', minutes: optMin },
+    { kind: 'worst_sleeve_quote', minutes: worstSleeveOptMin },
+    { kind: 'worst_underlying_quote', minutes: worstUndOptMin },
+  ];
+  for (const c of candidates) {
+    if (Number.isFinite(c.minutes) && c.minutes > (bottleneck.minutes ?? 0)) bottleneck = c;
+  }
+  // Holdings convert to "stale" by trading-day cadence (1 day = ~390 RTH minutes).
+  if (Number.isFinite(holdingsDays) && holdingsDays > 0) {
+    const holdMin = holdingsDays * 24 * 60;
+    if (holdMin > (bottleneck.minutes ?? 0)) bottleneck = { kind: 'holdings', minutes: holdMin, days: holdingsDays };
+  }
+  const minutes = bottleneck.minutes ?? buildMin;
+  const isMissingChain = Array.isArray(vrpHealth?.missing_chain_ybs) && vrpHealth.missing_chain_ybs.length > 0;
   const warnAt = Math.max(target + 10, 45);
   const staleAt = Math.max(target * 2 + 10, 90);
-  const ftpOk = Boolean(data?.ibkr_ftp_success);
-  if (ageMin >= staleAt) return { label: `Stale (${ageMin}m old)`, className: 'fresh-bad' };
-  if (!ftpOk || ageMin >= warnAt) return { label: `Degraded (${ageMin}m old)`, className: 'fresh-warn' };
-  return { label: `Fresh (${ageMin}m old)`, className: 'fresh-good' };
+  // Bottleneck label suffix tells the user *which* feed is dragging the badge.
+  const labelKind = bottleneck.kind === 'holdings'
+    ? `holdings ${bottleneck.days}d`
+    : bottleneck.kind === 'worst_sleeve_quote'
+      ? 'worst sleeve quote'
+      : bottleneck.kind === 'worst_underlying_quote'
+        ? 'worst und. quote'
+        : bottleneck.kind === 'options_cache'
+          ? 'options cache'
+          : 'build';
+  if (bottleneck.kind === 'holdings' && bottleneck.days >= 3) {
+    return { label: `Stale holdings (${bottleneck.days}d)`, className: 'fresh-bad', detail: `bottleneck=${labelKind}` };
+  }
+  if (minutes >= 24 * 60) {
+    return { label: `Stale (${Math.round(minutes / 60)}h old, ${labelKind})`, className: 'fresh-bad', detail: `bottleneck=${labelKind}` };
+  }
+  if (minutes >= staleAt) {
+    return { label: `Stale (${minutes}m old, ${labelKind})`, className: 'fresh-bad', detail: `bottleneck=${labelKind}` };
+  }
+  if (!ftpOk || minutes >= warnAt || isMissingChain) {
+    const extra = isMissingChain ? `${vrpHealth.missing_chain_ybs.length} chains missing` : labelKind;
+    return { label: `Degraded (${minutes}m old, ${extra})`, className: 'fresh-warn', detail: `bottleneck=${labelKind}` };
+  }
+  return { label: `Fresh (${minutes}m old, ${labelKind})`, className: 'fresh-good', detail: `bottleneck=${labelKind}` };
 };
 
 const HIGH_BETA_THRESHOLD = 1.5;
@@ -4925,48 +4991,6 @@ function LetfIntradayConvergenceChart({ series, underlying, latestRealized, late
   );
 }
 
-/** Latest issuer/Yahoo price from etf_metrics_daily rows (close, then NAV). */
-function latestMetricSpotForSymbol(sym, etfMetricsMap, undSym, peerRecords) {
-  const s = String(sym || '').toUpperCase();
-  const und = String(undSym || '').toUpperCase();
-  const rows = Array.isArray(etfMetricsMap?.[s]) ? etfMetricsMap[s] : [];
-  const latest = rows.length ? rows[rows.length - 1] : null;
-  if (latest) {
-    const px = Number(latest.close_price) || Number(latest.nav);
-    if (Number.isFinite(px) && px > 0) return px;
-  }
-  if (s === und) {
-    for (const p of (Array.isArray(peerRecords) ? peerRecords : [])) {
-      const peerSym = String(p?.symbol || '').toUpperCase();
-      const peerRows = Array.isArray(etfMetricsMap?.[peerSym]) ? etfMetricsMap[peerSym] : [];
-      const peerLatest = peerRows.length ? peerRows[peerRows.length - 1] : null;
-      const undPx = Number(peerLatest?.underlying_adj_close);
-      if (Number.isFinite(undPx) && undPx > 0) return undPx;
-    }
-  }
-  return null;
-}
-
-/** Resolve Trade Lab spot: live options cache first, then etf_metrics fallback. */
-function resolveTradeSpotForSymbol(sym, optionsCache, etfMetricsMap, undSym, peerRecords) {
-  const s = String(sym || '').toUpperCase();
-  const cached = Number(optionsCache?.symbols?.[s]?.spot);
-  if (Number.isFinite(cached) && cached > 0) {
-    return { spot: cached, source: 'options_cache' };
-  }
-  const metric = latestMetricSpotForSymbol(s, etfMetricsMap, undSym, peerRecords);
-  if (metric != null) {
-    return { spot: metric, source: 'etf_metrics' };
-  }
-  return { spot: null, source: null };
-}
-
-function tradeSpotSourceLabel(source) {
-  if (source === 'options_cache') return 'live';
-  if (source === 'etf_metrics') return 'metrics close';
-  return 'fallback 100';
-}
-
 function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart', dashboardBuildTime = null, intradayFlows = null, intradayFlowsError = null, allRecords = [], onNavigateToChart = null }) {
   const activeTf = useMemo(
     () => TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2],
@@ -5767,30 +5791,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return { underlying: und, peers, symbols };
   }, [allRecords, undSym]);
 
-  const tradeSpotMetaBySymbol = useMemo(() => {
-    const out = {};
-    for (const sym of tradeUnderlyingGroup.symbols) {
-      out[sym] = resolveTradeSpotForSymbol(
-        sym,
-        optionsCache,
-        etfMetricsMap,
-        undSym,
-        tradeUnderlyingGroup.peers,
-      );
-    }
-    return out;
-  }, [tradeUnderlyingGroup.symbols, tradeUnderlyingGroup.peers, optionsCache, etfMetricsMap, undSym]);
-
   const tradeSpotBySymbol = useMemo(() => {
     const out = {};
     for (const sym of tradeUnderlyingGroup.symbols) {
-      const resolved = tradeSpotMetaBySymbol[sym];
-      out[sym] = Number.isFinite(Number(resolved?.spot)) && Number(resolved.spot) > 0
-        ? Number(resolved.spot)
-        : 100;
+      const spot = Number(optionsCache?.symbols?.[sym]?.spot);
+      out[sym] = Number.isFinite(spot) ? spot : 100;
     }
     return out;
-  }, [tradeUnderlyingGroup.symbols, tradeSpotMetaBySymbol]);
+  }, [tradeUnderlyingGroup.symbols, optionsCache]);
   const tradeLeverageBySymbol = useMemo(() => {
     const out = {};
     const und = String(undSym || '').toUpperCase();
@@ -5810,17 +5818,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   }, [tradeSpotBySymbol]);
   const hasCachedSpotForSymbol = useCallback((sym) => {
     const s = String(sym || '').toUpperCase();
-    const resolved = tradeSpotMetaBySymbol[s];
-    return Number.isFinite(Number(resolved?.spot)) && Number(resolved.spot) > 0;
-  }, [tradeSpotMetaBySymbol]);
-  const tradeSpotLabelForSymbol = useCallback((sym) => {
-    const s = String(sym || '').toUpperCase();
-    const resolved = tradeSpotMetaBySymbol[s];
-    if (Number.isFinite(Number(resolved?.spot)) && Number(resolved.spot) > 0) {
-      return `spot ${Number(resolved.spot).toFixed(2)} (${tradeSpotSourceLabel(resolved.source)})`;
-    }
-    return 'spot n/a (fallback 100)';
-  }, [tradeSpotMetaBySymbol]);
+    return Number.isFinite(Number(optionsCache?.symbols?.[s]?.spot));
+  }, [optionsCache]);
 
   const tradeBorrowBySymbol = useMemo(() => {
     const out = {};
@@ -7221,7 +7220,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <input type="number" value={leg.quantity} onChange={(e) => setTradeBaseLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, quantity: Number(e.target.value || 0) } : x))} placeholder="Qty" />
                       <input type="number" value={leg.entry} onChange={(e) => setTradeBaseLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, entry: Number(e.target.value || 0) } : x))} placeholder="Entry" />
                       <div className="scenario-sub">
-                        {tradeSpotLabelForSymbol(leg.symbol)}
+                        {hasCachedSpotForSymbol(leg.symbol)
+                          ? `spot ${tradeSpotForSymbol(leg.symbol).toFixed(2)}`
+                          : 'spot n/a (fallback 100)'}
                       </div>
                       <button onClick={() => setTradeBaseLegs((arr) => arr.filter((x) => x.id !== leg.id))}>×</button>
                     </div>
@@ -7280,7 +7281,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 )}
                 {symbolChoices.some((s) => !hasCachedSpotForSymbol(s)) && (
                   <div className="trade-warning">
-                    Spot missing for {symbolChoices.filter((s) => !hasCachedSpotForSymbol(s)).join(', ')} — using placeholder 100 until a live quote or metrics close is available.
+                    Spot missing for {symbolChoices.filter((s) => !hasCachedSpotForSymbol(s)).join(', ')} — using placeholder 100 until cache fills.
                   </div>
                 )}
                 {symbolChoices.some((s) => s !== undSym && !optionsForSymbol(s).length && optionsCache?.errors_by_symbol?.[s]) && (
@@ -8493,6 +8494,45 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
     return m;
   }, [eventCalendar]);
 
+  // P0a freshness gating: a row is "stale" when the held-leg options snapshot,
+  // the underlying chain snapshot, or the holdings file fall outside the
+  // tradeable freshness band. STRONG SELL / sell signals are hard-blocked on
+  // stale rows: traders should not act on the σ-edge until the inputs refresh.
+  const freshnessFor = (r) => {
+    const optMs = r.options_as_of ? new Date(r.options_as_of).getTime() : null;
+    const undMs = r.underlying_options_as_of ? new Date(r.underlying_options_as_of).getTime() : null;
+    const hMs = r.holdings_as_of ? new Date(r.holdings_as_of + 'T16:00:00-04:00').getTime() : null;
+    const optAge = optMs ? Math.max(0, Math.round((Date.now() - optMs) / 60000)) : null;
+    const undAge = undMs ? Math.max(0, Math.round((Date.now() - undMs) / 60000)) : null;
+    const holdingsDays = hMs ? Math.max(0, Math.floor((Date.now() - hMs) / 86400000)) : null;
+    const worst = Math.max(optAge ?? 0, undAge ?? 0);
+    const skew = Number(r.iv_expiry_skew_days) || 0;
+    const ivExact = String(r.iv_source) === 'holdings_exact';
+    // Block trading recommendations when:
+    //  (a) any quote > 24h stale  → outright stale
+    //  (b) holdings > 2 trading days → strike-set may have rolled
+    //  (c) IV source is not exact AND expiry skew > 7 days → interpolated IV
+    //  (d) iv_source = holdings_missing_chain (no IV available)
+    const blockStale = (worst >= 24 * 60)
+      || (holdingsDays != null && holdingsDays > 2)
+      || (!ivExact && skew > 7)
+      || (String(r.iv_source) === 'holdings_missing_chain');
+    const warnStale = (worst >= 60) || (holdingsDays != null && holdingsDays > 1) || (skew > 14);
+    let label;
+    let className;
+    if (worst >= 24 * 60) {
+      label = `${Math.round(worst / 60)}h old`;
+      className = 'fresh-bad';
+    } else if (worst >= 60) {
+      label = `${Math.round(worst / 60)}h old`;
+      className = 'fresh-warn';
+    } else {
+      label = `${worst}m old`;
+      className = 'fresh-good';
+    }
+    return { optAge, undAge, holdingsDays, worst, label, className, blockStale, warnStale, skew };
+  };
+
   const enriched = useMemo(() => {
     const rows = (vrpLive?.rows) || [];
     const today = new Date();
@@ -8509,6 +8549,15 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
           const hDate = new Date(r.expiry + 'T00:00:00Z');
           if (eDate <= hDate && eDate >= today) eventInHeldWindow = true;
         }
+      }
+      // P0b-2: server-side `days_to_event` (from event_calendar_combined.json)
+      // is the source of truth when the local prop doesn't have this underlying.
+      // Surface it even when the event falls AFTER the held expiry so the
+      // trader can see "next earnings in 60d" instead of a bare em-dash on
+      // every 0-DTE row.
+      if (daysToEarnings == null && Number.isFinite(Number(r.days_to_event))) {
+        daysToEarnings = Number(r.days_to_event);
+        eventInHeldWindow = !!r.event_in_held_horizon;
       }
       // Implied event move (if both base & full IV known, sleeve scale).
       // The fraction of variance attributed to the event over the held horizon
@@ -8531,6 +8580,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
       const weeklyFairUsd = Number.isFinite(Number(r.bs_put_spread_fair_diffusion))
         ? Number(r.bs_put_spread_fair_diffusion) * 100 // standard option contract = 100 sh
         : null;
+      const fr = freshnessFor(r);
       return {
         ...r,
         days_to_earnings: daysToEarnings,
@@ -8540,6 +8590,8 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
         earnings_historical_move_mad: ev?.historicalMovePctMad ?? null,
         implied_event_move_pct_underlying: impliedEventMovePct,
         weekly_pnl_per_spread_usd: weeklyFairUsd,
+        _freshness: fr,
+        _block_stale: fr.blockStale,
       };
     });
   }, [vrpLive, earningsByUnderlying]);
@@ -8587,11 +8639,17 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
     };
   }, [enriched]);
 
-  const signalFor = (edge) => {
+  const signalFor = (edge, opts = {}) => {
     if (edge == null || !Number.isFinite(Number(edge))) {
       return { label: '—', color: 'var(--text-muted)', bg: 'transparent', weight: 400 };
     }
     const e = Number(edge);
+    // P0a hard-block: stale inputs degrade SELL → AVOID-DATA so traders never
+    // act on a positive σ-edge that is built on >24h-old quotes or a holdings
+    // file that has rolled past the displayed strikes.
+    if (opts.blockStale && e > 0) {
+      return { label: 'AVOID DATA', color: '#fff', bg: '#6b7280', weight: 700 };
+    }
     if (e >= 0.30) return { label: 'STRONG SELL', color: '#fff', bg: '#10b981', weight: 700 };
     if (e >= 0.10) return { label: 'sell', color: '#10b981', bg: 'rgba(16,185,129,0.15)', weight: 600 };
     if (e >= 0) return { label: 'lean sell', color: '#10b981', bg: 'transparent', weight: 500 };
@@ -8723,11 +8781,15 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
               <Th k="signal" label="Signal" align="left" hint="σ-space edge classification" />
               <Th k="yb_etf" label="YB" align="left" hint="YieldBOOST ETF ticker" />
               <Th k="underlying" label="Und." align="left" hint="Single-stock underlying" />
-              <Th k="iv_minus_breakeven_sigma" label="IV − BEσ" hint="Sleeve IV minus BS breakeven σ. Positive = market overpaying expected loss." />
+              <Th k="iv_minus_breakeven_sigma" label="BS edge" hint="Sleeve IV minus BS breakeven σ. Positive = market overpaying expected loss. Diffusion-only baseline." />
+              <Th k="best_model_edge_pp_of_max_loss" label="Model edge" hint="Best non-BS model edge (% of max-loss): Bates (single-stock) > Heston (index) > AZ-imputed. Positive = market mid above model fair = SELL." />
+              <Th k="az_cone_residual_iv" label="AZ cone" hint="Sleeve IV minus AZ-implied sleeve IV from underlying 1× chain at mapped strike. Positive = sleeve trades rich vs underlying surface (cross-surface arb signal)." />
               <Th k="iv_full_proxy" label="IV (sleeve)" hint="Spread-leg IV average (full, not event-stripped)" />
               <Th k="spread_breakeven_sigma_annual" label="BE σ" hint="σ that makes BS_fair == spread_mid_market" />
               <Th k="spread_mid_market" label="Mid" hint="Current spread mid-market price (short K_short − long K_long)" />
               <Th k="bs_put_spread_fair_diffusion" label="BS fair" hint="BS short-spread fair value at sigma_source. Diffusion only." />
+              <Th k="heston_put_spread_fair" label="Heston fair" hint="Heston + AHJ-propagated sleeve fair (Carr-Madan / COS). Uses calibrated underlying surface; absent for thin chains." />
+              <Th k="bates_put_spread_fair" label="Bates fair" hint="Bates jump-diffusion + AHJ truncation sleeve fair. Single-stock sleeves only; captures earnings-event jump premium absent from BS/Heston." />
               <Th k="expected_weekly_loss_pct_of_spot" label="Wk loss %" hint="Expected weekly NAV bleed at current σ" />
               <Th k="bs_dollar_gamma_per_1pct_underlying" label="$-γ /1%U" hint="$ P&L per 1% underlying move (short = negative)" />
               <Th k="bs_theta_spread_per_day" label="θ/day" hint="Theta per calendar day (positive = collecting)" />
@@ -8737,15 +8799,23 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
               <Th k="event_historical_move_pct_underlying" label="Hist. evt%" hint="Historical MAD of |return| on prior earnings days (underlying scale)" />
               <Th k="event_move_richness_pct" label="Rich%" hint="(implied / historical) − 1. Positive = market overpaying event move (SELL), negative = underpaying (BUY)" />
               <Th k="iv_expiry_skew_days" label="Skew" hint="|held - chain| expiry days; the IV-term-structure interpolation gap" />
-              <Th k="iv_source" label="IV src" align="left" hint="How IV was resolved" />
+              <Th k="iv_source" label="IV src" align="left" hint="How IV was resolved (holdings_exact best; az_imputed_from_underlying = AZ rescale)" />
+              <Th k="_freshness.worst" label="Quote age" hint="Worst-of sleeve and underlying options quote age (min). Hard-blocks SELL signals above 24h. P0a freshness rail." />
             </tr>
           </thead>
           <tbody>
             {sorted.map((r) => {
-              const sig = signalFor(r.iv_minus_breakeven_sigma);
+              const fr = r._freshness || { label: '—', className: 'fresh-warn', worst: null, blockStale: false };
+              const sig = signalFor(r.iv_minus_breakeven_sigma, { blockStale: fr.blockStale });
               const edge = r.iv_minus_breakeven_sigma;
               const edgeFmt = (v) => (v == null || !Number.isFinite(Number(v))) ? '—'
                 : (Number(v) >= 0 ? '+' : '') + (Number(v) * 100).toFixed(1) + 'pp';
+              const ppFmt = (v) => (v == null || !Number.isFinite(Number(v))) ? '—'
+                : (Number(v) >= 0 ? '+' : '') + Number(v).toFixed(1) + 'pp';
+              const freshColor = fr.className === 'fresh-bad' ? '#ef4444'
+                : fr.className === 'fresh-warn' ? '#f59e0b' : '#10b981';
+              const freshBg = fr.className === 'fresh-bad' ? 'rgba(239,68,68,0.18)'
+                : fr.className === 'fresh-warn' ? 'rgba(245,158,11,0.18)' : 'rgba(16,185,129,0.12)';
               return (
                 <tr key={`${r.yb_etf}-${r.expiry}`} style={{ borderBottom: '1px solid var(--border)' }}>
                   <td style={{ padding: '5px 8px' }}>
@@ -8759,7 +8829,10 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                       background: sig.bg,
                       letterSpacing: 0.3,
                       whiteSpace: 'nowrap',
-                    }}>{sig.label}</span>
+                    }}
+                    title={fr.blockStale
+                      ? `Stale inputs: quote age ${fr.label}, holdings ${fr.holdingsDays ?? '?'}d, skew ${fr.skew}d, src ${r.iv_source}. SELL recommendations hard-blocked until refresh.`
+                      : 'Edge signal computed against current quote, holdings, and IV source.'}>{sig.label}</span>
                   </td>
                   <td style={{ padding: '5px 8px', fontWeight: 600 }}>
                     <a
@@ -8780,7 +8853,27 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                     fontWeight: 600,
                     color: edge == null ? 'var(--text-muted)'
                       : (Number(edge) > 0 ? '#10b981' : (Number(edge) < -0.05 ? '#ef4444' : 'var(--text-muted)')),
-                  }}>{edgeFmt(edge)}</td>
+                  }} title="BS-baseline edge (IV − BEσ). Diffusion only.">{edgeFmt(edge)}</td>
+                  <td style={{
+                    padding: '5px 8px', textAlign: 'right', fontWeight: 600,
+                    color: r.best_model_edge_pp_of_max_loss == null ? 'var(--text-muted)'
+                      : (Number(r.best_model_edge_pp_of_max_loss) > 0 ? '#10b981'
+                        : (Number(r.best_model_edge_pp_of_max_loss) < -10 ? '#ef4444' : 'var(--text-muted)')),
+                  }}
+                  title={`Best non-BS model: ${r.best_model_name || 'none'}. Edge in % of max-loss; positive = market mid above ${r.best_model_name || 'model'} fair = SELL.`}>
+                    {ppFmt(r.best_model_edge_pp_of_max_loss)}
+                    <div style={{ fontSize: 9, color: 'var(--text-muted)', fontWeight: 400 }}>
+                      {r.best_model_name || '—'}
+                    </div>
+                  </td>
+                  <td style={{
+                    padding: '5px 8px', textAlign: 'right',
+                    color: r.az_cone_residual_iv == null ? 'var(--text-muted)'
+                      : (Number(r.az_cone_residual_iv) > 0.05 ? '#10b981'
+                        : (Number(r.az_cone_residual_iv) < -0.05 ? '#ef4444' : 'var(--text-muted)')),
+                  }} title="Sleeve IV minus AZ-implied sleeve IV (|β|·σ_underlying at mapped strike). Cross-surface arbitrage signal.">
+                    {r.az_cone_residual_iv != null ? edgeFmt(r.az_cone_residual_iv) : '—'}
+                  </td>
                   <td style={{ padding: '5px 8px', textAlign: 'right' }}>
                     {r.iv_full_proxy != null ? `${(r.iv_full_proxy * 100).toFixed(1)}%` : '—'}
                   </td>
@@ -8792,6 +8885,12 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                   </td>
                   <td style={{ padding: '5px 8px', textAlign: 'right' }}>
                     {r.bs_put_spread_fair_diffusion != null ? Number(r.bs_put_spread_fair_diffusion).toFixed(3) : '—'}
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }} title={r.heston_sleeve_params ? `Sleeve Heston: kappa=${r.heston_sleeve_params.kappa}, theta=${r.heston_sleeve_params.theta}, gamma=${r.heston_sleeve_params.gamma}, rho=${r.heston_sleeve_params.rho}, v0=${r.heston_sleeve_params.v0}` : 'Heston calibration unavailable (thin chain or convergence failure)'}>
+                    {r.heston_put_spread_fair != null ? Number(r.heston_put_spread_fair).toFixed(3) : '—'}
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }} title={r.bates_sleeve_params ? `Sleeve Bates: lambda=${r.bates_sleeve_params.lambda}, mu_jump=${r.bates_sleeve_params.mu_jump}, sigma_jump=${r.bates_sleeve_params.sigma_jump}` : 'Bates not calibrated (index sleeve, thin chain, or pre-event window absent).'}>
+                    {r.bates_put_spread_fair != null ? Number(r.bates_put_spread_fair).toFixed(3) : '—'}
                   </td>
                   <td style={{ padding: '5px 8px', textAlign: 'right' }}>
                     {r.expected_weekly_loss_pct_of_spot != null
@@ -8856,11 +8955,20 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                   <td style={{ padding: '5px 8px', color: 'var(--text-muted)', fontSize: 11 }}>
                     {r.iv_source || '—'}
                   </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>
+                    <span style={{
+                      display: 'inline-block', padding: '2px 7px', borderRadius: 10,
+                      color: freshColor, background: freshBg, fontSize: 10, fontWeight: 600,
+                      whiteSpace: 'nowrap',
+                    }} title={`Sleeve quote: ${fr.optAge != null ? fr.optAge + 'm' : '?'}, Underlying quote: ${fr.undAge != null ? fr.undAge + 'm' : '?'}, Holdings: ${fr.holdingsDays != null ? fr.holdingsDays + 'd' : '?'}.${fr.blockStale ? ' SELL signals hard-blocked.' : ''}`}>
+                      {fr.label}
+                    </span>
+                  </td>
                 </tr>
               );
             })}
             {sorted.length === 0 && (
-              <tr><td colSpan={18} style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>
+              <tr><td colSpan={22} style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>
                 No rows match current filters.
               </td></tr>
             )}
@@ -8869,12 +8977,17 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
       </div>
 
       <div style={{ marginTop: 14, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-        <strong>How to read:</strong> Sort by <em>IV − BEσ</em> (default) to see the cleanest sells at the top.
-        Filter "Edge signal only" to drop rows whose breakeven σ couldn't be solved (e.g. spread mid below intrinsic).
-        Cross-check the <em>Skew</em> column: rows with &gt;21d skew used a monthly chain to imply a weekly IV; treat
-        them as regime indicators, not tradable BS fair values. Rows with red <em>DT-Earn</em> have earnings inside
-        the held window — diffusion-only fair is invalid (BS doesn't price the jump). For those, the proper edge
-        is in the <em>event-aware</em> spread VRP shown on the per-ETF Vol/VRP tab.
+        <strong>How to read:</strong> Sort by <em>Model edge</em> to use the best non-BS pricing model per row
+        (Bates for single-stock sleeves, Heston for index sleeves, AZ-imputed otherwise). The legacy <em>BS edge</em>
+        column is kept for parity but trusts flat-σ Black-Scholes — it will be wrong on rows with calibrated jump
+        kernels. <em>AZ cone</em> is the structural cross-surface arbitrage signal (sleeve IV vs |β|·σ_underlying at
+        the AZ-mapped strike); positive means the sleeve trades rich vs its own underlying surface. The <em>Quote
+        age</em> column shows the worst-of sleeve + underlying quote freshness — rows that flip <strong>SELL → AVOID
+        DATA</strong> are hard-blocked because their inputs (quote &gt; 24h stale, holdings &gt; 2 trading days, or
+        IV interpolated &gt;7d through the term structure) are no longer tradable. Rows with red <em>DT-Earn</em>
+        have earnings inside the held window — switch to the per-ETF Vol/VRP tab for the event-aware spread VRP,
+        or read the <em>Bates fair</em> column for the jump-diffusion alternative on single-stock names. P0a/P1/P2/P3
+        of the roadmap are now live in the pipeline (see <code>scripts/letf_options_models.py</code>).
       </div>
     </div>
   );
@@ -9675,6 +9788,30 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [newsError, setNewsError] = useState(null);
   const [metricsCacheTick, setMetricsCacheTick] = useState(0);
   const [borrowHistoryMap, setBorrowHistoryMap] = useState(() => BORROW_HISTORY_CACHE || {});
+  // P0a: load vrp_health alongside dashboard_data so the topbar freshness pill
+  // can show the worst-of clock (build_time, options refresh, holdings_as_of,
+  // worst per-row sleeve/underlying quote age) rather than just build_time.
+  const [vrpHealth, setVrpHealth] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refetchHealth = () => {
+      const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+      fetch(`${VRP_HEALTH_URL}${cacheBust}`, { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((p) => { if (!cancelled && p) setVrpHealth(p); })
+        .catch(() => { /* best-effort */ });
+    };
+    refetchHealth();
+    const id = setInterval(refetchHealth, 5 * 60 * 1000);
+    const onVis = () => { if (document.visibilityState === 'visible') refetchHealth(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -9908,7 +10045,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
   const records = data?.records || [];
   const summary = data?.summary || {};
-  const freshness = useMemo(() => getFreshness(data), [data]);
+  // Worst-of freshness now incorporates vrp_health.json so the topbar badge can
+  // never claim Fresh when the underlying OPRA quotes / holdings file are stale.
+  const freshness = useMemo(() => getFreshness(data, vrpHealth), [data, vrpHealth]);
 
   const bucketMap = {
     all: null,

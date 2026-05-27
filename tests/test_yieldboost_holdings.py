@@ -16,6 +16,7 @@ sys.path.insert(0, str(SCRIPTS))
 from yieldboost_holdings import (  # noqa: E402
     backfill_exact_strike_mid_from_chain,
     build_occ_symbol_index,
+    build_vrp_health_payload,
     build_vrp_live_payload,
     build_yieldboost_rv_map,
     extract_rv_30d_annual,
@@ -215,8 +216,15 @@ def test_build_vrp_live_payload_missing_chain_iv_source():
     }
     payload = build_vrp_live_payload(spread, options_cache, rv_map={"AMZZ": 0.44})
     row = payload["rows"][0]
-    assert row["iv_put_long"] is None
-    assert row["iv_source"] == "holdings_missing_chain"
+    # lookup_contract_iv now performs a nearest-expiry fallback (cap 35d). The
+    # only chain row (6/18) is 27d from the 5/22 held expiry, so the long-leg IV
+    # comes back at the nearest strike with an explicit expiry-skew label. That
+    # IS the desired graceful-degradation behavior: a stale-but-best estimate is
+    # always better than a hard null, but it MUST be flagged in iv_source so the
+    # UI can downgrade the recommendation.
+    assert row["iv_put_long"] == pytest.approx(0.62)
+    assert row["iv_source"] == "holdings_nearest_expiry"
+    assert row["iv_expiry_skew_days"] == 27
 
 
 def test_spreads_json_to_put_spread_legs_recomputes_front_per_etf():
@@ -636,6 +644,241 @@ def test_spreads_json_to_put_spread_legs_repairs_legacy_sleeve():
     legs = spreads_json_to_put_spread_legs(payload)
     assert len(legs) == 1
     assert legs[0].sleeve_2x_etf == "HIMZ"
+
+
+# ── P0a: freshness "worst-of" clock + P0b-1: AZ imputation iv_source escalation ──
+
+def _build_amyy_az_spread(*, expiry: date = date(2026, 5, 27)) -> list:
+    """Single AMYY put-spread leg for AZ-imputation tests."""
+    return pair_put_spreads_from_holdings(
+        pd.DataFrame([
+            {
+                "as_of_date": expiry.isoformat(),
+                "etf_ticker": "AMYY",
+                "position_ticker": f"AMDL{expiry.strftime('%y%m%d')}P00047890",
+                "security_type": "OPTION_PUT",
+                "shares": 100.0,
+                "option_root": "2AMDL",
+                "option_expiry": expiry.isoformat(),
+                "option_strike": 47.89,
+                "option_put_call": "P",
+                "option_side": "long",
+            },
+            {
+                "as_of_date": expiry.isoformat(),
+                "etf_ticker": "AMYY",
+                "position_ticker": f"AMDL{expiry.strftime('%y%m%d')}P00050550",
+                "security_type": "OPTION_PUT",
+                "shares": -100.0,
+                "option_root": "2AMDL",
+                "option_expiry": expiry.isoformat(),
+                "option_strike": 50.55,
+                "option_put_call": "P",
+                "option_side": "short",
+            },
+        ]),
+        underlying_by_etf={"AMYY": "AMD"},
+        as_of=expiry,
+    )
+
+
+def test_build_vrp_live_payload_az_imputes_missing_chain_sleeve_iv():
+    """P0b-1: sleeve has no chain, but underlying chain exists -> iv_source escalates to AZ.
+
+    This is the structural fix for CWY / MTYY / MUYY / RGYY / TSYY which Tradier
+    OCC cannot quote (the FLEX strikes are not on OPRA). AZ takes the underlying
+    1x surface and rescales by |beta| to imply a sleeve IV at the held strike.
+    """
+    expiry = date(2026, 5, 27)
+    spread = _build_amyy_az_spread(expiry=expiry)
+    options_cache = {
+        "symbols": {
+            "AMDL": {
+                "spot": 66.9,
+                "updated_at": "2026-05-27T00:00:00Z",
+                "options": [],
+            },
+            "AMD": {
+                "spot": 467.5,
+                "updated_at": "2026-05-27T00:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": k, "iv": 0.70, "mid": 12.0}
+                    for k in (380, 390, 395, 400, 405, 410, 420)
+                ],
+            },
+        },
+    }
+    payload = build_vrp_live_payload(
+        spread, options_cache,
+        rv_map={"AMD": 0.45, "AMDL": 0.95},
+        as_of=expiry,
+    )
+    row = payload["rows"][0]
+    # IV-source escalation: holdings_missing_chain -> az_imputed_from_underlying.
+    assert row["iv_source"] == "az_imputed_from_underlying"
+    assert row["az_iv_source"] == "az_imputed_from_underlying"
+    # The AZ pipeline rebuilt the sleeve IV from the underlying chain.
+    assert row["az_implied_sleeve_iv"] is not None and row["az_implied_sleeve_iv"] > 0
+    # The BS-fair recomputed with the AZ-implied IV is a usable surrogate for
+    # the dashboard's headline "fair value" column.
+    assert row["az_put_spread_fair"] is not None and row["az_put_spread_fair"] >= 0
+    # spread_mid_market is None (no sleeve quote), so best_model_edge cannot be
+    # computed in price space. That is the correct null behavior -- the row is
+    # AZ-fair-valued but the actionable edge stays None until a sleeve mid lands.
+    assert row["best_model_edge_pp_of_max_loss"] is None
+
+
+def test_build_vrp_live_payload_az_best_model_when_sleeve_mid_present():
+    """When both AZ-imputed IV and a sleeve mid land, best_model_edge fires."""
+    expiry = date(2026, 5, 27)
+    spread = _build_amyy_az_spread(expiry=expiry)
+    options_cache = {
+        "symbols": {
+            "AMDL": {
+                "spot": 66.9,
+                "updated_at": "2026-05-27T00:00:00Z",
+                # Sleeve has IV+mid at the exact held strikes (not "missing-chain"
+                # for this test) but we still want to confirm the AZ engine runs
+                # AND the price-space edge column populates.
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 47.89, "iv": 2.50, "mid": 0.10},
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 50.55, "iv": 1.90, "mid": 0.18},
+                ],
+            },
+            "AMD": {
+                "spot": 467.5,
+                "updated_at": "2026-05-27T00:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": k, "iv": 0.70, "mid": 5.0}
+                    for k in (380, 390, 395, 400, 405, 410, 420)
+                ],
+            },
+        },
+    }
+    payload = build_vrp_live_payload(
+        spread, options_cache,
+        rv_map={"AMD": 0.45, "AMDL": 0.95},
+        as_of=expiry,
+    )
+    row = payload["rows"][0]
+    assert row["spread_mid_market"] is not None
+    assert row["az_put_spread_fair"] is not None
+    assert row["best_model_edge_pp_of_max_loss"] is not None
+    assert row["best_model_name"] in {"az", "heston", "bates"}
+
+
+def test_build_vrp_live_payload_az_fires_even_when_sigma_bar_missing():
+    """The AZ branch must NOT gate on a missing rv_30d_underlying."""
+    expiry = date(2026, 5, 27)
+    spread = _build_amyy_az_spread(expiry=expiry)
+    options_cache = {
+        "symbols": {
+            "AMDL": {
+                "spot": 66.9,
+                "updated_at": "2026-05-27T00:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 47.89, "iv": 2.50, "mid": 0.12},
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 50.55, "iv": 1.90, "mid": 0.25},
+                ],
+            },
+            "AMD": {
+                "spot": 467.5,
+                "updated_at": "2026-05-27T00:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": k, "iv": 0.68}
+                    for k in (380, 390, 395, 400, 405, 410, 420)
+                ],
+            },
+        },
+    }
+    # rv_map deliberately empty for AMD: sigma_bar_underlying must fall back to iv_full/|beta|.
+    payload = build_vrp_live_payload(spread, options_cache, rv_map={}, as_of=expiry)
+    row = payload["rows"][0]
+    assert row["az_implied_sleeve_iv"] is not None
+    assert row["az_mapped_strike_long_underlying"] is not None
+    assert row["az_underlying_iv_long"] is not None
+    assert row["az_cone_residual_iv"] is not None
+
+
+def test_build_vrp_health_payload_worst_of_clock_picks_oldest_source():
+    """P0a: the topbar freshness pill must surface the *oldest* of (sleeve quote,
+    underlying chain, holdings) — never the freshest build_time alone."""
+    spreads_payload = {
+        "build_time": "2026-05-27T00:37:00Z",
+        "spreads": [{
+            "yb_etf": "AMYY", "is_front": True,
+            "holdings_as_of": "2026-05-22",
+            "sleeve_2x_etf": "AMDL", "underlying": "AMD",
+        }],
+    }
+    vrp_payload = {
+        "build_time": "2026-05-27T00:37:00Z",
+        "rows": [
+            {
+                "yb_etf": "AMYY", "sleeve_2x": "AMDL",
+                "iv_put_long": 2.5, "iv_put_short": 1.9,
+                "spread_mid_market": 0.12,
+                "options_as_of": "2026-05-23T20:20:00Z",            # 4d old
+                "underlying_options_as_of": "2026-05-23T20:20:00Z",
+            },
+            {
+                "yb_etf": "AZYY", "sleeve_2x": "AMZZ",
+                "iv_put_long": 0.62, "iv_put_short": 0.60,
+                "spread_mid_market": 0.06,
+                "options_as_of": "2026-05-27T00:31:00Z",            # ~minutes old
+                "underlying_options_as_of": "2026-05-27T00:31:00Z",
+            },
+        ],
+    }
+    health = build_vrp_health_payload(
+        spreads_payload, vrp_payload,
+        options_cache={"build_time": "2026-05-27T00:31:54Z"},
+    )
+    # worst-of clocks: the oldest sleeve quote sets the per-row freshness floor.
+    assert health["options_as_of_min"] == "2026-05-23T20:20:00Z"
+    assert health["options_as_of_max"] == "2026-05-27T00:31:00Z"
+    assert health["underlying_options_as_of_min"] == "2026-05-23T20:20:00Z"
+    # The worst-of *age* must be the larger of the two (in minutes).
+    assert (
+        health["worst_sleeve_options_age_minutes"]
+        > health["worst_underlying_options_age_minutes"] // 2
+    )
+    # Holdings age: 5/22 (Friday) vs build today -> trading-day age must be > 0.
+    assert health["holdings_as_of"] == "2026-05-22"
+    assert health["holdings_age_trading_days"] >= 1
+
+
+def test_build_vrp_health_payload_flags_missing_chain_ybs():
+    """P0b-1 telemetry: sleeves with iv_source=holdings_missing_chain land in the
+    missing_chain_ybs bucket so the dashboard can hard-block their SELL signals."""
+    spreads_payload = {
+        "build_time": "2026-05-27T00:37:00Z",
+        "spreads": [],
+    }
+    vrp_payload = {
+        "build_time": "2026-05-27T00:37:00Z",
+        "rows": [
+            {"yb_etf": "CWY", "sleeve_2x": "CRWV",
+             "iv_put_long": None, "iv_put_short": None,
+             "iv_source": "holdings_missing_chain"},
+            {"yb_etf": "MUYY", "sleeve_2x": "MULL",
+             "iv_put_long": None, "iv_put_short": None,
+             "iv_source": "holdings_missing_chain"},
+            {"yb_etf": "AMYY", "sleeve_2x": "AMDL",
+             "iv_put_long": 2.5, "iv_put_short": 1.9,
+             "iv_source": "holdings_exact"},
+        ],
+    }
+    health = build_vrp_health_payload(spreads_payload, vrp_payload, options_cache={})
+    assert sorted(health["missing_chain_ybs"]) == ["CWY", "MUYY"]
+    assert "AMDL" not in health["missing_chain_ybs"]
 
 
 def test_spreads_json_to_put_spread_legs_roundtrip():
