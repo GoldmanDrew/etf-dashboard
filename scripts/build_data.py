@@ -83,6 +83,7 @@ _MANUAL_SPLIT_OVERRIDES: dict[str, dict[str, float]] = {
 BORROW_HISTORY_MAX_COMMITS = int(os.environ.get("BORROW_HISTORY_MAX_COMMITS", "400"))
 BORROW_HISTORY_COMMIT_PAGE_SIZE = int(os.environ.get("BORROW_HISTORY_COMMIT_PAGE_SIZE", "100"))
 POLYGON_OPTIONS_MAX_SYMBOLS = int(os.environ.get("POLYGON_OPTIONS_MAX_SYMBOLS", "100"))
+POLYGON_SPOT_MAX_SYMBOLS = int(os.environ.get("POLYGON_SPOT_MAX_SYMBOLS", "350"))
 TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH = int(os.environ.get("TRADIER_SPOT_MAX_SYMBOLS_PER_BATCH", "200"))
 TRADIER_SPOT_MAX_REQUESTS = int(os.environ.get("TRADIER_SPOT_MAX_REQUESTS", "30"))
 OPTIONS_REFRESH_SLEEP_MS = int(os.environ.get("OPTIONS_REFRESH_SLEEP_MS", "0"))
@@ -126,6 +127,11 @@ OPTIONS_STALE_AFTER_MINUTES = int(os.environ.get("OPTIONS_STALE_AFTER_MINUTES", 
 OPTIONS_ONLY_BUCKET3 = os.environ.get("OPTIONS_ONLY_BUCKET3", "1").strip().lower() not in {"0", "false", "no"}
 OPTIONS_INCLUDE_YIELDBOOST = os.environ.get("OPTIONS_INCLUDE_YIELDBOOST", "1").strip().lower() not in {"0", "false", "no"}
 OPTIONS_INCLUDE_BUCKET3_UNDERLYING = os.environ.get("OPTIONS_INCLUDE_BUCKET3_UNDERLYING", "1").strip().lower() not in {"0", "false", "no"}
+OPTIONS_INCLUDE_UNDERLYING_PEERS = os.environ.get("OPTIONS_INCLUDE_UNDERLYING_PEERS", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
 OPTIONS_ACCUMULATE_CACHE = os.environ.get("OPTIONS_ACCUMULATE_CACHE", "1").strip().lower() not in {"0", "false", "no"}
 YIELDBOOST_TRADIER_ONLY = os.environ.get("YIELDBOOST_TRADIER_ONLY", "1").strip().lower() not in {"0", "false", "no"}
 OPTIONS_MAX_ROWS_PER_SYMBOL = int(os.environ.get("OPTIONS_MAX_ROWS_PER_SYMBOL", "1200"))
@@ -2625,6 +2631,44 @@ def build_polygon_options_cache(
     if not yieldboost_targeted:
         _supplement_yieldboost_occ_quotes(force_all_front=False)
 
+    def _backfill_missing_spot_quotes() -> None:
+        """Ensure every symbol in the refresh universe has at least a spot quote."""
+        backfilled = 0
+        for sym in all_symbols:
+            payload = out["symbols"].get(sym)
+            existing_spot = _safe_float(payload.get("spot")) if isinstance(payload, dict) else None
+            if existing_spot is not None and existing_spot > 0:
+                continue
+            spot_candidate = tradier_spot_map.get(sym)
+            if spot_candidate is None:
+                continue
+            prior_rows: list[dict] = []
+            source = "tradier_spot_backfill"
+            if isinstance(payload, dict):
+                pr = payload.get("options")
+                if isinstance(pr, list):
+                    prior_rows = pr
+                if prior_rows and payload.get("source"):
+                    source = str(payload.get("source"))
+            elif isinstance(prior_symbols.get(sym), dict):
+                prior_payload = prior_symbols[sym]
+                pr = prior_payload.get("options")
+                if isinstance(pr, list):
+                    prior_rows = pr
+                if prior_rows and prior_payload.get("source"):
+                    source = str(prior_payload.get("source"))
+            _set_symbol_entry(
+                sym,
+                spot_candidate,
+                prior_rows[: max(100, OPTIONS_MAX_ROWS_PER_SYMBOL)],
+                source,
+            )
+            backfilled += 1
+        if backfilled:
+            out["spot_backfill_count"] = int(backfilled)
+
+    _backfill_missing_spot_quotes()
+
     out["symbols_count"] = len(out["symbols"])
     out["polygon_requests_used"] = int(total_polygon_requests)
     out["tradier_requests_used"] = int(tradier_budget["used"])
@@ -2711,7 +2755,9 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
     Priority:
       1) YieldBOOST sleeve + underlying symbols (when enabled)
       2) forced symbols from env (within bucket-3 set when restricted)
-      3) bucket-3 symbol + underlying pairs in record order
+      3) bucket-3 ETF symbols
+      4) bucket-3 underlyings
+      5) peer ETFs on those underlyings (Trade Lab underlying groups)
     """
     seen: set[str] = set()
     ordered: list[str] = []
@@ -2723,27 +2769,54 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
         seen.add(s)
         ordered.append(s)
 
+    def at_cap() -> bool:
+        return len(ordered) >= max(1, POLYGON_SPOT_MAX_SYMBOLS)
+
     if OPTIONS_INCLUDE_YIELDBOOST:
         for s in sorted(load_yieldboost_option_symbols()):
             add(s)
+            if at_cap():
+                return ordered
 
-    base_set: set[str] = set()
+    b3_symbols: set[str] = set()
+    b3_underlyings: set[str] = set()
     for rec in records:
         if OPTIONS_ONLY_BUCKET3 and str(rec.get("bucket")) != "bucket_3_inverse":
             continue
-        base_set.add(norm_sym(rec.get("symbol")))
-        if OPTIONS_INCLUDE_BUCKET3_UNDERLYING:
-            base_set.add(norm_sym(rec.get("underlying")))
+        s = norm_sym(rec.get("symbol"))
+        u = norm_sym(rec.get("underlying"))
+        if s:
+            b3_symbols.add(s)
+        if OPTIONS_INCLUDE_BUCKET3_UNDERLYING and u:
+            b3_underlyings.add(u)
+
+    peer_symbols: set[str] = set()
+    if OPTIONS_INCLUDE_UNDERLYING_PEERS and b3_underlyings:
+        for rec in records:
+            u = norm_sym(rec.get("underlying"))
+            s = norm_sym(rec.get("symbol"))
+            if u in b3_underlyings and s:
+                peer_symbols.add(s)
 
     for s in get_polygon_force_symbols():
         ss = norm_sym(s)
-        if not OPTIONS_ONLY_BUCKET3 or ss in base_set:
+        if not OPTIONS_ONLY_BUCKET3 or ss in b3_symbols or ss in b3_underlyings or ss in peer_symbols:
             add(ss)
+            if at_cap():
+                return ordered
 
-    for s in sorted(base_set):
+    for s in sorted(b3_symbols):
         add(s)
-        if len(ordered) >= max(1, POLYGON_OPTIONS_MAX_SYMBOLS):
-            break
+        if at_cap():
+            return ordered
+    for s in sorted(b3_underlyings):
+        add(s)
+        if at_cap():
+            return ordered
+    for s in sorted(peer_symbols):
+        add(s)
+        if at_cap():
+            return ordered
 
     return ordered
 

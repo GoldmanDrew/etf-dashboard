@@ -7,7 +7,7 @@ import logging
 import math
 import re
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -1009,20 +1009,45 @@ def build_vrp_health_payload(
 
     stale_sleeves: list[str] = []
     options_as_of_max: str | None = None
+    # Worst-of (oldest) timestamps for the per-row freshness pill. The headline
+    # ``Fresh`` badge on the dashboard topbar previously used ``build_time`` only;
+    # we now compute the *oldest* per-row options_as_of and the holdings_as_of
+    # gap so the badge can never claim the dataset is fresher than the oldest
+    # feed actually says.
+    options_as_of_min: str | None = None
+    underlying_options_as_of_min: str | None = None
+    per_row_stale_minutes: list[int] = []
     for row in vrp_rows:
         sleeve = str(row.get("sleeve_2x") or "").upper()
         if row.get("iv_put_long") is None or row.get("iv_put_short") is None:
             if sleeve and sleeve not in stale_sleeves:
                 stale_sleeves.append(sleeve)
         ts = row.get("options_as_of")
-        if ts and (options_as_of_max is None or str(ts) > options_as_of_max):
-            options_as_of_max = str(ts)
+        if ts:
+            if options_as_of_max is None or str(ts) > options_as_of_max:
+                options_as_of_max = str(ts)
+            if options_as_of_min is None or str(ts) < options_as_of_min:
+                options_as_of_min = str(ts)
+            mins = _ts_age_minutes(str(ts), now)
+            if mins is not None:
+                per_row_stale_minutes.append(mins)
+        und_ts = row.get("underlying_options_as_of")
+        if und_ts:
+            if underlying_options_as_of_min is None or str(und_ts) < underlying_options_as_of_min:
+                underlying_options_as_of_min = str(und_ts)
 
     holdings_as_of = None
     for row in front_spreads:
         ha = row.get("holdings_as_of")
         if ha and (holdings_as_of is None or str(ha) > holdings_as_of):
             holdings_as_of = str(ha)
+    holdings_age_days = _date_age_days(holdings_as_of, now.date()) if holdings_as_of else None
+    worst_options_age_minutes = (
+        max(per_row_stale_minutes) if per_row_stale_minutes else None
+    )
+    worst_underlying_age_minutes = (
+        _ts_age_minutes(underlying_options_as_of_min, now) if underlying_options_as_of_min else None
+    )
 
     missing_chain_ybs = sorted({
         str(r.get("yb_etf") or "").upper()
@@ -1068,6 +1093,7 @@ def build_vrp_health_payload(
     return {
         "build_time": now.isoformat().replace("+00:00", "Z"),
         "holdings_as_of": holdings_as_of,
+        "holdings_age_trading_days": holdings_age_days,
         "spreads_front_count": front_count,
         "iv_coverage_front_pct": round(coverage, 4),
         "stale_sleeves": stale_sleeves,
@@ -1077,9 +1103,47 @@ def build_vrp_health_payload(
         "last_options_refresh": options_cache.get("build_time") if options_cache else options_as_of_max,
         "last_holdings_refresh": spreads_payload.get("build_time"),
         "last_vrp_refresh": vrp_payload.get("build_time"),
+        # P0a — worst-of clock for the dashboard topbar freshness pill.
+        "options_as_of_max": options_as_of_max,
+        "options_as_of_min": options_as_of_min,
+        "underlying_options_as_of_min": underlying_options_as_of_min,
+        "worst_sleeve_options_age_minutes": worst_options_age_minutes,
+        "worst_underlying_options_age_minutes": worst_underlying_age_minutes,
         "stale_after_minutes": int(stale_after_minutes),
         "errors": list(errors or []),
     }
+
+
+def _ts_age_minutes(ts: str | None, now: datetime) -> int | None:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0, int((now - dt).total_seconds() // 60))
+
+
+def _date_age_days(d_iso: str | None, today: date) -> int | None:
+    """Approximate trading-day age (Sat/Sun count as 0)."""
+    if not d_iso:
+        return None
+    try:
+        d = date.fromisoformat(str(d_iso))
+    except ValueError:
+        return None
+    days = (today - d).days
+    if days <= 0:
+        return 0
+    # Subtract weekend days that fell inside the interval (rough but useful).
+    weekend = 0
+    for i in range(days):
+        weekday = (d + timedelta(days=i + 1)).weekday()
+        if weekday >= 5:
+            weekend += 1
+    return max(0, days - weekend)
 
 
 def pair_put_spreads_from_holdings(
@@ -1487,6 +1551,42 @@ def build_vrp_live_payload(
             rv_full = row.get("rv_30d_2x_full") if "rv_30d_2x_full" in row else rv_2x
             rv_base_row = row.get("rv_30d_2x_base")
 
+            # ── Model context: pull underlying spot + chain for AZ/Heston/Bates ────
+            # (Falls through cleanly to None if the underlying has no cached chain;
+            # the model extras then emit nulls instead of crashing.)
+            underlying_entry = {}
+            spot_underlying_val = None
+            underlying_iv_chain_rows: list[dict] = []
+            if und_key:
+                ucache = (options_cache.get("symbols") or {}).get(und_key) or {}
+                if isinstance(ucache, dict):
+                    underlying_entry = ucache
+                    spot_underlying_val = _parse_float(ucache.get("spot"))
+                    raw_chain = ucache.get("options") or []
+                    if isinstance(raw_chain, list):
+                        underlying_iv_chain_rows = [c for c in raw_chain if isinstance(c, dict)]
+            # σ-bar for AZ moneyness map. Priority:
+            #  1. ``rv_30d_underlying`` (true 30D realized on the spot leg).
+            #  2. fallback to the in-row ``iv_underlying_implied`` (sleeve IV / |β|).
+            #  3. last-resort: sleeve IV / 2 directly.
+            # We accept *any* finite ?-bar so the AZ branch can fire on every
+            # row that has a sleeve IV; bad ?-bar only shifts the mapped strike
+            # by ½(β-1)σ²T, which on a 0-2 DTE held leg is a few basis points.
+            sigma_bar_und = (
+                _parse_float(row.get("rv_30d_underlying"))
+                or _parse_float(rv_u)
+                or _parse_float(row.get("iv_underlying_implied"))
+            )
+            if sigma_bar_und is None:
+                iv_proxy = (
+                    _parse_float(iv_full)
+                    or _parse_float(iv_base)
+                    or _parse_float(rv_full)
+                    or _parse_float(rv_base_row)
+                )
+                if iv_proxy is not None:
+                    sigma_bar_und = float(iv_proxy) / 2.0
+
             # Pull the per-underlying next-event date + historical MAD-move from
             # the event_calendar payload. Both are on the *underlying* scale;
             # ``compute_vrp_row_extras`` knows the β=2 sleeve→underlying inversion.
@@ -1545,8 +1645,26 @@ def build_vrp_live_payload(
                 historical_event_move_pct_underlying=evt_hist_und,
                 days_to_event=evt_days,
                 event_in_horizon=evt_in_window,
+                yb_etf=s.yb_etf,
+                underlying=s.underlying,
+                sleeve_2x=s.sleeve_2x_etf,
+                sleeve_beta=2.0,
+                spot_underlying=spot_underlying_val,
+                expiry_iso=s.expiry.isoformat(),
+                underlying_iv_chain=underlying_iv_chain_rows,
+                sigma_bar_underlying=sigma_bar_und,
+                expense_rate_letf=0.0099,
+                is_single_stock_sleeve=None,
             )
             row.update(extras)
+            # Expose the underlying chain freshness so the UI can show a single
+            # worst-of pill per row (sleeve quote || underlying quote || holdings).
+            row["underlying_options_as_of"] = underlying_entry.get("updated_at") if isinstance(underlying_entry, dict) else None
+            row["spot_underlying"] = spot_underlying_val
+            # Final IV source label includes az_imputed escalation when sleeve IV is null.
+            if row.get("iv_source") in ("holdings_missing_chain", "holdings_missing_quote"):
+                if extras.get("az_implied_sleeve_iv") is not None:
+                    row["iv_source"] = "az_imputed_from_underlying"
         rows.append(row)
     return {
         "build_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),

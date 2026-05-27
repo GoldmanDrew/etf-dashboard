@@ -725,6 +725,20 @@ def compute_vrp_row_extras(
     historical_event_move_pct_underlying: float | None = None,
     days_to_event: int | None = None,
     event_in_horizon: bool = False,
+    # ── New (P1/P2/P3): optional model-extra context ──────────────────────
+    yb_etf: str | None = None,
+    underlying: str | None = None,
+    sleeve_2x: str | None = None,
+    sleeve_beta: float = LEVERAGE_BETA,
+    spot_underlying: float | None = None,
+    expiry_iso: str | None = None,
+    underlying_iv_chain: Iterable[dict] | None = None,
+    sigma_bar_underlying: float | None = None,
+    expense_rate_letf: float = 0.0099,
+    is_single_stock_sleeve: bool | None = None,
+    enable_az_models: bool = True,
+    enable_heston_models: bool = True,
+    enable_bates_models: bool = True,
 ) -> dict[str, Any]:
     """Compute the §4.1 'shippable today' VRP metrics for a single front spread.
 
@@ -896,6 +910,37 @@ def compute_vrp_row_extras(
 
     out["days_to_event"] = int(days_to_event) if days_to_event is not None else None
     out["event_in_held_horizon"] = bool(event_in_horizon)
+
+    # ── P1/P2/P3: AZ rescale, Heston+AHJ, Bates+AHJ truncation extras ──────
+    if enable_az_models or enable_heston_models or enable_bates_models:
+        try:
+            from letf_options_models import compute_letf_model_extras
+
+            model_extras = compute_letf_model_extras(
+                yb_etf=str(yb_etf or ""),
+                underlying=underlying,
+                sleeve_2x=str(sleeve_2x or ""),
+                beta=float(sleeve_beta),
+                spot_letf=_parse_float(spot),
+                spot_underlying=_parse_float(spot_underlying),
+                strike_long=_parse_float(strike_long),
+                strike_short=_parse_float(strike_short),
+                expiry_iso=str(expiry_iso or ""),
+                t_years=float(h),
+                risk_free=float(risk_free),
+                expense_rate_letf=float(expense_rate_letf),
+                iv_sleeve_market=_parse_float(iv_full_sleeve) or _parse_float(iv_base_sleeve),
+                spread_mid=_parse_float(spread_mid),
+                underlying_iv_chain=list(underlying_iv_chain or []),
+                sigma_bar_underlying=_parse_float(sigma_bar_underlying),
+                is_single_stock_sleeve=is_single_stock_sleeve,
+                days_to_event=days_to_event,
+                enable_heston=enable_heston_models,
+                enable_bates=enable_bates_models,
+            )
+            out.update(model_extras)
+        except Exception as exc:  # pragma: no cover — guard against any pricing regression
+            out.setdefault("letf_model_error", str(exc)[:200])
 
     return out
 
