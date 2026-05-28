@@ -1181,3 +1181,19 @@ def test_build_vrp_live_payload_uses_kernel_greeks_when_kernel_fires():
             assert row["theta_per_day"] > 0
         if row.get("dollar_gamma_per_1pct_underlying") is not None:
             assert row["dollar_gamma_per_1pct_underlying"] < 0
+
+
+def test_yieldboost_targeted_refresh_symbols_keeps_underlyings():
+    """YB-targeted options refresh must not drop underlying tickers from the request."""
+    from build_data import _yieldboost_targeted_refresh_symbols
+
+    targets = {"AMDL": [47.89, 50.55], "AMZZ": [35.07, 37.02]}
+    held = {"AMDL": {"2026-05-27"}, "AMZZ": {"2026-05-27"}}
+    sleeves, underlyings = _yieldboost_targeted_refresh_symbols(
+        ["AMDL", "AMZZ", "AMD", "AMZN"],
+        target_strikes_by_sleeve=targets,
+        held_expiries_by_sleeve=held,
+    )
+    assert sleeves == ["AMDL", "AMZZ"]
+    assert underlyings == ["AMD", "AMZN"]
+    assert sorted(set(sleeves) | set(underlyings)) == ["AMD", "AMDL", "AMZN", "AMZZ"]
