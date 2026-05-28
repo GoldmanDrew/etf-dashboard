@@ -155,6 +155,7 @@ YIELDBOOST_PUT_SPREADS_FILE = OUTPUT_DIR / "yieldboost_put_spreads_latest.json"
 YIELDBOOST_OPTIONS_TARGET_FILE = OUTPUT_DIR / "yieldboost_options_target.json"
 VRP_LIVE_FILE = OUTPUT_DIR / "vrp_live.json"
 VRP_HEALTH_FILE = OUTPUT_DIR / "vrp_health.json"
+VRP_FIELD_DICTIONARY_FILE = OUTPUT_DIR / "vrp_field_dictionary.json"
 EVENT_CALENDAR_COMBINED_FILE = OUTPUT_DIR / "event_calendar_combined.json"
 LS_ALGO_DATA_PATH = Path(
     os.environ.get(
@@ -2999,6 +3000,12 @@ def refresh_yieldboost_vrp_files(
         options_cache=options_cache,
     )
     write_json(VRP_HEALTH_FILE, health_payload)
+    try:
+        from vrp_field_dictionary import write_vrp_field_dictionary
+
+        write_vrp_field_dictionary(VRP_FIELD_DICTIONARY_FILE)
+    except Exception as exc:
+        print(f"[WARN] vrp_field_dictionary.json not written: {exc}")
     return {
         "spreads": spreads_payload,
         "vrp": vrp_payload,

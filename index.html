@@ -1383,10 +1383,12 @@
 <script src="assets/trade_lab.js?v=tl-v2"></script>
 <script src="assets/pair_backtest.js?v=pb-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
+<script src="assets/vrp_ui.js?v=vrp-ui-1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
 <script type="text/babel">
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
+const VrpUi = window.VrpUi || {};
 
 const DATA_URL = "data/dashboard_data.json";
 const INVESTORS_URL = "data/investors.json";
@@ -1403,6 +1405,7 @@ const LETF_INTRADAY_METRICS_URL = "data/letf_intraday_flow_metrics.json";
 const VOL_SHAPE_HISTORY_URL = "data/vol_shape_history.json";
 const VRP_LIVE_URL = "data/vrp_live.json";
 const VRP_HEALTH_URL = "data/vrp_health.json";
+const VRP_FIELD_DICT_URL = "data/vrp_field_dictionary.json";
 const YIELDBOOST_PUT_SPREADS_URL = "data/yieldboost_put_spreads_latest.json";
 /** @type {{ symbols: Record<string, { series: object[], vcrMedian: number|null, window: number }>, buildTime: string|null }|null} */
 let VOL_SHAPE_HISTORY_CACHE = null;
@@ -2109,89 +2112,6 @@ function defaultNetGrossTolerancePct(record) {
   if (pc === 'income_yieldboost' || pc.includes('yieldboost')) return 2;
   return 5;
 }
-// Worst-of freshness: the badge can NEVER claim the dataset is fresher
-// than the oldest feed actually says. We aggregate (build_time,
-// last_options_refresh, last_holdings_refresh, worst per-row options_as_of,
-// worst per-row underlying_options_as_of, holdings_age) and surface whichever
-// is the oldest. The headline label shows that bottleneck explicitly so users
-// trading off this dashboard know *which* feed is the bottleneck. See
-// `LETF_Options_Pricing_and_Edge_Roadmap.md` Phase 0a.
-function _ageMinutesSince(isoLike) {
-  if (!isoLike) return null;
-  const t = new Date(isoLike).getTime();
-  if (!Number.isFinite(t)) return null;
-  return Math.max(0, Math.round((Date.now() - t) / 60000));
-}
-function _holdingsAgeDays(isoDate) {
-  if (!isoDate) return null;
-  const t = new Date(`${isoDate}T16:00:00-04:00`).getTime();  // assume close ET
-  if (!Number.isFinite(t)) return null;
-  const ms = Date.now() - t;
-  return Math.max(0, Math.round(ms / (24 * 3600 * 1000)));
-}
-const getFreshness = (data, vrpHealth) => {
-  const built = data?.build_time ? new Date(data.build_time) : null;
-  if (!built || Number.isNaN(built.getTime())) {
-    return { label: 'Freshness: Unknown', className: 'fresh-warn', detail: 'no build_time' };
-  }
-  const buildMin = _ageMinutesSince(data.build_time);
-  const optMin = _ageMinutesSince(vrpHealth?.last_options_refresh);
-  const worstSleeveOptMin = Number.isFinite(vrpHealth?.worst_sleeve_options_age_minutes)
-    ? Number(vrpHealth.worst_sleeve_options_age_minutes) : null;
-  const worstUndOptMin = Number.isFinite(vrpHealth?.worst_underlying_options_age_minutes)
-    ? Number(vrpHealth.worst_underlying_options_age_minutes) : null;
-  const holdingsDays = vrpHealth?.holdings_age_trading_days != null
-    ? Number(vrpHealth.holdings_age_trading_days)
-    : _holdingsAgeDays(vrpHealth?.holdings_as_of);
-  const target = Number(data?.borrow_refresh_interval_minutes) > 0
-    ? Number(data.borrow_refresh_interval_minutes)
-    : 30;
-  const ftpOk = Boolean(data?.ibkr_ftp_success);
-  // Find the bottleneck.
-  let bottleneck = { kind: 'build', minutes: buildMin };
-  const candidates = [
-    { kind: 'options_cache', minutes: optMin },
-    { kind: 'worst_sleeve_quote', minutes: worstSleeveOptMin },
-    { kind: 'worst_underlying_quote', minutes: worstUndOptMin },
-  ];
-  for (const c of candidates) {
-    if (Number.isFinite(c.minutes) && c.minutes > (bottleneck.minutes ?? 0)) bottleneck = c;
-  }
-  // Holdings convert to "stale" by trading-day cadence (1 day = ~390 RTH minutes).
-  if (Number.isFinite(holdingsDays) && holdingsDays > 0) {
-    const holdMin = holdingsDays * 24 * 60;
-    if (holdMin > (bottleneck.minutes ?? 0)) bottleneck = { kind: 'holdings', minutes: holdMin, days: holdingsDays };
-  }
-  const minutes = bottleneck.minutes ?? buildMin;
-  const isMissingChain = Array.isArray(vrpHealth?.missing_chain_ybs) && vrpHealth.missing_chain_ybs.length > 0;
-  const warnAt = Math.max(target + 10, 45);
-  const staleAt = Math.max(target * 2 + 10, 90);
-  // Bottleneck label suffix tells the user *which* feed is dragging the badge.
-  const labelKind = bottleneck.kind === 'holdings'
-    ? `holdings ${bottleneck.days}d`
-    : bottleneck.kind === 'worst_sleeve_quote'
-      ? 'worst sleeve quote'
-      : bottleneck.kind === 'worst_underlying_quote'
-        ? 'worst und. quote'
-        : bottleneck.kind === 'options_cache'
-          ? 'options cache'
-          : 'build';
-  if (bottleneck.kind === 'holdings' && bottleneck.days >= 3) {
-    return { label: `Stale holdings (${bottleneck.days}d)`, className: 'fresh-bad', detail: `bottleneck=${labelKind}` };
-  }
-  if (minutes >= 24 * 60) {
-    return { label: `Stale (${Math.round(minutes / 60)}h old, ${labelKind})`, className: 'fresh-bad', detail: `bottleneck=${labelKind}` };
-  }
-  if (minutes >= staleAt) {
-    return { label: `Stale (${minutes}m old, ${labelKind})`, className: 'fresh-bad', detail: `bottleneck=${labelKind}` };
-  }
-  if (!ftpOk || minutes >= warnAt || isMissingChain) {
-    const extra = isMissingChain ? `${vrpHealth.missing_chain_ybs.length} chains missing` : labelKind;
-    return { label: `Degraded (${minutes}m old, ${extra})`, className: 'fresh-warn', detail: `bottleneck=${labelKind}` };
-  }
-  return { label: `Fresh (${minutes}m old, ${labelKind})`, className: 'fresh-good', detail: `bottleneck=${labelKind}` };
-};
-
 const HIGH_BETA_THRESHOLD = 1.5;
 
 function timingSafeEqualBytes(a, b) {
@@ -4991,7 +4911,68 @@ function LetfIntradayConvergenceChart({ series, underlying, latestRealized, late
   );
 }
 
-function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart', dashboardBuildTime = null, intradayFlows = null, intradayFlowsError = null, allRecords = [], onNavigateToChart = null }) {
+function VrpFreshnessBar({ mode, data, vrpHealth, row, compact = false }) {
+  if (mode === 'fleet') {
+    const f = VrpUi.fleetFreshness(data, vrpHealth);
+    return (
+      <span className={cls('fresh-badge', f.className)} title={f.detail || ''}>
+        {f.label}
+      </span>
+    );
+  }
+  if (mode === 'row') {
+    const fr = VrpUi.rowFreshness(row);
+    const pill = VrpUi.gradePillStyle(fr.grade);
+    return (
+      <span
+        style={{
+          display: 'inline-block',
+          width: compact ? 22 : 'auto',
+          padding: compact ? '2px 0' : '2px 6px',
+          borderRadius: 4,
+          fontSize: 10,
+          fontWeight: 700,
+          color: pill.color,
+          background: pill.background,
+        }}
+        title={fr.reason || `data_grade = ${fr.grade}`}
+      >
+        {fr.grade}
+      </span>
+    );
+  }
+  if (mode === 'etf') {
+    if (!row) return null;
+    const fr = VrpUi.rowFreshness(row);
+    const pill = VrpUi.gradePillStyle(fr.grade);
+    return (
+      <>
+        Grade{' '}
+        <strong
+          style={{
+            display: 'inline-block',
+            padding: '0 4px',
+            borderRadius: 3,
+            fontSize: 11,
+            color: pill.color,
+            background: pill.background,
+          }}
+          title={fr.reason || ''}
+        >
+          {fr.grade}
+        </strong>
+        {fr.reason ? <> · {fr.reason}</> : null}
+        {fr.worst != null ? <> · {fr.label}</> : null}
+        {vrpHealth?.iv_coverage_front_pct != null ? (
+          <> · coverage {Math.round(Number(vrpHealth.iv_coverage_front_pct) * 100)}%</>
+        ) : null}
+      </>
+    );
+  }
+  return null;
+}
+
+function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart', dashboardBuildTime = null, intradayFlows = null, intradayFlowsError = null, allRecords = [], onNavigateToChart = null, vrpFieldDict = null }) {
   const activeTf = useMemo(
     () => TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2],
     [chartVolLookbackRange],
@@ -5126,16 +5107,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return labels[src] || src;
   }, [vrpDisplayRow]);
   const vrpMissingChain = vrpDisplayRow?.iv_source === 'holdings_missing_chain';
-  const vrpStaleness = useMemo(() => {
-    const ts = vrpDisplayRow?.options_as_of || vrpHealth?.last_options_refresh || vrpHealth?.last_vrp_refresh;
-    if (!ts) return { label: vrpIvPending ? 'IV pending' : 'unknown', cls: 'scenario-sub' };
-    const ageMin = (Date.now() - new Date(ts).getTime()) / 60000;
-    if (!Number.isFinite(ageMin)) return { label: 'unknown', cls: 'scenario-sub' };
-    const staleAfter = Number(vrpHealth?.stale_after_minutes) || 30;
-    if (ageMin <= staleAfter) return { label: `IV fresh (${Math.round(ageMin)}m ago)`, cls: 'scenario-sub' };
-    if (ageMin <= staleAfter * 6) return { label: `IV aging (${Math.round(ageMin)}m ago)`, cls: 'scenario-warning' };
-    return { label: `IV stale (${Math.round(ageMin)}m ago)`, cls: 'scenario-warning' };
-  }, [vrpDisplayRow, vrpHealth, vrpIvPending]);
+  const vrpFieldHint = (key) => VrpUi.hintFor(key, vrpFieldDict);
   // Universe-level health banner: surface when the pipeline as a whole is
   // returning < 50% IV coverage across YB front spreads. This is the
   // condition that previously hid behind per-row "—" cells; the operator
@@ -7846,14 +7818,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 IV pending — options refresh in progress. Holdings strikes below are from Granite XLS.
               </div>
             )}
-            {!vrpIvPending && vrpDisplayRow && (
-              <div className={vrpStaleness.cls} style={{ marginBottom: 8 }}>
-                {vrpStaleness.label}
-                {vrpHealth?.iv_coverage_front_pct != null && (
-                  <> · coverage {Math.round(Number(vrpHealth.iv_coverage_front_pct) * 100)}%</>
-                )}
-              </div>
-            )}
             {vrpMissingChain && (
               <div className="scenario-warning" style={{ marginBottom: 8 }}>
                 Held expiry not in options chain — IV/VRP need Tradier OCC backfill or a yieldboost refresh tick.
@@ -7870,10 +7834,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="borrow-card">
                   <div className="scenario-title" style={{ fontSize: 13 }}>Trade</div>
                   <div className="scenario-sub" style={{ marginBottom: 6 }}>
-                    Holdings as of {vrpDisplayRow.holdings_as_of || '—'} · Expiry {vrpDisplayRow.expiry || '—'} · Grade <strong style={{
-                      color: vrpDisplayRow.data_grade === 'A' || vrpDisplayRow.data_grade === 'B' ? 'var(--green, #10b981)'
-                        : vrpDisplayRow.data_grade === 'C' ? 'var(--amber, #f59e0b)' : 'var(--red, #ef4444)',
-                    }} title={vrpDisplayRow.data_grade_reason || ''}>{vrpDisplayRow.data_grade || '?'}</strong>
+                    Holdings as of {vrpDisplayRow.holdings_as_of || '—'} · Expiry {vrpDisplayRow.expiry || '—'}
+                    {' · '}
+                    <VrpFreshnessBar mode="etf" row={vrpDisplayRow} vrpHealth={vrpHealth} />
                   </div>
                   <table className="scenario-table">
                     <tbody>
@@ -7901,7 +7864,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                         </td>
                       </tr>
                       <tr>
-                        <td className="vrp-label-tip" title={VRP_SPREAD_MID_TOOLTIP}>Spread mid (market)</td>
+                        <td className="vrp-label-tip" title={vrpFieldHint('spread_mid_market') || VRP_SPREAD_MID_TOOLTIP}>Spread mid (market)</td>
                         <td>
                           {vrpDisplayRow.spread_mid_market != null
                             ? fmtSpreadMid(vrpDisplayRow.spread_mid_market, vrpDisplayRow.spot_2x)
@@ -7910,26 +7873,21 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                               : '—')}
                         </td>
                       </tr>
-                      <tr title={`Model fair value from the chosen pricing kernel (${vrpDisplayRow.model_name || 'no model'}). Bates > Heston > AZ priority. No Black-Scholes.`}>
+                      <tr title={vrpFieldHint('model_fair')}>
                         <td>Fair value ({vrpDisplayRow.model_name || '—'})</td>
                         <td>{vrpDisplayRow.model_fair != null ? fmtSpreadMid(vrpDisplayRow.model_fair, vrpDisplayRow.spot_2x) : '—'}</td>
                       </tr>
-                      <tr title="(mid − model_fair) / max_loss × 100. Positive ⇒ market overpaying ⇒ SELL the spread.">
+                      <tr title={vrpFieldHint('edge_pp_of_max_loss')}>
                         <td>Edge ($ space)</td>
                         <td>
                           {vrpDisplayRow.edge_pp_of_max_loss != null ? (
-                            <strong style={{
-                              color: vrpDisplayRow.edge_pp_of_max_loss >= 10 ? 'var(--green, #10b981)'
-                                : vrpDisplayRow.edge_pp_of_max_loss >= 0 ? 'var(--text-muted)'
-                                : vrpDisplayRow.edge_pp_of_max_loss >= -10 ? 'var(--amber, #f59e0b)'
-                                : 'var(--red, #ef4444)',
-                            }}>
-                              {vrpDisplayRow.edge_pp_of_max_loss >= 0 ? '+' : ''}{Number(vrpDisplayRow.edge_pp_of_max_loss).toFixed(1)}pp of max-loss
+                            <strong style={{ color: VrpUi.edgeColor(vrpDisplayRow.edge_pp_of_max_loss) }}>
+                              {VrpUi.fmtEdgePp(vrpDisplayRow.edge_pp_of_max_loss)} of max-loss
                             </strong>
                           ) : '—'}
                         </td>
                       </tr>
-                      <tr title="model_fair × 100 = expected $ carry per OCC contract per week of holding the short spread.">
+                      <tr title={vrpFieldHint('expected_weekly_carry_usd')}>
                         <td>Expected carry / wk</td>
                         <td>{vrpDisplayRow.expected_weekly_carry_usd != null ? `$${Number(vrpDisplayRow.expected_weekly_carry_usd).toFixed(2)} / spread` : '—'}</td>
                       </tr>
@@ -7945,11 +7903,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   </div>
                   <table className="scenario-table">
                     <tbody>
-                      <tr title="Avellaneda–Zhang sleeve fair: rescale held strikes to underlying-equivalent strikes, look up IV on the underlying chain, price the spread in sleeve space.">
+                      <tr title={vrpFieldHint('az_put_spread_fair')}>
                         <td>AZ fair</td>
                         <td>{vrpDisplayRow.az_put_spread_fair != null ? Number(vrpDisplayRow.az_put_spread_fair).toFixed(3) : '—'}</td>
                       </tr>
-                      <tr title="Sleeve IV minus AZ-implied sleeve IV (|β|·σ_underlying at mapped strike). Positive = sleeve trades rich vs underlying surface = cross-surface arb signal.">
+                      <tr title={vrpFieldHint('az_cone_residual_iv')}>
                         <td>AZ cone (Δσ)</td>
                         <td>
                           {vrpDisplayRow.az_cone_residual_iv != null ? (
@@ -7958,7 +7916,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                                 : vrpDisplayRow.az_cone_residual_iv <= -0.05 ? 'var(--red, #ef4444)'
                                 : 'var(--text-muted)',
                             }}>
-                              {vrpDisplayRow.az_cone_residual_iv >= 0 ? '+' : ''}{(vrpDisplayRow.az_cone_residual_iv * 100).toFixed(1)}pp
+                              {VrpUi.fmtIvPp(vrpDisplayRow.az_cone_residual_iv)}
                             </strong>
                           ) : '—'}
                         </td>
@@ -7975,7 +7933,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                         <td>Bates fair</td>
                         <td>{vrpDisplayRow.bates_put_spread_fair != null ? Number(vrpDisplayRow.bates_put_spread_fair).toFixed(3) : '—'}</td>
                       </tr>
-                      <tr title="Max − min model fair across calibrated kernels, in % of max-loss. >20pp = model uncertainty; size at half band or skip.">
+                      <tr title={vrpFieldHint('model_disagreement_pp_of_max_loss')}>
                         <td>Disagreement</td>
                         <td>
                           {vrpDisplayRow.model_disagreement_pp_of_max_loss != null ? (
@@ -8002,7 +7960,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   </div>
                   <table className="scenario-table">
                     <tbody>
-                      <tr title="$ P&L per 1% adverse move in the underlying. Use to cap loss at a target gap-down tolerance: spreads = floor(VaR / (|$-γ| · gap² / 2)).">
+                      <tr title={vrpFieldHint('dollar_gamma_per_1pct_underlying')}>
                         <td>$-γ per 1% underlying</td>
                         <td>
                           {vrpDisplayRow.dollar_gamma_per_1pct_underlying != null ? (
@@ -8014,7 +7972,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           ) : '—'}
                         </td>
                       </tr>
-                      <tr title="Theta per calendar day. + = we collect decay.">
+                      <tr title={vrpFieldHint('theta_per_day')}>
                         <td>θ / day</td>
                         <td>
                           {vrpDisplayRow.theta_per_day != null ? (
@@ -8026,7 +7984,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           ) : '—'}
                         </td>
                       </tr>
-                      <tr title="Carry-to-tail rule of thumb: θ × DTE should be ≥ 0.5 × |$-γ × 25 / 2| for a 5% gap reference. If carry < tail, you're being paid too little for the risk.">
+                      <tr title={vrpFieldHint('carry_vs_tail')}>
                         <td>Carry vs 5% tail</td>
                         <td>
                           {(() => {
@@ -8056,16 +8014,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   </div>
                   <table className="scenario-table">
                     <tbody>
-                      <tr title="σ² Itô drag for a 2× daily-rebalanced sleeve. The decay edge of the short pair.">
+                      <tr title={vrpFieldHint('sleeve_diffusion_drag_annual')}>
                         <td>Itô drag (x=2, /yr)</td>
                         <td>{vrpDisplayRow.sleeve_diffusion_drag_annual != null ? fmt(vrpDisplayRow.sleeve_diffusion_drag_annual) : '—'}</td>
                       </tr>
-                      <tr title="3σ² Itô drag for an x=−2 inverse pair. Mirror of the long-sleeve drag.">
+                      <tr title={vrpFieldHint('inverse_sleeve_drag_annual_x_minus2')}>
                         <td>Itô drag (x=−2, /yr)</td>
                         <td>{vrpDisplayRow.inverse_sleeve_drag_annual_x_minus2 != null ? fmt(vrpDisplayRow.inverse_sleeve_drag_annual_x_minus2) : '—'}</td>
                       </tr>
                       <tr><td>RV 30d (sleeve)</td><td>{vrpDisplayRow.rv_30d_2x_full != null ? fmt(vrpDisplayRow.rv_30d_2x_full) : (vrpDisplayRow.rv_30d_2x != null ? fmt(vrpDisplayRow.rv_30d_2x) : '—')}</td></tr>
-                      <tr title="VRP in σ-space (sleeve IV − sleeve RV), event-stripped where event variance was identified.">
+                      <tr title={vrpFieldHint('vrp_vol_2x_base')}>
                         <td>VRP σ (event-stripped)</td>
                         <td><strong>{vrpDisplayRow.vrp_vol_2x_base != null ? fmt(vrpDisplayRow.vrp_vol_2x_base) : '—'}</strong></td>
                       </tr>
@@ -8093,15 +8051,15 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           ) : '—'}
                         </td>
                       </tr>
-                      <tr title="(var_full − var_base)^0.5 / β. The 1σ event-day move implied by the IV variance split, on the underlying scale.">
+                      <tr title={vrpFieldHint('event_implied_move_pct_underlying')}>
                         <td>Implied move (underlying)</td>
                         <td>{vrpDisplayRow.event_implied_move_pct_underlying != null ? `${Number(vrpDisplayRow.event_implied_move_pct_underlying).toFixed(2)}%` : '—'}</td>
                       </tr>
-                      <tr title="Median absolute |return| on prior earnings days for this underlying. The historical baseline the implied is compared against.">
+                      <tr title={vrpFieldHint('event_historical_move_pct_underlying')}>
                         <td>Historical MAD</td>
                         <td>{vrpDisplayRow.event_historical_move_pct_underlying != null ? `${Number(vrpDisplayRow.event_historical_move_pct_underlying).toFixed(2)}%` : '—'}</td>
                       </tr>
-                      <tr title="(implied / historical) − 1. ≥ +30% market overpays the event (SELL); ≤ −20% market underpays (BUY).">
+                      <tr title={vrpFieldHint('event_move_richness_pct')}>
                         <td>Richness</td>
                         <td>
                           {vrpDisplayRow.event_move_richness_pct != null ? (
@@ -8489,7 +8447,7 @@ function NewsCard({ item, bucketOf, onNavigate, eventsById }) {
 //   ≥ -10pp  lean avoid   (slightly negative edge)
 //        else AVOID       (market significantly underpaying expected loss --
 //                           selling would be a structural carry tax)
-function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
+function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldDict = null }) {
   const [vrpLive, setVrpLive] = useState(null);
   const [vrpHealth, setVrpHealth] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -8503,6 +8461,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
   const [includeGradeC, setIncludeGradeC] = useState(true);
   const [includeGradeD, setIncludeGradeD] = useState(false);
   const [filterEarningsOnly, setFilterEarningsOnly] = useState(false);
+  const fieldHint = (key) => VrpUi.hintFor(key, vrpFieldDict);
 
   useEffect(() => {
     let cancelled = false;
@@ -8546,39 +8505,6 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
     }
     return m;
   }, [eventCalendar]);
-
-  // Freshness pill is driven by the server-side `data_grade` (A/B/C/D), which
-  // collapses sleeve quote age × underlying quote age × holdings age × IV
-  // source × expiry skew into one PM-grade letter. See
-  // `scripts/yieldboost_holdings.py::data_grade()` for the rule. The UI
-  // doesn't recompute thresholds — it consumes the grade and renders.
-  const freshnessFor = (r) => {
-    const optMs = r.options_as_of ? new Date(r.options_as_of).getTime() : null;
-    const undMs = r.underlying_options_as_of ? new Date(r.underlying_options_as_of).getTime() : null;
-    const hMs = r.holdings_as_of ? new Date(r.holdings_as_of + 'T16:00:00-04:00').getTime() : null;
-    const optAge = optMs ? Math.max(0, Math.round((Date.now() - optMs) / 60000)) : null;
-    const undAge = undMs ? Math.max(0, Math.round((Date.now() - undMs) / 60000)) : null;
-    const holdingsDays = hMs ? Math.max(0, Math.floor((Date.now() - hMs) / 86400000)) : null;
-    const worst = Math.max(optAge ?? 0, undAge ?? 0);
-    const grade = String(r.data_grade || '').toUpperCase() || '?';
-    // Display label for worst-of quote age (informational; grade is the gate).
-    let label;
-    if (worst >= 24 * 60) label = `${Math.round(worst / 60)}h old`;
-    else if (worst >= 60) label = `${Math.round(worst / 60)}h old`;
-    else label = `${worst}m old`;
-    // Tone derives strictly from grade; freshness label is supporting detail.
-    const tone = grade === 'A' ? 'good' : grade === 'B' ? 'good'
-      : grade === 'C' ? 'warn' : 'bad';
-    const className = tone === 'good' ? 'fresh-good' : tone === 'warn' ? 'fresh-warn' : 'fresh-bad';
-    // Hard-block SELL signals on grade C or D. C still shows the row (monitor),
-    // D is filtered out by default.
-    const blockSignal = grade === 'C' || grade === 'D';
-    return {
-      optAge, undAge, holdingsDays, worst, label, className,
-      grade, blockSignal, reason: r.data_grade_reason || '',
-      skew: Number(r.iv_expiry_skew_days) || 0,
-    };
-  };
 
   const enriched = useMemo(() => {
     const rows = (vrpLive?.rows) || [];
@@ -8624,7 +8550,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
       // Weekly $-P&L estimate per 1 spread structure ($-carry per OCC contract)
       // is now produced server-side as `expected_weekly_carry_usd` from the
       // chosen pricing kernel's fair value (not from Black-Scholes).
-      const fr = freshnessFor(r);
+      const fr = VrpUi.rowFreshness(r);
       return {
         ...r,
         days_to_earnings: daysToEarnings,
@@ -8693,36 +8619,6 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
       tradeable,
     };
   }, [enriched]);
-
-  // Price-space signal taxonomy (% of max-loss). NO σ-space, NO Black-Scholes.
-  // Thresholds match the sizing rules in scripts/income_schedule.py.
-  const signalFor = (edgePp, opts = {}) => {
-    if (edgePp == null || !Number.isFinite(Number(edgePp))) {
-      return { label: '—', color: 'var(--text-muted)', bg: 'transparent', weight: 400 };
-    }
-    const e = Number(edgePp);
-    if (opts.blockSignal && e > 0) {
-      // Grade C or D — model says sell but inputs are stale or imputed.
-      return { label: 'AVOID DATA', color: '#fff', bg: '#6b7280', weight: 700 };
-    }
-    if (e >= 30) return { label: 'STRONG SELL', color: '#fff', bg: '#10b981', weight: 700 };
-    if (e >= 10) return { label: 'sell', color: '#10b981', bg: 'rgba(16,185,129,0.15)', weight: 600 };
-    if (e >= 0) return { label: 'lean sell', color: '#10b981', bg: 'transparent', weight: 500 };
-    if (e >= -10) return { label: 'lean fade', color: '#f59e0b', bg: 'transparent', weight: 500 };
-    return { label: 'fade', color: '#fff', bg: '#ef4444', weight: 700 };
-  };
-
-  // Grade pill rendering helper — shared with the per-ETF Vol/VRP tab (Phase
-  // 4 will extract this into a top-level component reused on both routes).
-  const gradePill = (grade) => {
-    const g = String(grade || '?').toUpperCase();
-    const tone = g === 'A' ? { color: '#fff', bg: '#10b981' }
-      : g === 'B' ? { color: '#10b981', bg: 'rgba(16,185,129,0.15)' }
-      : g === 'C' ? { color: '#f59e0b', bg: 'rgba(245,158,11,0.15)' }
-      : g === 'D' ? { color: '#fff', bg: '#6b7280' }
-      : { color: 'var(--text-muted)', bg: 'transparent' };
-    return tone;
-  };
 
   const skewColor = (skew) => {
     const v = Number(skew);
@@ -8861,33 +8757,28 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
         <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, fontSize: 12 }}>
           <thead>
             <tr>
-              <Th k="data_grade" label="Grade" align="center" hint="Server-side A/B/C/D from data_grade(): collapses sleeve quote age × underlying quote age × holdings age × IV source × expiry skew into one PM-grade letter. A = full size · B = half size · C = monitor only · D = blocked." />
-              <Th k="signal" label="Signal" align="left" hint="Price-space edge classification on the kernel-aware model edge. STRONG SELL ≥ +30pp · sell ≥ +10pp · lean sell ≥ 0 · lean fade ≥ -10 · fade < -10. Grade C/D rows with positive edge show 'AVOID DATA'." />
-              <Th k="yb_etf" label="YB" align="left" hint="YieldBOOST ETF ticker — click to open per-ETF Vol/VRP tab." />
-              <Th k="underlying" label="Und." align="left" hint="Underlying single-stock or index" />
-              <Th k="model_name" label="Model" align="left" hint="Pricing kernel actually used for this row: Bates (single-stock + jumps) > Heston (stochastic vol) > AZ (cross-surface rescale). No Black-Scholes." />
-              <Th k="edge_pp_of_max_loss" label="Edge ($)" hint="(spread mid − model fair) / max loss · 100. Price-space, kernel-aware. Positive = market pays more than the model says it should = SELL." />
-              <Th k="az_cone_residual_iv" label="AZ cone" hint="Sleeve IV minus AZ-implied sleeve IV from underlying chain at mapped strike. Positive = sleeve trades rich vs underlying surface (cross-surface arb signal)." />
-              <Th k="model_fair" label="Fair" hint="Model fair value of the short spread (sleeve currency). Hover shows AZ/Heston/Bates side by side when multiple kernels fired." />
-              <Th k="spread_mid_market" label="Mid" hint="Current spread mid-market price (short K_short − long K_long)" />
-              <Th k="iv_full_proxy" label="IV" hint="Sleeve IV — average of leg IVs (chain input to the model, not a fair value)" />
-              <Th k="dollar_gamma_per_1pct_underlying" label="$-γ /1%U" hint="$ P&L per 1% underlying gap-down (short = negative). Sizes the position to a tolerable tail loss." />
-              <Th k="theta_per_day" label="θ/day" hint="Theta per calendar day (positive = collecting carry). Greeks are BS-proxy at sleeve IV until kernel-derivative greeks ship." />
-              <Th k="expected_weekly_carry_usd" label="Carry/wk" hint="model_fair × 100 = $ per OCC contract of expected weekly carry" />
-              <Th k="days_to_exp" label="DTE" hint="Days to held expiry" />
-              <Th k="days_to_earnings" label="Event" hint="Days to next known earnings. Red badge = INSIDE held window — Bates is the only kernel that prices the jump. Hover for implied/historical move + richness." />
+              <Th k="data_grade" label="Grade" align="center" hint={fieldHint('data_grade')} />
+              <Th k="signal" label="Signal" align="left" hint={fieldHint('signal')} />
+              <Th k="yb_etf" label="YB" align="left" hint={fieldHint('yb_etf')} />
+              <Th k="underlying" label="Und." align="left" hint={fieldHint('underlying')} />
+              <Th k="model_name" label="Model" align="left" hint={fieldHint('model_name')} />
+              <Th k="edge_pp_of_max_loss" label="Edge ($)" hint={fieldHint('edge_pp_of_max_loss')} />
+              <Th k="az_cone_residual_iv" label="AZ cone" hint={fieldHint('az_cone_residual_iv')} />
+              <Th k="model_fair" label="Fair" hint={fieldHint('model_fair')} />
+              <Th k="spread_mid_market" label="Mid" hint={fieldHint('spread_mid_market')} />
+              <Th k="iv_full_proxy" label="IV" hint={fieldHint('iv_full_proxy')} />
+              <Th k="dollar_gamma_per_1pct_underlying" label="$-γ /1%U" hint={fieldHint('dollar_gamma_per_1pct_underlying')} />
+              <Th k="theta_per_day" label="θ/day" hint={fieldHint('theta_per_day')} />
+              <Th k="expected_weekly_carry_usd" label="Carry/wk" hint={fieldHint('expected_weekly_carry_usd')} />
+              <Th k="days_to_exp" label="DTE" hint={fieldHint('days_to_exp')} />
+              <Th k="days_to_earnings" label="Event" hint={fieldHint('days_to_earnings')} />
             </tr>
           </thead>
           <tbody>
             {sorted.map((r) => {
-              const fr = r._freshness || { label: '—', className: 'fresh-warn', worst: null, blockSignal: false, grade: '?' };
-              const sig = signalFor(r.edge_pp_of_max_loss, { blockSignal: fr.blockSignal });
+              const fr = r._freshness || VrpUi.rowFreshness(r);
+              const sig = VrpUi.signalFor(r.edge_pp_of_max_loss, { blockSignal: fr.blockSignal });
               const edgePp = r.edge_pp_of_max_loss;
-              const ppFmt = (v) => (v == null || !Number.isFinite(Number(v))) ? '—'
-                : (Number(v) >= 0 ? '+' : '') + Number(v).toFixed(1) + 'pp';
-              const ivFmt = (v) => (v == null || !Number.isFinite(Number(v))) ? '—'
-                : (Number(v) >= 0 ? '+' : '') + (Number(v) * 100).toFixed(1) + 'pp';
-              const grade = gradePill(fr.grade);
               const fairs = [
                 ['AZ', r.az_put_spread_fair],
                 ['Heston', r.heston_put_spread_fair],
@@ -8910,16 +8801,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
               return (
                 <tr key={`${r.yb_etf}-${r.expiry}`} style={{ borderBottom: '1px solid var(--border)' }}>
                   <td style={{ padding: '5px 8px', textAlign: 'center' }}>
-                    <span style={{
-                      display: 'inline-block',
-                      width: 22,
-                      padding: '2px 0',
-                      borderRadius: 4,
-                      fontSize: 10,
-                      fontWeight: 700,
-                      color: grade.color,
-                      background: grade.bg,
-                    }} title={r.data_grade_reason || `data_grade = ${fr.grade}`}>{fr.grade}</span>
+                    <VrpFreshnessBar mode="row" row={r} compact />
                   </td>
                   <td style={{ padding: '5px 8px' }}>
                     <span style={{
@@ -8935,7 +8817,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                     }}
                     title={fr.blockSignal
                       ? `Grade ${fr.grade}: ${r.data_grade_reason || 'stale or imputed inputs'}. SELL recommendations hard-blocked.`
-                      : `Price-space edge ${ppFmt(edgePp)} via ${r.model_name || 'no model'}.`}>{sig.label}</span>
+                      : `Price-space edge ${VrpUi.fmtEdgePp(edgePp)} via ${r.model_name || 'no model'}.`}>{sig.label}</span>
                   </td>
                   <td style={{ padding: '5px 8px', fontWeight: 600 }}>
                     <a
@@ -8953,27 +8835,25 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                   <td style={{ padding: '5px 8px', color: 'var(--text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.3 }}
                       title={`Pricing kernel chosen for this row. Bates > Heston > AZ in priority. Disagreement across kernels: ${
                         r.model_disagreement_pp_of_max_loss != null
-                          ? ppFmt(r.model_disagreement_pp_of_max_loss)
+                          ? VrpUi.fmtEdgePp(r.model_disagreement_pp_of_max_loss)
                           : 'single model only'
                       }`}>
                     {r.model_name || '—'}
                   </td>
                   <td style={{
                     padding: '5px 8px', textAlign: 'right', fontWeight: 600,
-                    color: edgePp == null ? 'var(--text-muted)'
-                      : (Number(edgePp) > 0 ? '#10b981'
-                        : (Number(edgePp) < -10 ? '#ef4444' : 'var(--text-muted)')),
+                    color: edgePp == null ? 'var(--text-muted)' : VrpUi.edgeColor(edgePp),
                   }}
-                  title={`Edge = (mid − ${r.model_name || 'model'} fair) / max-loss · 100. Positive => market overpaying => SELL the spread.`}>
-                    {ppFmt(edgePp)}
+                  title={fieldHint('edge_pp_of_max_loss')}>
+                    {VrpUi.fmtEdgePp(edgePp)}
                   </td>
                   <td style={{
                     padding: '5px 8px', textAlign: 'right',
                     color: r.az_cone_residual_iv == null ? 'var(--text-muted)'
                       : (Number(r.az_cone_residual_iv) > 0.05 ? '#10b981'
                         : (Number(r.az_cone_residual_iv) < -0.05 ? '#ef4444' : 'var(--text-muted)')),
-                  }} title="Sleeve IV minus AZ-implied sleeve IV (|β|·σ_underlying at mapped strike). Cross-surface arbitrage signal.">
-                    {r.az_cone_residual_iv != null ? ivFmt(r.az_cone_residual_iv) : '—'}
+                  }} title={fieldHint('az_cone_residual_iv')}>
+                    {r.az_cone_residual_iv != null ? VrpUi.fmtIvPp(r.az_cone_residual_iv) : '—'}
                   </td>
                   <td style={{ padding: '5px 8px', textAlign: 'right' }} title={fairHover}>
                     {r.model_fair != null ? Number(r.model_fair).toFixed(3) : '—'}
@@ -9003,10 +8883,8 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                       : '—'}
                   </td>
                   <td style={{ padding: '5px 8px', textAlign: 'right' }}
-                      title="model_fair × 100 = $ per OCC contract per week of expected carry">
-                    {r.expected_weekly_carry_usd != null
-                      ? `$${Number(r.expected_weekly_carry_usd).toFixed(2)}`
-                      : '—'}
+                      title={fieldHint('expected_weekly_carry_usd')}>
+                    {VrpUi.fmtUsd(r.expected_weekly_carry_usd)}
                   </td>
                   <td style={{ padding: '5px 8px', textAlign: 'right' }}>{r.days_to_exp ?? '—'}</td>
                   <td style={{ padding: '5px 8px', textAlign: 'right' }}>
@@ -9852,6 +9730,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   // can show the worst-of clock (build_time, options refresh, holdings_as_of,
   // worst per-row sleeve/underlying quote age) rather than just build_time.
   const [vrpHealth, setVrpHealth] = useState(null);
+  const [vrpFieldDict, setVrpFieldDict] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -9871,6 +9750,16 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       clearInterval(id);
       document.removeEventListener('visibilitychange', onVis);
     };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cacheBust = `?t=${Math.floor(Date.now() / 3600000)}`;
+    fetch(`${VRP_FIELD_DICT_URL}${cacheBust}`, { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((p) => { if (!cancelled && p) setVrpFieldDict(p); })
+      .catch(() => { /* tooltips fall back to empty string */ });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -10105,9 +9994,6 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
   const records = data?.records || [];
   const summary = data?.summary || {};
-  // Worst-of freshness now incorporates vrp_health.json so the topbar badge can
-  // never claim Fresh when the underlying OPRA quotes / holdings file are stale.
-  const freshness = useMemo(() => getFreshness(data, vrpHealth), [data, vrpHealth]);
 
   const bucketMap = {
     all: null,
@@ -10194,7 +10080,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <div className="topbar-meta">
             <span className={cls('dot', data.ibkr_ftp_success ? 'dot-green' : 'dot-amber')} />
             {data.ibkr_ftp_success ? 'IBKR Live' : 'CSV Data'}
-            <span className={cls('fresh-badge', freshness.className)}>{freshness.label}</span>
+            <VrpFreshnessBar mode="fleet" data={data} vrpHealth={vrpHealth} />
             <span style={{ margin: '0 4px' }}>·</span>
             <span title={data.build_time ? `UTC: ${data.build_time}` : ''}>Built {fmtTime(data.build_time)}</span>
             {data.last_commit && <>
@@ -10252,12 +10138,14 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           dashboardBuildTime={data.build_time}
           intradayFlows={letfIntradayCache}
           intradayFlowsError={letfIntradayError}
+          vrpFieldDict={vrpFieldDict}
         />
       ) : showYbEdge ? (
         <YbEdgePage
           onNavigateToChart={navigateToChart}
           onBack={navigateBack}
           eventCalendar={eventCalendar}
+          vrpFieldDict={vrpFieldDict}
         />
       ) : showFlow ? (
         <FlowPage
