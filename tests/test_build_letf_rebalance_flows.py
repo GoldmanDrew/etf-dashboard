@@ -275,3 +275,74 @@ def test_write_outputs_uses_per_underlying_latest(tmp_path: Path):
     assert payload["by_underlying"]["SPY"]["is_latest_global"] is True
     assert payload["by_underlying"]["APLD"]["net_moc_pct_adv_20d"] == pytest.approx(-0.04)
     assert payload["by_underlying"]["SPY"]["underlying_dollar_adv_20d"] == pytest.approx(30_000_000_000.0)
+
+
+def _yf_panel_legacy_multiindex() -> pd.DataFrame:
+    idx = pd.to_datetime(["2026-05-16", "2026-05-19"])
+    return pd.DataFrame(
+        {
+            ("SPY", "Close"): [500.0, 505.0],
+            ("SPY", "Volume"): [80_000_000, 90_000_000],
+            ("AAPL", "Close"): [200.0, 210.0],
+            ("AAPL", "Volume"): [50_000_000, 55_000_000],
+        },
+        index=idx,
+    )
+
+
+def _yf_panel_price_first_multiindex() -> pd.DataFrame:
+    idx = pd.to_datetime(["2026-05-16", "2026-05-19"])
+    return pd.DataFrame(
+        {
+            ("Close", "SPY"): [500.0, 505.0],
+            ("Volume", "SPY"): [80_000_000, 90_000_000],
+            ("Close", "AAPL"): [200.0, 210.0],
+            ("Volume", "AAPL"): [50_000_000, 55_000_000],
+        },
+        index=idx,
+    )
+
+
+def _yf_panel_flat_single_ticker() -> pd.DataFrame:
+    idx = pd.DatetimeIndex(["2026-05-16", "2026-05-19"])
+    return pd.DataFrame({"Close": [500.0, 505.0], "Volume": [80_000_000, 90_000_000]}, index=idx)
+
+
+def test_extract_yf_close_volume_long_legacy_multiindex():
+    out = flows._extract_yf_close_volume_long(_yf_panel_legacy_multiindex(), ["SPY", "AAPL"])
+    assert set(out["underlying"]) == {"SPY", "AAPL"}
+    assert set(out["date"]) == {"2026-05-16", "2026-05-19"}
+    assert len(out) == 4
+    spy = out[out["underlying"].eq("SPY")].sort_values("date")
+    assert spy.iloc[-1]["close"] == pytest.approx(505.0)
+    assert spy.iloc[-1]["volume"] == pytest.approx(90_000_000)
+
+
+def test_extract_yf_close_volume_long_price_first_multiindex():
+    out = flows._extract_yf_close_volume_long(_yf_panel_price_first_multiindex(), ["SPY", "AAPL"])
+    assert set(out["underlying"]) == {"SPY", "AAPL"}
+    spy = out[out["underlying"].eq("SPY")].sort_values("date")
+    assert spy.iloc[-1]["close"] == pytest.approx(505.0)
+
+
+def test_extract_yf_close_volume_long_flat_single_ticker():
+    out = flows._extract_yf_close_volume_long(_yf_panel_flat_single_ticker(), ["SPY"])
+    assert out["underlying"].tolist() == ["SPY", "SPY"]
+    assert out.iloc[-1]["date"] == "2026-05-19"
+    assert out.iloc[-1]["close"] == pytest.approx(505.0)
+
+
+def test_fetch_underlying_volume_panel_uses_yfinance_download(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_download(tickers, **_kwargs):
+        calls.append(list(tickers))
+        return _yf_panel_legacy_multiindex()
+
+    monkeypatch.setitem(sys.modules, "yfinance", type("yf", (), {"download": staticmethod(fake_download)}))
+
+    out = flows.fetch_underlying_volume_panel(["SPY", "AAPL"], lookback_days=5, batch_size=50)
+    assert calls == [["AAPL", "SPY"]]
+    assert set(out["underlying"]) == {"SPY", "AAPL"}
+    assert "dollar_volume" in out.columns
+    assert out.iloc[-1]["dollar_volume"] == pytest.approx(505.0 * 90_000_000)
