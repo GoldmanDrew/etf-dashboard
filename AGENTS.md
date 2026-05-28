@@ -1052,7 +1052,7 @@ event-decomposition fields (`iv_full_proxy`, `iv_base_proxy`, …). They are
 | `expected_weekly_carry_usd` | `model_fair · 100` = $ carry per OCC contract per week. |
 | `dollar_gamma_per_1pct_underlying` | $ P&L per 1% adverse move in the underlying (short spread = negative). Sizing input. |
 | `theta_per_day` | Theta per calendar day. Positive = collecting decay. |
-| `greeks_kernel` | `"bs_proxy"` until kernel-derivative greeks ship. Tells you whether the greeks are finite-diff on BS at sleeve IV (v1) or on the chosen kernel's `model_fair` (target). |
+| `greeks_kernel` | `"heston"` / `"bates"` / `"az"` when greeks are central finite-diff on the chosen kernel's `model_fair`. `"bs_proxy"` is the fallback when no kernel converged (BS finite-diff at sleeve IV). `null` when neither path produced greeks. |
 
 **Supporting (kernel-specific & event) fields:**
 
@@ -1077,7 +1077,7 @@ event-decomposition fields (`iv_full_proxy`, `iv_base_proxy`, …). They are
 
 **Diagnostics only (NOT for production consumers):**
 
-The following live under `row["debug"]["bs"]`. They are Black-Scholes diffusion-only outputs kept for regression / disagreement audits and are the source of the `bs_proxy` greeks until kernel-derivative greeks ship. Do not introduce new UI dependencies on these keys.
+The following live under `row["debug"]["bs"]`. They are Black-Scholes diffusion-only outputs kept for regression / disagreement audits and are the source of the `bs_proxy` greeks when no kernel converged (the fallback path). Do not introduce new UI dependencies on these keys.
 
 | Field (under `debug.bs`) | Meaning |
 |---|---|
@@ -1086,8 +1086,8 @@ The following live under `row["debug"]["bs"]`. They are Black-Scholes diffusion-
 | `spread_breakeven_sigma_annual` | Annualized σ that makes `BS_fair(σ) == spread_mid_market`. Legacy σ-space pricing — replaced by `edge_pp_of_max_loss` in price space. |
 | `iv_minus_breakeven_sigma` | Net short-vol edge in σ-space. Legacy headline metric — replaced by `edge_pp_of_max_loss`. |
 | `expected_weekly_loss_pct_of_spot` | `BS_fair / spot_2x · 100`. Replaced by `expected_weekly_carry_usd` ($ space) in the production UI. |
-| `delta_spread`, `gamma_spread`, `vega_spread`, `theta_spread_per_day` | BS greeks per single structure. Source of `theta_per_day` (canonical) until kernel-derivative greeks land. |
-| `dollar_gamma_per_1pct_sleeve`, `dollar_gamma_per_1pct_underlying` | BS finite-diff $-γ. Source of canonical `dollar_gamma_per_1pct_underlying` under the `bs_proxy` flag. |
+| `delta_spread`, `gamma_spread`, `vega_spread`, `theta_spread_per_day` | BS greeks per single structure. Fallback source of `theta_per_day` (canonical) under the `"bs_proxy"` flag when no kernel converged. |
+| `dollar_gamma_per_1pct_sleeve`, `dollar_gamma_per_1pct_underlying` | BS finite-diff $-γ. Fallback source of canonical `dollar_gamma_per_1pct_underlying` under the `"bs_proxy"` flag. |
 
 #### Earnings calendar seed fallback (`data/earnings_calendar_seed.json`)
 

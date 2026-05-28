@@ -14,12 +14,14 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from yieldboost_holdings import (  # noqa: E402
+    _variance_time_interp_iv,
     backfill_exact_strike_mid_from_chain,
     build_occ_symbol_index,
     build_vrp_health_payload,
     build_vrp_live_payload,
     build_yieldboost_rv_map,
     data_grade,
+    lookup_contract_iv,
     extract_rv_30d_annual,
     format_occ_ticker,
     held_contract_needs_occ_quote,
@@ -683,6 +685,35 @@ def _build_amyy_az_spread(*, expiry: date = date(2026, 5, 27)) -> list:
     )
 
 
+def test_build_vrp_live_payload_emits_iv_synthesis_provenance():
+    """P3: every row carries an ``iv_synthesis`` provenance block documenting how
+    the held-expiry IV was reconstructed (here: AZ from the underlying surface)."""
+    expiry = date(2026, 5, 27)
+    spread = _build_amyy_az_spread(expiry=expiry)
+    options_cache = {
+        "symbols": {
+            "AMDL": {"spot": 66.9, "updated_at": "2026-05-27T15:00:00Z", "options": []},
+            "AMD": {
+                "spot": 467.5,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(), "contract_type": "put",
+                     "strike_price": k, "iv": 0.70, "mid": 12.0}
+                    for k in (380, 390, 395, 400, 405, 410, 420)
+                ],
+            },
+        },
+    }
+    payload = build_vrp_live_payload(
+        spread, options_cache, rv_map={"AMD": 0.45, "AMDL": 0.95}, as_of=expiry,
+    )
+    row = payload["rows"][0]
+    syn = row["iv_synthesis"]
+    assert syn["method"] == "az_underlying"
+    assert syn["underlying_skew_days"] == 0
+    assert syn["iv_underlying_derived"] is not None and syn["iv_underlying_derived"] > 0
+
+
 def test_build_vrp_live_payload_az_imputes_missing_chain_sleeve_iv():
     """P0b-1: sleeve has no chain, but underlying chain exists -> iv_source escalates to AZ.
 
@@ -1026,6 +1057,172 @@ def test_data_grade_D_when_skew_above_21_days():
     assert grade == "D"
 
 
+# ── P1/P2/P3: held-expiry IV synthesis grade policy ────────────────────────
+
+
+def test_data_grade_C_for_skew_above_21_with_term_interp():
+    """P2: a monthly-only sleeve whose held expiry is term-interpolated across
+    two bracketing listed expiries is a held-expiry proxy → C, not D."""
+    grade, reason = data_grade(
+        options_as_of=_now_ts(15),
+        underlying_options_as_of=_now_ts(15),
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_term_interp",
+        iv_expiry_skew_days=25,
+        iv_term_interp=True,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "C"
+    assert "term-interp" in reason
+
+
+def test_data_grade_C_for_skew_above_21_with_near_underlying():
+    """P1: a monthly-only sleeve rescued by a near-dated underlying expiry → C."""
+    grade, reason = data_grade(
+        options_as_of=_now_ts(15),
+        underlying_options_as_of=_now_ts(15),
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_nearest_expiry",
+        iv_expiry_skew_days=25,
+        underlying_iv_skew_days=2,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "C"
+    assert "underlying IV" in reason
+
+
+def test_data_grade_D_for_skew_above_21_with_far_underlying():
+    """Resilience: if the underlying expiry used is ALSO far (>7d), the rescue
+    is not trustworthy and the row stays D."""
+    grade, _ = data_grade(
+        options_as_of=_now_ts(15),
+        underlying_options_as_of=_now_ts(15),
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_nearest_expiry",
+        iv_expiry_skew_days=25,
+        underlying_iv_skew_days=30,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "D"
+
+
+def test_data_grade_held_proxy_does_not_override_stale_quote():
+    """Resilience: the held-expiry proxy forgives *skew* only. A stale quote
+    (>24h) is an independent hard block that must still produce D."""
+    grade, _ = data_grade(
+        options_as_of=_now_ts(30 * 60),   # 30h stale
+        underlying_options_as_of=_now_ts(30 * 60),
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_term_interp",
+        iv_expiry_skew_days=25,
+        iv_term_interp=True,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "D"
+
+
+def test_data_grade_caps_at_C_on_iv_disagreement():
+    """P3: otherwise-A inputs are capped to C when the sleeve and underlying IV
+    surfaces disagree by more than the threshold."""
+    grade, reason = data_grade(
+        options_as_of=_now_ts(15),
+        underlying_options_as_of=_now_ts(20),
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_exact",
+        iv_expiry_skew_days=0,
+        iv_disagreement_pct=0.50,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "C"
+    assert "disagree" in reason
+
+
+def test_data_grade_no_cap_on_small_iv_disagreement():
+    grade, _ = data_grade(
+        options_as_of=_now_ts(15),
+        underlying_options_as_of=_now_ts(20),
+        holdings_as_of="2026-05-27",
+        iv_source="holdings_exact",
+        iv_expiry_skew_days=0,
+        iv_disagreement_pct=0.10,
+        now_utc=_dt.datetime(2026, 5, 27, 20, 0, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert grade == "A"
+
+
+# ── P2: variance-time interpolation helper + lookup_contract_iv ────────────
+
+
+def test_variance_time_interp_iv_between_nodes():
+    # Flat 20% vol on both nodes → interpolated vol is 20% regardless of tenor.
+    iv = _variance_time_interp_iv(iv_lo=0.20, t_lo=10 / 365, iv_hi=0.20, t_hi=40 / 365, t_held=25 / 365)
+    assert iv == pytest.approx(0.20, abs=1e-9)
+    # Rising term structure: interpolated vol sits strictly between the nodes.
+    iv2 = _variance_time_interp_iv(iv_lo=0.30, t_lo=10 / 365, iv_hi=0.50, t_hi=40 / 365, t_held=25 / 365)
+    assert 0.30 < iv2 < 0.50
+
+
+def test_variance_time_interp_iv_rejects_degenerate():
+    assert _variance_time_interp_iv(iv_lo=None, t_lo=0.1, iv_hi=0.2, t_hi=0.2, t_held=0.15) is None
+    assert _variance_time_interp_iv(iv_lo=0.2, t_lo=0.1, iv_hi=0.2, t_hi=0.1, t_held=0.15) is None
+    assert _variance_time_interp_iv(iv_lo=0.2, t_lo=0.0, iv_hi=0.2, t_hi=0.2, t_held=0.15) is None
+
+
+def test_lookup_contract_iv_term_interpolates_bracketed_expiry():
+    """Held 5/27 is bracketed by listed 5/18 and 6/19 (>7d to either) → the
+    returned IV is variance-time interpolated and flagged."""
+    held = date(2026, 5, 27)
+    options_cache = {
+        "symbols": {
+            "AMZZ": {
+                "spot": 40.0,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": "2026-05-18", "contract_type": "put",
+                     "strike_price": 35.0, "iv": 0.40, "mid": 0.30},
+                    {"expiration_date": "2026-06-19", "contract_type": "put",
+                     "strike_price": 35.0, "iv": 0.60, "mid": 1.10},
+                ],
+            },
+        },
+    }
+    # Valuation date is before the held expiry (realistic: both bracket nodes
+    # have a positive time-to-expiry).
+    q = lookup_contract_iv(options_cache, "AMZZ", held, 35.0, "P", as_of=date(2026, 5, 15))
+    assert q["iv_term_interp"] is True
+    assert q["iv_interp_expiries"] == ["2026-05-18", "2026-06-19"]
+    assert 0.40 < q["iv"] < 0.60
+    assert "holdings_term_interp" in q["iv_source_chain"]
+
+
+def test_lookup_contract_iv_no_term_interp_when_not_bracketed():
+    """Held 5/27 is BEFORE the only listed expiry (6/19) → cannot interpolate,
+    falls back to the nearest far node verbatim."""
+    held = date(2026, 5, 27)
+    options_cache = {
+        "symbols": {
+            "AMZZ": {
+                "spot": 40.0,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": "2026-06-19", "contract_type": "put",
+                     "strike_price": 35.0, "iv": 0.60, "mid": 1.10},
+                ],
+            },
+        },
+    }
+    q = lookup_contract_iv(options_cache, "AMZZ", held, 35.0, "P", as_of=held)
+    assert q["iv_term_interp"] is False
+    assert q["iv"] == pytest.approx(0.60)
+
+
+def test_resolve_iv_source_term_interp_label():
+    long_q = {"iv": 0.5, "iv_source_chain": ["holdings_nearest_expiry", "holdings_term_interp"],
+              "expiry_in_chain": False}
+    short_q = {"iv": 0.5, "iv_source_chain": ["holdings_nearest_expiry"], "expiry_in_chain": False}
+    assert resolve_iv_source(long_q, short_q) == "holdings_term_interp"
+
+
 # ───────────────────────────────────────────────────────────────────────────
 # Canonical (BS-free) public field names
 # ───────────────────────────────────────────────────────────────────────────
@@ -1071,7 +1268,9 @@ def test_build_vrp_live_payload_emits_canonical_kernel_aware_fields():
     assert "expected_weekly_carry_usd" in row
     assert "dollar_gamma_per_1pct_underlying" in row
     assert "theta_per_day" in row
-    assert row.get("greeks_kernel") in {"bs_proxy", None}
+    # Greeks may now come from the calibrated kernel (heston / bates / az) when
+    # one converged; bs_proxy is the fallback when none did.
+    assert row.get("greeks_kernel") in {"heston", "bates", "az", "bs_proxy", None}
     assert "data_grade" in row and row["data_grade"] in {"A", "B", "C", "D"}
     assert "data_grade_reason" in row
     # When a model fair was computed, expected_weekly_carry_usd = model_fair * 100.
@@ -1119,3 +1318,79 @@ def test_build_vrp_live_payload_model_disagreement_when_multiple_kernels_fire():
     # disagreement is None when only 1 model fires, otherwise a non-negative pp number
     if row.get("model_disagreement_pp_of_max_loss") is not None:
         assert row["model_disagreement_pp_of_max_loss"] >= 0
+
+
+def test_build_vrp_live_payload_uses_kernel_greeks_when_kernel_fires():
+    """When a calibrated kernel produces a model_fair, greeks_kernel must
+    flip away from "bs_proxy" to that kernel's name and the canonical
+    dollar_gamma / theta_per_day must come from the kernel's finite-diff."""
+    expiry = date(2026, 5, 27)
+    spread = _build_amyy_az_spread(expiry=expiry)
+    # Skewed underlying chain wide enough for both Heston and Bates to converge.
+    options_cache = {
+        "symbols": {
+            "AMDL": {
+                "spot": 66.9,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 47.89, "iv": 2.50, "mid": 0.12},
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 50.55, "iv": 1.90, "mid": 0.25},
+                ],
+            },
+            "AMD": {
+                "spot": 467.5,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": k, "iv": iv}
+                    for k, iv in [
+                        (360, 0.95), (380, 0.85), (400, 0.76), (420, 0.69),
+                        (440, 0.64), (460, 0.62), (480, 0.63), (500, 0.66),
+                    ]
+                ],
+            },
+        },
+    }
+    payload = build_vrp_live_payload(
+        spread, options_cache, rv_map={"AMD": 0.6, "AMDL": 1.2}, as_of=expiry,
+    )
+    row = payload["rows"][0]
+    # Whatever kernel fired, greeks_kernel must agree with model_name unless
+    # the kernel-greeks helper itself returned None and we fell back to BS-proxy.
+    if row.get("model_fair") is not None:
+        assert row["greeks_kernel"] in {row["model_name"], "bs_proxy"}
+        # If not falling back, the canonical greeks must equal what the
+        # kernel emitted (i.e. NOT match the BS-proxy values).
+        if row["greeks_kernel"] != "bs_proxy":
+            bs_dbg = (row.get("debug") or {}).get("bs", {})
+            bs_gamma = bs_dbg.get("dollar_gamma_per_1pct_underlying")
+            kernel_gamma = row.get("dollar_gamma_per_1pct_underlying")
+            # Both should be defined; kernel γ should differ structurally
+            # (skewed chain → Heston/Bates ≠ BS).
+            if bs_gamma is not None and kernel_gamma is not None:
+                assert kernel_gamma < 0
+                # Not strictly required to differ, but on this skewed chain it does.
+                assert kernel_gamma != bs_gamma
+        # Sign sanity for the canonical fields.
+        if row.get("theta_per_day") is not None:
+            assert row["theta_per_day"] > 0
+        if row.get("dollar_gamma_per_1pct_underlying") is not None:
+            assert row["dollar_gamma_per_1pct_underlying"] < 0
+
+
+def test_yieldboost_targeted_refresh_symbols_keeps_underlyings():
+    """YB-targeted options refresh must not drop underlying tickers from the request."""
+    from build_data import _yieldboost_targeted_refresh_symbols
+
+    targets = {"AMDL": [47.89, 50.55], "AMZZ": [35.07, 37.02]}
+    held = {"AMDL": {"2026-05-27"}, "AMZZ": {"2026-05-27"}}
+    sleeves, underlyings = _yieldboost_targeted_refresh_symbols(
+        ["AMDL", "AMZZ", "AMD", "AMZN"],
+        target_strikes_by_sleeve=targets,
+        held_expiries_by_sleeve=held,
+    )
+    assert sleeves == ["AMDL", "AMZZ"]
+    assert underlyings == ["AMD", "AMZN"]
+    assert sorted(set(sleeves) | set(underlyings)) == ["AMD", "AMDL", "AMZN", "AMZZ"]

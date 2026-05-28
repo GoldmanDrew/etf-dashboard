@@ -18,7 +18,48 @@ LOGGER = logging.getLogger("yieldboost_holdings")
 
 HELD_STRIKE_EXACT_TOL = 0.011
 
+# ── Held-expiry IV synthesis / grading thresholds ──────────────────────────
+# Granite writes weekly / off-cycle put-spreads, but many 2x sleeves only list
+# monthly OPRA expiries. When the held expiry is not listed we either
+#   (P2) variance-time interpolate across two *bracketing* listed sleeve
+#        expiries, or
+#   (P1) impute the sleeve IV from the underlying surface (AZ rescale), which
+#        usually DOES list the near-dated expiry.
+# Both are honest proxies for the held-expiry IV and should grade C (monitor),
+# not D (hidden) — but ONLY when built from fresh, near-dated, sane inputs.
+# These constants bound "near-dated" and "sane" so a stale or wild proxy can
+# never silently promote a row.
+NEAR_UNDERLYING_EXPIRY_MAX_DAYS = 7   # underlying expiry must be within this of held to rescue
+TERM_INTERP_MIN_SKEW_DAYS = 7         # only term-interp when the nearest sleeve node is beyond this
+TERM_INTERP_MAX_BRACKET_DAYS = 45     # refuse to interpolate across a wider listed-expiry gap
+SYNTH_IV_MIN = 0.01                   # reject synthesized IVs outside (1%, 800%)
+SYNTH_IV_MAX = 8.0
+IV_DISAGREEMENT_GRADE_CAP_PCT = 0.35  # far-sleeve vs underlying-derived IV gap that caps grade at C
+
 GRANITE_BASE = "https://www.graniteshares.com"
+
+
+def _variance_time_interp_iv(
+    *, iv_lo: float | None, t_lo: float, iv_hi: float | None, t_hi: float, t_held: float,
+) -> float | None:
+    """Variance-time (total-variance-linear) IV interpolation to the held expiry.
+
+    Interpolates ``σ²·T`` linearly between two bracketing listed expiries, then
+    solves for ``σ`` at the held tenor. Returns ``None`` on degenerate inputs or
+    when the result falls outside the sane IV band — callers must fall back.
+    """
+    if iv_lo is None or iv_hi is None:
+        return None
+    if t_lo <= 0 or t_hi <= 0 or t_held <= 0 or t_hi == t_lo:
+        return None
+    var_lo = iv_lo * iv_lo * t_lo
+    var_hi = iv_hi * iv_hi * t_hi
+    w = (t_held - t_lo) / (t_hi - t_lo)
+    var_h = var_lo + w * (var_hi - var_lo)
+    if var_h <= 0:
+        return None
+    iv = math.sqrt(var_h / t_held)
+    return iv if SYNTH_IV_MIN < iv < SYNTH_IV_MAX else None
 
 _GRANITE_OPT_RE = re.compile(
     r"^(?P<root>\S+)\s+(?P<exp>\d{2}/\d{2}/\d{4})\s+(?P<pc>[PC])(?P<strike>[\d.]+)$",
@@ -1265,6 +1306,7 @@ def lookup_contract_iv(
     put_call: str = "P",
     *,
     nearest_expiry_max_days: int = 35,
+    as_of: date | None = None,
 ) -> dict[str, Any]:
     """Resolve a held contract's IV/mid from the cached chain.
 
@@ -1282,11 +1324,20 @@ def lookup_contract_iv(
               away. The IV-term-structure error is real for monthly-out
               interpolation on a 1-day-out spread; the UI should warn the
               user on large ``expiry_skew_days`` values.
+      3b. **(P2) Term-structure interpolation.** When the nearest listed expiry
+         is far (``> TERM_INTERP_MIN_SKEW_DAYS``) but the held date is *bracketed*
+         by two listed expiries no more than ``TERM_INTERP_MAX_BRACKET_DAYS``
+         apart, variance-time interpolate the IV to the held tenor instead of
+         taking the far node's IV verbatim. ``iv_term_interp=True`` flags this so
+         the grade treats it as a held-expiry proxy (C) rather than a raw far
+         quote (D). The MID is *not* interpolated (time-value across expiries is
+         not linear); we keep the nearest node's mid for spread pricing.
 
     The returned ``iv_source_chain`` field documents which tier produced the
     quote and ``expiry_skew_days`` is the |held - chain| calendar-day gap
     (always non-negative) so consumers can flag risky interpolations.
     """
+    as_of = as_of or date.today()
     sym = str(symbol).upper()
     entry = (options_cache.get("symbols") or {}).get(sym) or {}
     spot = _parse_float(entry.get("spot"))
@@ -1375,6 +1426,8 @@ def lookup_contract_iv(
             "options_as_of": entry.get("updated_at"),
             "iv_source_chain": iv_source_chain,
             "expiry_skew_days": None,
+            "iv_term_interp": False,
+            "iv_interp_expiries": None,
         }
     skew_days: int | None = None
     if chain_expiry_used is not None:
@@ -1383,6 +1436,64 @@ def lookup_contract_iv(
             skew_days = abs((used_dt - expiry).days)
         except ValueError:
             skew_days = None
+
+    final_iv = _norm_iv(best.get("iv"))
+
+    # ── P2: variance-time term-structure interpolation ─────────────────────
+    # Only when the nearest listed node is far AND the held date is bracketed by
+    # two listed expiries within the max-bracket span. Refines ``final_iv`` to
+    # the held tenor; ``expiry_skew_days`` stays the observed-data distance so
+    # the grade remains honest, but ``iv_term_interp`` lets it count as a
+    # held-expiry proxy.
+    iv_term_interp = False
+    iv_interp_expiries: list[str] | None = None
+    if (
+        final_iv is not None
+        and skew_days is not None
+        and skew_days > TERM_INTERP_MIN_SKEW_DAYS
+        and not exact
+    ):
+        lo_node: tuple[date, str, float] | None = None  # (exp_date, exp_str, iv)
+        hi_node: tuple[date, str, float] | None = None
+        for c in chain:
+            exp_other = str(c.get("expiration_date") or "")
+            if not exp_other:
+                continue
+            try:
+                exp_dt = datetime.strptime(exp_other, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            # Both bracket nodes must have a positive time-to-expiry from the
+            # valuation date — an already-expired listed node carries no usable
+            # term-structure information.
+            if exp_dt <= as_of:
+                continue
+            node_row, _node_dist, _node_exact = _best_at_expiry(exp_other)
+            node_iv = _norm_iv(node_row.get("iv")) if node_row is not None else None
+            if node_iv is None:
+                continue
+            if exp_dt < expiry:
+                if lo_node is None or exp_dt > lo_node[0]:
+                    lo_node = (exp_dt, exp_other, node_iv)
+            elif exp_dt > expiry:
+                if hi_node is None or exp_dt < hi_node[0]:
+                    hi_node = (exp_dt, exp_other, node_iv)
+        if (
+            lo_node is not None and hi_node is not None
+            and (hi_node[0] - lo_node[0]).days <= TERM_INTERP_MAX_BRACKET_DAYS
+        ):
+            t_lo = max((lo_node[0] - as_of).days, 1) / 365.0
+            t_hi = max((hi_node[0] - as_of).days, 1) / 365.0
+            t_held = max((expiry - as_of).days, 1) / 365.0
+            interp_iv = _variance_time_interp_iv(
+                iv_lo=lo_node[2], t_lo=t_lo, iv_hi=hi_node[2], t_hi=t_hi, t_held=t_held,
+            )
+            if interp_iv is not None:
+                final_iv = round(interp_iv, 6)
+                iv_term_interp = True
+                iv_interp_expiries = [lo_node[1], hi_node[1]]
+                iv_source_chain.append("holdings_term_interp")
+
     return {
         "matched": exact or (best_dist is not None and best_dist < 0.05),
         "exact_strike": exact and chain_expiry_used == expiry_s,
@@ -1391,11 +1502,13 @@ def lookup_contract_iv(
         "expiry_skew_days": skew_days,
         "strike_used": _parse_float(best.get("strike_price")),
         "strike_interp": not exact and best_dist is not None and best_dist >= HELD_STRIKE_EXACT_TOL,
-        "iv": _norm_iv(best.get("iv")),
+        "iv": final_iv,
         "mid": _parse_float(best.get("mid")),
         "spot": spot,
         "options_as_of": entry.get("updated_at"),
         "iv_source_chain": iv_source_chain,
+        "iv_term_interp": iv_term_interp,
+        "iv_interp_expiries": iv_interp_expiries,
     }
 
 
@@ -1416,6 +1529,10 @@ def resolve_iv_source(long_q: dict[str, Any], short_q: dict[str, Any]) -> str:
     # is the most honest label since the IV is an interpolation across expiries.
     chain_l = long_q.get("iv_source_chain") or []
     chain_s = short_q.get("iv_source_chain") or []
+    # Term-structure interpolation (P2) is synthesized AT the held tenor, so it
+    # ranks above a raw far nearest-expiry read.
+    if "holdings_term_interp" in chain_l or "holdings_term_interp" in chain_s:
+        return "holdings_term_interp"
     if "holdings_nearest_expiry" in chain_l or "holdings_nearest_expiry" in chain_s:
         return "holdings_nearest_expiry"
     if (
@@ -1436,6 +1553,9 @@ def data_grade(
     iv_source: str | None,
     iv_expiry_skew_days: float | int | None,
     now_utc: datetime | None = None,
+    iv_term_interp: bool = False,
+    underlying_iv_skew_days: float | int | None = None,
+    iv_disagreement_pct: float | None = None,
 ) -> tuple[str, str]:
     """Return (grade, reason) for a single VRP row.
 
@@ -1451,11 +1571,28 @@ def data_grade(
       * B — half size, sleeve only: holdings ≤ 2cd, worst quote ≤ 4h,
         skew ≤ 7d, IV source is exact or nearest-expiry.
       * C — monitor / pair with underlying hedge only: AZ-imputed source,
-        or skew 8–21d, or worst quote 4–24h. The signal still has
-        information; the magnitude is degraded.
-      * D — display only: holdings > 2cd, worst quote > 24h, skew > 21d,
-        or IV source is ``holdings_missing_chain``. SELL recommendations
-        must be hard-blocked.
+        term-interpolated source, or skew 8–21d, or worst quote 4–24h.
+        The signal still has information; the magnitude is degraded.
+      * D — display only: holdings > 2cd, worst quote > 24h, skew > 21d
+        *with no fresh near-dated held-expiry proxy*, or IV source is
+        ``holdings_missing_chain``. SELL recommendations must be hard-blocked.
+
+    Held-expiry proxy (P1/P2): many 2x sleeves only list monthly OPRA expiries,
+    so a weekly held spread shows ``iv_expiry_skew_days`` > 21 even though we can
+    reconstruct an honest held-expiry IV. A large sleeve skew is forgiven from D
+    to **C** (never better) when EITHER:
+      * ``iv_term_interp`` is True (variance-time interpolated across two
+        bracketing listed sleeve expiries ≤ ``TERM_INTERP_MAX_BRACKET_DAYS``
+        apart), OR
+      * ``underlying_iv_skew_days`` ≤ ``NEAR_UNDERLYING_EXPIRY_MAX_DAYS`` (the
+        AZ rescale used a near-dated underlying expiry).
+    The worst-quote freshness gate still applies independently, so a stale
+    underlying chain cannot rescue anything (its age folds into ``worst_quote``).
+
+    IV-disagreement guardrail (P3): when the raw far-sleeve IV and the
+    underlying-derived IV disagree by more than ``IV_DISAGREEMENT_GRADE_CAP_PCT``,
+    the row is capped at C — one of the two surfaces is mispriced and the model
+    fair is not trustworthy at full size.
     """
     now = now_utc or datetime.now(timezone.utc)
     reasons: list[str] = []
@@ -1486,6 +1623,17 @@ def data_grade(
     skew = float(iv_expiry_skew_days) if iv_expiry_skew_days is not None else 0.0
     src = str(iv_source or "")
 
+    # P1/P2: do we have a fresh, near-dated held-expiry IV proxy that justifies
+    # forgiving a large *sleeve* skew (monthly-only listings) down to C, not D?
+    und_skew = (
+        float(underlying_iv_skew_days)
+        if underlying_iv_skew_days is not None
+        else None
+    )
+    has_held_proxy = bool(iv_term_interp) or (
+        und_skew is not None and und_skew <= NEAR_UNDERLYING_EXPIRY_MAX_DAYS
+    )
+
     # Hard-block conditions → D
     if hold_age is not None and hold_age > 2:
         blockers.append(f"holdings {hold_age}cd > 2")
@@ -1493,7 +1641,7 @@ def data_grade(
         blockers.append(f"quote {worst_quote // 60}h > 24h")
     if src == "holdings_missing_chain":
         blockers.append("missing chain")
-    if skew > 21:
+    if skew > 21 and not has_held_proxy:
         blockers.append(f"skew {int(skew)}d > 21")
     if blockers:
         return ("D", "; ".join(blockers))
@@ -1502,12 +1650,24 @@ def data_grade(
     degraded: list[str] = []
     if src == "az_imputed_from_underlying":
         degraded.append("AZ-imputed IV")
-    if skew > 7:
+    if src == "holdings_term_interp" or iv_term_interp:
+        degraded.append("term-interp IV")
+    if skew > 21 and has_held_proxy:
+        # Monthly-only sleeve rescued by a held-expiry proxy.
+        if iv_term_interp:
+            degraded.append(f"sleeve skew {int(skew)}d (term-interp)")
+        else:
+            degraded.append(
+                f"sleeve skew {int(skew)}d (underlying IV {int(und_skew)}d)"
+            )
+    elif skew > 7:
         degraded.append(f"skew {int(skew)}d")
     if worst_quote > 4 * 60:
         degraded.append(f"quote {worst_quote // 60}h")
     if hold_age is not None and hold_age == 2:
         degraded.append("holdings 2cd")
+    if iv_disagreement_pct is not None and iv_disagreement_pct > IV_DISAGREEMENT_GRADE_CAP_PCT:
+        degraded.append(f"sleeve/underlying IV disagree {iv_disagreement_pct * 100:.0f}%")
     if degraded:
         return ("C", "; ".join(degraded))
 
@@ -1560,10 +1720,10 @@ def build_vrp_live_payload(
         if not s.is_front:
             continue
         long_q = lookup_contract_iv(
-            options_cache, s.sleeve_2x_etf, s.expiry, s.strike_long, "P",
+            options_cache, s.sleeve_2x_etf, s.expiry, s.strike_long, "P", as_of=today,
         )
         short_q = lookup_contract_iv(
-            options_cache, s.sleeve_2x_etf, s.expiry, s.strike_short, "P",
+            options_cache, s.sleeve_2x_etf, s.expiry, s.strike_short, "P", as_of=today,
         )
         spot = long_q.get("spot") or short_q.get("spot")
         m_long = m_short = None
@@ -1629,6 +1789,8 @@ def build_vrp_live_payload(
             "iv_source": resolve_iv_source(long_q, short_q),
             "iv_chain_expiry_used": chain_expiry_used,
             "iv_expiry_skew_days": chain_skew_days,
+            "iv_term_interp": bool(long_q.get("iv_term_interp") or short_q.get("iv_term_interp")),
+            "iv_interp_expiries": long_q.get("iv_interp_expiries") or short_q.get("iv_interp_expiries"),
             "holdings_as_of": s.holdings_as_of.isoformat(),
             "options_as_of": long_q.get("options_as_of") or short_q.get("options_as_of"),
             "days_to_exp": s.days_to_exp,
@@ -1766,6 +1928,61 @@ def build_vrp_live_payload(
             if row.get("iv_source") in ("holdings_missing_chain", "holdings_missing_quote"):
                 if extras.get("az_implied_sleeve_iv") is not None:
                     row["iv_source"] = "az_imputed_from_underlying"
+
+        # ── P1/P3: held-expiry IV synthesis provenance + disagreement guard ──
+        # ``underlying_iv_skew_days`` is the worst (largest) expiry-skew the AZ
+        # rescale had to accept on either leg; it gates the skew-forgiveness in
+        # data_grade. ``iv_disagreement_pct`` compares the raw far-sleeve IV vs
+        # the underlying-derived sleeve IV and caps over-confident grades.
+        underlying_iv_skew_days = None
+        iv_disagreement_pct = None
+        az_implied_iv = row.get("az_implied_sleeve_iv")
+        az_meta = row.get("az_meta") if isinstance(row.get("az_meta"), dict) else None
+        if az_meta:
+            und_skews = []
+            for leg_meta in (az_meta.get("long"), az_meta.get("short")):
+                if isinstance(leg_meta, dict):
+                    sk = leg_meta.get("underlying_iv_expiry_skew_days")
+                    if sk is not None:
+                        try:
+                            und_skews.append(abs(int(sk)))
+                        except (TypeError, ValueError):
+                            pass
+            if und_skews:
+                underlying_iv_skew_days = max(und_skews)
+        far_sleeve_iv = _parse_float(row.get("iv_full_proxy"))
+        if far_sleeve_iv is None:
+            far_sleeve_iv = iv_spread_proxy
+        if (
+            az_implied_iv is not None
+            and far_sleeve_iv is not None
+            and far_sleeve_iv > 0
+            and float(az_implied_iv) > 0
+        ):
+            denom = min(float(az_implied_iv), float(far_sleeve_iv))
+            if denom > 0:
+                iv_disagreement_pct = round(
+                    abs(float(az_implied_iv) - float(far_sleeve_iv)) / denom, 4
+                )
+        iv_term_interp_flag = bool(row.get("iv_term_interp"))
+        row["iv_synthesis"] = {
+            "method": (
+                "sleeve_exact" if row.get("iv_source") == "holdings_exact"
+                else "sleeve_nearest_strike" if row.get("iv_source") == "holdings_nearest_strike"
+                else "sleeve_term_interp" if iv_term_interp_flag
+                else "az_underlying" if row.get("iv_source") == "az_imputed_from_underlying"
+                else "sleeve_nearest_expiry" if row.get("iv_source") == "holdings_nearest_expiry"
+                else "missing"
+            ),
+            "sleeve_skew_days": row.get("iv_expiry_skew_days"),
+            "sleeve_interp_expiries": row.get("iv_interp_expiries"),
+            "underlying_skew_days": underlying_iv_skew_days,
+            "iv_far_sleeve": round(far_sleeve_iv, 6) if far_sleeve_iv is not None else None,
+            "iv_underlying_derived": round(float(az_implied_iv), 6) if az_implied_iv is not None else None,
+            "iv_disagreement_pct": iv_disagreement_pct,
+        }
+        row["iv_disagreement_pct"] = iv_disagreement_pct
+
         # ── Canonical data_grade stamp ─────────────────────────────────────
         grade, grade_reason = data_grade(
             options_as_of=row.get("options_as_of"),
@@ -1773,6 +1990,9 @@ def build_vrp_live_payload(
             holdings_as_of=row.get("holdings_as_of"),
             iv_source=row.get("iv_source"),
             iv_expiry_skew_days=row.get("iv_expiry_skew_days"),
+            iv_term_interp=iv_term_interp_flag,
+            underlying_iv_skew_days=underlying_iv_skew_days,
+            iv_disagreement_pct=iv_disagreement_pct,
         )
         row["data_grade"] = grade
         row["data_grade_reason"] = grade_reason

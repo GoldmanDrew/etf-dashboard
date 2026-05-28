@@ -7955,8 +7955,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   <div className="scenario-title" style={{ fontSize: 13 }}>Greeks (short spread, per structure)</div>
                   <div className="scenario-sub" style={{ marginBottom: 6 }}>
                     Sizing inputs for the short pair. <em>{vrpDisplayRow.greeks_kernel === 'bs_proxy'
-                      ? 'BS finite-diff at sleeve IV (kernel-derivative greeks pending).'
-                      : 'Kernel finite-diff on model_fair.'}</em>
+                      ? 'BS finite-diff at sleeve IV (fallback — no kernel converged).'
+                      : `Finite-diff on ${String(vrpDisplayRow.greeks_kernel || 'kernel').toUpperCase()} model_fair.`}</em>
                   </div>
                   <table className="scenario-table">
                     <tbody>
@@ -8862,16 +8862,22 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
                     {r.spread_mid_market != null ? `${Number(r.spread_mid_market).toFixed(2)}` : '—'}
                   </td>
                   <td style={{ padding: '5px 8px', textAlign: 'right' }}
-                      title={`Long leg IV ${r.iv_put_long != null ? (Number(r.iv_put_long) * 100).toFixed(1) + '%' : '—'} · Short leg IV ${r.iv_put_short != null ? (Number(r.iv_put_short) * 100).toFixed(1) + '%' : '—'} · Source ${r.iv_source || '—'} · Skew ${r.iv_expiry_skew_days != null ? r.iv_expiry_skew_days + 'd' : '?'}`}>
+                      title={`Long leg IV ${r.iv_put_long != null ? (Number(r.iv_put_long) * 100).toFixed(1) + '%' : '—'} · Short leg IV ${r.iv_put_short != null ? (Number(r.iv_put_short) * 100).toFixed(1) + '%' : '—'} · Source ${r.iv_source || '—'} · Skew ${r.iv_expiry_skew_days != null ? r.iv_expiry_skew_days + 'd' : '?'}`
+                        + (r.iv_synthesis ? `\nHeld-expiry IV method: ${r.iv_synthesis.method}`
+                            + (r.iv_synthesis.sleeve_interp_expiries ? ` (interp ${r.iv_synthesis.sleeve_interp_expiries.join(' → ')})` : '')
+                            + (r.iv_synthesis.underlying_skew_days != null ? ` · underlying expiry skew ${r.iv_synthesis.underlying_skew_days}d` : '')
+                            + (r.iv_synthesis.iv_underlying_derived != null ? ` · underlying-derived IV ${(r.iv_synthesis.iv_underlying_derived * 100).toFixed(1)}%` : '') : '')
+                        + (r.iv_disagreement_pct != null ? `\nSleeve vs underlying IV disagreement: ${(r.iv_disagreement_pct * 100).toFixed(0)}%${r.iv_disagreement_pct > 0.35 ? ' (capped at C)' : ''}` : '')}>
                     {r.iv_full_proxy != null ? `${(r.iv_full_proxy * 100).toFixed(1)}%` : '—'}
+                    {r.iv_term_interp ? <span style={{ color: '#888', fontSize: '0.8em' }} title="Variance-time interpolated to held expiry"> ⇄</span> : null}
                   </td>
                   <td style={{
                     padding: '5px 8px', textAlign: 'right',
                     color: r.dollar_gamma_per_1pct_underlying != null && r.dollar_gamma_per_1pct_underlying < 0
                       ? '#ef4444' : undefined,
                   }} title={r.greeks_kernel === 'bs_proxy'
-                    ? 'Greeks via BS finite-diff at sleeve IV (kernel-derivative greeks pending).'
-                    : 'Greeks via kernel finite-diff on model_fair.'}>
+                    ? 'Greeks via BS finite-diff at sleeve IV (fallback — no kernel converged).'
+                    : `Greeks via finite-diff on ${String(r.greeks_kernel || 'kernel').toUpperCase()} model_fair.`}>
                     {r.dollar_gamma_per_1pct_underlying != null ? Number(r.dollar_gamma_per_1pct_underlying).toFixed(3) : '—'}
                   </td>
                   <td style={{

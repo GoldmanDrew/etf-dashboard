@@ -21,6 +21,7 @@ import math
 import os
 import sys
 import time
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qs
 
@@ -1209,6 +1210,29 @@ def _maps_from_universe_csv(df: pd.DataFrame) -> dict:
     return out
 
 
+def _yieldboost_targeted_refresh_symbols(
+    symbols: Iterable[str],
+    *,
+    target_strikes_by_sleeve: Mapping[str, object],
+    held_expiries_by_sleeve: Mapping[str, object],
+) -> tuple[list[str], list[str]]:
+    """Split a YB-targeted refresh request into sleeves vs underlying tickers.
+
+    ``build_polygon_options_cache(..., yieldboost_targeted=True)`` must refresh
+    both buckets; previously it dropped underlyings and left
+    ``underlying_options_as_of`` stale (grade D on every row).
+    """
+    all_symbols = sorted({norm_sym(s) for s in symbols if str(s).strip()})
+    yb_sleeves = sorted(
+        s for s in all_symbols if s in target_strikes_by_sleeve or s in held_expiries_by_sleeve
+    )
+    underlying_refresh = sorted(
+        s for s in all_symbols
+        if s not in target_strikes_by_sleeve and s not in held_expiries_by_sleeve
+    )
+    return yb_sleeves, underlying_refresh
+
+
 def build_polygon_options_cache(
     symbols: list[str],
     *,
@@ -1291,12 +1315,15 @@ def build_polygon_options_cache(
     # Time-sharded refresh keeps frequent updates while controlling API pressure.
     symbols_per_run = max(1, OPTIONS_SYMBOLS_PER_RUN)
     shard_interval_minutes = max(1, OPTIONS_SHARD_INTERVAL_MINUTES)
+    underlying_refresh: list[str] = []
     if yieldboost_targeted:
-        yb_sleeves = sorted(
-            s for s in all_symbols if s in target_strikes_by_sleeve or s in held_expiries_by_sleeve
+        yb_sleeves, underlying_refresh = _yieldboost_targeted_refresh_symbols(
+            all_symbols,
+            target_strikes_by_sleeve=target_strikes_by_sleeve,
+            held_expiries_by_sleeve=held_expiries_by_sleeve,
         )
-        if yb_sleeves:
-            all_symbols = yb_sleeves
+        if yb_sleeves or underlying_refresh:
+            all_symbols = sorted(set(yb_sleeves) | set(underlying_refresh))
         forced_symbols = list(all_symbols)
         symbols_per_run = max(symbols_per_run, len(all_symbols))
         shard_count = 1
@@ -1343,7 +1370,8 @@ def build_polygon_options_cache(
         "tradier_chain_symbols": sorted(tradier_chain_symbols),
         "refresh_symbols_count": int(len(refresh_symbols)),
         "yieldboost_targeted": bool(yieldboost_targeted),
-        "yieldboost_sleeves_only": bool(yieldboost_targeted),
+        "yieldboost_sleeves_only": bool(yieldboost_targeted and not underlying_refresh),
+        "yieldboost_underlyings_refreshed": underlying_refresh,
         "yieldboost_target_sleeves": sorted(target_strikes_by_sleeve.keys()),
         "shard_interval_minutes": int(shard_interval_minutes),
         "polygon_request_limits": {
@@ -3734,8 +3762,72 @@ def refresh_options_only() -> None:
         print(f"  sample error: {options_cache['errors'][0]}")
 
 
+def refresh_yieldboost_holdings_slice(
+    *,
+    max_holdings_age_days: int = 2,
+    force: bool = False,
+) -> bool:
+    """Refresh GraniteShares YieldBOOST holdings when the latest as-of is stale.
+
+    Returns ``True`` when a fetch ran and ``etf_holdings_latest.csv`` was updated.
+    Called from ``--yieldboost-vrp-only`` so intraday VRP ticks do not keep
+    grading rows D on a week-old ``holdings_as_of`` while sleeve quotes are fresh.
+    """
+    import requests
+
+    from etf_holdings_providers import build_default_holdings_stack, fetch_all_holdings
+    from ingest_etf_metrics import save_holdings_outputs, save_yieldboost_put_spreads
+    from yieldboost_holdings import load_holdings_latest_dataframe, load_underlying_map_from_screener
+
+    yb_tickers = sorted({norm_sym(yb) for yb, _ in YIELDBOOST_BUCKET2_PAIRS})
+    underlying_map = load_underlying_map_from_screener(OUTPUT_DIR / "etf_screened_today.csv")
+    if not underlying_map:
+        underlying_map = {norm_sym(yb): norm_sym(und) for yb, und in YIELDBOOST_BUCKET2_PAIRS}
+
+    hdf = load_holdings_latest_dataframe(
+        csv_path=ETF_HOLDINGS_LATEST_FILE,
+        parquet_path=OUTPUT_DIR / "etf_holdings_daily.parquet",
+    )
+    hold_age: int | None = None
+    if not hdf.empty and "etf_ticker" in hdf.columns and "as_of_date" in hdf.columns:
+        yb_rows = hdf[hdf["etf_ticker"].astype(str).str.upper().isin(yb_tickers)]
+        if not yb_rows.empty:
+            latest = yb_rows["as_of_date"].max()
+            if latest is not None:
+                try:
+                    if hasattr(latest, "date"):
+                        latest_d = latest.date() if hasattr(latest, "date") else latest
+                    else:
+                        latest_d = dt.date.fromisoformat(str(latest).split("T")[0])
+                    hold_age = max(0, (dt.date.today() - latest_d).days)
+                except (ValueError, TypeError):
+                    hold_age = None
+
+    if not force and hold_age is not None and hold_age <= max_holdings_age_days:
+        print(
+            f"  YieldBOOST holdings fresh ({hold_age}cd <= {max_holdings_age_days}cd); skip fetch"
+        )
+        return False
+
+    print(
+        f"  YieldBOOST holdings stale ({hold_age if hold_age is not None else '?'}cd); "
+        f"fetching {len(yb_tickers)} Granite tickers…"
+    )
+    session = requests.Session()
+    session.headers.update({"User-Agent": "etf-dashboard-builder/1.0"})
+    stack = build_default_holdings_stack(session, underlying_by_ticker=underlying_map)
+    holdings_df = fetch_all_holdings(yb_tickers, as_of=dt.date.today(), stack=stack)
+    if holdings_df is None or holdings_df.empty:
+        print("[WARN] YieldBOOST holdings fetch returned empty; keeping prior snapshot")
+        return False
+    save_holdings_outputs(holdings_df)
+    save_yieldboost_put_spreads(holdings_df, underlying_by_ticker=underlying_map)
+    print(f"  YieldBOOST holdings refreshed ({len(holdings_df)} rows)")
+    return True
+
+
 def refresh_yieldboost_vrp_only() -> None:
-    """Targeted YieldBOOST sleeve options refresh + VRP/health artifacts."""
+    """Targeted YieldBOOST sleeve + underlying options refresh + VRP/health artifacts."""
     if not OUTPUT_FILE.exists():
         raise FileNotFoundError(
             f"Cannot run --yieldboost-vrp-only because {OUTPUT_FILE} does not exist. Run full build first."
@@ -3747,9 +3839,14 @@ def refresh_yieldboost_vrp_only() -> None:
         load_holdings_latest_dataframe,
         load_sleeve_by_yb_from_screener,
         load_underlying_map_from_screener,
+        load_yieldboost_underlying_symbols_from_spreads,
         pair_put_spreads_from_holdings,
         write_json,
     )
+
+    # Refresh Granite holdings when >2cd stale so ``data_grade`` is not blocked
+    # on ``holdings_as_of`` while sleeve quotes are intraday-fresh.
+    refresh_yieldboost_holdings_slice()
 
     screener_csv = OUTPUT_DIR / "etf_screened_today.csv"
     underlying_map = load_underlying_map_from_screener(screener_csv)
@@ -3773,8 +3870,6 @@ def refresh_yieldboost_vrp_only() -> None:
             write_json(YIELDBOOST_PUT_SPREADS_FILE, spreads_payload)
         write_json(YIELDBOOST_OPTIONS_TARGET_FILE, build_yieldboost_options_target(spreads))
 
-    from yieldboost_holdings import load_yieldboost_underlying_symbols_from_spreads
-
     sleeves = load_yieldboost_sleeve_symbols(front_only=True)
     if not sleeves:
         sleeves = sorted(
@@ -3782,6 +3877,15 @@ def refresh_yieldboost_vrp_only() -> None:
             for s in load_yieldboost_option_symbols()
             if s not in {norm_sym(yb) for yb, _ in YIELDBOOST_BUCKET2_PAIRS}
         )
+    underlyings = load_yieldboost_underlying_symbols_from_spreads(
+        YIELDBOOST_PUT_SPREADS_FILE, front_only=True,
+    )
+    if not underlyings and spreads:
+        underlyings = sorted({
+            norm_sym(s.underlying) for s in spreads
+            if getattr(s, "underlying", None)
+        })
+
     if not sleeves:
         print("[WARN] No YieldBOOST sleeve symbols found; writing VRP from cached spreads only.")
 
@@ -3794,13 +3898,17 @@ def refresh_yieldboost_vrp_only() -> None:
 
     refresh_list: list[str] = []
     seen_refresh: set[str] = set()
-    for sym in sleeves:
+    for sym in sleeves + underlyings:
         ss = norm_sym(sym)
         if ss and ss not in seen_refresh:
             seen_refresh.add(ss)
             refresh_list.append(ss)
     options_cache = prior_cache
     if refresh_list:
+        print(
+            f"  YieldBOOST options refresh: {len(sleeves)} sleeves + "
+            f"{len(underlyings)} underlyings = {len(refresh_list)} symbols"
+        )
         options_cache = build_polygon_options_cache(
             refresh_list,
             yieldboost_targeted=True,
