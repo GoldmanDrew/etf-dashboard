@@ -241,6 +241,93 @@ def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bda
     return out
 
 
+_YF_OHLCV_FIELDS = {"open", "high", "low", "close", "adj close", "volume"}
+
+
+def _yf_column_name(col: object) -> str:
+    return str(col).strip().lower()
+
+
+def _yf_find_column(columns: pd.Index, *candidates: str) -> str | None:
+    wanted = {_yf_column_name(c) for c in candidates}
+    for col in columns:
+        if _yf_column_name(col) in wanted:
+            return str(col)
+    return None
+
+
+def _yf_extract_ticker_subframe(raw: pd.DataFrame, sym: str) -> pd.DataFrame | None:
+    """Return one ticker's OHLCV block from a yfinance download frame."""
+    up = str(sym).strip().upper()
+    if not up:
+        return None
+    if not isinstance(raw.columns, pd.MultiIndex):
+        return raw if not raw.empty else None
+
+    lv0 = raw.columns.get_level_values(0)
+    lv1 = raw.columns.get_level_values(1) if raw.columns.nlevels > 1 else pd.Index([])
+    lv0_by_upper = {str(x).upper(): x for x in lv0}
+    lv1_by_upper = {str(x).upper(): x for x in lv1}
+    price_in_l0 = any(_yf_column_name(x) in _YF_OHLCV_FIELDS for x in lv0)
+
+    try:
+        if price_in_l0 and up in lv1_by_upper:
+            return raw.xs(lv1_by_upper[up], axis=1, level=1)
+        if up in lv0_by_upper:
+            return raw[lv0_by_upper[up]]
+        if sym in lv0:
+            return raw[sym]
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _extract_yf_close_volume_long(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
+    """Pull daily close + volume per ticker from yfinance download into long-form rows."""
+    cols = ["date", "underlying", "close", "volume"]
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=cols)
+    records: list[dict] = []
+
+    def _append_symbol_rows(up: str, sub: pd.DataFrame) -> None:
+        if sub is None or sub.empty:
+            return
+        frame = sub.copy()
+        if isinstance(frame.columns, pd.MultiIndex):
+            frame.columns = frame.columns.get_level_values(0)
+        close_key = _yf_find_column(frame.columns, "close")
+        vol_key = _yf_find_column(frame.columns, "volume")
+        if close_key is None or vol_key is None:
+            return
+        for idx, row in frame[[close_key, vol_key]].iterrows():
+            try:
+                close = float(row[close_key])
+                volume = float(row[vol_key])
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(close) and math.isfinite(volume) and close > 0 and volume > 0):
+                continue
+            d = idx.date() if hasattr(idx, "date") else idx
+            records.append({"date": d, "underlying": up, "close": close, "volume": volume})
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        for sym in tickers:
+            up = str(sym).strip().upper()
+            sub = _yf_extract_ticker_subframe(raw, sym)
+            _append_symbol_rows(up, sub if sub is not None else pd.DataFrame())
+    elif len(tickers) == 1:
+        up = str(tickers[0]).strip().upper()
+        _append_symbol_rows(up, raw)
+
+    if not records:
+        return pd.DataFrame(columns=cols)
+    out = pd.DataFrame.from_records(records)
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return out.dropna(subset=["date", "underlying"]).drop_duplicates(
+        subset=["underlying", "date"], keep="last",
+    )
+
+
 def fetch_underlying_volume_panel(
     underlyings: list[str],
     *,
@@ -279,28 +366,9 @@ def fetch_underlying_volume_panel(
         except Exception as exc:
             LOGGER.warning("yfinance ADV batch failed for %d symbols: %s", len(chunk), exc)
             continue
-        if data is None or data.empty:
-            continue
-
-        if isinstance(data.columns, pd.MultiIndex):
-            for sym in chunk:
-                if sym not in data.columns.get_level_values(0):
-                    continue
-                sub = data[sym].copy().reset_index()
-                if sub.empty:
-                    continue
-                sub = sub.rename(columns={"Date": "date", "Close": "close", "Volume": "volume"})
-                sub["underlying"] = sym
-                sub["date"] = pd.to_datetime(sub["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-                rows.append(sub[["date", "underlying", "close", "volume"]])
-        else:
-            sub = data.copy().reset_index()
-            if sub.empty:
-                continue
-            sub = sub.rename(columns={"Date": "date", "Close": "close", "Volume": "volume"})
-            sub["underlying"] = chunk[0]
-            sub["date"] = pd.to_datetime(sub["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-            rows.append(sub[["date", "underlying", "close", "volume"]])
+        part = _extract_yf_close_volume_long(data, chunk)
+        if not part.empty:
+            rows.append(part)
 
     if not rows:
         return pd.DataFrame(columns=["date", "underlying", "close", "volume", "dollar_volume"])
@@ -338,7 +406,7 @@ def load_or_refresh_underlying_volume_panel(
         except Exception:
             cache_max = pd.NaT
         if pd.notna(cache_max):
-            now = pd.Timestamp.utcnow().tz_localize(None)
+            now = pd.Timestamp.now("UTC").tz_localize(None)
             cache_is_fresh = (now - cache_max).total_seconds() / 3600.0 <= float(fresh_hours)
 
     if skip_fetch and not cached.empty:
