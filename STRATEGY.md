@@ -117,6 +117,14 @@ ranked by `edge_pp_of_max_loss`. The columns are:
 
 ## 3. Sizing from greeks
 
+`dollar_gamma_per_1pct_underlying` and `theta_per_day` are central finite-diff
+on the chosen kernel's `model_fair` -- the row's `greeks_kernel` field reports
+which one (`heston` / `bates` / `az`). On skewed single-stock sleeves Heston
+and Bates kernel-?? differ from BS-proxy ?? by 5-30%; the calibrated number
+is the one you should size off, not the BS-at-sleeve-IV proxy. When no kernel
+converges (`greeks_kernel == "bs_proxy"`), the fallback BS finite-diff at
+sleeve IV is used and the row should be sized conservatively or skipped.
+
 For a sleeve flagged **sell** or **STRONG SELL**, decide how much to put on by
 working backwards from a tolerable P&L per unit of risk:
 

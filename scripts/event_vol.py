@@ -820,10 +820,11 @@ def compute_vrp_row_extras(
     else:
         bs_debug["iv_minus_breakeven_sigma"] = None
 
-    # 6 & 7. BS greeks of the SHORT put spread. These remain the source of the
-    # canonical ``dollar_gamma_per_1pct_underlying`` and ``theta_per_day`` fields
-    # below (flagged ``greeks_kernel="bs_proxy"``) until kernel-derivative
-    # greeks ship in the follow-up PR.
+    # 6 & 7. BS greeks of the SHORT put spread. These are the FALLBACK source
+    # of the canonical ``dollar_gamma_per_1pct_underlying`` / ``theta_per_day``
+    # fields when no calibrated kernel converged (flagged
+    # ``greeks_kernel="bs_proxy"``). When Heston / Bates / AZ produced kernel-
+    # derivative greeks via ``compute_letf_model_extras``, those win below.
     if s and kl and ks and iv_for_bs:
         gks = bs_put_spread_greeks(s, kl, ks, h, iv_for_bs, risk_free=risk_free)
         bs_debug["delta_spread"] = round(gks["delta"], 6)
@@ -957,14 +958,30 @@ def compute_vrp_row_extras(
     # these short, kernel-agnostic names; BS-only outputs live under
     # ``out["debug"]["bs"]`` for diagnostics only.
     #
-    # Greeks v1: sourced from BS finite-diff at sleeve IV (flagged
-    # ``greeks_kernel="bs_proxy"``). For AZ that's the AZ-implied sleeve IV;
-    # for Heston/Bates it's the chain IV (per-strike-effective-vol from the
-    # calibrated surface). Kernel-derivative greeks ship in a follow-up.
+    # Greeks selection ladder (kernel-first):
+    #   1. Kernel-derivative greeks from ``compute_letf_model_extras``
+    #      (flagged ``"heston" | "bates" | "az"``) — central finite-diff on
+    #      the chosen kernel's ``model_fair``.
+    #   2. BS finite-diff at sleeve IV (flagged ``"bs_proxy"``) — fallback when
+    #      no kernel converged.
+    #   3. ``None`` / ``None`` when both are unavailable.
     bs_only = out.get("debug", {}).get("bs", {}) if isinstance(out.get("debug"), dict) else {}
-    out["dollar_gamma_per_1pct_underlying"] = bs_only.get("dollar_gamma_per_1pct_underlying")
-    out["theta_per_day"] = bs_only.get("theta_spread_per_day")
-    out["greeks_kernel"] = "bs_proxy" if bs_only.get("theta_spread_per_day") is not None else None
+    kernel_gamma = out.pop("dollar_gamma_per_1pct_underlying_kernel", None)
+    kernel_theta = out.pop("theta_per_day_kernel", None)
+    kernel_label = out.pop("greeks_kernel_chosen", None)
+    if (kernel_label is not None and kernel_gamma is not None
+            and kernel_theta is not None):
+        out["dollar_gamma_per_1pct_underlying"] = kernel_gamma
+        out["theta_per_day"] = kernel_theta
+        out["greeks_kernel"] = kernel_label
+    elif bs_only.get("theta_spread_per_day") is not None:
+        out["dollar_gamma_per_1pct_underlying"] = bs_only.get("dollar_gamma_per_1pct_underlying")
+        out["theta_per_day"] = bs_only.get("theta_spread_per_day")
+        out["greeks_kernel"] = "bs_proxy"
+    else:
+        out["dollar_gamma_per_1pct_underlying"] = None
+        out["theta_per_day"] = None
+        out["greeks_kernel"] = None
 
     # Carry in $ per OCC contract (one spread structure = 100 shares). Pulls
     # from the chosen kernel's ``model_fair`` if any non-BS kernel succeeded.

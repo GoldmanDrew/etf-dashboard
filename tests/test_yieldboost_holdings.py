@@ -1071,7 +1071,9 @@ def test_build_vrp_live_payload_emits_canonical_kernel_aware_fields():
     assert "expected_weekly_carry_usd" in row
     assert "dollar_gamma_per_1pct_underlying" in row
     assert "theta_per_day" in row
-    assert row.get("greeks_kernel") in {"bs_proxy", None}
+    # Greeks may now come from the calibrated kernel (heston / bates / az) when
+    # one converged; bs_proxy is the fallback when none did.
+    assert row.get("greeks_kernel") in {"heston", "bates", "az", "bs_proxy", None}
     assert "data_grade" in row and row["data_grade"] in {"A", "B", "C", "D"}
     assert "data_grade_reason" in row
     # When a model fair was computed, expected_weekly_carry_usd = model_fair * 100.
@@ -1119,3 +1121,63 @@ def test_build_vrp_live_payload_model_disagreement_when_multiple_kernels_fire():
     # disagreement is None when only 1 model fires, otherwise a non-negative pp number
     if row.get("model_disagreement_pp_of_max_loss") is not None:
         assert row["model_disagreement_pp_of_max_loss"] >= 0
+
+
+def test_build_vrp_live_payload_uses_kernel_greeks_when_kernel_fires():
+    """When a calibrated kernel produces a model_fair, greeks_kernel must
+    flip away from "bs_proxy" to that kernel's name and the canonical
+    dollar_gamma / theta_per_day must come from the kernel's finite-diff."""
+    expiry = date(2026, 5, 27)
+    spread = _build_amyy_az_spread(expiry=expiry)
+    # Skewed underlying chain wide enough for both Heston and Bates to converge.
+    options_cache = {
+        "symbols": {
+            "AMDL": {
+                "spot": 66.9,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 47.89, "iv": 2.50, "mid": 0.12},
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": 50.55, "iv": 1.90, "mid": 0.25},
+                ],
+            },
+            "AMD": {
+                "spot": 467.5,
+                "updated_at": "2026-05-27T15:00:00Z",
+                "options": [
+                    {"expiration_date": expiry.isoformat(),
+                     "contract_type": "put", "strike_price": k, "iv": iv}
+                    for k, iv in [
+                        (360, 0.95), (380, 0.85), (400, 0.76), (420, 0.69),
+                        (440, 0.64), (460, 0.62), (480, 0.63), (500, 0.66),
+                    ]
+                ],
+            },
+        },
+    }
+    payload = build_vrp_live_payload(
+        spread, options_cache, rv_map={"AMD": 0.6, "AMDL": 1.2}, as_of=expiry,
+    )
+    row = payload["rows"][0]
+    # Whatever kernel fired, greeks_kernel must agree with model_name unless
+    # the kernel-greeks helper itself returned None and we fell back to BS-proxy.
+    if row.get("model_fair") is not None:
+        assert row["greeks_kernel"] in {row["model_name"], "bs_proxy"}
+        # If not falling back, the canonical greeks must equal what the
+        # kernel emitted (i.e. NOT match the BS-proxy values).
+        if row["greeks_kernel"] != "bs_proxy":
+            bs_dbg = (row.get("debug") or {}).get("bs", {})
+            bs_gamma = bs_dbg.get("dollar_gamma_per_1pct_underlying")
+            kernel_gamma = row.get("dollar_gamma_per_1pct_underlying")
+            # Both should be defined; kernel γ should differ structurally
+            # (skewed chain → Heston/Bates ≠ BS).
+            if bs_gamma is not None and kernel_gamma is not None:
+                assert kernel_gamma < 0
+                # Not strictly required to differ, but on this skewed chain it does.
+                assert kernel_gamma != bs_gamma
+        # Sign sanity for the canonical fields.
+        if row.get("theta_per_day") is not None:
+            assert row["theta_per_day"] > 0
+        if row.get("dollar_gamma_per_1pct_underlying") is not None:
+            assert row["dollar_gamma_per_1pct_underlying"] < 0

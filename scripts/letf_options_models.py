@@ -806,6 +806,230 @@ def bates_put_spread_fair(
     return float(short_px - long_px)
 
 
+# ── Part 3b: Kernel-derivative finite-difference greeks ─────────────────────
+#
+# The dashboard previously published BS finite-diff greeks at sleeve IV under
+# ``greeks_kernel="bs_proxy"``. For Heston / Bates that ignores the calibrated
+# skew and (for single-stock sleeves) the jump premium, so the seller's $-γ is
+# systematically understated on rows with the most edge. The helpers below
+# central-difference the calibrated kernel's ``model_fair`` directly. All signs
+# follow the seller-of-the-short-spread convention used by ``event_vol``:
+#
+#   delta_seller     = −∂V/∂S      (V = short_put − long_put = model_fair)
+#   gamma_seller     = −∂²V/∂S²
+#   theta_seller/day = +∂V/∂t      (positive = seller collects decay)
+#   vega_seller(v0)  = −∂V/∂v0     (short vol = vega negative)
+#
+# ``dollar_gamma_per_1pct_*`` is quoted as ``γ · S² · 1e-4`` (no ½ factor) to
+# match the BS-proxy convention already wired into the UI.
+
+def _bs_put_spread_seller_greeks(
+    *, spot: float, strike_long: float, strike_short: float, t_years: float,
+    sigma: float, risk_free: float, div_yield: float = 0.0, beta: float = 2.0,
+) -> dict[str, float] | None:
+    """Closed-form BS greeks for the seller of a short put spread.
+
+    Used for the AZ branch (``model_fair`` is BS at AZ-imputed sleeve IV by
+    construction, so the kernel greeks reduce to BS finite-diff at that σ).
+    """
+    if (spot <= 0 or strike_long <= 0 or strike_short <= 0
+            or t_years <= 0 or sigma <= 0 or strike_long >= strike_short):
+        return None
+    sqrt_t = math.sqrt(t_years)
+    vol_sqrt_t = sigma * sqrt_t
+
+    def _put_greeks(strike: float) -> dict[str, float]:
+        d1 = (math.log(spot / strike)
+              + (risk_free - div_yield + 0.5 * sigma * sigma) * t_years) / vol_sqrt_t
+        d2 = d1 - vol_sqrt_t
+        pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+        delta_put = math.exp(-div_yield * t_years) * (_norm_cdf(d1) - 1.0)
+        gamma_put = (math.exp(-div_yield * t_years) * pdf_d1) / (spot * vol_sqrt_t)
+        theta_put = (
+            -(spot * math.exp(-div_yield * t_years) * pdf_d1 * sigma) / (2.0 * sqrt_t)
+            + risk_free * strike * math.exp(-risk_free * t_years) * _norm_cdf(-d2)
+            - div_yield * spot * math.exp(-div_yield * t_years) * _norm_cdf(-d1)
+        )
+        vega_put = spot * math.exp(-div_yield * t_years) * pdf_d1 * sqrt_t
+        return {"delta": delta_put, "gamma": gamma_put,
+                "theta_per_year": theta_put, "vega": vega_put}
+
+    short = _put_greeks(strike_short)
+    long_ = _put_greeks(strike_long)
+    delta = -short["delta"] + long_["delta"]
+    gamma = -short["gamma"] + long_["gamma"]
+    theta_per_year = -short["theta_per_year"] + long_["theta_per_year"]
+    vega = -short["vega"] + long_["vega"]
+    s2 = spot * spot
+    return {
+        "delta": float(delta),
+        "gamma": float(gamma),
+        "vega": float(vega),
+        "theta_per_day": float(theta_per_year / TRADING_DAYS),
+        "dollar_gamma_per_1pct_sleeve": float(gamma * s2 * 1e-4),
+        "dollar_gamma_per_1pct_underlying": float(gamma * s2 * 1e-4 * beta * beta),
+    }
+
+
+def _finite_diff_short_put_spread_greeks(
+    *,
+    pricer,                # callable(spot, strike, t_years, params) -> float | None
+    bump_v0,               # callable(params, delta_v0) -> params | None
+    spot: float,
+    strike_long: float,
+    strike_short: float,
+    t_years: float,
+    params,
+    beta: float = 2.0,
+    bump_spot_rel: float = 5e-3,
+    bump_v0_rel: float = 2e-2,
+    bump_t_days: float = 1.0,
+) -> dict[str, float] | None:
+    """Central-difference Δ/Γ + forward-difference θ + central-difference vega(v0).
+
+    Returns ``None`` if any required bump re-price is undefined. Individual
+    greeks (e.g. theta near 0-DTE, vega when v0 is at the floor) may be ``None``
+    inside the returned dict while others are populated.
+    """
+    if (spot <= 0 or strike_long <= 0 or strike_short <= 0
+            or t_years <= 0 or strike_long >= strike_short):
+        return None
+    if not params.is_valid():
+        return None
+
+    def _spread(s: float, T: float, p) -> float | None:
+        if s <= 0 or T <= 0 or p is None or not p.is_valid():
+            return None
+        try:
+            long_px = pricer(s, strike_long, T, p)
+            short_px = pricer(s, strike_short, T, p)
+        except (FloatingPointError, OverflowError, ValueError):
+            return None
+        if long_px is None or short_px is None:
+            return None
+        if not (math.isfinite(long_px) and math.isfinite(short_px)):
+            return None
+        return float(short_px - long_px)
+
+    h = max(spot * bump_spot_rel, 1e-6)
+    v_at = _spread(spot, t_years, params)
+    v_up = _spread(spot + h, t_years, params)
+    v_dn = _spread(spot - h, t_years, params)
+    if v_at is None or v_up is None or v_dn is None:
+        return None
+    delta = -(v_up - v_dn) / (2.0 * h)
+    gamma = -(v_up - 2.0 * v_at + v_dn) / (h * h)
+
+    dt_year = bump_t_days / TRADING_DAYS
+    theta_per_day: float | None = None
+    if t_years - dt_year > 0:
+        v_t_minus = _spread(spot, t_years - dt_year, params)
+        if v_t_minus is not None:
+            theta_per_day = float(v_at - v_t_minus)
+
+    vega_v0: float | None = None
+    v0_h = bump_v0_rel
+    p_up = bump_v0(params, +v0_h)
+    p_dn = bump_v0(params, -v0_h)
+    if p_up is not None and p_dn is not None:
+        v_v_up = _spread(spot, t_years, p_up)
+        v_v_dn = _spread(spot, t_years, p_dn)
+        # Recover the actual achieved v0 deltas (the floor may have clamped one side).
+        if v_v_up is not None and v_v_dn is not None:
+            v0_up = p_up.heston.v0 if hasattr(p_up, "heston") else p_up.v0
+            v0_dn = p_dn.heston.v0 if hasattr(p_dn, "heston") else p_dn.v0
+            denom = v0_up - v0_dn
+            if denom > _EPS:
+                vega_v0 = -(v_v_up - v_v_dn) / denom
+
+    s2 = spot * spot
+    return {
+        "delta": float(delta),
+        "gamma": float(gamma),
+        "theta_per_day": theta_per_day,
+        "vega_v0": vega_v0,
+        "dollar_gamma_per_1pct_sleeve": float(gamma * s2 * 1e-4),
+        "dollar_gamma_per_1pct_underlying": float(gamma * s2 * 1e-4 * beta * beta),
+    }
+
+
+def _bump_heston_v0(p: HestonParams, delta_v0: float) -> HestonParams | None:
+    new_v0 = p.v0 + delta_v0
+    if new_v0 <= 0:
+        new_v0 = max(p.v0 * 0.05, _EPS)
+    cand = HestonParams(kappa=p.kappa, theta=p.theta, gamma=p.gamma, rho=p.rho, v0=new_v0)
+    return cand if cand.is_valid() else None
+
+
+def _bump_bates_v0(p: BatesParams, delta_v0: float) -> BatesParams | None:
+    h_new = _bump_heston_v0(p.heston, delta_v0)
+    if h_new is None:
+        return None
+    cand = BatesParams(
+        heston=h_new, lambda_jump=p.lambda_jump,
+        mu_jump=p.mu_jump, sigma_jump=p.sigma_jump,
+    )
+    return cand if cand.is_valid() else None
+
+
+def heston_put_spread_greeks(
+    *, spot_letf: float, strike_long: float, strike_short: float, t_years: float,
+    risk_free: float, div_yield: float, params: HestonParams,
+    beta: float = 2.0,
+    bump_spot_rel: float = 5e-3,
+    bump_v0_rel: float = 2e-2,
+    bump_t_days: float = 1.0,
+    n_terms: int = _COS_N, truncation_range: float = _COS_L,
+) -> dict[str, float] | None:
+    """Finite-diff greeks for the seller of a short Heston put spread.
+
+    See module-level docstring for sign conventions. Returns ``None`` if the
+    central-difference at spot fails (any of three re-prices was undefined);
+    individual entries (``theta_per_day``, ``vega_v0``) may be ``None`` while
+    the spot-derivatives are populated.
+    """
+    def _pricer(s: float, k: float, T: float, p: HestonParams) -> float:
+        return cos_put_price_heston(
+            spot=s, strike=k, t_years=T,
+            risk_free=risk_free, div_yield=div_yield, params=p,
+            n_terms=n_terms, truncation_range=truncation_range,
+        )
+
+    return _finite_diff_short_put_spread_greeks(
+        pricer=_pricer, bump_v0=_bump_heston_v0,
+        spot=spot_letf, strike_long=strike_long, strike_short=strike_short,
+        t_years=t_years, params=params, beta=beta,
+        bump_spot_rel=bump_spot_rel, bump_v0_rel=bump_v0_rel,
+        bump_t_days=bump_t_days,
+    )
+
+
+def bates_put_spread_greeks(
+    *, spot_letf: float, strike_long: float, strike_short: float, t_years: float,
+    risk_free: float, div_yield: float, params: BatesParams,
+    beta: float = 2.0,
+    bump_spot_rel: float = 5e-3,
+    bump_v0_rel: float = 2e-2,
+    bump_t_days: float = 1.0,
+    n_terms: int = _COS_N, truncation_range: float = _COS_L,
+) -> dict[str, float] | None:
+    """Finite-diff greeks for the seller of a short Bates put spread."""
+    def _pricer(s: float, k: float, T: float, p: BatesParams) -> float:
+        return cos_put_price_bates(
+            spot=s, strike=k, t_years=T,
+            risk_free=risk_free, div_yield=div_yield, params=p,
+            n_terms=n_terms, truncation_range=truncation_range,
+        )
+
+    return _finite_diff_short_put_spread_greeks(
+        pricer=_pricer, bump_v0=_bump_bates_v0,
+        spot=spot_letf, strike_long=strike_long, strike_short=strike_short,
+        t_years=t_years, params=params, beta=beta,
+        bump_spot_rel=bump_spot_rel, bump_v0_rel=bump_v0_rel,
+        bump_t_days=bump_t_days,
+    )
+
+
 # ?? Part 4: Unified per-row extras dispatcher ???????????????????????????????
 
 def compute_letf_model_extras(
@@ -1091,6 +1315,60 @@ def compute_letf_model_extras(
         out["model_disagreement_pp_of_max_loss"] = round(100.0 * spread / max_loss, 4)
     else:
         out["model_disagreement_pp_of_max_loss"] = None
+
+    # ── Kernel-derivative greeks (replaces BS-proxy for the chosen kernel) ──
+    # Emitted under ``*_kernel`` keys + a ``greeks_kernel_chosen`` label so the
+    # caller (``event_vol.compute_vrp_row_extras``) can prefer them in the
+    # canonical ``dollar_gamma_per_1pct_underlying`` / ``theta_per_day`` /
+    # ``greeks_kernel`` fields, and fall back to BS-proxy when no kernel fired.
+    kernel_greeks: dict | None = None
+    kernel_greeks_label: str | None = None
+    if (best_model == "bates" and bates_sleeve is not None
+            and spot_letf and strike_long and strike_short and t_years > 0):
+        kernel_greeks = bates_put_spread_greeks(
+            spot_letf=spot_letf, strike_long=strike_long, strike_short=strike_short,
+            t_years=t_years, risk_free=risk_free, div_yield=expense_rate_letf,
+            params=bates_sleeve, beta=beta,
+        )
+        if kernel_greeks is not None:
+            kernel_greeks_label = "bates"
+    elif (best_model == "heston" and heston_sleeve is not None
+            and spot_letf and strike_long and strike_short and t_years > 0):
+        kernel_greeks = heston_put_spread_greeks(
+            spot_letf=spot_letf, strike_long=strike_long, strike_short=strike_short,
+            t_years=t_years, risk_free=risk_free, div_yield=expense_rate_letf,
+            params=heston_sleeve, beta=beta,
+        )
+        if kernel_greeks is not None:
+            kernel_greeks_label = "heston"
+    elif (best_model == "az" and az_filled_iv and az_filled_iv > 0
+            and spot_letf and strike_long and strike_short and t_years > 0):
+        # AZ ``model_fair`` IS BS at AZ-imputed sleeve IV by construction, so the
+        # kernel greeks reduce to a closed-form BS finite-diff at that σ.
+        kernel_greeks = _bs_put_spread_seller_greeks(
+            spot=spot_letf, strike_long=strike_long, strike_short=strike_short,
+            t_years=t_years, sigma=az_filled_iv,
+            risk_free=risk_free, div_yield=expense_rate_letf, beta=beta,
+        )
+        if kernel_greeks is not None:
+            kernel_greeks_label = "az"
+
+    if kernel_greeks is not None and kernel_greeks_label is not None:
+        out["dollar_gamma_per_1pct_underlying_kernel"] = (
+            round(kernel_greeks["dollar_gamma_per_1pct_underlying"], 6)
+            if kernel_greeks.get("dollar_gamma_per_1pct_underlying") is not None
+            else None
+        )
+        out["theta_per_day_kernel"] = (
+            round(kernel_greeks["theta_per_day"], 6)
+            if kernel_greeks.get("theta_per_day") is not None
+            else None
+        )
+        out["greeks_kernel_chosen"] = kernel_greeks_label
+    else:
+        out["dollar_gamma_per_1pct_underlying_kernel"] = None
+        out["theta_per_day_kernel"] = None
+        out["greeks_kernel_chosen"] = None
 
     return out
 

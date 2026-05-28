@@ -7997,8 +7997,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   <div className="scenario-title" style={{ fontSize: 13 }}>Greeks (short spread, per structure)</div>
                   <div className="scenario-sub" style={{ marginBottom: 6 }}>
                     Sizing inputs for the short pair. <em>{vrpDisplayRow.greeks_kernel === 'bs_proxy'
-                      ? 'BS finite-diff at sleeve IV (kernel-derivative greeks pending).'
-                      : 'Kernel finite-diff on model_fair.'}</em>
+                      ? 'BS finite-diff at sleeve IV (fallback — no kernel converged).'
+                      : `Finite-diff on ${String(vrpDisplayRow.greeks_kernel || 'kernel').toUpperCase()} model_fair.`}</em>
                   </div>
                   <table className="scenario-table">
                     <tbody>
@@ -8872,7 +8872,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
               <Th k="spread_mid_market" label="Mid" hint="Current spread mid-market price (short K_short − long K_long)" />
               <Th k="iv_full_proxy" label="IV" hint="Sleeve IV — average of leg IVs (chain input to the model, not a fair value)" />
               <Th k="dollar_gamma_per_1pct_underlying" label="$-γ /1%U" hint="$ P&L per 1% underlying gap-down (short = negative). Sizes the position to a tolerable tail loss." />
-              <Th k="theta_per_day" label="θ/day" hint="Theta per calendar day (positive = collecting carry). Greeks are BS-proxy at sleeve IV until kernel-derivative greeks ship." />
+              <Th k="theta_per_day" label="θ/day" hint="Theta per calendar day (positive = collecting carry). Greeks are central finite-diff on the chosen kernel's model_fair (heston/bates/az); BS-proxy at sleeve IV is the fallback when no kernel converged." />
               <Th k="expected_weekly_carry_usd" label="Carry/wk" hint="model_fair × 100 = $ per OCC contract of expected weekly carry" />
               <Th k="days_to_exp" label="DTE" hint="Days to held expiry" />
               <Th k="days_to_earnings" label="Event" hint="Days to next known earnings. Red badge = INSIDE held window — Bates is the only kernel that prices the jump. Hover for implied/historical move + richness." />
@@ -8990,8 +8990,8 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null }) {
                     color: r.dollar_gamma_per_1pct_underlying != null && r.dollar_gamma_per_1pct_underlying < 0
                       ? '#ef4444' : undefined,
                   }} title={r.greeks_kernel === 'bs_proxy'
-                    ? 'Greeks via BS finite-diff at sleeve IV (kernel-derivative greeks pending).'
-                    : 'Greeks via kernel finite-diff on model_fair.'}>
+                    ? 'Greeks via BS finite-diff at sleeve IV (fallback — no kernel converged).'
+                    : `Greeks via finite-diff on ${String(r.greeks_kernel || 'kernel').toUpperCase()} model_fair.`}>
                     {r.dollar_gamma_per_1pct_underlying != null ? Number(r.dollar_gamma_per_1pct_underlying).toFixed(3) : '—'}
                   </td>
                   <td style={{
