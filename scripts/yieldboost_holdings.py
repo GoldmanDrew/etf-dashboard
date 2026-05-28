@@ -1428,6 +1428,107 @@ def resolve_iv_source(long_q: dict[str, Any], short_q: dict[str, Any]) -> str:
     return "holdings_nearest_strike"
 
 
+def data_grade(
+    *,
+    options_as_of: str | None,
+    underlying_options_as_of: str | None,
+    holdings_as_of: str | None,
+    iv_source: str | None,
+    iv_expiry_skew_days: float | int | None,
+    now_utc: datetime | None = None,
+) -> tuple[str, str]:
+    """Return (grade, reason) for a single VRP row.
+
+    Grades collapse the freshness × IV-source × skew × holdings-age matrix
+    into a single PM-grade letter that drives sizing rules in
+    ``income_schedule.py`` and the UI signal pill on both the YB-Edge page
+    and the per-ETF Vol/VRP tab. Anything worse than B should not be
+    sized; D rows are display-only.
+
+    Bands:
+      * A — tradeable at full size: holdings ≤ 1cd, worst quote ≤ 30 min,
+        skew ≤ 3d, IV source is exact.
+      * B — half size, sleeve only: holdings ≤ 2cd, worst quote ≤ 4h,
+        skew ≤ 7d, IV source is exact or nearest-expiry.
+      * C — monitor / pair with underlying hedge only: AZ-imputed source,
+        or skew 8–21d, or worst quote 4–24h. The signal still has
+        information; the magnitude is degraded.
+      * D — display only: holdings > 2cd, worst quote > 24h, skew > 21d,
+        or IV source is ``holdings_missing_chain``. SELL recommendations
+        must be hard-blocked.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    reasons: list[str] = []
+    blockers: list[str] = []
+
+    def _age_minutes(ts: str | None) -> int | None:
+        if not ts:
+            return None
+        try:
+            t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            return max(0, int((now - t).total_seconds() / 60))
+        except (ValueError, TypeError):
+            return None
+
+    def _holdings_age_cd(d: str | None) -> int | None:
+        if not d:
+            return None
+        try:
+            hd = date.fromisoformat(str(d).split("T")[0])
+            return max(0, (now.date() - hd).days)
+        except (ValueError, TypeError):
+            return None
+
+    sleeve_age = _age_minutes(options_as_of)
+    und_age = _age_minutes(underlying_options_as_of)
+    worst_quote = max(v for v in (sleeve_age, und_age, 0) if v is not None)
+    hold_age = _holdings_age_cd(holdings_as_of)
+    skew = float(iv_expiry_skew_days) if iv_expiry_skew_days is not None else 0.0
+    src = str(iv_source or "")
+
+    # Hard-block conditions → D
+    if hold_age is not None and hold_age > 2:
+        blockers.append(f"holdings {hold_age}cd > 2")
+    if worst_quote > 24 * 60:
+        blockers.append(f"quote {worst_quote // 60}h > 24h")
+    if src == "holdings_missing_chain":
+        blockers.append("missing chain")
+    if skew > 21:
+        blockers.append(f"skew {int(skew)}d > 21")
+    if blockers:
+        return ("D", "; ".join(blockers))
+
+    # Degraded → C
+    degraded: list[str] = []
+    if src == "az_imputed_from_underlying":
+        degraded.append("AZ-imputed IV")
+    if skew > 7:
+        degraded.append(f"skew {int(skew)}d")
+    if worst_quote > 4 * 60:
+        degraded.append(f"quote {worst_quote // 60}h")
+    if hold_age is not None and hold_age == 2:
+        degraded.append("holdings 2cd")
+    if degraded:
+        return ("C", "; ".join(degraded))
+
+    # Tier B (size half) — exact-or-nearest, fresh enough
+    if (
+        worst_quote > 30
+        or (hold_age is not None and hold_age >= 1)
+        or skew > 3
+        or src not in ("holdings_exact", "holdings_nearest_expiry")
+    ):
+        reasons.append(
+            f"quote {worst_quote}m"
+            + (f", holdings {hold_age}cd" if hold_age else "")
+            + (f", skew {int(skew)}d" if skew else "")
+            + (f", src={src}" if src else "")
+        )
+        return ("B", "; ".join(reasons) or "clean")
+
+    return ("A", "exact, fresh, ≤3d skew, holdings 0cd")
+
+
 def build_vrp_live_payload(
     spreads: Iterable[PutSpreadLeg],
     options_cache: dict,
@@ -1665,6 +1766,16 @@ def build_vrp_live_payload(
             if row.get("iv_source") in ("holdings_missing_chain", "holdings_missing_quote"):
                 if extras.get("az_implied_sleeve_iv") is not None:
                     row["iv_source"] = "az_imputed_from_underlying"
+        # ── Canonical data_grade stamp ─────────────────────────────────────
+        grade, grade_reason = data_grade(
+            options_as_of=row.get("options_as_of"),
+            underlying_options_as_of=row.get("underlying_options_as_of"),
+            holdings_as_of=row.get("holdings_as_of"),
+            iv_source=row.get("iv_source"),
+            iv_expiry_skew_days=row.get("iv_expiry_skew_days"),
+        )
+        row["data_grade"] = grade
+        row["data_grade_reason"] = grade_reason
         rows.append(row)
     return {
         "build_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),

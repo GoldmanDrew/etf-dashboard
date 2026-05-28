@@ -150,6 +150,15 @@ Steps 4–7 are the "etf-dashboard sweep". You will do this often. There is a re
 
 The **critical invariant**: `data/dashboard_data.json` is the only file the SPA needs to render the main grid. Everything else is optional context fetched on-demand by individual panels.
 
+A second invariant for YieldBOOST: `data/vrp_live.json` is the BS-free single-row contract between the server pricing kernel (`scripts/letf_options_models.compute_letf_model_extras` and `scripts/event_vol.compute_vrp_row_extras`) and the UI. Each row carries:
+
+- **Quality:** `data_grade` (A/B/C/D) + `data_grade_reason`
+- **Pricing:** `model_name` (`bates`/`heston`/`az`), `model_fair`, `edge_pp_of_max_loss`, `expected_weekly_carry_usd`, `model_disagreement_pp_of_max_loss`
+- **Greeks:** `dollar_gamma_per_1pct_underlying`, `theta_per_day`, `greeks_kernel`
+- **Diagnostics:** BS-only outputs sit under `row["debug"]["bs"]` — never read these from the UI
+
+The UI (both the YB-Edge ranking page and the per-ETF Vol/VRP tab) consumes only the canonical fields above. Black-Scholes is not used as a pricing kernel for LETF put-spreads.
+
 ---
 
 ## 4. Decay models — the math you need to know
@@ -1029,27 +1038,56 @@ The UI falls back to `yieldboost_put_spreads_latest.json` when `vrp_live.json` i
 event-decomposition fields (`iv_full_proxy`, `iv_base_proxy`, …). They are
 *best-effort*: any input missing flows through as `null` rather than erroring.
 
+**Canonical (kernel-agnostic, BS-free) fields — what the UI consumes:**
+
+| Field | Meaning |
+|---|---|
+| `data_grade` | A / B / C / D server-side PM-grade quality letter from `yieldboost_holdings.data_grade()`. Collapses sleeve quote age × underlying quote age × holdings age × IV source × expiry skew. **A** = full size, **B** = half size, **C** = monitor only, **D** = blocked. |
+| `data_grade_reason` | Human-readable string explaining why a row earned its grade ("quote 120m; skew 14d"). |
+| `model_name` | `bates` › `heston` › `az` — which calibrated kernel produced this row's `model_fair`. `null` if no kernel converged. |
+| `model_fair` | Fair value of the short spread in sleeve currency from the chosen kernel. NOT Black-Scholes. |
+| `model_fair_minus_mid` | `spread_mid_market − model_fair` in sleeve currency. Positive = market overpays vs model. |
+| `edge_pp_of_max_loss` | `(spread_mid_market − model_fair) / (K_short − K_long) · 100`. **Primary headline signal.** Positive ⇒ SELL. |
+| `model_disagreement_pp_of_max_loss` | Max − min model fair across calibrated kernels, in % of max-loss. >20pp = model uncertainty. |
+| `expected_weekly_carry_usd` | `model_fair · 100` = $ carry per OCC contract per week. |
+| `dollar_gamma_per_1pct_underlying` | $ P&L per 1% adverse move in the underlying (short spread = negative). Sizing input. |
+| `theta_per_day` | Theta per calendar day. Positive = collecting decay. |
+| `greeks_kernel` | `"bs_proxy"` until kernel-derivative greeks ship. Tells you whether the greeks are finite-diff on BS at sleeve IV (v1) or on the chosen kernel's `model_fair` (target). |
+
+**Supporting (kernel-specific & event) fields:**
+
 | Field | Meaning |
 |---|---|
 | `iv_underlying_implied` | Sleeve IV inverted to underlying space via β=2 (`σ_sleeve / 2`). The like-for-like vol to compare to `rv_30d_underlying`. |
 | `iv_implied_weekly_move_2x_pct` | `σ_sleeve · √(5/252) · 100`. The implied 1σ one-week move on the **sleeve** at current IV. |
 | `iv_implied_weekly_move_underlying_pct` | Same but on the **underlying** (1× space). |
-| `bs_put_spread_fair_diffusion` | BS fair value (short K_short − long K_long) at the chosen σ. Diffusion only — no event-jump component. |
-| `bs_put_spread_sigma_source` | Which σ fed the BS fair value: `iv_full_sleeve` › `iv_base_sleeve` › `rv_2x_full` › `rv_2x_base`. |
-| `expected_weekly_loss_pct_of_spot` | `bs_put_spread_fair_diffusion / spot_2x · 100`. Headline "how much NAV does this spread bleed per week at the current σ". |
-| `spread_breakeven_sigma_annual` | Annualized σ that makes `BS_fair(σ) == spread_mid_market`. The IV at which the structure is "fair" — if `iv_full_sleeve > breakeven_sigma`, the market is paying you more than expected loss. |
-| `iv_minus_breakeven_sigma` | `iv_full_sleeve − breakeven_sigma`. Net short-vol edge in σ-space (positive = sell). |
-| `bs_delta_spread`, `bs_gamma_spread`, `bs_vega_spread`, `bs_theta_spread_per_day` | Greeks of the **short** put-spread per 1 structure (combine with sizing on the consumer side). Theta typically positive (we collect decay); gamma typically negative (short convexity). |
-| `bs_dollar_gamma_per_1pct_sleeve` | `γ · S² · 0.0001` — dollar P&L acceleration per 1% sleeve move. |
-| `bs_dollar_gamma_per_1pct_underlying` | Above × 4 (variance-of-leverage scaling for x=2 sleeve). |
+| `az_put_spread_fair`, `heston_put_spread_fair`, `bates_put_spread_fair` | Per-kernel fair values. Used to populate `model_fair` based on priority and for disagreement diagnostics. |
+| `az_cone_residual_iv` | Sleeve IV minus AZ-implied sleeve IV (`|β| · σ_underlying` at mapped strike). Cross-surface arbitrage signal: positive = sleeve trades rich vs underlying. |
+| `az_mapped_strike_long_underlying`, `az_mapped_strike_short_underlying` | Underlying-equivalent strikes after AZ moneyness rescale. |
+| `az_implied_sleeve_iv` | `|β| · σ_underlying_at_mapped_K` — AZ-imputed sleeve IV used when the sleeve chain is missing. Triggers `iv_source = "az_imputed_from_underlying"`. |
+| `heston_sleeve_params`, `bates_sleeve_params` | AHJ-propagated Heston / Bates parameter dicts for the 2× sleeve. |
 | `sleeve_diffusion_drag_annual` | `σ_underlying²` — the simple Itô gross decay for x=2 daily-rebalanced. |
 | `inverse_sleeve_drag_annual_x_minus2` | `3 σ_underlying²` — equivalent drag for the Bucket-4 short pair (`x = −2`). |
 | `event_implied_move_pct_underlying` | Implied 1σ event-day move on the **underlying** scale (from the variance split between `iv_full_proxy` and `iv_base_proxy`, β=2 inverted). Quoted as %. |
 | `event_historical_move_pct_underlying` | Mean absolute deviation of \|return\| on prior earnings days for this underlying, from the combined event calendar's `historical_move_pct_mad`. Quoted as %. |
 | `event_move_richness_pct` | `(event_implied / event_historical) − 1`. ≥+30% = market over-paying the move (SELL the event premium); ≤−20% = market under-paying (BUY the move). |
-| `event_jump_share_of_variance` | `(var_full − var_base) / var_full` over the held horizon. ≥0.40 means the event jump dominates IV — `bs_put_spread_fair_diffusion` is structurally wrong, use `put_spread_fair_event_aware` instead. |
+| `event_jump_share_of_variance` | `(var_full − var_base) / var_full` over the held horizon. ≥0.40 means the event jump dominates IV — use Bates `model_fair`, not Heston / AZ. |
 | `days_to_event` | Calendar days until the next earnings event for this underlying (combined-calendar earliest upcoming, with seed/projection fallback). |
-| `event_in_held_horizon` | `true` if the next event date ≤ held expiry. UI flags these rows red — diffusion BS is invalid. |
+| `event_in_held_horizon` | `true` if the next event date ≤ held expiry. UI flags these rows red. |
+
+**Diagnostics only (NOT for production consumers):**
+
+The following live under `row["debug"]["bs"]`. They are Black-Scholes diffusion-only outputs kept for regression / disagreement audits and are the source of the `bs_proxy` greeks until kernel-derivative greeks ship. Do not introduce new UI dependencies on these keys.
+
+| Field (under `debug.bs`) | Meaning |
+|---|---|
+| `put_spread_fair_diffusion` | BS fair at chosen σ. Wrong for LETF puts (no vol drag / skew / jumps). |
+| `put_spread_sigma_source` | Which σ fed the BS fair value. |
+| `spread_breakeven_sigma_annual` | Annualized σ that makes `BS_fair(σ) == spread_mid_market`. Legacy σ-space pricing — replaced by `edge_pp_of_max_loss` in price space. |
+| `iv_minus_breakeven_sigma` | Net short-vol edge in σ-space. Legacy headline metric — replaced by `edge_pp_of_max_loss`. |
+| `expected_weekly_loss_pct_of_spot` | `BS_fair / spot_2x · 100`. Replaced by `expected_weekly_carry_usd` ($ space) in the production UI. |
+| `delta_spread`, `gamma_spread`, `vega_spread`, `theta_spread_per_day` | BS greeks per single structure. Source of `theta_per_day` (canonical) until kernel-derivative greeks land. |
+| `dollar_gamma_per_1pct_sleeve`, `dollar_gamma_per_1pct_underlying` | BS finite-diff $-γ. Source of canonical `dollar_gamma_per_1pct_underlying` under the `bs_proxy` flag. |
 
 #### Earnings calendar seed fallback (`data/earnings_calendar_seed.json`)
 

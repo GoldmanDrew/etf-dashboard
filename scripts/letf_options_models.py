@@ -1059,6 +1059,39 @@ def compute_letf_model_extras(
     )
     out["best_model_name"] = best_model
 
+    # -- Canonical (BS-free) public field names ------------------------------
+    # The UI consumes these short names; the per-model fields above remain for
+    # debug / regression / disagreement-checking. P1+P2+P3 made BS the wrong
+    # kernel for LETF put-spreads; the dashboard must default to the calibrated
+    # model fair, not the diffusion-only BS fair.
+    fair_lookup = {
+        "bates": out.get("bates_put_spread_fair"),
+        "heston": out.get("heston_put_spread_fair"),
+        "az": out.get("az_put_spread_fair"),
+    }
+    fair_minus_mid_lookup = {
+        "bates": out.get("bates_fair_minus_mid"),
+        "heston": out.get("heston_fair_minus_mid"),
+        "az": out.get("az_fair_minus_mid"),
+    }
+    out["model_name"] = best_model
+    out["model_fair"] = fair_lookup.get(best_model) if best_model else None
+    out["model_fair_minus_mid"] = (
+        fair_minus_mid_lookup.get(best_model) if best_model else None
+    )
+    out["edge_pp_of_max_loss"] = (
+        round(best_edge_pp, 4) if best_edge_pp is not None else None
+    )
+    # Disagreement check across kernels (max fair − min fair, ignoring None).
+    # PMs care about model uncertainty; >20% of max-loss is "the models don't
+    # agree, don't size this row to full risk".
+    fair_values = [v for v in fair_lookup.values() if v is not None]
+    if len(fair_values) >= 2 and max_loss and max_loss > 0:
+        spread = max(fair_values) - min(fair_values)
+        out["model_disagreement_pp_of_max_loss"] = round(100.0 * spread / max_loss, 4)
+    else:
+        out["model_disagreement_pp_of_max_loss"] = None
+
     return out
 
 
