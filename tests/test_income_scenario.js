@@ -412,22 +412,20 @@ test("simulateWeeklyCompoundPairPnL produces ordered finite quantiles", () => {
 });
 
 test("simulateWeeklyCompoundPairPnL MTYY p50 within Python parity band", () => {
-  // Python anchor (n=20k, sigma=0.674, beta=0.372): p50 ~= +1.20 log/yr.
-  // JS uses mulberry32 (different RNG family) so we tolerate +/-0.10 log/yr
-  // at n=5000.
+  // Python anchor (n=20k, sigma=0.674, beta=0.372, capR=0.80): p50 ~ +0.19 log/yr
+  // after explicit distribution debits (no wash).
   const out = simulateWeeklyCompoundPairPnL({
     ...MTYY_BASE, weeks: 52, nPaths: 5000, seed: stableSeedFromSymbol("MTYY"),
   });
-  assert.ok(Math.abs(out.p50Log - 1.20) <= 0.10, `p50=${out.p50Log}`);
+  assert.ok(Math.abs(out.p50Log - 0.19) <= 0.15, `p50=${out.p50Log}`);
 });
 
-test("simulateWeeklyCompoundPairPnL distributions wash (capR drops out)", () => {
+test("simulateWeeklyCompoundPairPnL higher captureRatio lowers p50 (distribution debit)", () => {
   const seed = stableSeedFromSymbol("MTYY");
-  const a = simulateWeeklyCompoundPairPnL({ ...MTYY_BASE, captureRatio: 0.50, weeks: 52, nPaths: 2000, seed });
-  const b = simulateWeeklyCompoundPairPnL({ ...MTYY_BASE, captureRatio: 1.00, weeks: 52, nPaths: 2000, seed });
-  // Per-week pair PnL never depends on capture ratio (distributions wash),
-  // so identical seed -> identical p50 to numerical precision.
-  assert.ok(Math.abs(a.p50Log - b.p50Log) < 1e-12);
+  const low = simulateWeeklyCompoundPairPnL({ ...MTYY_BASE, captureRatio: 0.50, weeks: 52, nPaths: 2000, seed });
+  const high = simulateWeeklyCompoundPairPnL({ ...MTYY_BASE, captureRatio: 1.00, weeks: 52, nPaths: 2000, seed });
+  assert.ok(low.p50Log > high.p50Log, `low=${low.p50Log} high=${high.p50Log}`);
+  assert.ok((low.p50Log - high.p50Log) > 0.2);
 });
 
 test("simulateWeeklyCompoundPairPnL sigma->0 collapses to ER - borrow", () => {
@@ -445,17 +443,34 @@ test("simulateWeeklyCompoundPairPnL sigma->0 collapses to ER - borrow", () => {
   assert.ok(Math.abs(outB.p50Log - (0.0099 - 0.05)) < 0.001);
 });
 
-test("simulateWeeklyCompoundPairPnL sigma axis is monotone at zero drift", () => {
+test("simulateWeeklyCompoundPairPnL sigma axis monotone without distributions", () => {
   const seed = stableSeedFromSymbol("MTYY");
   const ks = [0.5, 0.7, 1.0, 1.3, 1.5];
   const p50s = ks.map((k) => simulateWeeklyCompoundPairPnL({
-    sigmaAnnual: 0.674 * k, muAnnual: 0.0, beta: 0.372, captureRatio: 0.80,
+    sigmaAnnual: 0.674 * k, muAnnual: 0.0, beta: 0.372, captureRatio: 0.0,
     expenseRatioAnnual: 0.0099, borrowAnnual: 0.0,
     weeks: 52, nPaths: 2000, seed,
   }).p50Log);
   for (let i = 0; i < p50s.length - 1; i += 1) {
     assert.ok(p50s[i + 1] > p50s[i], `non-monotone at i=${i}: ${p50s.join(",")}`);
   }
+});
+
+test("simulateWeeklyCompoundPairPnL sigma increases through mid band with distributions", () => {
+  const seed = stableSeedFromSymbol("MTYY");
+  const ks = [0.5, 0.7, 1.0];
+  const p50s = ks.map((k) => simulateWeeklyCompoundPairPnL({
+    sigmaAnnual: 0.674 * k, muAnnual: 0.0, beta: 0.372, captureRatio: 0.80,
+    expenseRatioAnnual: 0.0099, borrowAnnual: 0.0,
+    weeks: 52, nPaths: 2000, seed,
+  }).p50Log);
+  assert.ok(p50s[1] > p50s[0] && p50s[2] > p50s[1], p50s.join(","));
+  const hi = simulateWeeklyCompoundPairPnL({
+    sigmaAnnual: 0.674 * 1.5, muAnnual: 0.0, beta: 0.372, captureRatio: 0.80,
+    expenseRatioAnnual: 0.0099, borrowAnnual: 0.0,
+    weeks: 52, nPaths: 2000, seed,
+  }).p50Log;
+  assert.ok(hi > p50s[0]);
 });
 
 test("simulateWeeklyCompoundPairPnL is reproducible across runs (same seed)", () => {
@@ -491,9 +506,9 @@ test("scenarioGridPairPnL fills 5x5 grid with finite cells", () => {
   assert.equal(grid.engine, "yieldboost_mc");
 });
 
-test("scenarioGridPairPnL sigma axis monotone at zero drift", () => {
+test("scenarioGridPairPnL sigma axis monotone without distributions", () => {
   const grid = scenarioGridPairPnL({
-    sigmaAnnual: 0.674, beta: 0.372, captureRatio: 0.80,
+    sigmaAnnual: 0.674, beta: 0.372, captureRatio: 0.0,
     nPaths: 1500, seed: stableSeedFromSymbol("MTYY"),
   });
   const driftIdx = grid.drifts.indexOf(0.0);
@@ -501,6 +516,17 @@ test("scenarioGridPairPnL sigma axis monotone at zero drift", () => {
   for (let i = 0; i < col.length - 1; i += 1) {
     assert.ok(col[i + 1] > col[i], `non-monotone at sigma idx ${i}: ${col.join(",")}`);
   }
+});
+
+test("scenarioGridPairPnL sigma increases through mid band with distributions", () => {
+  const grid = scenarioGridPairPnL({
+    sigmaAnnual: 0.674, beta: 0.372, captureRatio: 0.80,
+    nPaths: 1500, seed: stableSeedFromSymbol("MTYY"),
+  });
+  const driftIdx = grid.drifts.indexOf(0.0);
+  const col = grid.p50LogGrid.map((row) => row[driftIdx]);
+  assert.ok(col[1] > col[0] && col[2] > col[1], col.join(","));
+  assert.ok(col[col.length - 1] > col[0]);
 });
 
 test("stableSeedFromSymbol is deterministic and case-insensitive", () => {

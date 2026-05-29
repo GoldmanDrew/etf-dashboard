@@ -609,6 +609,14 @@
     const muW = muOk / WEEKS_PER_YEAR - 0.5 * sigmaW * sigmaW;
     const weeklyEr = erOk / WEEKS_PER_YEAR;
     const weeklyBorrow = borrowOk / WEEKS_PER_YEAR;
+    const bsWeekly = expectedPutSpreadLossWeekly({
+      underlyingReturn: 0,
+      sigmaAnnual: sigma,
+      horizonYears: 1,
+    });
+    const weeklyDist = Number.isFinite(bsWeekly) && capOk > 0
+      ? Math.max(0, capOk * bsWeekly)
+      : 0;
     const annualization = WEEKS_PER_YEAR / weeks;
 
     const rand = _mulberry32(seed || 1);
@@ -632,7 +640,7 @@
         const rUnd = Math.expm1(logUndT);
         const sleeveRet = Math.expm1(2 * logUndT);
         const L = _putSpreadPayoff(sleeveRet);
-        let pairW = L + weeklyEr - weeklyBorrow + betaOk * rUnd;
+        let pairW = L + weeklyEr - weeklyBorrow - weeklyDist + betaOk * rUnd;
         if (pairW < _PAIR_WEEK_FLOOR) pairW = _PAIR_WEEK_FLOOR;
         if (pairW > _PAIR_WEEK_CEIL) pairW = _PAIR_WEEK_CEIL;
         logPair += Math.log1p(pairW);
@@ -675,6 +683,8 @@
       muUsed: muOk,
       betaUsed: betaOk,
       captureUsed: capOk,
+      distributionsWeekly: weeklyDist,
+      distributionsAnnual: weeklyDist * WEEKS_PER_YEAR,
       expenseRatioAnnual: erOk,
       borrowAnnual: borrowOk,
       axis: 'log_continuous_annual',

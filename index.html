@@ -2420,9 +2420,8 @@ function expectedDecayDistribution(r) {
 //     Median pair P&L of a delta-hedged short pair where each Friday the
 //     short notional is reset to current equity, the long is reset to
 //     beta * equity, and the put-spread payoff L_t = (95/88)·sleeve²
-//     accrues to the short. Distributions wash on this axis (q' = 1 − L
-//     − f/52 − d cancels), so capture_ratio is recorded but does not
-//     enter the per-week pair P&L.
+//     accrues to the short. Each week debits calibrated distribution cash
+//     (capture_ratio × BS premium at scenario σ); borrow subtracted at Net edge.
 //   - LETF / inverse / vol-ETP: pair P&L = gross drag (no cash leg) so
 //     this equals `expected_gross_decay_p*` by identity. Scenario grid is
 //     filled analytically from (β² − β)/2·σ² + β·μ.
@@ -2574,8 +2573,8 @@ function decayDistTooltip(r, chartVolLookbackRange) {
     return PASSIVE_LOW_BETA_POLICY_TOOLTIP;
   }
   // YieldBOOST -- weekly-rebalanced compound MC (schema_v=4). Each path
-  // simulates 52 weekly delta-hedged rebalances; distributions wash so
-  // capture_ratio is recorded but does not enter the per-week pair P&L.
+  // simulates 52 weekly delta-hedged rebalances; explicit short-side
+  // distribution debits each week (capture_ratio × calibrated yield).
   if (isYieldBoostIncomeStrategy(r)) {
     const pair = expectedPairPnlDistribution(r);
     const forecastVol = forecastVolForScenario(r, volLookback);
@@ -2583,7 +2582,7 @@ function decayDistTooltip(r, chartVolLookbackRange) {
       const lines = [
         'Exp. edge (fwd) — 1Y median forward pair P&L (weekly-rebalanced short pair).',
         'Pair = short ETF + beta-long underlying. Sign: short-favorable positive (+ = profit).',
-        'YieldBOOST: path-dependent MC over forecast sigma; distributions wash under weekly rebalance.',
+        'YieldBOOST: path-dependent MC over forecast sigma; short distributions debited weekly.',
         `sigma (forecast): ${fmt(Number(forecastVol?.sigma))} (${r?.forecast_vol_source || 'forecast_vol'}).`,
         `Median (p50): ${fmtLogYr(pair.p50)} log/yr (${fmtPct(logToSimpleAnnual(pair.p50))} simple)`,
       ];
@@ -3383,7 +3382,7 @@ const COLS = [
   { key: 'borrow_current', label: 'Borrow Rate', w: 105, hint: 'Spot fee-only borrow on this row (IBKR FTP on full build, else screener CSV). Compare to borrow_history.json tail on chart Borrow tab.' },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, sublabel: 'trailing', hint: 'Realized: trailing annualized hedge drag from ls-algo screener (β·r_U − r_ETF) × 252. Not the forward Exp. decay column.' },
-  { key: 'expected_pair_pnl_p50_annual', label: 'Exp. edge (fwd)', sublabel: 'pair · 1Y log/yr', w: 128, hint: 'Median 1Y forward pair P&L on the log-continuous-annual axis (same as Gross realiz. and Net edge). Short ETF + beta-long underlying, weekly rebalance, MC over forecast vol. Sub-row: p10/p90 band in log/yr plus simple % for intuition. Hover for vol sensitivity. YieldBOOST: path-dependent MC; distributions wash.' },
+  { key: 'expected_pair_pnl_p50_annual', label: 'Exp. edge (fwd)', sublabel: 'pair · 1Y log/yr', w: 128, hint: 'Median 1Y forward pair P&L on the log-continuous-annual axis (same as Gross realiz. and Net edge). Short ETF + beta-long underlying, weekly rebalance, MC over forecast vol. Sub-row: p10/p90 band in log/yr plus simple % for intuition. Hover for vol sensitivity. YieldBOOST: path-dependent MC; short distributions debited via capture ratio.' },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
@@ -3801,7 +3800,7 @@ function NetEdgeMergedCell({ r }) {
         `  MC mean ${fmtLogYr(meanLog)} · MC std ${fmtLogYr(stdLog)} log/yr (= sigma_F)`
       );
     }
-    tipLines.push('  Distributions wash on this axis (q\' = 1 - L - f/52 - d cancels under weekly rebalance).');
+    tipLines.push('  Short distributions debited weekly (capture_ratio × BS premium at forecast σ).');
   } else if (Number.isFinite(anchorEffective)) {
     tipLines.push(`Anchor (posterior gross): ${fmt(anchorEffective)}`);
   }
@@ -4165,7 +4164,8 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
       <div className="scenario-sub" style={{ marginTop: 8, fontSize: 11, lineHeight: 1.5 }}>
         Forward pair P&L is a 1Y log-rate of a weekly-rebalanced delta-hedged short pair (short ETF + β-long underlying).
         Direction is hedged via β; remaining sensitivity is to realized vol of the underlying — higher σ → more
-        weekly put-spread payoff captured (gamma scalp) → more positive forward edge.
+        weekly put-spread payoff captured (gamma scalp) → more positive forward edge. Short-side distribution
+        cash is debited each week (calibrated via capture ratio × BS premium at cell σ).
         {pair && pair.p50 != null ? (
           <> Headline cell (σ×1.0, drift 0%): <strong>{fmtLogYr(pair.p50)} log/yr</strong>.</>
         ) : null}

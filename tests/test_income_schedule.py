@@ -529,39 +529,46 @@ def test_simulate_mc_quantiles_strictly_monotone_and_finite():
 
 
 def test_simulate_mc_mtyy_anchor_within_band():
-    """MTYY (sigma=0.674, beta=0.372, capR=0.80) headline p50 must land
-    in the documented [+1.10, +1.30] log/yr band with 20k paths and the
-    canonical seed. This is the regression anchor the rest of the
-    sigma-regime triplet is measured against.
+    """MTYY (sigma=0.674, beta=0.372, capR=0.80) headline p50 with explicit
+    distribution debits (no wash). Regression anchor for sigma-regime triplet.
     """
     out = ic.simulate_weekly_compound_pair_pnl(
         **MTYY_BASE, weeks=52, n_paths=20_000,
         seed=ic.stable_seed_from_symbol("MTYY"),
     )
-    assert 1.10 <= out["p50_log"] <= 1.30, out["p50_log"]
-    assert 0.85 <= out["p10_log"] <= 1.15, out["p10_log"]
-    assert 1.25 <= out["p90_log"] <= 1.45, out["p90_log"]
-    # Sanity: mean roughly equals median for a not-too-skew distribution
+    assert 0.05 <= out["p50_log"] <= 0.35, out["p50_log"]
+    assert -0.15 <= out["p10_log"] <= 0.15, out["p10_log"]
+    assert 0.25 <= out["p90_log"] <= 0.55, out["p90_log"]
     assert abs(out["mean_log"] - out["p50_log"]) < 0.10
+    assert out["distributions_annual"] > 0.5
 
 
-def test_simulate_mc_distributions_wash():
-    """Capture ratio drops out of per-week pair P&L when rebalancing
-    weekly (distributions are paid by short to lender but collected
-    back via the q' = 1 - L - f/52 - d price drop). Same seed ->
-    p50 should be bit-identical across capR values.
-    """
-    seeds = ic.stable_seed_from_symbol("MTYY")
-    p50s = []
-    for cap in (0.50, 0.65, 0.80, 1.00):
-        out = ic.simulate_weekly_compound_pair_pnl(
-            sigma_annual=0.674, mu_annual=0.0, beta=0.372, capture_ratio=cap,
-            expense_ratio_annual=0.0099, borrow_annual=0.0,
-            weeks=52, n_paths=5_000, seed=seeds,
-        )
-        p50s.append(out["p50_log"])
-    spread = max(p50s) - min(p50s)
-    assert spread < 1e-9, p50s
+def test_simulate_mc_capture_ratio_lowers_p50_via_distributions():
+    """Higher capture_ratio => larger weekly distribution debit => lower p50."""
+    seed = ic.stable_seed_from_symbol("MTYY")
+    low = ic.simulate_weekly_compound_pair_pnl(
+        sigma_annual=0.674, mu_annual=0.0, beta=0.372, capture_ratio=0.50,
+        expense_ratio_annual=0.0099, borrow_annual=0.0,
+        weeks=52, n_paths=5_000, seed=seed,
+    )
+    high = ic.simulate_weekly_compound_pair_pnl(
+        sigma_annual=0.674, mu_annual=0.0, beta=0.372, capture_ratio=1.00,
+        expense_ratio_annual=0.0099, borrow_annual=0.0,
+        weeks=52, n_paths=5_000, seed=seed,
+    )
+    assert low["p50_log"] > high["p50_log"]
+    assert (low["p50_log"] - high["p50_log"]) > 0.3
+
+
+def test_simulate_mc_zero_capture_ratio_matches_no_distribution_drag():
+    """capture_ratio=0 removes distribution debit; p50 near old wash anchor."""
+    out = ic.simulate_weekly_compound_pair_pnl(
+        sigma_annual=0.674, mu_annual=0.0, beta=0.372, capture_ratio=0.0,
+        expense_ratio_annual=0.0099, borrow_annual=0.0,
+        weeks=52, n_paths=20_000, seed=ic.stable_seed_from_symbol("MTYY"),
+    )
+    assert 1.05 <= out["p50_log"] <= 1.35, out["p50_log"]
+    assert out["distributions_annual"] == pytest.approx(0.0, abs=1e-12)
 
 
 def test_simulate_mc_sigma_zero_limit_collapses_to_er_minus_borrow():
@@ -584,13 +591,30 @@ def test_simulate_mc_sigma_zero_limit_collapses_to_er_minus_borrow():
     assert out_b["p50_log"] == pytest.approx(0.0099 - 0.05, abs=0.0005)
 
 
-def test_simulate_mc_sigma_monotone_p50():
-    """Higher realized vol -> more put-spread payoff captured -> higher
-    p50 pair P&L (weekly gamma scalp). Strict monotonicity at MTYY
-    parameters with shared seed.
+def test_simulate_mc_sigma_monotone_p50_without_distributions():
+    """Without distribution debits (capture_ratio=0), higher vol -> more
+    put-spread payoff -> strictly higher p50 (gamma scalp only).
     """
     seeds = ic.stable_seed_from_symbol("MTYY")
     sigmas = [0.674 * k for k in (0.5, 0.7, 1.0, 1.3, 1.5)]
+    p50s = []
+    for s in sigmas:
+        out = ic.simulate_weekly_compound_pair_pnl(
+            sigma_annual=s, mu_annual=0.0, beta=0.372, capture_ratio=0.0,
+            expense_ratio_annual=0.0099, borrow_annual=0.0,
+            weeks=52, n_paths=5_000, seed=seeds,
+        )
+        p50s.append(out["p50_log"])
+    diffs = [p50s[i + 1] - p50s[i] for i in range(len(p50s) - 1)]
+    assert all(d > 0 for d in diffs), p50s
+
+
+def test_simulate_mc_sigma_increases_p50_through_mid_band_with_distributions():
+    """With distribution debits, gamma scalp dominates through 1.0x sigma;
+    high-sigma tail may flatten as d_weekly scales with BS premium.
+    """
+    seeds = ic.stable_seed_from_symbol("MTYY")
+    sigmas = [0.674 * k for k in (0.5, 0.7, 1.0)]
     p50s = []
     for s in sigmas:
         out = ic.simulate_weekly_compound_pair_pnl(
@@ -599,8 +623,13 @@ def test_simulate_mc_sigma_monotone_p50():
             weeks=52, n_paths=5_000, seed=seeds,
         )
         p50s.append(out["p50_log"])
-    diffs = [p50s[i + 1] - p50s[i] for i in range(len(p50s) - 1)]
-    assert all(d > 0 for d in diffs), p50s
+    assert p50s[1] > p50s[0] and p50s[2] > p50s[1], p50s
+    out_hi = ic.simulate_weekly_compound_pair_pnl(
+        sigma_annual=0.674 * 1.5, mu_annual=0.0, beta=0.372, capture_ratio=0.8,
+        expense_ratio_annual=0.0099, borrow_annual=0.0,
+        weeks=52, n_paths=5_000, seed=seeds,
+    )
+    assert out_hi["p50_log"] > p50s[0]
 
 
 def test_simulate_mc_reproducible():
@@ -651,17 +680,27 @@ def test_scenario_grid_shape_and_axes():
     assert grid["engine"] == "yieldboost_mc"
 
 
-def test_scenario_grid_sigma_axis_is_monotone_at_zero_drift():
-    """Holding drift at 0, p50 must be increasing in sigma_multiplier
-    (more vol -> more gamma scalp on the weekly put-spread roll).
-    """
+def test_scenario_grid_sigma_axis_is_monotone_without_distributions():
+    """capture_ratio=0: p50 strictly increases in sigma (gamma only)."""
+    grid = ic.scenario_grid_pair_pnl(
+        sigma_annual=0.674, beta=0.372, capture_ratio=0.0,
+        n_paths=2_500, seed=ic.stable_seed_from_symbol("MTYY"),
+    )
+    drift_idx = grid["drifts"].index(0.0)
+    col = [row[drift_idx] for row in grid["p50_log_grid"]]
+    assert all(col[i + 1] > col[i] for i in range(len(col) - 1)), col
+
+
+def test_scenario_grid_sigma_axis_increases_through_mid_band_with_distributions():
+    """With distribution debits, p50 rises through 1.0x sigma; high tail may flatten."""
     grid = ic.scenario_grid_pair_pnl(
         sigma_annual=0.674, beta=0.372, capture_ratio=0.80,
         n_paths=2_500, seed=ic.stable_seed_from_symbol("MTYY"),
     )
     drift_idx = grid["drifts"].index(0.0)
     col = [row[drift_idx] for row in grid["p50_log_grid"]]
-    assert all(col[i + 1] > col[i] for i in range(len(col) - 1)), col
+    assert col[1] > col[0] and col[2] > col[1], col
+    assert col[-1] > col[0]
 
 
 def test_scenario_grid_returns_none_for_bad_inputs():

@@ -4433,8 +4433,8 @@ def build():
     #
     # YieldBOOST forward = path-dependent MC of a delta-hedged short pair on
     # the weekly compounding axis, same as the screener's gross_decay_annual.
-    # Distributions wash on this axis (q' = 1 - L - f/52 - d cancels), so
-    # capture_ratio is recorded but does NOT enter the per-week pair P&L.
+    # Short-side distribution cash is debited each week (capture_ratio × BS
+    # premium at scenario σ); borrow remains 0 in MC (subtracted at Net edge).
     #
     # LETF / inverse / vol-ETP forward = identity (cash leg absent), so we
     # mirror expected_gross_decay_p* into expected_pair_pnl_p* and analytically

@@ -280,19 +280,18 @@ for each path:
         L_t      = max(0, min(0.07,                             # 95/88 put-spread payoff
                        max(0, 0.95 - (1 + sleeve))
                      - max(0, 0.88 - (1 + sleeve))))
-        pair_w   = L_t + ER/52 - borrow/52 + beta * r_und
+        pair_w   = L_t + ER/52 - borrow/52 - d_weekly + beta * r_und
+        # d_weekly = capture_ratio * E[put_spread_loss](0, sigma, 1 week)
         log_pair += log1p(pair_w)
     sample_log_ann = log_pair * (52 / weeks)
 return percentiles(samples)
 ```
 
-**Distributions wash (one-line proof).** Under the physical NAV evolution after one week,
-
-```
-q' = 1 - L - ER/52 - d        (loss + expense - distribution)
-```
-
-a delta-hedged short receives `d` per dollar short and pays `d` to the lender (or carries it via the implicit reinvestment of the rebalanced equity). The two cancel, so the per-week pair PnL **does not depend on `d`**. This is why `capture_ratio` (which only sets `d`) is a no-op for `simulate_weekly_compound_pair_pnl` and is kept as input only for symmetry with the Scenarios tab. (See `tests/test_income_schedule.py::test_distributions_wash` and the JS mirror in `tests/test_income_scenario.js`.)
+**Short distributions.** Each week debits calibrated distribution cash owed to the lender:
+`d_weekly = capture_ratio × E[put_spread_loss_weekly](0, sigma, 1)`. This replaces the prior
+assumption that ex-date price drops fully offset cash distributions under weekly rebalance.
+`capture_ratio` therefore directly lowers forward pair P&L in `simulate_weekly_compound_pair_pnl`.
+(See `tests/test_income_schedule.py::test_simulate_mc_capture_ratio_lowers_p50_via_distributions`.)
 
 **Output fields** (per YB row, all **log-continuous-annual** unless noted):
 
