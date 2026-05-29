@@ -861,11 +861,8 @@ def compute_vrp_row_extras(
         # x=2 daily-rebalanced exponent: A_T / A_0 = (S_T/S_0)^2 · exp(-σ² T)
         # so the *gross* drag is σ_underlying² per year for x=2.
         out["sleeve_diffusion_drag_annual"] = round(rv_und_proxy * rv_und_proxy, 6)
-        # Inverse-LETF analog (x = -2) for the Bucket-4 short-pair view: 3σ².
-        out["inverse_sleeve_drag_annual_x_minus2"] = round(3.0 * rv_und_proxy * rv_und_proxy, 6)
     else:
         out["sleeve_diffusion_drag_annual"] = None
-        out["inverse_sleeve_drag_annual_x_minus2"] = None
 
     # 9. Event-week decomposition: compare implied event-day 1σ move to the
     #    historical MAD of |return| on prior earnings days. Both inputs are
