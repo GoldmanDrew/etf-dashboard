@@ -4292,14 +4292,15 @@ function buildTotalReturnMetricsSeries(rawRows, distributions) {
   return ok.map((row) => {
     const dateStr = String(row?.date || '');
     const nav = Number(row?.nav);
-    if (dateStr && Number.isFinite(nav) && nav > 0) {
+    const pxBase = Number.isFinite(nav) && nav > 0 ? nav : (Number(row?.close_price) || Number(row?.nav));
+    if (dateStr && Number.isFinite(pxBase) && pxBase > 0) {
       while (dIdx < dists.length && String(dists[dIdx].ex_date) <= dateStr) {
         const amt = Number(dists[dIdx].amount);
-        if (Number.isFinite(amt) && amt > 0) reinvFactor *= (nav + amt) / nav;
+        if (Number.isFinite(amt) && amt > 0) reinvFactor *= (pxBase + amt) / pxBase;
         dIdx += 1;
       }
     }
-    const tr = Number.isFinite(nav) && nav > 0 ? nav * reinvFactor : null;
+    const tr = Number.isFinite(pxBase) && pxBase > 0 ? pxBase * reinvFactor : null;
     return { ...row, nav_total_return: tr, tr_reinvestment_factor: reinvFactor };
   });
 }
@@ -4328,14 +4329,15 @@ function buildTotalReturnBacktestSeries(rawRows, distributions) {
   return ok.map((row) => {
     const dateStr = String(row?.date || '');
     const nav = Number(row?.nav);
-    if (dateStr && Number.isFinite(nav) && nav > 0) {
+    const pxBase = Number.isFinite(nav) && nav > 0 ? nav : (Number(row?.close_price) || Number(row?.nav));
+    if (dateStr && Number.isFinite(pxBase) && pxBase > 0) {
       while (dIdx < dists.length && String(dists[dIdx].ex_date) <= dateStr) {
         const amt = Number(dists[dIdx].amount);
-        if (Number.isFinite(amt) && amt > 0) reinvFactor *= (nav + amt) / nav;
+        if (Number.isFinite(amt) && amt > 0) reinvFactor *= (pxBase + amt) / pxBase;
         dIdx += 1;
       }
     }
-    const tr = Number.isFinite(nav) && nav > 0 ? nav * reinvFactor : null;
+    const tr = Number.isFinite(pxBase) && pxBase > 0 ? pxBase * reinvFactor : null;
     return { ...row, nav_total_return: tr, tr_reinvestment_factor: reinvFactor };
   });
 }
@@ -4427,11 +4429,13 @@ function PairBacktestChart({ result }) {
     ['longPnl', `${legEtf} (cum)`, 'rgba(16,185,129,0.95)'],
     ['shortPnl', `${legUnd} (cum)`, 'rgba(139,92,246,0.95)'],
     ['borrow', 'Borrow', 'rgba(239,68,68,0.95)'],
+    ['distributions', 'Distributions (short)', 'rgba(244,114,182,0.95)'],
     ['transactionCosts', 'T-costs', 'rgba(245,158,11,0.95)'],
   ];
+  const costPlotKeys = new Set(['borrow', 'transactionCosts', 'distributions']);
   const vals = [];
   series.forEach((r) => keys.forEach(([k]) => {
-    const sign = (k === 'borrow' || k === 'transactionCosts') ? -1 : 1;
+    const sign = costPlotKeys.has(k) ? -1 : 1;
     const v = Number(r?.[k]);
     if (Number.isFinite(v)) vals.push(sign * v);
   }));
@@ -4451,7 +4455,7 @@ function PairBacktestChart({ result }) {
   const x = (i) => L + (i / Math.max(1, series.length - 1)) * PW;
   const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, yMax - yMin))) * PH;
   const pathFor = (k) => series.map((r, i) => {
-    const sign = (k === 'borrow' || k === 'transactionCosts') ? -1 : 1;
+    const sign = costPlotKeys.has(k) ? -1 : 1;
     const v = sign * Number(r?.[k]);
     return Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : '';
   }).filter(Boolean).join(' ');
@@ -4474,7 +4478,7 @@ function PairBacktestChart({ result }) {
             <text key={idx} x={x(idx)} y={H - 10} textAnchor={idx === 0 ? 'start' : idx === series.length - 1 ? 'end' : 'middle'} fontSize="11" fill="#8b9cbb" fontFamily="DM Sans">{formatBacktestAxisDate(dateStrs[idx])}</text>
           ))}
           {keys.map(([k, _label, color]) => (
-            <path key={k} d={pathFor(k)} fill="none" stroke={color} strokeWidth={k === 'netPnl' ? 3 : 2.2} strokeLinejoin="round" strokeLinecap="round" strokeDasharray={(k === 'borrow' || k === 'transactionCosts') ? '5 4' : ''} />
+            <path key={k} d={pathFor(k)} fill="none" stroke={color} strokeWidth={k === 'netPnl' ? 3 : 2.2} strokeLinejoin="round" strokeLinecap="round" strokeDasharray={costPlotKeys.has(k) ? '5 4' : ''} />
           ))}
           {series.map((r, i) => (r.rebalance ? (
             <line key={`rb-${i}`} x1={x(i)} x2={x(i)} y1={T} y2={H - B} stroke="rgba(148,163,184,0.18)" />
@@ -4483,7 +4487,7 @@ function PairBacktestChart({ result }) {
       </div>
       <div className="backtest-chart-legend">
         {keys.map(([k, label, color]) => (
-          <span key={k}><span className="backtest-legend-dot" style={{ background: color }} />{label}{(k === 'borrow' || k === 'transactionCosts') ? ' (cost plotted negative)' : ''}</span>
+          <span key={k}><span className="backtest-legend-dot" style={{ background: color }} />{label}{costPlotKeys.has(k) ? ' (cost plotted negative)' : ''}</span>
         ))}
       </div>
     </div>
@@ -5738,6 +5742,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       slippageBps: Number(btSlippageBps) || 0,
       avgBorrowAnnual: Number.isFinite(bAnn) ? bAnn : 0,
       borrowHistory: etfBorrowSeries,
+      distributions: etfDistributionsSeries,
     });
   })();
   const pairRiskSeries = (() => {
@@ -7387,7 +7392,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               ? <>short <strong>{etfSym}</strong>, long <strong>{String(undSym || '').toUpperCase()}</strong> (ETF short borrow only).</>
               : <>short <strong>{etfSym}</strong> and short <strong>{String(undSym || '').toUpperCase()}</strong> (ETF short borrow only; underlying short treated as 0% borrow).</>}
             {' '}Notional <strong>h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>|</strong> (default <strong>1/|β|</strong>); gross <strong>G</strong> at rebalance: <code>MV<sub>ETF</sub> = h·G/(1+h)</code>, <code>MV<sub>und</sub> = G/(1+h)</code>.
-            Uses every day with both legs priced (same total-return NAV reinvestment as Stats; includes rows before status=ok when data exists).
+            Uses every day with both legs priced. ETF short leg: Yahoo <strong>adj. close total return</strong> when <code>etf_adj_close</code> is on file (<code>−MV × adjReturn</code>; distributions embedded), else raw close/NAV plus explicit ex-date distribution debits from <code>etf_distributions.json</code> (never both). Underlying long: Yahoo adj. close. Sizing, borrow, and t-costs use tradeable close/NAV.
             Borrow: <strong>short_favorable_positive</strong> — <code>borrow_current</code> from history by date (forward-filled), else hist. avg / spot from this row; negative = fee, positive = rebate. Daily drag <code>−rate/252 ×</code> trapezoid ETF short MV (underlying short borrow 0%).
           </div>
 
@@ -7457,6 +7462,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   <div className="cs-value">{fmtMoney(pairBacktestResult.summary.borrowPaid)}</div>
                   <div className="cs-sub">−rate/252 × trapezoid ETF short MV</div>
                 </div>
+                {(Number(pairBacktestResult.summary.distributionsPaid) || 0) > 0 ? (
+                  <div className="chart-stat">
+                    <div className="cs-label">Distributions (short)</div>
+                    <div className="cs-value">{fmtMoney(pairBacktestResult.summary.distributionsPaid)}</div>
+                    <div className="cs-sub">Explicit ex-date debits (fallback when adj. close missing)</div>
+                  </div>
+                ) : null}
                 <div className="chart-stat">
                   <div className="cs-label">T-costs</div>
                   <div className="cs-value">{fmtMoney(pairBacktestResult.summary.tCosts)}</div>
@@ -7467,7 +7479,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="trade-head">
                   <div>
                     <div className="scenario-title">{etfSym} vs {String(undSym || '').toUpperCase()} — PnL breakdown</div>
-                    <div className="scenario-sub">Net = ETF leg + und leg − borrow − transaction costs (legend matches leg directions).</div>
+                    <div className="scenario-sub">Net = ETF leg + und leg − borrow − distributions (explicit fallback only) − transaction costs.</div>
                   </div>
                 </div>
                 <PairBacktestChart result={pairBacktestResult} />
