@@ -46,7 +46,6 @@ VOL_VRP_ROW_KEYS: tuple[str, ...] = (
     "theta_per_day",
     "carry_vs_tail",
     "sleeve_diffusion_drag_annual",
-    "inverse_sleeve_drag_annual_x_minus2",
     "rv_30d_2x",
     "vrp_vol_2x_base",
     "days_to_event",
@@ -185,10 +184,6 @@ FIELDS: dict[str, dict[str, str]] = {
     "sleeve_diffusion_drag_annual": {
         "label": "Ito drag (x=2, /yr)",
         "tooltip": "sigma_underlying squared: simple Ito variance drag for a 2x daily-rebalanced sleeve.",
-    },
-    "inverse_sleeve_drag_annual_x_minus2": {
-        "label": "Ito drag (x=-2, /yr)",
-        "tooltip": "3 sigma_underlying squared: inverse pair drag for bucket-2 shorts.",
     },
     "rv_30d_2x": {
         "label": "RV 30d (sleeve)",

@@ -1067,7 +1067,6 @@ event-decomposition fields (`iv_full_proxy`, `iv_base_proxy`, …). They are
 | `az_implied_sleeve_iv` | `|β| · σ_underlying_at_mapped_K` — AZ-imputed sleeve IV used when the sleeve chain is missing. Triggers `iv_source = "az_imputed_from_underlying"`. |
 | `heston_sleeve_params`, `bates_sleeve_params` | AHJ-propagated Heston / Bates parameter dicts for the 2× sleeve. |
 | `sleeve_diffusion_drag_annual` | `σ_underlying²` — the simple Itô gross decay for x=2 daily-rebalanced. |
-| `inverse_sleeve_drag_annual_x_minus2` | `3 σ_underlying²` — equivalent drag for the Bucket-4 short pair (`x = −2`). |
 | `event_implied_move_pct_underlying` | Implied 1σ event-day move on the **underlying** scale (from the variance split between `iv_full_proxy` and `iv_base_proxy`, β=2 inverted). Quoted as %. |
 | `event_historical_move_pct_underlying` | Mean absolute deviation of \|return\| on prior earnings days for this underlying, from the combined event calendar's `historical_move_pct_mad`. Quoted as %. |
 | `event_move_richness_pct` | `(event_implied / event_historical) − 1`. ≥+30% = market over-paying the move (SELL the event premium); ≤−20% = market under-paying (BUY the move). |

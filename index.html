@@ -8030,10 +8030,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                         <td>Itô drag (x=2, /yr)</td>
                         <td>{vrpDisplayRow.sleeve_diffusion_drag_annual != null ? fmt(vrpDisplayRow.sleeve_diffusion_drag_annual) : '—'}</td>
                       </tr>
-                      <tr title={vrpFieldHint('inverse_sleeve_drag_annual_x_minus2')}>
-                        <td>Itô drag (x=−2, /yr)</td>
-                        <td>{vrpDisplayRow.inverse_sleeve_drag_annual_x_minus2 != null ? fmt(vrpDisplayRow.inverse_sleeve_drag_annual_x_minus2) : '—'}</td>
-                      </tr>
                       <tr><td>RV 30d (sleeve)</td><td>{vrpDisplayRow.rv_30d_2x_full != null ? fmt(vrpDisplayRow.rv_30d_2x_full) : (vrpDisplayRow.rv_30d_2x != null ? fmt(vrpDisplayRow.rv_30d_2x) : '—')}</td></tr>
                       <tr title={vrpFieldHint('vrp_vol_2x_base')}>
                         <td>VRP σ (event-stripped)</td>
