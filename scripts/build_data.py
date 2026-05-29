@@ -583,6 +583,21 @@ def _pick_borrow_fee_only(row) -> float | None:
     return None
 
 
+def _borrow_for_mc(rec: dict) -> float:
+    """Annual borrow fed into YieldBOOST forward MC (heatmap + headline)."""
+    for key in ("borrow_for_net_annual", "borrow_fee_annual", "borrow_current"):
+        v = rec.get(key)
+        if v is None:
+            continue
+        try:
+            f = float(v)
+            if math.isfinite(f) and f >= 0:
+                return f
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 def build_borrow_history_from_commits(universe_symbols: set[str]) -> dict:
     """
     Build cleaned borrow/shares time series for each ETF symbol using all available
@@ -4434,18 +4449,16 @@ def build():
     # YieldBOOST forward = path-dependent MC of a delta-hedged short pair on
     # the weekly compounding axis, same as the screener's gross_decay_annual.
     # Short-side distribution cash is debited each week (capture_ratio × BS
-    # premium at scenario σ); borrow remains 0 in MC (subtracted at Net edge).
+    # premium at scenario σ). Borrow is subtracted inside the weekly MC
+    # (``borrow_for_net_annual``); net-edge quantiles add borrow back after
+    # the screener shift so it is not subtracted twice (schema_v=4).
     #
     # LETF / inverse / vol-ETP forward = identity (cash leg absent), so we
     # mirror expected_gross_decay_p* into expected_pair_pnl_p* and analytically
     # compute the scenario grid as (beta^2 - beta)/2 * (k*sigma)^2 + beta*mu.
     #
-    # Net edge: the inverse-variance blend now consumes (forward_mc, realized)
-    # both pre-borrow on the same log axis, then borrow is subtracted once at
-    # net_edge time (via the existing screener pipeline). The historical D1
-    # 'gross_decay_annual - distributions_annual' subtraction is removed --
-    # gross_decay_annual is already pair-axis (TR-based, distributions in
-    # adjclose), so subtracting distributions a second time double-counted.
+    # Net edge: inverse-variance blend consumes (forward_mc, realized) on the
+    # pair log axis; borrow is already in forward MC for YB.
     _yb_mc = 0
     _yb_skipped_no_inputs = 0
     _yb_skipped_no_diag = 0
@@ -4539,6 +4552,7 @@ def build():
         capture_ratio_used = float(
             calibration.get("blended_ratio_used") or DEFAULT_CROSS_FUND_RATIO
         )
+        borrow_mc = _borrow_for_mc(rec)
 
         pair = expected_pair_pnl_annual(
             calibration=calibration,
@@ -4547,7 +4561,7 @@ def build():
             mu_annual=0.0,
             horizon_years=1.0,
             expense_ratio_annual=DEFAULT_EXPENSE_RATIO_ANNUAL,
-            borrow_annual=0.0,  # pre-borrow forward; borrow subtracted at net-edge
+            borrow_annual=borrow_mc,
             n_paths=PAIR_MC_PATHS,
             seed=seed_base,
         )
@@ -4592,7 +4606,7 @@ def build():
                 beta=beta_v_f,
                 capture_ratio=capture_ratio_used,
                 expense_ratio_annual=DEFAULT_EXPENSE_RATIO_ANNUAL,
-                borrow_annual=0.0,
+                borrow_annual=borrow_mc,
                 n_paths=PAIR_MC_PATHS,
                 seed=seed_base ^ int(mult * 1000),
             )
@@ -4618,7 +4632,7 @@ def build():
             sigma_multipliers=PAIR_SCENARIO_SIGMA_MULTIPLIERS,
             drifts=PAIR_SCENARIO_DRIFTS,
             expense_ratio_annual=DEFAULT_EXPENSE_RATIO_ANNUAL,
-            borrow_annual=0.0,
+            borrow_annual=borrow_mc,
             n_paths=PAIR_MC_GRID_PATHS,
             seed=seed_base,
         )
@@ -4683,8 +4697,8 @@ def build():
         rec["pair_realized_mean_annual"] = round(mu_R_pair, 6)
         # Histogram + quantile shift: net_edge bootstrap was anchored on the
         # OLD gross-axis posterior; shift it onto the NEW pair-axis posterior.
-        # Both anchors are pre-borrow on the same log axis, so this is a
-        # single additive shift = posterior_mu - old_anchor_val.
+        # Screener net draws subtract borrow; forward MC already includes
+        # borrow, so add borrow back after the level shift (schema_v=4).
         delta = posterior_mu - old_anchor_val
         if math.isfinite(delta):
             for q_key in (
@@ -4709,6 +4723,31 @@ def build():
                         )
                 except (ValueError, TypeError):
                     pass
+            if borrow_mc > 0:
+                for q_key in (
+                    "net_edge_p05_annual",
+                    "net_edge_p25_annual",
+                    "net_edge_p50_annual",
+                    "net_edge_p75_annual",
+                    "net_edge_p95_annual",
+                ):
+                    v = rec.get(q_key)
+                    if isinstance(v, (int, float)) and math.isfinite(float(v)):
+                        rec[q_key] = round(float(v) + borrow_mc, 6)
+                hist_str = rec.get("net_edge_hist_json")
+                if isinstance(hist_str, str) and hist_str.strip():
+                    try:
+                        hist = json.loads(hist_str)
+                        edges = hist.get("e")
+                        if isinstance(edges, list):
+                            hist["e"] = [
+                                round(float(e) + borrow_mc, 6) for e in edges
+                            ]
+                            rec["net_edge_hist_json"] = json.dumps(
+                                hist, separators=(",", ":")
+                            )
+                    except (ValueError, TypeError):
+                        pass
     if _yb_mc or _letf_grid_filled or _yb_skipped_no_inputs or _yb_skipped_no_diag:
         print(
             f"  Pair-PnL forward (schema_v=4): {_yb_mc} YB MC, "

@@ -591,6 +591,23 @@ def test_simulate_mc_sigma_zero_limit_collapses_to_er_minus_borrow():
     assert out_b["p50_log"] == pytest.approx(0.0099 - 0.05, abs=0.0005)
 
 
+def test_simulate_mc_borrow_lowers_p50_at_forecast_sigma():
+    """Higher borrow -> lower p50 at MTYY-like parameters."""
+    seeds = ic.stable_seed_from_symbol("MTYY")
+    low = ic.simulate_weekly_compound_pair_pnl(
+        sigma_annual=0.674, mu_annual=0.0, beta=0.372, capture_ratio=0.8,
+        expense_ratio_annual=0.0099, borrow_annual=0.0,
+        weeks=52, n_paths=5_000, seed=seeds,
+    )
+    high = ic.simulate_weekly_compound_pair_pnl(
+        sigma_annual=0.674, mu_annual=0.0, beta=0.372, capture_ratio=0.8,
+        expense_ratio_annual=0.0099, borrow_annual=0.05,
+        weeks=52, n_paths=5_000, seed=seeds,
+    )
+    assert low["p50_log"] > high["p50_log"]
+    assert high["p50_log"] == pytest.approx(low["p50_log"] - 0.05, abs=0.02)
+
+
 def test_simulate_mc_sigma_monotone_p50_without_distributions():
     """Without distribution debits (capture_ratio=0), higher vol -> more
     put-spread payoff -> strictly higher p50 (gamma scalp only).

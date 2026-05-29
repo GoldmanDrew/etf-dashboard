@@ -2421,7 +2421,7 @@ function expectedDecayDistribution(r) {
 //     short notional is reset to current equity, the long is reset to
 //     beta * equity, and the put-spread payoff L_t = (95/88)·sleeve²
 //     accrues to the short. Each week debits calibrated distribution cash
-//     (capture_ratio × BS premium at scenario σ); borrow subtracted at Net edge.
+//     (capture_ratio × BS premium at scenario σ) and borrow (borrow_for_net).
 //   - LETF / inverse / vol-ETP: pair P&L = gross drag (no cash leg) so
 //     this equals `expected_gross_decay_p*` by identity. Scenario grid is
 //     filled analytically from (β² − β)/2·σ² + β·μ.
@@ -4094,7 +4094,9 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
             {isYb ? 'YieldBOOST: weekly-rebalanced compound MC' : 'LETF: Itô analytic'} ·
             {sigma != null ? <> σ <strong>{fmt(sigma)}</strong> ·</> : null}
             {Number.isFinite(beta) ? <> β <strong>{beta.toFixed(2)}</strong> ·</> : null}
-            {Number.isFinite(borrow) ? <> borrow <strong>{fmt(borrow)}</strong>/yr (subtracted in Net edge)</> : null}
+            {Number.isFinite(borrow) ? (
+              <> borrow <strong>{fmt(borrow)}</strong>/yr{isYb ? ' (in MC cells)' : ' (subtracted in Net edge)'}</>
+            ) : null}
           </div>
           <div className="scenario-sub">
             Rows = sigma multiplier of forecast vol · Cols = 1Y simple underlying drift ·
@@ -4166,10 +4168,10 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
         Direction is hedged via β; remaining sensitivity is to realized vol of the underlying — higher σ → more
         weekly put-spread payoff captured (gamma scalp) → more positive forward edge. Short-side distribution
         cash is debited each week (calibrated via capture ratio × BS premium at cell σ).
+        Borrow is subtracted inside each MC cell for YieldBOOST.
         {pair && pair.p50 != null ? (
           <> Headline cell (σ×1.0, drift 0%): <strong>{fmtLogYr(pair.p50)} log/yr</strong>.</>
         ) : null}
-        {' '}Subtract <strong>borrow</strong> for the net edge.
       </div>
     </div>
   );
@@ -10330,7 +10332,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                   <br /><br />
                   <strong>YieldBOOST income</strong>: <code className="dm-formula">pair_P&L = NAV_decay − distributions</code> at flat underlying, calibrated weekly cash and <code>forecast_vol_underlying_annual</code>. Band maps gross put-spread MC quantiles with the calibrated cash leg held fixed; band width = gross band width.
                   <br /><br />
-                  This is the <strong>anchor</strong> for the Net edge inverse-variance blend (decision B2 + C2). Net edge then subtracts borrow.
+                  This is the <strong>anchor</strong> for the Net edge inverse-variance blend (decision B2 + C2). YieldBOOST forward MC includes borrow; net-edge quantiles are level-shifted without a second borrow subtract.
                   <br /><br />
                   <strong>Passive low-β (non-income)</strong>: hidden by policy.
                 </p>
