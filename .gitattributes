@@ -1,0 +1,5 @@
+# Git LFS patterns for data blobs that must stay in git and may exceed GitHub's 100 MB limit.
+# Prefer committing parquet + materializing JSON at Pages deploy
+# (scripts/export_etf_metrics_daily_json.py). Uncomment a line before the file hits ~90 MB:
+#
+# data/etf_metrics_daily.csv filter=lfs diff=lfs merge=lfs -text

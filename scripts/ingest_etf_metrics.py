@@ -67,6 +67,7 @@ from etf_holdings_providers import (
     build_default_holdings_stack,
     fetch_all_holdings,
 )
+from etf_metrics_format import sanitize_metrics_json_df, write_metrics_daily_json
 
 
 LOGGER = logging.getLogger("etf_metrics_ingest")
@@ -649,13 +650,7 @@ def apply_stale_carry_forward(
 
 
 def _sanitize_json_df(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
-    d["date"] = pd.to_datetime(d["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    d["ingested_at_utc"] = pd.to_datetime(d["ingested_at_utc"], errors="coerce", utc=True).astype(str)
-    for col in ("nav", "aum", "shares_outstanding", "shares_traded", "close_price", "etf_adj_close", "underlying_adj_close", "stale_age_bdays"):
-        if col in d.columns:
-            d[col] = pd.to_numeric(d[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
-    return d.astype(object).where(pd.notna(d), None)
+    return sanitize_metrics_json_df(df)
 
 
 # ---------------------------------------------------------------------------
@@ -1415,13 +1410,7 @@ def save_outputs(df: pd.DataFrame) -> None:
     df.to_parquet(PARQUET_PATH, index=False)
     df.to_csv(CSV_PATH, index=False)
 
-    # Full daily JSON
-    json_rows = _sanitize_json_df(df)
-    with open(JSON_PATH, "w", encoding="utf-8") as f:
-        json.dump({
-            "build_time": datetime.now(UTC).isoformat(),
-            "rows": json_rows.to_dict("records"),
-        }, f, separators=(",", ":"), allow_nan=False)
+    write_metrics_daily_json(df, JSON_PATH)
 
     # Latest snapshot JSON.
     # After dedup-style collapsing, a ticker's most-recent row may be older than

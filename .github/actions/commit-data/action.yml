@@ -28,6 +28,7 @@ runs:
           BRANCH="${GITHUB_REF_NAME:-main}"
         fi
         FILES="${{ inputs.files }}"
+        git lfs install --local 2>/dev/null || true
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -87,6 +88,23 @@ runs:
           fi
 
           git add ${RESTORED}
+
+          # Block pushes that would hit GitHub's 100 MB blob limit (use Git LFS or stop committing).
+          MAX_BYTES=$((100 * 1024 * 1024))
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            [ -f "$f" ] || continue
+            sz=$(wc -c < "$f" | tr -d ' ')
+            if [ "$sz" -ge "$MAX_BYTES" ]; then
+              filter=$(git check-attr filter -- "$f" | sed 's/.*: //')
+              if [ "$filter" != "lfs" ]; then
+                echo "::error::Staged file $f is ${sz} bytes (>=100 MB) and is not Git LFS tracked."
+                echo "Add it to .gitattributes, materialize at deploy, or reduce size."
+                exit 1
+              fi
+            fi
+          done < <(git diff --staged --name-only --diff-filter=ACM)
+
           if git diff --staged --quiet; then
             echo "No changes against latest origin/${BRANCH}"
             pushed=1

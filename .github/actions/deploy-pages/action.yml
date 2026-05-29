@@ -3,6 +3,22 @@ description: Build _site from index.html + data/ + assets/ and publish to GitHub
 runs:
   using: composite
   steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Materialize deploy-only data artifacts
+      shell: bash
+      run: |
+        set -euo pipefail
+        pip install -q pyarrow pandas numpy
+        if [ -f data/etf_metrics_daily.parquet ]; then
+          python scripts/export_etf_metrics_daily_json.py
+        else
+          echo "No etf_metrics_daily.parquet; skipping JSON materialization"
+        fi
+
     - name: Setup Pages
       uses: actions/configure-pages@v5
 

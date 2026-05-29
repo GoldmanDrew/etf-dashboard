@@ -39,6 +39,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
+          lfs: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -168,7 +169,6 @@ jobs:
           files: >-
             data/etf_metrics_daily.parquet
             data/etf_metrics_daily.csv
-            data/etf_metrics_daily.json
             data/etf_metrics_latest.json
             data/etf_metrics_health.json
             data/etf_distributions.json
