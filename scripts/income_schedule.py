@@ -21,20 +21,19 @@ them:
 2. **Weekly-rebalanced compound MC (this module's headline forward
    model, schema_v=4).**  Each week we draw a lognormal underlying
    return, evaluate the realised 95/88 put-spread on the 2x sleeve
-   ``L_t``, mark the pair to current equity, and compound:
+   ``L_t``, mark the pair (short ETF + beta*long underlying) to
+   current equity, and compound:
 
-       pair_w = L_t + ER/52 + beta * r_und_t      (per dollar of equity)
-       equity *= (1 + pair_w)
+       d_weekly = capture_ratio * E[put_spread_loss_weekly](0, sigma, 1)
+       pair_w   = L_t + ER/52 - borrow/52 - d_weekly + beta * r_und_t
+       equity  *= (1 + pair_w)
        pair_log_annual = ln(equity_W) * 52 / W
 
-   Distributions wash on this axis -- under physical NAV evolution
-   ``q' = 1 - L - f/52 - d`` the short collects ``L + f/52 + d`` from
-   price drop and pays ``d`` to the lender, so the per-week net is
-   ``L + f/52`` regardless of d.  This puts the forward pair P&L on
-   the **same log-continuous-annual axis** as the screener's
-   ``gross_decay_annual`` (Stahl ``mean(beta*log(R_und_TR) -
-   log(R_etf_TR)) * 252``), so they can be blended directly without a
-   units mismatch.
+   **Short distributions** are debited explicitly each week (cash owed
+   to the lender). ``capture_ratio`` scales calibrated weekly cash via
+   the NAV-normalized yield / BS-premium ratio. This replaces the
+   prior "distributions wash" assumption (ex-date price drop = full
+   distribution), which overstated edge on high-payout names.
 
    See ``simulate_weekly_compound_pair_pnl`` and
    ``scenario_grid_pair_pnl`` below; both are deterministic in a
@@ -48,11 +47,9 @@ The NAV-normalized capture-ratio calibration is unchanged (see
     ratio_i  = yield_i / bs_i             # ~0.65 cross-fund per research
 
 When fund-specific history is thin (CWY, new launches) we blend the
-fund ratio toward a cross-fund prior. The capture ratio is **not**
-needed by the weekly-rebalanced compound MC (distributions wash) but
-is still consumed by the Income Scenarios cash-projection helper, by
-the Magis simple-return diagnostics, and as a sanity input on the
-Scenarios tab heatmap.
+fund ratio toward a cross-fund prior. The capture ratio feeds the MC
+via ``d_weekly`` and is still consumed by the Income Scenarios cash-
+projection helper and Magis simple-return diagnostics.
 
 References
 ----------
@@ -683,18 +680,14 @@ def simulate_weekly_compound_pair_pnl(
         r_und_t    = exp(mu_w + sigma_w * z_t) - 1
         sleeve_t   = (1 + r_und_t)^2 - 1
         L_t        = put_spread_payoff(sleeve_t)            # 95/88, capped 0..0.07
-        pair_w_t   = L_t + ER/52 - borrow/52 + beta * r_und_t
+        d_weekly   = capture_ratio * E[put_spread_loss](0, sigma, 1 week)
+        pair_w_t   = L_t + ER/52 - borrow/52 - d_weekly + beta * r_und_t
         equity_t+1 = equity_t * (1 + pair_w_t)
         pair_log_annual = ln(equity_W) * (52 / weeks)
 
-    Distributions wash here: under physical NAV evolution
-    ``q' = 1 - L - f/52 - d`` the short collects ``L + f/52 + d``
-    on the price drop and pays ``d`` to the lender, so per-week net is
-    ``L + f/52 - borrow/52`` regardless of d.
-
-    ``capture_ratio`` is accepted (and recorded in the output) so the
-    Scenarios tab can project distribution yield separately, but it
-    does NOT appear in the per-week P&L.
+    ``capture_ratio`` scales the calibrated weekly distribution cash
+    debit (``d_weekly``). Higher capture / vol ⇒ larger short-side
+    distribution drag ⇒ lower forward pair P&L.
 
     Returns a dict with log-continuous-annual quantiles, mean, std, and
     diagnostic moments of the underlying. ``None`` on invalid inputs.
@@ -725,6 +718,10 @@ def simulate_weekly_compound_pair_pnl(
     mu_w = mu / WEEKS_PER_YEAR - 0.5 * sigma_w * sigma_w
     weekly_er = max(0.0, er) / WEEKS_PER_YEAR
     weekly_borrow = max(0.0, borrow) / WEEKS_PER_YEAR
+    bs_weekly = expected_put_spread_loss_weekly(0.0, sigma, 1.0)
+    if not math.isfinite(bs_weekly):
+        bs_weekly = 0.0
+    weekly_dist = max(0.0, cap_r * bs_weekly) if cap_r > 0 else 0.0
 
     rng = np.random.default_rng(int(seed) & 0x7FFFFFFF)
     z = rng.standard_normal(size=(n_paths_i, weeks_i))
@@ -735,7 +732,7 @@ def simulate_weekly_compound_pair_pnl(
     # the nonlinearity that drives the put-spread payoff distribution.
     sleeve_ret = np.expm1(2.0 * log_und)
     L = _put_spread_payoff_vec(sleeve_ret)
-    pair_w = L + weekly_er - weekly_borrow + b * r_und
+    pair_w = L + weekly_er - weekly_borrow - weekly_dist + b * r_und
     pair_w = np.clip(pair_w, _PAIR_WEEK_FLOOR, _PAIR_WEEK_CEIL)
     log_pair_week = np.log1p(pair_w)
     log_pair_total = log_pair_week.sum(axis=1)
@@ -765,6 +762,8 @@ def simulate_weekly_compound_pair_pnl(
         "mu_used": float(mu),
         "beta_used": float(b),
         "capture_used": float(cap_r),
+        "distributions_weekly": float(weekly_dist),
+        "distributions_annual": float(weekly_dist * WEEKS_PER_YEAR),
         "expense_ratio_annual": float(er),
         "borrow_annual": float(borrow),
         "axis": "log_continuous_annual",
