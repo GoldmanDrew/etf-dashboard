@@ -95,6 +95,7 @@ REQUIRED_COLUMNS = [
     "shares_outstanding",
     "shares_traded",
     "close_price",
+    "etf_adj_close",
     "underlying_adj_close",
     "stale",
     "stale_age_bdays",
@@ -156,6 +157,7 @@ def _records_to_df(records: list[ProviderResult], ingested_at: datetime) -> pd.D
             "shares_outstanding": r.shares_outstanding,
             "shares_traded": None,
             "close_price": None,
+            "etf_adj_close": None,
             "underlying_adj_close": None,
             "stale": bool(r.stale),
             "stale_age_bdays": r.stale_age_bdays,
@@ -634,6 +636,8 @@ def apply_stale_carry_forward(
         # (avoids bogus prem/disc until the next full merge).
         if "close_price" in out.columns:
             out.at[idx, "close_price"] = None
+        if "etf_adj_close" in out.columns:
+            out.at[idx, "etf_adj_close"] = None
         if "shares_traded" in out.columns:
             out.at[idx, "shares_traded"] = None
         out.at[idx, "status"] = "ok"
@@ -648,7 +652,7 @@ def _sanitize_json_df(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     d["date"] = pd.to_datetime(d["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     d["ingested_at_utc"] = pd.to_datetime(d["ingested_at_utc"], errors="coerce", utc=True).astype(str)
-    for col in ("nav", "aum", "shares_outstanding", "shares_traded", "close_price", "underlying_adj_close", "stale_age_bdays"):
+    for col in ("nav", "aum", "shares_outstanding", "shares_traded", "close_price", "etf_adj_close", "underlying_adj_close", "stale_age_bdays"):
         if col in d.columns:
             d[col] = pd.to_numeric(d[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
     return d.astype(object).where(pd.notna(d), None)
@@ -845,6 +849,104 @@ def fetch_underlying_adj_close_batch(
         return pd.DataFrame(columns=cols)
     out = pd.concat(frames, ignore_index=True)
     return out.drop_duplicates(subset=["date", "ticker"], keep="last")
+
+
+def fetch_etf_adj_close_batch(
+    tickers: list[str],
+    start: date,
+    end: date,
+) -> pd.DataFrame:
+    """Long-form (date, ticker, etf_adj_close) using Yahoo adjusted close for ETF tickers.
+
+    ``auto_adjust=True`` so daily ratios embed cash distributions (total-return level).
+    Used by the pair backtest short leg; sizing/borrow still use raw ``close_price``.
+    """
+    cols = ["date", "ticker", "etf_adj_close"]
+    if os.getenv("ETF_METRICS_DISABLE_YFINANCE", "").lower() in ("1", "true", "yes"):
+        return pd.DataFrame(columns=cols)
+    uniq = sorted({_normalize_symbol(s) for s in tickers if s and str(s).strip()})
+    if not uniq:
+        return pd.DataFrame(columns=cols)
+    chunk_sz = max(1, int(os.getenv("ETF_METRICS_CLOSE_YF_CHUNK_SIZE", "50")))
+    frames: list[pd.DataFrame] = []
+    for i in range(0, len(uniq), chunk_sz):
+        chunk = uniq[i : i + chunk_sz]
+        raw = _yf_download_ohlcv(chunk, start, end, auto_adjust=True)
+        part = _extract_yf_series_to_long(raw, chunk, "Close", "etf_adj_close")
+        if not part.empty:
+            frames.append(part)
+        else:
+            LOGGER.warning(
+                "etf_adj_close chunk empty (%d tickers, offset %d)",
+                len(chunk), i,
+            )
+    if not frames:
+        return pd.DataFrame(columns=cols)
+    out = pd.concat(frames, ignore_index=True)
+    return out.drop_duplicates(subset=["date", "ticker"], keep="last")
+
+
+def merge_etf_adj_close(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataFrame:
+    """Left-join Yahoo ETF adjusted close on (session date, ticker)."""
+    if adj_df.empty:
+        if "etf_adj_close" not in df.columns:
+            df = df.copy()
+            df["etf_adj_close"] = None
+        return df
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["_jd"] = yahoo_join_dates_series(out["date"], out.get("source_url"))
+    a2 = adj_df.copy()
+    a2["date"] = pd.to_datetime(a2["date"], errors="coerce").dt.date
+    a2["ticker"] = a2["ticker"].astype(str).str.upper()
+    merged = out.merge(
+        a2.rename(columns={"etf_adj_close": "_adj_new", "date": "_yf_date"}),
+        left_on=["ticker", "_jd"],
+        right_on=["ticker", "_yf_date"],
+        how="left",
+    )
+    merged = merged.drop(columns=["_jd", "_yf_date"])
+    if "etf_adj_close" not in merged.columns:
+        merged["etf_adj_close"] = None
+    merged["etf_adj_close"] = pd.to_numeric(merged["_adj_new"], errors="coerce").combine_first(
+        pd.to_numeric(merged["etf_adj_close"], errors="coerce")
+    )
+    merged = merged.drop(columns=["_adj_new"])
+    return merged
+
+
+def backfill_etf_adj_close_gaps(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill ``etf_adj_close`` where null but ``close_price`` exists (per-ticker gap fetch)."""
+    if df.empty or "etf_adj_close" not in df.columns or "close_price" not in df.columns:
+        return df
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    adj = pd.to_numeric(out["etf_adj_close"], errors="coerce")
+    close = pd.to_numeric(out["close_price"], errors="coerce")
+    need = close.notna() & adj.isna()
+    if not need.any():
+        return out
+    filled_before = int(adj.notna().sum())
+    for sym, grp in out.loc[need].groupby("ticker"):
+        dmin = grp["date"].min()
+        dmax = grp["date"].max()
+        patch = fetch_etf_adj_close_batch([str(sym)], dmin, dmax)
+        if patch.empty:
+            continue
+        pmap = patch.rename(columns={"etf_adj_close": "_p_adj"})
+        pmap["date"] = pd.to_datetime(pmap["date"], errors="coerce").dt.date
+        out = out.merge(pmap, on=["date", "ticker"], how="left")
+        u_old = pd.to_numeric(out["etf_adj_close"], errors="coerce")
+        u_new = pd.to_numeric(out["_p_adj"], errors="coerce")
+        out["etf_adj_close"] = u_old.combine_first(u_new)
+        out = out.drop(columns=["_p_adj"], errors="ignore")
+    filled_after = int(pd.to_numeric(out["etf_adj_close"], errors="coerce").notna().sum())
+    n_new = filled_after - filled_before
+    if n_new > 0:
+        LOGGER.info("backfill etf_adj_close: +%d non-null row(s) after gap fetch", n_new)
+    return out
 
 
 def yahoo_join_dates_series(dates: pd.Series, urls: pd.Series | None) -> pd.Series:
@@ -1722,6 +1824,18 @@ def main() -> None:
             incoming["close_price"] = None
         LOGGER.info("close_price fetch returned no rows")
 
+    etf_adj_df = fetch_etf_adj_close_batch(
+        tickers, start=resolved_start_date, end=resolved_end_date,
+    )
+    if not etf_adj_df.empty:
+        incoming = merge_etf_adj_close(incoming, etf_adj_df)
+        got_a = pd.to_numeric(incoming["etf_adj_close"], errors="coerce").notna().sum()
+        LOGGER.info("etf_adj_close attached to %d/%d rows", int(got_a), len(incoming))
+    else:
+        if "etf_adj_close" not in incoming.columns:
+            incoming["etf_adj_close"] = None
+        LOGGER.info("etf_adj_close fetch returned no rows")
+
     underlying_map = load_universe_underlying_map()
     und_syms = sorted({str(v).strip().upper() for v in underlying_map.values() if v and str(v).strip()})
     und_close_df = fetch_underlying_adj_close_batch(und_syms, resolved_start_date, resolved_end_date)
@@ -1767,6 +1881,7 @@ def main() -> None:
     # Must run on full merged history: ``incoming`` is usually one trading day,
     # so an earlier backfill never saw legacy null rows in the parquet store.
     merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
+    merged = backfill_etf_adj_close_gaps(merged)
     merged, n_vol_bf = backfill_shares_traded_gaps(merged)
     if n_vol_bf:
         LOGGER.info("Backfilled Yahoo shares_traded on %d historical row(s)", n_vol_bf)

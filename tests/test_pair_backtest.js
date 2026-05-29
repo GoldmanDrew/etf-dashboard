@@ -7,6 +7,8 @@ const {
   slippageCost,
   simulateInversePairBacktest,
   computePairBacktestRiskSeries,
+  computeEtfShortDayPnl,
+  buildDistributionByDate,
   MIN_TRADING_DAYS_FOR_CAGR,
 } = require("../assets/pair_backtest.js");
 
@@ -368,4 +370,105 @@ test("short both flat prices: raw net/gross is ~0 (balanced notionals)", () => {
   const mid = out.daily[Math.floor(out.daily.length / 2)];
   assert.ok(Number.isFinite(mid.netGrossRaw));
   assert.ok(mid.netGrossRaw < 0.02, `expected small raw net/gross, got ${mid.netGrossRaw}`);
+});
+
+test("etf adj close short leg uses total return (negative of long TR)", () => {
+  const rows = [
+    { date: "2024-09-01", close_price: 100, etf_adj_close: 100, underlying_adj_close: 50 },
+    { date: "2024-09-02", close_price: 100, etf_adj_close: 101, underlying_adj_close: 50 },
+    { date: "2024-09-03", close_price: 100, etf_adj_close: 101, underlying_adj_close: 50 },
+  ];
+  const out = simulateInversePairBacktest(rows, {
+    gross: 100000,
+    hedgeRatio: 1,
+    beta: 1,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.summary.etfReturnMode, "adj_close");
+  assert.equal(out.summary.distributionsPaid, 0);
+  // MV_etf = 50k; adj return +1% => short loses 500
+  assert.ok(Math.abs(out.summary.longPnl + 500) < 1e-6);
+});
+
+test("adj close path ignores explicit distributions (no double count)", () => {
+  const rows = [
+    { date: "2024-09-01", close_price: 100, etf_adj_close: 100, underlying_adj_close: 50 },
+    { date: "2024-09-02", close_price: 99, etf_adj_close: 99.5, underlying_adj_close: 50 },
+    { date: "2024-09-03", close_price: 99, etf_adj_close: 99.5, underlying_adj_close: 50 },
+  ];
+  const dists = [{ ex_date: "2024-09-02", amount: 0.5 }];
+  const baseOpts = {
+    gross: 100000,
+    hedgeRatio: 1,
+    beta: 1,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0,
+  };
+  const withDiv = simulateInversePairBacktest(rows, { ...baseOpts, distributions: dists });
+  const withoutDiv = simulateInversePairBacktest(rows, { ...baseOpts, distributions: [] });
+  assert.equal(withDiv.ok, true);
+  assert.equal(withoutDiv.ok, true);
+  assert.equal(withDiv.summary.distributionsPaid, 0);
+  assert.ok(Math.abs(withDiv.summary.longPnl - withoutDiv.summary.longPnl) < 1e-9);
+});
+
+test("fallback: raw price plus explicit distribution debit on ex-date", () => {
+  const rows = [
+    { date: "2024-09-01", close_price: 100, underlying_adj_close: 50 },
+    { date: "2024-09-02", close_price: 100, underlying_adj_close: 50 },
+    { date: "2024-09-03", close_price: 100, underlying_adj_close: 50 },
+  ];
+  const out = simulateInversePairBacktest(rows, {
+    gross: 100000,
+    hedgeRatio: 1,
+    beta: 1,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0,
+    distributions: [{ ex_date: "2024-09-02", amount: 0.5 }],
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.summary.etfReturnMode, "price_fallback");
+  // qE = 50k/100 = 500 shares; distribution debit = 250
+  assert.ok(Math.abs(out.summary.distributionsPaid - 250) < 1e-6);
+  assert.ok(Math.abs(out.summary.longPnl + 250) < 1e-6);
+});
+
+test("fallback wash: full price drop offsets distribution on ex-date", () => {
+  const rows = [
+    { date: "2024-09-01", close_price: 100, underlying_adj_close: 50 },
+    { date: "2024-09-02", close_price: 99.5, underlying_adj_close: 50 },
+    { date: "2024-09-03", close_price: 99.5, underlying_adj_close: 50 },
+  ];
+  const out = simulateInversePairBacktest(rows, {
+    gross: 100000,
+    hedgeRatio: 1,
+    beta: 1,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0,
+    distributions: [{ ex_date: "2024-09-02", amount: 0.5 }],
+  });
+  assert.equal(out.ok, true);
+  assert.ok(Math.abs(out.summary.longPnl) < 1e-6);
+});
+
+test("computeEtfShortDayPnl unit: adj close beats price+div when both present", () => {
+  const dist = buildDistributionByDate([{ ex_date: "2024-09-02", amount: 1 }]);
+  const prev = { pl: 100, pa: 100 };
+  const cur = { pl: 99, pa: 99.5, date: "2024-09-02" };
+  const adj = computeEtfShortDayPnl(1000, prev, cur, dist);
+  assert.equal(adj.mode, "adj_close");
+  assert.equal(adj.divDebit, 0);
+  const priceOnly = computeEtfShortDayPnl(1000, { pl: 100, pa: NaN }, cur, dist);
+  assert.equal(priceOnly.mode, "price_plus_div");
+  assert.ok(priceOnly.divDebit > 0);
 });

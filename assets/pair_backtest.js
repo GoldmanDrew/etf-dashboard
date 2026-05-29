@@ -61,6 +61,45 @@
     return vals.length % 2 ? vals[mid] : 0.5 * (vals[mid - 1] + vals[mid]);
   }
 
+  /** Sum distribution amounts by ex-date (ISO YYYY-MM-DD). */
+  function buildDistributionByDate(distributions) {
+    const out = Object.create(null);
+    if (!Array.isArray(distributions)) return out;
+    for (const item of distributions) {
+      const ex = String((item && item.ex_date) || "").trim();
+      const amt = toNum(item && item.amount);
+      if (ex && Number.isFinite(amt) && amt > 0) out[ex] = (out[ex] || 0) + amt;
+    }
+    return out;
+  }
+
+  /**
+   * Short ETF daily PnL on one leg.
+   * Primary: -MV × (adjClose_t/adjClose_{t-1} - 1) when both Yahoo adj closes exist (dividends embedded).
+   * Fallback: -q×ΔrawPrice minus q×distribution on ex-date — never both adj return and explicit div.
+   */
+  function computeEtfShortDayPnl(qE, prev, cur, distByDate) {
+    const prevMv = qE * prev.pl;
+    const prevAdj = prev.pa;
+    const curAdj = cur.pa;
+    if (Number.isFinite(prevAdj) && prevAdj > 0 && Number.isFinite(curAdj) && curAdj > 0) {
+      const trRet = curAdj / prevAdj - 1;
+      return { pnl: -prevMv * trRet, divDebit: 0, mode: "adj_close" };
+    }
+    let pnl = -qE * (cur.pl - prev.pl);
+    let divDebit = 0;
+    const divAmt = distByDate[cur.date];
+    if (Number.isFinite(divAmt) && divAmt > 0) {
+      divDebit = qE * divAmt;
+      pnl -= divDebit;
+    }
+    return {
+      pnl,
+      divDebit,
+      mode: divDebit > 0 ? "price_plus_div" : "price_only",
+    };
+  }
+
   function alignPair(longRows, shortRows, opts) {
     const l = normalizeSeries(longRows, opts && opts.long);
     const s = normalizeSeries(shortRows, opts && opts.short);
@@ -327,8 +366,10 @@
    * `netGrossTolerancePct` (percentage points), rebalance to target notionals and reset the anchor.
    * Anchor is snapshotted at inception and after each rebalance.
    *
-   * Pass `opts.delta` (screener δ) or legacy `opts.beta`. `opts.hedgeRatio` is the magnitude h (UI default 1/|δ|).
-   * `opts.slippageBps`: per-rebalance t-cost = `Math.max(0, slippageBps) / 10000` × traded notional (Diamond-Creek-Quant parity; no floor/impact fallback).
+   * **ETF short leg:** mark-to-market on Yahoo total return when ``etf_adj_close`` is present
+   * (`−MV × adjReturn`; distributions embedded — no separate ex-date debit). Otherwise raw
+   * ``close_price``/``nav`` plus explicit distribution debits from ``opts.distributions`` on
+   * ex-dates (never both). Sizing, borrow, and t-costs always use tradeable close/NAV.
    */
   function simulateInversePairBacktest(rows, opts) {
     const gross = Math.max(0, toNum(opts && opts.gross));
@@ -351,6 +392,7 @@
         .filter((x) => x.d && Number.isFinite(x.b))
         .sort((a, b) => a.d.localeCompare(b.d))
       : [];
+    const distByDate = buildDistributionByDate(opts && opts.distributions);
 
     if (!Array.isArray(rows) || rows.length < 2 || !Number.isFinite(gross) || gross <= 0) {
       return { ok: false, error: "Invalid rows or gross capital.", daily: [], rebalanceMarks: [], summary: {} };
@@ -359,10 +401,11 @@
     const pts = [];
     for (const row of rows) {
       const pl = toNum(row && row.close_price) || toNum(row && row.nav);
+      const pa = toNum(row && row.etf_adj_close);
       const ps = toNum(row && row.underlying_adj_close);
       const ds = String((row && row.date) || "").trim();
       if (!ds || !Number.isFinite(pl) || pl <= 0 || !Number.isFinite(ps) || ps <= 0) continue;
-      pts.push({ date: ds, pl, ps });
+      pts.push({ date: ds, pl, pa: Number.isFinite(pa) && pa > 0 ? pa : NaN, ps });
     }
     if (pts.length < 3) {
       return {
@@ -396,6 +439,9 @@
     let cumUnd = 0;
     let cumBorrow = 0;
     let cumTc = 0;
+    let cumDistributions = 0;
+    let nDaysAdjClose = 0;
+    let nDaysPriceFallback = 0;
     const daily = [];
     const rebalanceMarks = [];
 
@@ -441,11 +487,14 @@
     for (let i = 1; i < pts.length; i += 1) {
       const cur = pts[i];
       const prev = pts[i - 1];
-      const dpl = cur.pl - prev.pl;
       const dps = cur.ps - prev.ps;
-      const dEtf = -qE * dpl;
-      const dUnd = shortEtfLongUnd ? qU * dps : -qU * dps;
+      const etfDay = computeEtfShortDayPnl(qE, prev, cur, distByDate);
+      const dEtf = etfDay.pnl;
       cumEtf += dEtf;
+      cumDistributions += etfDay.divDebit;
+      if (etfDay.mode === "adj_close") nDaysAdjClose += 1;
+      else nDaysPriceFallback += 1;
+      const dUnd = shortEtfLongUnd ? qU * dps : -qU * dps;
       cumUnd += dUnd;
 
       advanceBorrowForDate(cur.date);
@@ -485,6 +534,7 @@
         longPnl: cumEtf,
         shortPnl: cumUnd,
         borrow: -cumBorrow,
+        distributions: -cumDistributions,
         tCosts: -cumTc,
         netGross: netGrossBeta,
         netGrossRaw,
@@ -498,14 +548,21 @@
       });
     }
 
+    const etfReturnMode = nDaysAdjClose > 0 && nDaysPriceFallback === 0
+      ? "adj_close"
+      : (nDaysAdjClose === 0 && nDaysPriceFallback > 0 ? "price_fallback" : "mixed");
     const summary = {
       netPnl: cumEtf + cumUnd - cumBorrow - cumTc,
       longPnl: cumEtf,
       shortPnl: cumUnd,
       borrowPaid: cumBorrow,
+      distributionsPaid: cumDistributions,
       tCosts: cumTc,
       nDays: pts.length,
       nRebalances: rebalanceMarks.length,
+      etfReturnMode,
+      nDaysAdjClose,
+      nDaysPriceFallback,
     };
     const chartRows = daily.map((d) => ({
       date: d.date,
@@ -513,6 +570,7 @@
       longPnl: d.longPnl,
       shortPnl: d.shortPnl,
       borrow: d.borrow,
+      distributions: d.distributions,
       transactionCosts: d.tCosts,
       exposureRatio: d.netGrossBeta,
       mvEtfAbs: d.mvEtfAbs,
@@ -542,6 +600,8 @@
   const exported = {
     alignPair,
     median,
+    buildDistributionByDate,
+    computeEtfShortDayPnl,
     runPairBacktest,
     slippageCost,
     exposureRatio,
