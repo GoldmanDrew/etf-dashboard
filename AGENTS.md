@@ -262,9 +262,7 @@ Routing logic: `index.html` → `expectedDecayHeadlineValue(r)` → `expectedDec
 
 ### 4.5.2 YieldBOOST forward pair-P&L (weekly-rebalanced compound MC, schema_v=4)
 
-The forward edge for a YB pair trade is computed by `simulate_weekly_compound_pair_pnl(...)` in `scripts/income_schedule.py` (dashboard build) and `yieldboost_pair_mc.py` (ls-algo screener). The strategy modeled is: short one YB ETF, long β units of the underlying, **rebalance once per week** to keep the dollar hedge constant. Output units are **log-continuous-annual** (`ln(equity_W / equity_0)`), the same axis as `gross_decay_annual` from the screener.
-
-**Unified anchor (schema_v=4+):** one MC run stamps **both** `expected_pair_pnl_p*` and `expected_gross_decay_p*` on each YB row (`build_data._stamp_unified_yb_forward`). Net edge inverse-variance blending uses the same MC p50 / std. Legacy `yieldboost_decay.py` simple-decay σ-draw MC is no longer used for anchoring.
+The forward edge for a YB pair trade is computed dashboard-side by `simulate_weekly_compound_pair_pnl(...)` in `scripts/income_schedule.py`. The strategy modeled is: short one YB ETF, long β units of the underlying, **rebalance once per week** to keep the dollar hedge constant. Output units are **log-continuous-annual** (`ln(equity_W / equity_0)`), the same axis as `gross_decay_annual` from the screener.
 
 **Per-week recursion** (vectorized over 20,000 paths × 52 weeks):
 
