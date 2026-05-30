@@ -335,18 +335,21 @@ Both YB and LETF rows now carry a `pair_scenario_grid` block in `dashboard_data.
   "p50_log_grid": [[...], [...], [...], [...], [...]],
   "und_p50_simple_grid": [[...], ...],
   "borrow_annual": 0.056,
-  "engine": "yieldboost_mc" | "letf_ito_analytic",
+  "engine": "yieldboost_put_spread_structural" | "ito_closed_form",
   "axis": "log_continuous_annual",
-  "basis": "weekly_rebalanced_compound" | "letf_ito_analytic"
+  "basis": "put_spread_gross_anchor" | "letf_ito_analytic"
 }
 ```
 
-`p50_log_grid[i][j]` is the median pair P&L (log/yr) at `σ * sigma_multipliers[i]` and `μ_annual = drifts[j]`. Two code paths:
+`p50_log_grid[i][j]` is gross structural pair P&L (log/yr) at `σ * sigma_multipliers[i]` and `μ_annual = drifts[j]`. Code paths:
 
-- **YB:** `scenario_grid_pair_pnl(...)` — runs `simulate_weekly_compound_pair_pnl` 25 times (5×5 cells) at 5,000 paths/cell. Cost ~150 ms per ticker.
-- **LETF / inverse / vol-ETP:** analytic Itô `(β² − β)/2 · (k·σ)² + β·μ − borrow` per cell (no MC). Microseconds.
+- **YB (Scenarios heatmap):** `scenario_grid_put_spread_pair(...)` — put-spread closed form + `β·μ`, center cell calibrated to `expected_gross_decay_p50_annual`. Aligns with Exp. decay / net-edge anchoring.
+- **YB (main grid Exp. edge fwd):** `expected_pair_pnl_annual` / weekly path MC — separate metric.
+- **LETF / inverse / vol-ETP:** analytic Itô `(β² − β)/2 · (k·σ)² + β·μ` per cell.
 
-Both paths emit the same keys so the frontend `PairScenarioHeatmap` component renders uniformly. The grid is computed once at build time and re-rendered client-side via the JS mirror (`assets/income_scenario.js::scenarioGridPairPnL`) when the user toggles the Scenarios-tab "Use live slider σ" switch.
+YB `net_edge_*` is passed through from the screener (no dashboard re-blend onto weekly pair MC).
+
+Both paths emit the same keys so `PairScenarioHeatmap` renders uniformly. Client mirror: `assets/income_scenario.js::scenarioGridPutSpreadPair`.
 
 The `pair_scenario_grid_meta` global field on the JSON envelope documents the canonical axes for any tooling that wants to build alternative grids.
 

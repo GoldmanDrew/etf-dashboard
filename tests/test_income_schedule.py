@@ -726,6 +726,41 @@ def test_scenario_grid_returns_none_for_bad_inputs():
     assert ic.scenario_grid_pair_pnl(sigma_annual=-0.1, beta=0.5) is None
 
 
+def test_put_spread_grid_shape_and_center_anchor():
+    anchor = 0.79
+    grid = ic.scenario_grid_put_spread_pair(
+        sigma_annual=0.674,
+        beta=0.372,
+        capture_ratio=0.80,
+        gross_anchor_p50=anchor,
+    )
+    assert grid is not None
+    assert grid["engine"] == "yieldboost_put_spread_structural"
+    assert len(grid["p50_log_grid"]) == 5
+    assert len(grid["p50_log_grid"][0]) == 5
+    mid = grid["p50_log_grid"][2][2]
+    assert mid is not None
+    assert abs(float(mid) - anchor) < 1e-6
+
+
+def test_put_spread_grid_sigma_axis_monotone_at_flat_drift():
+    grid = ic.scenario_grid_put_spread_pair(
+        sigma_annual=0.674,
+        beta=0.372,
+        capture_ratio=0.80,
+        gross_anchor_p50=0.79,
+    )
+    assert grid is not None
+    drift_idx = grid["drifts"].index(0.0)
+    col = [row[drift_idx] for row in grid["p50_log_grid"]]
+    assert col[1] > col[0] and col[2] > col[1], col
+
+
+def test_put_spread_grid_returns_none_for_bad_inputs():
+    assert ic.scenario_grid_put_spread_pair(sigma_annual=None, beta=0.5) is None
+    assert ic.scenario_grid_put_spread_pair(sigma_annual=0.5, beta=None) is None
+
+
 # ---------------------------------------------------------------------------
 # 11. expected_pair_pnl_annual: log-axis headline + simple-return diagnostics
 # ---------------------------------------------------------------------------

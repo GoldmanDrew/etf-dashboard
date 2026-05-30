@@ -770,6 +770,89 @@
     };
   }
 
+  function scenarioGridPutSpreadPair(params) {
+    const opts = params || {};
+    const sigma = _toNum(opts.sigmaAnnual);
+    const beta = _toNum(opts.beta);
+    if (!Number.isFinite(sigma) || sigma <= 0) return null;
+    if (!Number.isFinite(beta)) return null;
+    const sigmaMults = Array.isArray(opts.sigmaMultipliers) && opts.sigmaMultipliers.length > 0
+      ? opts.sigmaMultipliers.map(_toNum)
+      : [0.5, 0.7, 1.0, 1.3, 1.5];
+    const drifts = Array.isArray(opts.drifts) && opts.drifts.length > 0
+      ? opts.drifts.map(_toNum)
+      : [-0.5, -0.25, 0.0, 0.25, 0.5];
+    const cap = _toNum(opts.captureRatio);
+    const er = _toNum(opts.expenseRatioAnnual);
+    const borrow = _toNum(opts.borrowAnnual);
+    const horizonYears = _toNum(opts.horizonYears) || 1.0;
+    const anchorP50 = _toNum(opts.grossAnchorP50);
+    const expense = Number.isFinite(er) && er >= 0 ? er : DEFAULT_EXPENSE_RATIO_ANNUAL;
+
+    function intrinsicGrossLog(sigmaK, mu) {
+      const t = horizonYears;
+      const undSimple = Math.expm1(mu * t);
+      const weeklyLoss = expectedPutSpreadLossWeekly({
+        underlyingReturn: undSimple,
+        sigmaAnnual: sigmaK,
+        horizonYears: t,
+      });
+      if (weeklyLoss == null) return null;
+      const weeks = Math.max(1, Math.round(t * WEEKS_PER_YEAR));
+      const weeklyExpense = Math.max(0, expense) / WEEKS_PER_YEAR;
+      const q = clamp(1 - weeklyLoss - weeklyExpense, 0.0001, 1.5);
+      const navEnd = Math.pow(q, weeks);
+      if (!(navEnd > 0)) return null;
+      return -Math.log(navEnd) / t;
+    }
+
+    function structuralCell(sigmaK, mu) {
+      const gross = intrinsicGrossLog(sigmaK, mu);
+      if (gross == null) return null;
+      return gross + beta * mu;
+    }
+
+    const rawCenter = structuralCell(sigma, 0);
+    const anchorDelta = Number.isFinite(anchorP50) && rawCenter != null
+      ? anchorP50 - rawCenter
+      : 0;
+
+    const grid = [];
+    const undGrid = [];
+    for (let i = 0; i < sigmaMults.length; i += 1) {
+      const k = sigmaMults[i];
+      const row = [];
+      const undRow = [];
+      for (let j = 0; j < drifts.length; j += 1) {
+        const mu = drifts[j];
+        const cell = structuralCell(sigma * k, mu);
+        if (cell == null) {
+          row.push(null);
+          undRow.push(null);
+        } else {
+          row.push(cell + anchorDelta);
+          undRow.push(Math.expm1(mu * horizonYears));
+        }
+      }
+      grid.push(row);
+      undGrid.push(undRow);
+    }
+    return {
+      sigmaMultipliers: sigmaMults,
+      drifts,
+      p50LogGrid: grid,
+      undP50SimpleGrid: undGrid,
+      borrowAnnual: Number.isFinite(borrow) && borrow >= 0 ? borrow : 0,
+      expenseRatioAnnual: expense,
+      nPathsPerCell: 0,
+      axis: 'log_continuous_annual',
+      basis: 'put_spread_gross_anchor',
+      engine: 'yieldboost_put_spread_structural',
+      anchorP50Annual: Number.isFinite(anchorP50) ? anchorP50 : null,
+      anchorDeltaAnnual: anchorDelta,
+    };
+  }
+
   const exported = {
     PUT_SPREAD_SHORT_STRIKE,
     PUT_SPREAD_LONG_STRIKE,
@@ -790,6 +873,7 @@
     bandToSigma,
     simulateWeeklyCompoundPairPnL,
     scenarioGridPairPnL,
+    scenarioGridPutSpreadPair,
     stableSeedFromSymbol,
   };
 

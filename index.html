@@ -4034,16 +4034,106 @@ function buildWidgetHtml(symbol, compareSymbol, range, interval) {
 }
 
 // =============================================================================
+// YB scenario anchor + net-edge bridge (Scenarios tab)
+// =============================================================================
+function YbScenarioAnchorPanel({ r }) {
+  if (!isYieldBoostIncomeStrategy(r)) return null;
+  const dist = expectedDecayDistribution(r);
+  const pair = expectedPairPnlDistribution(r);
+  const grossP50 = dist?.p50 ?? Number(r?.expected_gross_decay_p50_annual);
+  const grossModel = dist?.model || r?.expected_gross_decay_dist_model || '—';
+  const anchorTarget = Number(r?.gross_anchor_target_annual);
+  const netP50 = Number(r?.net_edge_p50_annual);
+  const pairFwd = pair?.p50 ?? Number(r?.expected_pair_pnl_p50_annual);
+  const realized = Number(r?.gross_realized_mean_annual);
+  return (
+    <div className="scenario-card" style={{ marginTop: 0, marginBottom: 14 }}>
+      <div className="scenario-head">
+        <div>
+          <div className="scenario-title">Anchor metrics (YieldBOOST)</div>
+          <div className="scenario-sub">
+            <strong>Exp. decay</strong> uses screener put-spread MC ({DECAY_DIST_MODEL_LABELS[grossModel] || grossModel}) and anchors net edge.
+            <strong> Exp. edge (fwd)</strong> is a separate weekly-rebalanced pair MC on the main grid.
+          </div>
+        </div>
+      </div>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+        gap: 10,
+        fontSize: 12,
+        fontVariantNumeric: 'tabular-nums',
+      }}>
+        <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Exp. decay p50</div><strong>{fmtLogYr(grossP50)}</strong></div>
+        <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Gross anchor (posterior)</div><strong>{fmtLogYr(anchorTarget)}</strong></div>
+        <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Realized gross mean</div><strong>{fmtLogYr(realized)}</strong></div>
+        <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Net edge p50</div><strong>{fmtLogYr(netP50)}</strong></div>
+        <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Exp. edge (fwd) p50</div><strong>{fmtLogYr(pairFwd)}</strong></div>
+      </div>
+    </div>
+  );
+}
+
+function NetEdgeBridgePanel({ r }) {
+  if (!expectedDecayAvailableForRow(r)) return null;
+  const IS = typeof window !== 'undefined' ? window.IncomeScenario : null;
+  const muF = Number(r?.expected_gross_decay_p50_annual);
+  const p10 = Number(r?.expected_gross_decay_p10_annual);
+  const p90 = Number(r?.expected_gross_decay_p90_annual);
+  const muR = Number(r?.gross_realized_mean_annual);
+  const sigmaR = Number(r?.gross_sigma_realized_annual);
+  const posterior = Number(r?.gross_anchor_target_annual);
+  const netP50 = Number(r?.net_edge_p50_annual);
+  const borrow = Number(r?.borrow_for_net_annual ?? r?.borrow_fee_annual);
+  const blendMethod = r?.gross_blend_method || r?.net_edge_blend_method || '—';
+  const wF = Number(r?.gross_blend_weight_forward);
+  let sigmaF = Number(r?.gross_sigma_forward_annual);
+  if (!Number.isFinite(sigmaF) && IS && IS.bandToSigma) {
+    sigmaF = IS.bandToSigma(p10, p90);
+  }
+  let blend = null;
+  if (IS && IS.inverseVarianceBlend && Number.isFinite(muF) && Number.isFinite(muR)) {
+    blend = IS.inverseVarianceBlend({
+      muForward: muF,
+      sigmaForward: Number.isFinite(sigmaF) ? sigmaF : null,
+      muRealized: muR,
+      sigmaRealized: Number.isFinite(sigmaR) ? sigmaR : null,
+    });
+  }
+  return (
+    <div className="scenario-card" style={{ marginTop: 14 }}>
+      <div className="scenario-head">
+        <div>
+          <div className="scenario-title">Net edge bridge</div>
+          <div className="scenario-sub">
+            Realized gross bootstrap is inverse-variance blended to forward Exp. decay p50, then borrow is applied for net edge.
+          </div>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, lineHeight: 1.6, fontVariantNumeric: 'tabular-nums' }}>
+        <div>Forward μ<sub>F</sub> (Exp. decay p50): <strong>{fmtLogYr(muF)}</strong>
+          {Number.isFinite(sigmaF) ? <> · σ<sub>F</sub> ≈ {fmt(sigmaF)}</> : null}
+        </div>
+        <div>Realized μ<sub>R</sub>: <strong>{fmtLogYr(muR)}</strong>
+          {Number.isFinite(sigmaR) ? <> · σ<sub>R</sub> ≈ {fmt(sigmaR)}</> : null}
+        </div>
+        <div>Posterior gross anchor: <strong>{fmtLogYr(Number.isFinite(posterior) ? posterior : (blend?.posteriorMean ?? NaN))}</strong>
+          {Number.isFinite(wF) ? <> · w<sub>F</sub> = {wF.toFixed(2)}</> : null}
+          {' '}· method: {blendMethod}
+        </div>
+        <div>Net edge p50: <strong>{fmtLogYr(netP50)}</strong>
+          {Number.isFinite(borrow) ? <> (after borrow ≈ {fmt(borrow)}/yr)</> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =============================================================================
 // PairScenarioHeatmap (schema_v=4)
 // =============================================================================
-// 5x5 grid of weekly-rebalanced compound forward pair P&L (log/yr) across
-// (sigma_multiplier × annualized underlying drift). For YB rows the grid is
-// the output of `scenario_grid_pair_pnl` (server-side MC, ~5k paths/cell).
-// For LETF rows it is the analytic Itô closed form
-//   (β² − β)/2 · (k·σ)² + β·μ
-// computed cell-by-cell in `build_data.py`. Both axes are
-// `log_continuous_annual` so the colour scale is shared across product
-// classes.
+// 5x5 grid of structural gross pair P&L (log/yr) for YieldBOOST — put-spread
+// closed form anchored to Exp. decay p50 — or Itô analytic for LETF.
 const _HEATMAP_MIN = -2.0;
 const _HEATMAP_MAX = 2.0;
 function _heatmapCellColor(v) {
@@ -4084,23 +4174,35 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
   const beta = Number(r?.delta != null ? r.delta : r?.beta);
   const borrow = Number(r?.borrow_for_net_annual);
   const isLetfAnalytic = grid.basis === 'letf_ito_analytic';
+  const isPutSpreadStructural = grid.engine === 'yieldboost_put_spread_structural'
+    || grid.basis === 'put_spread_gross_anchor';
   const isYb = isYieldBoostIncomeStrategy(r);
+  const gridTitle = isPutSpreadStructural
+    ? 'Structural gross pair heatmap (log/yr)'
+    : 'Forward pair P&L heatmap (log/yr)';
   return (
     <div className="scenario-card" style={{ marginTop: 0 }}>
       <div className="scenario-head">
         <div>
-          <div className="scenario-title">Forward pair P&L heatmap (log/yr)</div>
+          <div className="scenario-title">{gridTitle}</div>
           <div className="scenario-sub">
-            {isYb ? 'YieldBOOST: weekly-rebalanced compound MC' : 'LETF: Itô analytic'} ·
+            {isPutSpreadStructural
+              ? 'YieldBOOST: put-spread structural gross (center ≈ Exp. decay p50) + β·μ drift leg'
+              : isYb ? 'YieldBOOST: weekly-rebalanced compound MC' : 'LETF: Itô analytic'} ·
             {sigma != null ? <> σ <strong>{fmt(sigma)}</strong> ·</> : null}
             {Number.isFinite(beta) ? <> β <strong>{beta.toFixed(2)}</strong> ·</> : null}
-            {Number.isFinite(borrow) ? (
+            {Number.isFinite(borrow) && !isPutSpreadStructural ? (
               <> borrow <strong>{fmt(borrow)}</strong>/yr{isYb ? ' (in MC cells)' : ' (subtracted in Net edge)'}</>
             ) : null}
           </div>
           <div className="scenario-sub">
-            Rows = sigma multiplier of forecast vol · Cols = 1Y simple underlying drift ·
-            Cells = median forward pair P&L on the same axis as Realized.
+            Rows = σ multiplier · Cols = 1Y underlying log drift ·
+            {isPutSpreadStructural
+              ? ' Gross structural (distributions/borrow in Net edge bridge + income table below).'
+              : ' Cells = median forward pair P&L on the same axis as Realized.'}
+            {isPutSpreadStructural && pair?.p50 != null ? (
+              <> Forward pair MC p50 (main grid): <strong>{fmtLogYr(pair.p50)}</strong>.</>
+            ) : null}
           </div>
         </div>
       </div>
@@ -4164,14 +4266,25 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
         </table>
       </div>
       <div className="scenario-sub" style={{ marginTop: 8, fontSize: 11, lineHeight: 1.5 }}>
-        Forward pair P&L is a 1Y log-rate of a weekly-rebalanced delta-hedged short pair (short ETF + β-long underlying).
-        Direction is hedged via β; remaining sensitivity is to realized vol of the underlying — higher σ → more
-        weekly put-spread payoff captured (gamma scalp) → more positive forward edge. Short-side distribution
-        cash is debited each week (calibrated via capture ratio × BS premium at cell σ).
-        Borrow is subtracted inside each MC cell for YieldBOOST.
-        {pair && pair.p50 != null ? (
-          <> Headline cell (σ×1.0, drift 0%): <strong>{fmtLogYr(pair.p50)} log/yr</strong>.</>
-        ) : null}
+        {isPutSpreadStructural ? (
+          <>
+            Structural gross pair = put-spread ETF log decay (same engine as Exp. decay) + β × underlying log drift.
+            Center cell (σ×1.0, drift 0%) is calibrated to screener Exp. decay p50
+            {grid.anchor_p50_annual != null ? <> ({fmtLogYr(grid.anchor_p50_annual)})</> : null}.
+            Distributions and borrow enter net edge via the screener bootstrap, not this gross grid.
+          </>
+        ) : (
+          <>
+            Forward pair P&L is a 1Y log-rate of a weekly-rebalanced delta-hedged short pair (short ETF + β-long underlying).
+            Direction is hedged via β; remaining sensitivity is to realized vol of the underlying — higher σ → more
+            weekly put-spread payoff captured (gamma scalp) → more positive forward edge. Short-side distribution
+            cash is debited each week (calibrated via capture ratio × BS premium at cell σ).
+            Borrow is subtracted inside each MC cell for YieldBOOST.
+            {pair && pair.p50 != null ? (
+              <> Headline cell (σ×1.0, drift 0%): <strong>{fmtLogYr(pair.p50)} log/yr</strong>.</>
+            ) : null}
+          </>
+        )}
       </div>
     </div>
   );
@@ -6800,13 +6913,15 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             lineHeight: 1.5,
             color: 'var(--text-secondary)',
           }}>
-            <strong style={{ color: 'var(--text-primary)' }}>Two views on this tab:</strong>{' '}
-            (1) <strong>Forward pair P&L heatmap</strong> below — short-favorable forward edge in <em>log/yr</em> across σ × drift,
-            same axis as Realized.
-            (2) <strong>Long total return tables</strong> further down — what a long earns on price + cash, without borrow
-            (income names add payouts). Borrow is subtracted only in the <strong>Net edge</strong> column on the main table.
+            <strong style={{ color: 'var(--text-primary)' }}>Three views on this tab:</strong>{' '}
+            (1) <strong>Structural gross heatmap</strong> — put-spread engine anchored to Exp. decay p50 (same family as net edge).
+            (2) <strong>Income scenario tables</strong> — long TR / net short with calibrated distributions.
+            (3) <strong>Net edge bridge</strong> — how realized gross is blended to forward Exp. decay.
+            Weekly-rebalanced forward pair MC lives on the main grid as <strong>Exp. edge (fwd)</strong>.
           </div>
+          {isYieldBoostIncomeStrategy(r) ? <YbScenarioAnchorPanel r={r} /> : null}
           <PairScenarioHeatmap r={r} forecastSigma={forecastVolForScenario(r, chartVolLookbackRange)?.sigma} />
+          {expectedDecayAvailableForRow(r) ? <NetEdgeBridgePanel r={r} /> : null}
           <ScenarioDistributionsPanel
             etfSym={etfSym}
             series={etfDistributionsSeries}

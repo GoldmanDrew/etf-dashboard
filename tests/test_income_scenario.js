@@ -24,6 +24,7 @@ const {
   bandToSigma,
   simulateWeeklyCompoundPairPnL,
   scenarioGridPairPnL,
+  scenarioGridPutSpreadPair,
   stableSeedFromSymbol,
   DEFAULT_CROSS_FUND_RATIO,
   WEEKS_PER_YEAR,
@@ -527,6 +528,21 @@ test("scenarioGridPairPnL sigma increases through mid band with distributions", 
   const col = grid.p50LogGrid.map((row) => row[driftIdx]);
   assert.ok(col[1] > col[0] && col[2] > col[1], col.join(","));
   assert.ok(col[col.length - 1] > col[0]);
+});
+
+test("scenarioGridPutSpreadPair anchors center to gross p50", () => {
+  const anchor = 0.79;
+  const grid = scenarioGridPutSpreadPair({
+    sigmaAnnual: 0.674,
+    beta: 0.372,
+    captureRatio: 0.80,
+    grossAnchorP50: anchor,
+  });
+  assert.ok(grid);
+  assert.equal(grid.engine, "yieldboost_put_spread_structural");
+  const mid = grid.p50LogGrid[2][2];
+  assert.ok(Number.isFinite(mid));
+  assert.ok(Math.abs(mid - anchor) < 1e-6);
 });
 
 test("stableSeedFromSymbol is deterministic and case-insensitive", () => {
