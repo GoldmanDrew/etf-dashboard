@@ -42,6 +42,7 @@ from income_schedule import (
     scenario_grid_put_spread_pair,
     simulate_weekly_compound_pair_pnl,
     stable_seed_from_symbol,
+    structural_pair_gross_log_annual,
 )
 
 # schema_v=4 + weekly-rebalanced compound MC: tunable knobs for the new
@@ -4447,12 +4448,11 @@ def build():
     #   - expected_pair_pnl_at_sigma_{lo,mid,hi}_p50_annual (vol-regime sensitivity)
     #   - pair_scenario_grid (5x5 sigma_mult x drift)
     #
-    # YieldBOOST forward = path-dependent MC of a delta-hedged short pair on
-    # the weekly compounding axis, same as the screener's gross_decay_annual.
-    # Short-side distribution cash is debited each week (capture_ratio × BS
-    # premium at scenario σ). Borrow is subtracted inside the weekly MC
-    # (``borrow_for_net_annual``); net-edge quantiles add borrow back after
-    # the screener shift so it is not subtracted twice (schema_v=4).
+    # YieldBOOST headline forward = screener put-spread structural gross
+    # (``expected_gross_decay_p*`` mirrored into ``expected_pair_pnl_p*``),
+    # same anchor as net edge and the Scenarios heatmap center cell.
+    # Weekly-rebalanced pair MC is retained as ``expected_pair_pnl_weekly_mc_*``
+    # diagnostics only (distributions + borrow inside the path sim).
     #
     # LETF / inverse / vol-ETP forward = identity (cash leg absent), so we
     # mirror expected_gross_decay_p* into expected_pair_pnl_p* and analytically
@@ -4472,16 +4472,31 @@ def build():
         rec["expected_pair_pnl_p75_annual"] = None
         rec["expected_pair_pnl_p90_annual"] = rec.get("expected_gross_decay_p90_annual")
         rec["expected_pair_pnl_mean_annual"] = rec.get("expected_gross_decay_mean_annual")
-        rec["expected_pair_pnl_std_annual"] = rec.get("gross_sigma_forward_annual")
+        if rec.get("is_yieldboost"):
+            _yb_p10 = rec.get("expected_gross_decay_p10_annual")
+            _yb_p90 = rec.get("expected_gross_decay_p90_annual")
+            _yb_sig = band_to_sigma(_yb_p10, _yb_p90)
+            if _yb_sig is None:
+                _yb_sig = rec.get("gross_sigma_forward_annual")
+            rec["expected_pair_pnl_std_annual"] = (
+                round(float(_yb_sig), 6) if _yb_sig is not None else None
+            )
+            rec["expected_pair_pnl_basis"] = "put_spread_structural_gross"
+            rec["expected_pair_pnl_source"] = (
+                rec.get("expected_gross_decay_dist_model")
+                or "yieldboost_put_spread_structural"
+                if rec.get("expected_gross_decay_p50_annual") is not None
+                else None
+            )
+        else:
+            rec["expected_pair_pnl_std_annual"] = rec.get("gross_sigma_forward_annual")
+            rec["expected_pair_pnl_basis"] = "log_drag_identity"
+            rec["expected_pair_pnl_source"] = (
+                "gross_drag_pair_identity"
+                if rec.get("expected_gross_decay_p50_annual") is not None
+                else None
+            )
         rec["expected_pair_pnl_units"] = "log_continuous_annual"
-        rec["expected_pair_pnl_basis"] = (
-            "weekly_rebalanced_compound" if rec.get("is_yieldboost") else "log_drag_identity"
-        )
-        rec["expected_pair_pnl_source"] = (
-            "gross_drag_pair_identity"
-            if rec.get("expected_gross_decay_p50_annual") is not None
-            else None
-        )
         # Drop any deprecated YB-only fields lingering from an older build.
         rec.pop("expected_pair_pnl_simple_p10_annual", None)
         rec.pop("expected_pair_pnl_simple_p50_annual", None)
@@ -4542,7 +4557,7 @@ def build():
         if not rec.get("is_yieldboost"):
             continue
 
-        # ---------- YieldBOOST weekly-rebalanced compound MC -------------
+        # ---------- YieldBOOST: headline = screener gross; weekly MC diagnostic --
         calibration = rec.get("income_distribution_calibration") or None
         if calibration is None or not sigma_ok or not beta_ok:
             _yb_skipped_no_inputs += 1
@@ -4566,54 +4581,38 @@ def build():
             n_paths=PAIR_MC_PATHS,
             seed=seed_base,
         )
-        if pair is None:
+        if pair is not None:
+            rec["expected_pair_pnl_weekly_mc_p10_annual"] = round(float(pair["p10_log"]), 6)
+            rec["expected_pair_pnl_weekly_mc_p50_annual"] = round(float(pair["p50_log"]), 6)
+            rec["expected_pair_pnl_weekly_mc_p90_annual"] = round(float(pair["p90_log"]), 6)
+            rec["expected_pair_pnl_weekly_mc_n_paths"] = int(pair["n_paths"])
+            rec["expected_pair_pnl_nav_decay_annual"] = round(
+                float(pair["nav_decay_simple_annual"]), 6
+            )
+            rec["expected_pair_pnl_distributions_annual"] = round(
+                float(pair["distributions_simple_annual"]), 6
+            )
+            rec["expected_pair_pnl_capture_ratio_used"] = round(capture_ratio_used, 6)
+            rec["expected_pair_pnl_sigma_forward_annual"] = round(float(sigma_forecast_f), 6)
+        else:
             _yb_skipped_no_inputs += 1
             continue
 
-        # ---- Headline log-axis quantiles (schema_v=4) -------------------
-        rec["expected_pair_pnl_p10_annual"] = round(float(pair["p10_log"]), 6)
-        rec["expected_pair_pnl_p25_annual"] = round(float(pair["p25_log"]), 6)
-        rec["expected_pair_pnl_p50_annual"] = round(float(pair["p50_log"]), 6)
-        rec["expected_pair_pnl_p75_annual"] = round(float(pair["p75_log"]), 6)
-        rec["expected_pair_pnl_p90_annual"] = round(float(pair["p90_log"]), 6)
-        rec["expected_pair_pnl_mean_annual"] = round(float(pair["mean_log"]), 6)
-        rec["expected_pair_pnl_std_annual"] = round(float(pair["std_log"]), 6)
-        rec["expected_pair_pnl_units"] = "log_continuous_annual"
-        rec["expected_pair_pnl_basis"] = "weekly_rebalanced_compound"
-        rec["expected_pair_pnl_source"] = "yieldboost_weekly_compound_mc"
-        rec["expected_pair_pnl_n_paths"] = int(pair["n_paths"])
-        # Sigma actually fed to the MC for back-trace (forecast vol).
-        rec["expected_pair_pnl_sigma_forward_annual"] = round(float(sigma_forecast_f), 6)
-        # Magis closed-form simple-return diagnostics (panel only, NOT headline).
-        rec["expected_pair_pnl_nav_decay_annual"] = round(
-            float(pair["nav_decay_simple_annual"]), 6
-        )
-        rec["expected_pair_pnl_distributions_annual"] = round(
-            float(pair["distributions_simple_annual"]), 6
-        )
-        rec["expected_pair_pnl_capture_ratio_used"] = round(capture_ratio_used, 6)
-
-        # ---- Vol-regime sensitivity triplet -----------------------------
+        # ---- Vol-regime triplet (put-spread structural gross at σ × mult) ----
         sigma_regime = {}
+        gross_mid = _safe_float(rec, "expected_gross_decay_p50_annual")
         for mult in PAIR_SIGMA_REGIME_MULTIPLIERS:
             label = "lo" if mult < 1.0 else "hi" if mult > 1.0 else "mid"
-            if abs(mult - 1.0) < 1e-9:
-                # Mid is just the headline, no need to resimulate.
-                sigma_regime[label] = float(pair["p50_log"])
+            if abs(mult - 1.0) < 1e-9 and gross_mid is not None:
+                sigma_regime[label] = float(gross_mid)
                 continue
-            mc_k = simulate_weekly_compound_pair_pnl(
-                sigma_annual=sigma_forecast_f * mult,
-                mu_annual=0.0,
-                beta=beta_v_f,
-                capture_ratio=capture_ratio_used,
+            cell = structural_pair_gross_log_annual(
+                sigma_forecast_f * mult,
+                0.0,
+                beta_v_f,
                 expense_ratio_annual=DEFAULT_EXPENSE_RATIO_ANNUAL,
-                borrow_annual=borrow_mc,
-                n_paths=PAIR_MC_PATHS,
-                seed=seed_base ^ int(mult * 1000),
             )
-            sigma_regime[label] = (
-                float(mc_k["p50_log"]) if mc_k is not None else None
-            )
+            sigma_regime[label] = float(cell) if cell is not None else None
         rec["expected_pair_pnl_at_sigma_lo_p50_annual"] = (
             round(sigma_regime["lo"], 6) if sigma_regime.get("lo") is not None else None
         )
@@ -4664,7 +4663,7 @@ def build():
         # re-blend on the weekly pair MC axis here.
     if _yb_mc or _letf_grid_filled or _yb_skipped_no_inputs or _yb_skipped_no_diag:
         print(
-            f"  Pair-PnL forward (schema_v=4): {_yb_mc} YB MC, "
+            f"  Pair-PnL forward (schema_v=4): {_yb_mc} YB put-spread headline + weekly MC diag, "
             f"{_letf_grid_filled} LETF analytic grid"
             + (f", {_yb_skipped_no_inputs} YB skipped (missing inputs)" if _yb_skipped_no_inputs else "")
             + (f", {_yb_skipped_no_diag} YB skipped re-blend (no screener diag)" if _yb_skipped_no_diag else "")
@@ -4688,7 +4687,7 @@ def build():
         "edge_sign_convention": "short_favorable_positive",
         "expected_pair_pnl_units": "log_continuous_annual",
         "expected_pair_pnl_basis": {
-            "yieldboost": "weekly_rebalanced_compound_mc",
+            "yieldboost": "put_spread_structural_gross",
             "letf": "ito_analytic",
         },
         "pair_scenario_grid_meta": {
@@ -4696,10 +4695,11 @@ def build():
             "drifts": list(PAIR_SCENARIO_DRIFTS),
             "axis": "log_continuous_annual",
             "yieldboost_engine": "yieldboost_put_spread_structural",
-            "yieldboost_forward_pair_engine": "weekly_rebalanced_compound_mc",
+            "yieldboost_forward_pair_engine": "put_spread_structural_gross",
+            "yieldboost_weekly_mc_engine": "weekly_rebalanced_compound_mc",
             "letf_engine": "ito_analytic",
             "n_paths_yb_grid": int(PAIR_MC_GRID_PATHS),
-            "n_paths_yb_headline": int(PAIR_MC_PATHS),
+            "n_paths_yb_weekly_mc": int(PAIR_MC_PATHS),
             "sigma_regime_multipliers": list(PAIR_SIGMA_REGIME_MULTIPLIERS),
         },
         "uncertainty_footnote": (
