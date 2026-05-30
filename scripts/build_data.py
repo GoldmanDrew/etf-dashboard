@@ -39,6 +39,7 @@ from income_schedule import (
     expected_pair_pnl_annual,
     inverse_variance_blend,
     scenario_grid_pair_pnl,
+    scenario_grid_put_spread_pair,
     simulate_weekly_compound_pair_pnl,
     stable_seed_from_symbol,
 )
@@ -4625,7 +4626,9 @@ def build():
         rec["expected_pair_pnl_sigma_regime_multipliers"] = list(PAIR_SIGMA_REGIME_MULTIPLIERS)
 
         # ---- 2D Scenarios-tab grid (sigma_mult x drift) ------------------
-        grid = scenario_grid_pair_pnl(
+        # Put-spread structural gross, anchored to screener Exp. decay p50.
+        gross_anchor = _safe_float(rec, "expected_gross_decay_p50_annual")
+        grid = scenario_grid_put_spread_pair(
             sigma_annual=sigma_forecast_f,
             beta=beta_v_f,
             capture_ratio=capture_ratio_used,
@@ -4633,8 +4636,7 @@ def build():
             drifts=PAIR_SCENARIO_DRIFTS,
             expense_ratio_annual=DEFAULT_EXPENSE_RATIO_ANNUAL,
             borrow_annual=borrow_mc,
-            n_paths=PAIR_MC_GRID_PATHS,
-            seed=seed_base,
+            gross_anchor_p50=gross_anchor,
         )
         if grid is not None:
             rec["pair_scenario_grid"] = {
@@ -4657,97 +4659,9 @@ def build():
             }
         _yb_mc += 1
 
-        # ---- Net-edge re-blend on the new log axis ----------------------
-        # Forward sigma is the MC standard deviation (path-level). Realized
-        # sigma + mean come from the screener. NO D1 distribution subtraction:
-        # gross_decay_annual is already pair-axis (TR-based via adjclose).
-        mu_R_raw = rec.get("gross_realized_mean_annual")
-        sigma_R = rec.get("gross_sigma_realized_annual")
-        old_anchor_target = rec.get("gross_anchor_target_annual")
-        if mu_R_raw is None or old_anchor_target is None:
-            _yb_skipped_no_diag += 1
-            continue
-        try:
-            mu_R_pair = float(mu_R_raw)
-            sigma_R_val = float(sigma_R) if sigma_R is not None else None
-            old_anchor_val = float(old_anchor_target)
-        except (TypeError, ValueError):
-            _yb_skipped_no_diag += 1
-            continue
-        sigma_F_pair = float(pair["std_log"]) if pair["std_log"] > 0 else None
-        blend = inverse_variance_blend(
-            mu_forward=float(pair["p50_log"]),
-            sigma_forward=sigma_F_pair,
-            mu_realized=mu_R_pair,
-            sigma_realized=sigma_R_val,
-        )
-        if blend is None:
-            continue
-        posterior_mu = float(blend["posterior_mean"])
-        rec["pair_anchor_target_annual"] = round(posterior_mu, 6)
-        rec["pair_anchor_shift_annual"] = round(posterior_mu - mu_R_pair, 6)
-        rec["pair_blend_method"] = blend["method"]
-        rec["pair_blend_weight_forward"] = round(float(blend["weight_forward"]), 6)
-        rec["pair_sigma_forward_annual"] = (
-            round(float(sigma_F_pair), 6) if sigma_F_pair is not None else None
-        )
-        rec["pair_sigma_realized_annual"] = (
-            round(sigma_R_val, 6) if sigma_R_val is not None else None
-        )
-        rec["pair_realized_mean_annual"] = round(mu_R_pair, 6)
-        # Histogram + quantile shift: net_edge bootstrap was anchored on the
-        # OLD gross-axis posterior; shift it onto the NEW pair-axis posterior.
-        # Screener net draws subtract borrow; forward MC already includes
-        # borrow, so add borrow back after the level shift (schema_v=4).
-        delta = posterior_mu - old_anchor_val
-        if math.isfinite(delta):
-            for q_key in (
-                "net_edge_p05_annual",
-                "net_edge_p25_annual",
-                "net_edge_p50_annual",
-                "net_edge_p75_annual",
-                "net_edge_p95_annual",
-            ):
-                v = rec.get(q_key)
-                if isinstance(v, (int, float)) and math.isfinite(float(v)):
-                    rec[q_key] = round(float(v) + delta, 6)
-            hist_str = rec.get("net_edge_hist_json")
-            if isinstance(hist_str, str) and hist_str.strip():
-                try:
-                    hist = json.loads(hist_str)
-                    edges = hist.get("e")
-                    if isinstance(edges, list):
-                        hist["e"] = [round(float(e) + delta, 6) for e in edges]
-                        rec["net_edge_hist_json"] = json.dumps(
-                            hist, separators=(",", ":")
-                        )
-                except (ValueError, TypeError):
-                    pass
-            if borrow_mc > 0:
-                for q_key in (
-                    "net_edge_p05_annual",
-                    "net_edge_p25_annual",
-                    "net_edge_p50_annual",
-                    "net_edge_p75_annual",
-                    "net_edge_p95_annual",
-                ):
-                    v = rec.get(q_key)
-                    if isinstance(v, (int, float)) and math.isfinite(float(v)):
-                        rec[q_key] = round(float(v) + borrow_mc, 6)
-                hist_str = rec.get("net_edge_hist_json")
-                if isinstance(hist_str, str) and hist_str.strip():
-                    try:
-                        hist = json.loads(hist_str)
-                        edges = hist.get("e")
-                        if isinstance(edges, list):
-                            hist["e"] = [
-                                round(float(e) + borrow_mc, 6) for e in edges
-                            ]
-                            rec["net_edge_hist_json"] = json.dumps(
-                                hist, separators=(",", ":")
-                            )
-                    except (ValueError, TypeError):
-                        pass
+        # Net-edge quantiles stay as screener output (anchored to
+        # expected_gross_decay_p50 via inverse-variance blend). Do not
+        # re-blend on the weekly pair MC axis here.
     if _yb_mc or _letf_grid_filled or _yb_skipped_no_inputs or _yb_skipped_no_diag:
         print(
             f"  Pair-PnL forward (schema_v=4): {_yb_mc} YB MC, "
@@ -4781,7 +4695,8 @@ def build():
             "sigma_multipliers": list(PAIR_SCENARIO_SIGMA_MULTIPLIERS),
             "drifts": list(PAIR_SCENARIO_DRIFTS),
             "axis": "log_continuous_annual",
-            "yieldboost_engine": "weekly_rebalanced_compound_mc",
+            "yieldboost_engine": "yieldboost_put_spread_structural",
+            "yieldboost_forward_pair_engine": "weekly_rebalanced_compound_mc",
             "letf_engine": "ito_analytic",
             "n_paths_yb_grid": int(PAIR_MC_GRID_PATHS),
             "n_paths_yb_headline": int(PAIR_MC_PATHS),

@@ -774,6 +774,207 @@ def simulate_weekly_compound_pair_pnl(
     return out
 
 
+def estimate_income_style_scenario_return(
+    underlying_return: float,
+    sigma_annual: float,
+    annual_income_yield: float,
+    *,
+    annual_borrow_cost: float = 0.0,
+    horizon_years: float = 1.0,
+    expense_ratio_annual: float = DEFAULT_EXPENSE_RATIO_ANNUAL,
+) -> dict | None:
+    """Mirror of ``estimateIncomeStyleScenarioReturn`` in ``index.html``.
+
+    Returns short-favorable simple-return economics over ``horizon_years``.
+    """
+    try:
+        u = float(underlying_return)
+        sigma = float(sigma_annual)
+        d_annual = float(annual_income_yield)
+        borrow = float(annual_borrow_cost)
+        t = float(horizon_years)
+        er = float(expense_ratio_annual)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(d_annual) or d_annual < 0 or not math.isfinite(t) or t <= 0:
+        return None
+    weekly_loss = expected_put_spread_loss_weekly(u, sigma, t)
+    if not math.isfinite(weekly_loss):
+        return None
+    weeks = max(1, int(round(t * WEEKS_PER_YEAR)))
+    weekly_expense = max(0.0, er) / WEEKS_PER_YEAR
+    weekly_distribution = d_annual / WEEKS_PER_YEAR
+    q = max(0.0001, min(1.5, 1.0 - weekly_loss - weekly_expense))
+    nav_end_ratio = q**weeks
+    nav_decay = 1.0 - nav_end_ratio
+    geom_sum = float(weeks) if abs(1.0 - q) < 1e-9 else (1.0 - nav_end_ratio) / (1.0 - q)
+    distributions_paid = weekly_distribution * geom_sum
+    borrow_cost = borrow * t if borrow > 0 else 0.0
+    net_short_pnl = nav_decay - distributions_paid - borrow_cost
+    return {
+        "weekly_spread_loss": float(weekly_loss),
+        "nav_decay": float(nav_decay),
+        "nav_return": float(-nav_decay),
+        "distributions_paid": float(distributions_paid),
+        "borrow_cost": float(borrow_cost),
+        "net_short_pnl": float(net_short_pnl),
+        "long_total_return": float(-nav_decay + distributions_paid),
+        "weeks": int(weeks),
+    }
+
+
+def intrinsic_gross_decay_log_annual(
+    sigma_annual: float,
+    *,
+    mu_annual: float = 0.0,
+    horizon_years: float = 1.0,
+    expense_ratio_annual: float = DEFAULT_EXPENSE_RATIO_ANNUAL,
+) -> float | None:
+    """Put-spread structural gross decay on the log/yr axis (short-favorable +)."""
+    try:
+        sigma = float(sigma_annual)
+        mu = float(mu_annual)
+        t = float(horizon_years)
+        er = float(expense_ratio_annual)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(sigma) or sigma <= 0 or not math.isfinite(t) or t <= 0:
+        return None
+    und_simple = math.expm1(mu * t) if math.isfinite(mu) else 0.0
+    weekly_loss = expected_put_spread_loss_weekly(und_simple, sigma, t)
+    if not math.isfinite(weekly_loss):
+        return None
+    weeks = max(1, int(round(t * WEEKS_PER_YEAR)))
+    weekly_expense = max(0.0, er) / WEEKS_PER_YEAR
+    q = max(0.0001, min(1.5, 1.0 - weekly_loss - weekly_expense))
+    nav_end = q**weeks
+    if nav_end <= 0.0 or not math.isfinite(nav_end):
+        return None
+    return float(-math.log(nav_end) / t)
+
+
+def structural_pair_gross_log_annual(
+    sigma_annual: float,
+    mu_annual: float,
+    beta: float,
+    *,
+    horizon_years: float = 1.0,
+    expense_ratio_annual: float = DEFAULT_EXPENSE_RATIO_ANNUAL,
+) -> float | None:
+    """Gross structural pair: put-spread ETF log decay + beta hedge leg."""
+    try:
+        b = float(beta)
+        mu = float(mu_annual)
+    except (TypeError, ValueError):
+        return None
+    gross = intrinsic_gross_decay_log_annual(
+        sigma_annual,
+        mu_annual=mu,
+        horizon_years=horizon_years,
+        expense_ratio_annual=expense_ratio_annual,
+    )
+    if gross is None or not math.isfinite(b):
+        return None
+    return float(gross + b * mu)
+
+
+def scenario_grid_put_spread_pair(
+    sigma_annual: float | None,
+    beta: float | None,
+    capture_ratio: float = DEFAULT_CROSS_FUND_RATIO,
+    *,
+    sigma_multipliers: Sequence[float] = (0.5, 0.7, 1.0, 1.3, 1.5),
+    drifts: Sequence[float] = (-0.50, -0.25, 0.00, 0.25, 0.50),
+    expense_ratio_annual: float = DEFAULT_EXPENSE_RATIO_ANNUAL,
+    borrow_annual: float = 0.0,
+    horizon_years: float = 1.0,
+    gross_anchor_p50: float | None = None,
+) -> dict | None:
+    """5x5 grid of put-spread structural gross pair P&L (log/yr).
+
+    Cells use the same closed-form put-spread engine as Exp. decay /
+    net-edge anchoring. The center cell (σ×1.0, μ=0) is calibrated to
+    ``gross_anchor_p50`` when provided (typically
+    ``expected_gross_decay_p50_annual`` from the screener).
+    """
+    if sigma_annual is None or beta is None:
+        return None
+    try:
+        sigma_base = float(sigma_annual)
+        beta_v = float(beta)
+        cap = float(capture_ratio)
+        er = float(expense_ratio_annual)
+        borrow = float(borrow_annual)
+        t = float(horizon_years)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(sigma_base) or sigma_base <= 0 or not math.isfinite(beta_v):
+        return None
+    sigma_mult_list = [float(k) for k in sigma_multipliers]
+    drift_list = [float(m) for m in drifts]
+    raw_center = structural_pair_gross_log_annual(
+        sigma_base,
+        0.0,
+        beta_v,
+        horizon_years=t,
+        expense_ratio_annual=er,
+    )
+    anchor_delta = 0.0
+    if (
+        gross_anchor_p50 is not None
+        and raw_center is not None
+        and math.isfinite(float(gross_anchor_p50))
+    ):
+        anchor_delta = float(gross_anchor_p50) - float(raw_center)
+    bs_weekly_base = expected_put_spread_loss_weekly(0.0, sigma_base, 1.0)
+    d_annual_base = (
+        max(0.0, cap * bs_weekly_base * WEEKS_PER_YEAR)
+        if math.isfinite(bs_weekly_base)
+        else 0.0
+    )
+    grid: list[list[float | None]] = []
+    und_grid: list[list[float | None]] = []
+    for k in sigma_mult_list:
+        row: list[float | None] = []
+        und_row: list[float | None] = []
+        sigma_k = sigma_base * k
+        for mu in drift_list:
+            cell = structural_pair_gross_log_annual(
+                sigma_k,
+                mu,
+                beta_v,
+                horizon_years=t,
+                expense_ratio_annual=er,
+            )
+            if cell is None:
+                row.append(None)
+                und_row.append(None)
+                continue
+            row.append(float(cell + anchor_delta))
+            und_row.append(float(math.expm1(mu * t)))
+        grid.append(row)
+        und_grid.append(und_row)
+    return {
+        "sigma_multipliers": sigma_mult_list,
+        "drifts": drift_list,
+        "p50_log_grid": grid,
+        "und_p50_simple_grid": und_grid,
+        "borrow_annual": float(borrow),
+        "expense_ratio_annual": float(er),
+        "n_paths_per_cell": 0,
+        "axis": "log_continuous_annual",
+        "basis": "put_spread_gross_anchor",
+        "engine": "yieldboost_put_spread_structural",
+        "anchor_p50_annual": (
+            float(gross_anchor_p50) if gross_anchor_p50 is not None else None
+        ),
+        "anchor_delta_annual": float(anchor_delta),
+        "distributions_annual_at_anchor": float(d_annual_base),
+        "capture_ratio_used": float(cap),
+        "horizon_years": float(t),
+    }
+
+
 def scenario_grid_pair_pnl(
     sigma_annual: float | None,
     beta: float | None,
