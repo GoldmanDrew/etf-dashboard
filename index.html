@@ -2413,15 +2413,11 @@ function expectedDecayDistribution(r) {
 }
 
 // Forward pair-trade P&L (`expected_pair_pnl_p*`) — the "Exp. edge (fwd)"
-// column. As of schema_v=4 every row carries values on the
-// **log_continuous_annual** axis (same as screener `gross_decay_annual`):
+// column. Values are on the **log_continuous_annual** axis:
 //
-//   - YieldBOOST: weekly-rebalanced compound MC (path-dependent, n=20k).
-//     Median pair P&L of a delta-hedged short pair where each Friday the
-//     short notional is reset to current equity, the long is reset to
-//     beta * equity, and the put-spread payoff L_t = (95/88)·sleeve²
-//     accrues to the short. Each week debits calibrated distribution cash
-//     (capture_ratio × BS premium at scenario σ) and borrow (borrow_for_net).
+//   - YieldBOOST: screener put-spread structural gross (`expected_gross_decay_p*`
+//     mirrored at build time). Same anchor as Net edge and Scenarios heatmap.
+//     Weekly-rebalanced pair MC is in `expected_pair_pnl_weekly_mc_*` (diagnostic).
 //   - LETF / inverse / vol-ETP: pair P&L = gross drag (no cash leg) so
 //     this equals `expected_gross_decay_p*` by identity. Scenario grid is
 //     filled analytically from (β² − β)/2·σ² + β·μ.
@@ -2444,8 +2440,8 @@ function expectedPairPnlDistribution(r) {
     ? r.expected_pair_pnl_sigma_regime_multipliers.map(Number)
     : [0.7, 1.0, 1.3];
   return {
-    // Log-axis (post-schema_v=4 headline). For YB: weekly-rebalanced MC.
-    // For LETF: gross drag identity (= expected_gross_decay_p*).
+    // Log-axis headline. YB: put-spread structural gross (= Exp. decay).
+    // LETF: gross drag identity (= expected_gross_decay_p*).
     p10: Number.isFinite(p10raw) ? p10raw : null,
     p25: Number.isFinite(p25raw) ? p25raw : null,
     p50,
@@ -2453,16 +2449,13 @@ function expectedPairPnlDistribution(r) {
     p90: Number.isFinite(p90raw) ? p90raw : null,
     mean: Number.isFinite(meanRaw) ? meanRaw : null,
     std: Number.isFinite(stdRaw) ? stdRaw : null,
-    // Vol-regime triplet: p50 forward edge at σ × {0.7, 1.0, 1.3}. lo/hi
-    // illustrate gamma-scalp sensitivity on the weekly put-spread roll.
+    // Vol-regime triplet: put-spread structural gross at σ × {0.7, 1.0, 1.3}.
     sigmaRegime: {
       lo: Number.isFinite(lo) ? lo : null,
       mid: Number.isFinite(mid) ? mid : (Number.isFinite(p50) ? p50 : null),
       hi: Number.isFinite(hi) ? hi : null,
       multipliers: sigmaMults,
     },
-    // Magis closed-form simple-return diagnostics (kept for the row
-    // detail panel but no longer headline). Both are NaN-safe.
     navDecaySimple: Number(r?.expected_pair_pnl_nav_decay_annual),
     distributionsSimple: Number(r?.expected_pair_pnl_distributions_annual),
     sigmaForwardForecast: Number(r?.expected_pair_pnl_sigma_forward_annual),
@@ -2470,7 +2463,20 @@ function expectedPairPnlDistribution(r) {
     units: r?.expected_pair_pnl_units || 'log_continuous_annual',
     basis: r?.expected_pair_pnl_basis || null,
     source: r?.expected_pair_pnl_source || null,
-    nPaths: Number(r?.expected_pair_pnl_n_paths) || null,
+    weeklyMc: expectedPairPnlWeeklyMc(r),
+  };
+}
+
+function expectedPairPnlWeeklyMc(r) {
+  const p50 = Number(r?.expected_pair_pnl_weekly_mc_p50_annual);
+  if (!Number.isFinite(p50)) return null;
+  const p10 = Number(r?.expected_pair_pnl_weekly_mc_p10_annual);
+  const p90 = Number(r?.expected_pair_pnl_weekly_mc_p90_annual);
+  return {
+    p10: Number.isFinite(p10) ? p10 : null,
+    p50,
+    p90: Number.isFinite(p90) ? p90 : null,
+    nPaths: Number(r?.expected_pair_pnl_weekly_mc_n_paths) || null,
   };
 }
 
@@ -2539,10 +2545,8 @@ const PASSIVE_LOW_BETA_POLICY_TOOLTIP =
 //   - LETF / inverse / vol-ETP: pair P&L = gross vol drag (cash leg absent),
 //     so this equals the prior "Exp. decay" column. Sourced from
 //     `expected_pair_pnl_p50_annual` (server-side mirror of `expected_gross_decay_p50_annual`).
-//   - YieldBOOST: pair P&L = NAV decay - calibrated distributions at flat
-//     underlying, 1Y horizon, before borrow. Computed in `build_data.py` via
-//     `income_scenario.expectedPairPnlAnnual` and stamped onto the record.
-//     Band (p10/p90) maps gross put-spread MC quantiles with the cash leg fixed.
+//   - YieldBOOST: put-spread structural gross from screener (same as Exp. decay
+//     anchor for net edge). Weekly pair MC is a separate diagnostic field.
 function expectedDecayHeadlineValue(r, chartVolLookbackRange) {
   if (!expectedDecayAvailableForRow(r)) return null;
   const pair = expectedPairPnlDistribution(r);
@@ -2572,17 +2576,18 @@ function decayDistTooltip(r, chartVolLookbackRange) {
   if (!expectedDecayAvailableForRow(r)) {
     return PASSIVE_LOW_BETA_POLICY_TOOLTIP;
   }
-  // YieldBOOST -- weekly-rebalanced compound MC (schema_v=4). Each path
-  // simulates 52 weekly delta-hedged rebalances; explicit short-side
-  // distribution debits each week (capture_ratio × calibrated yield).
+  // YieldBOOST — put-spread structural gross (mirrors screener Exp. decay).
   if (isYieldBoostIncomeStrategy(r)) {
     const pair = expectedPairPnlDistribution(r);
+    const weeklyMc = pair?.weeklyMc;
     const forecastVol = forecastVolForScenario(r, volLookback);
     if (pair) {
+      const modelLabel = DECAY_DIST_MODEL_LABELS[pair.source] || pair.source || 'put-spread';
       const lines = [
-        'Exp. edge (fwd) — 1Y median forward pair P&L (weekly-rebalanced short pair).',
+        'Exp. edge (fwd) — forward structural gross decay (put-spread MC from screener).',
+        'Same anchor as Net edge and Scenarios heatmap center. Before borrow.',
         'Pair = short ETF + beta-long underlying. Sign: short-favorable positive (+ = profit).',
-        'YieldBOOST: path-dependent MC over forecast sigma; short distributions debited weekly.',
+        `Model: ${modelLabel}.`,
         `sigma (forecast): ${fmt(Number(forecastVol?.sigma))} (${r?.forecast_vol_source || 'forecast_vol'}).`,
         `Median (p50): ${fmtLogYr(pair.p50)} log/yr (${fmtPct(logToSimpleAnnual(pair.p50))} simple)`,
       ];
@@ -2593,14 +2598,21 @@ function decayDistTooltip(r, chartVolLookbackRange) {
       if (sr.lo != null && sr.hi != null) {
         const mults = sr.multipliers || [0.7, 1.0, 1.3];
         lines.push(
-          `Vol sensitivity (p50 at ${mults[0]}× / ${mults[1]}× / ${mults[2]}× forecast σ): ` +
+          `Vol sensitivity (structural gross at ${mults[0]}× / ${mults[1]}× / ${mults[2]}× forecast σ): ` +
           `${fmtLogYr(sr.lo)} / ${fmtLogYr(sr.mid)} / ${fmtLogYr(sr.hi)} log/yr`
         );
       }
       if (Number.isFinite(pair.std)) {
-        lines.push(`MC stddev (path-level, used as sigma_F in blend): ${fmtLogYr(pair.std)}`);
+        lines.push(`Forward band σ (from p10/p90): ${fmtLogYr(pair.std)} log/yr`);
       }
-      lines.push('Same axis as Realized: Stahl beta·log(R_und_TR) − log(R_etf_TR).');
+      if (weeklyMc?.p50 != null) {
+        lines.push(
+          `Weekly pair MC diagnostic (distributions + borrow in sim): p50 ${fmtLogYr(weeklyMc.p50)} log/yr` +
+          (weeklyMc.p10 != null && weeklyMc.p90 != null
+            ? ` · band ${fmtLogYr(weeklyMc.p10)} / ${fmtLogYr(weeklyMc.p90)}`
+            : '')
+        );
+      }
       lines.push('Net edge: inverse-variance blend with realized history, then minus borrow.');
       return lines.join('\n');
     }
@@ -2658,7 +2670,7 @@ function decayDistTooltip(r, chartVolLookbackRange) {
 
 function expectedDecayDisplayLabel(r) {
   if (!expectedDecayAvailableForRow(r)) return 'Edge (N/A)';
-  if (isYieldBoostIncomeStrategy(r)) return 'Edge (pair · 1Y)';
+  if (isYieldBoostIncomeStrategy(r)) return 'Edge (struct · 1Y)';
   if (expectedPairPnlDistribution(r) || expectedDecayDistribution(r)) return 'Edge (median)';
   return isVolatilityEtp(r) ? 'Edge (vol-adj)' : 'Edge (Ito)';
 }
@@ -3382,13 +3394,13 @@ const COLS = [
   { key: 'borrow_current', label: 'Borrow Rate', w: 105, hint: 'Spot fee-only borrow on this row (IBKR FTP on full build, else screener CSV). Compare to borrow_history.json tail on chart Borrow tab.' },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, sublabel: 'trailing', hint: 'Realized: trailing annualized hedge drag from ls-algo screener (β·r_U − r_ETF) × 252. Not the forward Exp. decay column.' },
-  { key: 'expected_pair_pnl_p50_annual', label: 'Exp. edge (fwd)', sublabel: 'pair · 1Y log/yr', w: 128, hint: 'Median 1Y forward pair P&L on the log-continuous-annual axis (same as Gross realiz. and Net edge). Short ETF + beta-long underlying, weekly rebalance, MC over forecast vol. Sub-row: p10/p90 band in log/yr plus simple % for intuition. Hover for vol sensitivity. YieldBOOST: path-dependent MC; short distributions debited via capture ratio.' },
+  { key: 'expected_pair_pnl_p50_annual', label: 'Exp. edge (fwd)', sublabel: 'struct · 1Y log/yr', w: 128, hint: 'Forward structural gross decay before borrow (log/yr). YieldBOOST: screener put-spread MC — same anchor as Net edge and Scenarios heatmap. LETF/inverse/vol-ETP: vol-drag identity. Sub-row: p10/p90 band. Hover for vol sensitivity and weekly pair MC diagnostic.' },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
     sublabel: 'best estimate · band',
     w: 130,
-    hint: 'Best estimate of annual edge after borrow, short-favorable +. Inverse-variance Bayesian blend: posterior = w_forward * Exp. edge (fwd) + (1 - w_forward) * realized history, minus borrow. Weights = sigma_realized^2 / (sigma_forward^2 + sigma_realized^2). For YieldBOOST: anchor is pair-P&L (NAV decay - calibrated cash distributions); realized series is distribution-adjusted (decision D1). For LETF/inverse/vol-ETP: anchor is gross vol-drag (no cash leg). Box p25-p75, whisker p5-p95, dot p50. Hover for blend weights + sigma diagnostics.',
+    hint: 'Best estimate of annual edge after borrow, short-favorable + (log/yr). Inverse-variance Bayesian blend: posterior = w_forward × Exp. decay p50 + (1 − w_forward) × realized history, minus borrow. YieldBOOST anchor is put-spread structural gross (not weekly pair MC). Box p25–p75, whisker p5–p95, dot p50.',
   },
   {
     key: SCENARIO_ETF_3M_FLAT_SORT_KEY,
@@ -3525,7 +3537,7 @@ function GrossDecayComparisonStrip({ r }) {
       kind: 'bar',
       cls: 'expected',
       legShort: isYieldBoostIncomeStrategy(r)
-        ? `${expectedDecayDisplayLabel(r)} · net`
+        ? `${expectedDecayDisplayLabel(r)} · gross`
         : `${expectedDecayDisplayLabel(r)} · gross`,
     });
   }
@@ -3564,7 +3576,7 @@ function GrossDecayComparisonStrip({ r }) {
 
   if (grossPts.length === 0 && netPts.length === 0) return null;
 
-  const fmtPct1 = (x) => `${(x * 100).toFixed(1)}%`;
+  const fmtLogAxis = (x) => `${fmtLogYr(x)} log/yr`;
 
   function SingleRail({ title, pts }) {
     const vals = pts.map(p => p.v);
@@ -3586,20 +3598,20 @@ function GrossDecayComparisonStrip({ r }) {
                 key={p.key}
                 className={`gross-dumbbell-mark--diamond ${p.cls}`}
                 style={{ left: `${pos(p.v)}%` }}
-                title={`${p.legShort}: ${(p.v * 100).toFixed(2)}%`}
+                title={`${p.legShort}: ${fmtLogAxis(p.v)}`}
               />
             ) : (
               <div
                 key={p.key}
                 className={`gross-dumbbell-tick ${p.cls}`}
                 style={{ left: `${pos(p.v)}%` }}
-                title={`${p.legShort}: ${(p.v * 100).toFixed(2)}%`}
+                title={`${p.legShort}: ${fmtLogAxis(p.v)}`}
               />
             ),
           )}
           <div className="gross-dumbbell-axis">
-            <span>{fmtPct1(lo)}</span>
-            <span>{fmtPct1(hi)}</span>
+            <span>{fmtLogAxis(lo)}</span>
+            <span>{fmtLogAxis(hi)}</span>
           </div>
         </div>
       </div>
@@ -3791,18 +3803,14 @@ function NetEdgeMergedCell({ r }) {
   } else if (blendMethod === 'realized_only') {
     tipLines.push('Realized-only (no forward forecast available).');
   }
-  if (isYb && r?.pair_anchor_target_annual != null) {
-    const meanLog = Number(r?.expected_pair_pnl_mean_annual);
-    const stdLog = Number(r?.expected_pair_pnl_std_annual);
-    tipLines.push(`Anchor = weekly-rebalanced compound MC p50 (log/yr): ${fmtLogYr(anchorEffective)}`);
-    if (Number.isFinite(meanLog) || Number.isFinite(stdLog)) {
-      tipLines.push(
-        `  MC mean ${fmtLogYr(meanLog)} · MC std ${fmtLogYr(stdLog)} log/yr (= sigma_F)`
-      );
+  if (isYb && Number.isFinite(anchorEffective)) {
+    tipLines.push(`Anchor = Exp. decay p50 (put-spread structural): ${fmtLogYr(anchorEffective)} log/yr`);
+    const weeklyMc = expectedPairPnlWeeklyMc(r);
+    if (weeklyMc?.p50 != null) {
+      tipLines.push(`Weekly pair MC diagnostic p50: ${fmtLogYr(weeklyMc.p50)} log/yr`);
     }
-    tipLines.push('  Short distributions debited weekly (capture_ratio × BS premium at forecast σ).');
   } else if (Number.isFinite(anchorEffective)) {
-    tipLines.push(`Anchor (posterior gross): ${fmt(anchorEffective)}`);
+    tipLines.push(`Anchor (posterior gross): ${fmtLogYr(anchorEffective)} log/yr`);
   }
   if (Number.isFinite(anchorShift) && Math.abs(anchorShift) > 1e-6) {
     tipLines.push(`Realized-mean shift: ${anchorShift >= 0 ? '+' : ''}${fmt(anchorShift)}`);
@@ -3816,7 +3824,7 @@ function NetEdgeMergedCell({ r }) {
   const hasFan = Number.isFinite(Number(r.net_edge_p05_annual)) && Number.isFinite(Number(r.net_edge_p95_annual)) && Number.isFinite(Number(p50));
   return (
     <div className="net-edge-merged" title={tip} onClick={e => e.stopPropagation()}>
-      <div className={cls('net-edge-merged-p50', spreadCls(p50))}>{p50 != null ? fmt(p50) : '—'}</div>
+      <div className={cls('net-edge-merged-p50', spreadCls(p50))}>{p50 != null ? fmtLogYr(p50) : '—'}</div>
       <div className="net-edge-merged-fan">
         {hasFan ? <NetEdgeFanGlyph r={r} w={62} h={20} vbW={58} /> : <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>—</span>}
       </div>
@@ -4040,6 +4048,7 @@ function YbScenarioAnchorPanel({ r }) {
   if (!isYieldBoostIncomeStrategy(r)) return null;
   const dist = expectedDecayDistribution(r);
   const pair = expectedPairPnlDistribution(r);
+  const weeklyMc = pair?.weeklyMc || expectedPairPnlWeeklyMc(r);
   const grossP50 = dist?.p50 ?? Number(r?.expected_gross_decay_p50_annual);
   const grossModel = dist?.model || r?.expected_gross_decay_dist_model || '—';
   const anchorTarget = Number(r?.gross_anchor_target_annual);
@@ -4052,8 +4061,8 @@ function YbScenarioAnchorPanel({ r }) {
         <div>
           <div className="scenario-title">Anchor metrics (YieldBOOST)</div>
           <div className="scenario-sub">
-            <strong>Exp. decay</strong> uses screener put-spread MC ({DECAY_DIST_MODEL_LABELS[grossModel] || grossModel}) and anchors net edge.
-            <strong> Exp. edge (fwd)</strong> is a separate weekly-rebalanced pair MC on the main grid.
+            <strong>Exp. decay</strong>, <strong>Exp. edge (fwd)</strong>, and the heatmap center share the same put-spread structural gross anchor ({DECAY_DIST_MODEL_LABELS[grossModel] || grossModel}).
+            Net edge blends realized history to that anchor, then subtracts borrow.
           </div>
         </div>
       </div>
@@ -4065,10 +4074,13 @@ function YbScenarioAnchorPanel({ r }) {
         fontVariantNumeric: 'tabular-nums',
       }}>
         <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Exp. decay p50</div><strong>{fmtLogYr(grossP50)}</strong></div>
+        <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Exp. edge (fwd) p50</div><strong>{fmtLogYr(pairFwd)}</strong></div>
         <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Gross anchor (posterior)</div><strong>{fmtLogYr(anchorTarget)}</strong></div>
         <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Realized gross mean</div><strong>{fmtLogYr(realized)}</strong></div>
         <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Net edge p50</div><strong>{fmtLogYr(netP50)}</strong></div>
-        <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Exp. edge (fwd) p50</div><strong>{fmtLogYr(pairFwd)}</strong></div>
+        {weeklyMc?.p50 != null ? (
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Weekly pair MC p50</div><strong>{fmtLogYr(weeklyMc.p50)}</strong></div>
+        ) : null}
       </div>
     </div>
   );
@@ -4152,6 +4164,7 @@ function _heatmapCellColor(v) {
 function PairScenarioHeatmap({ r, forecastSigma }) {
   const grid = r?.pair_scenario_grid || null;
   const pair = expectedPairPnlDistribution(r);
+  const weeklyMc = pair?.weeklyMc || expectedPairPnlWeeklyMc(r);
   if (!grid || !Array.isArray(grid.p50_log_grid)) {
     return (
       <div className="scenario-card" style={{ marginTop: 0 }}>
@@ -4200,8 +4213,8 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
             {isPutSpreadStructural
               ? ' Gross structural (distributions/borrow in Net edge bridge + income table below).'
               : ' Cells = median forward pair P&L on the same axis as Realized.'}
-            {isPutSpreadStructural && pair?.p50 != null ? (
-              <> Forward pair MC p50 (main grid): <strong>{fmtLogYr(pair.p50)}</strong>.</>
+            {isPutSpreadStructural && weeklyMc?.p50 != null ? (
+              <> Weekly pair MC p50 (diagnostic): <strong>{fmtLogYr(weeklyMc.p50)}</strong>.</>
             ) : null}
           </div>
         </div>
@@ -6419,7 +6432,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="chart-stat" title={decayDistTooltip(r, chartVolLookbackRange)}>
               <div className="cs-label">Exp. edge (fwd)</div>
               <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>
-                {isYieldBoostIncomeStrategy(r) ? 'pair P&L · 1Y · band' : 'pair P&L · 1Y · band'}
+                {isYieldBoostIncomeStrategy(r) ? 'struct gross · 1Y · band' : 'pair P&L · 1Y · band'}
               </div>
               {(() => {
                 if (!expectedDecayAvailableForRow(r)) {
@@ -6917,7 +6930,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             (1) <strong>Structural gross heatmap</strong> — put-spread engine anchored to Exp. decay p50 (same family as net edge).
             (2) <strong>Income scenario tables</strong> — long TR / net short with calibrated distributions.
             (3) <strong>Net edge bridge</strong> — how realized gross is blended to forward Exp. decay.
-            Weekly-rebalanced forward pair MC lives on the main grid as <strong>Exp. edge (fwd)</strong>.
+            Weekly-rebalanced pair MC is a <strong>diagnostic</strong> (distributions + borrow inside the sim), not the main-grid headline.
           </div>
           {isYieldBoostIncomeStrategy(r) ? <YbScenarioAnchorPanel r={r} /> : null}
           <PairScenarioHeatmap r={r} forecastSigma={forecastVolForScenario(r, chartVolLookbackRange)?.sigma} />
@@ -10397,9 +10410,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                   <br /><br />
                   <strong>Gross (realized)</strong>: trailing β·r<sub>U</sub> − r<sub>ETF</sub> × 252 (always shown).
                   <br /><br />
-                  <strong>Exp. edge (fwd)</strong>: forward expected pair-trade P&L (before borrow). LETF/inverse/vol-ETP = vol-drag. YieldBOOST = NAV decay − calibrated distributions. This is the <em>anchor</em> for Net edge.
+                  <strong>Exp. edge (fwd)</strong>: forward structural gross decay before borrow (log/yr). YieldBOOST = screener put-spread MC (same anchor as Net edge). LETF/inverse/vol-ETP = vol-drag identity. Weekly pair MC is a separate YB diagnostic.
                   <br /><br />
-                  <strong>Net edge</strong>: inverse-variance Bayesian blend of <em>Exp. edge (fwd)</em> and the realized bootstrap, minus borrow. Weights = sigma<sup>2</sup>/(sigma_F<sup>2</sup>+sigma_R<sup>2</sup>). For YB the realized series is distribution-adjusted (D1) before blending.
+                  <strong>Net edge</strong>: inverse-variance Bayesian blend of Exp. decay p50 and the realized bootstrap, minus borrow.
                   <br /><br />
                   <strong>Exp. ETF return (3M)</strong>: long total return at 3M (NAV + cash), flat underlying, no borrow. This is a <em>different</em> sign convention (long-favorable) and a different horizon than the Edge columns.
                 </p>
@@ -10423,7 +10436,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                 <div className="dm-title">Net edge fan (visual)</div>
                 <p style={{ margin: '0 0 8px', lineHeight: 1.5 }}>
                   <strong>Whisker</strong> slate = p5–p95 · <strong>Box</strong> cyan = p25–p75 · <strong>Dot</strong> blue = p50.
-                  Flow: block-bootstrap daily hedge drag → annual realized gross draws (mu_R, sigma_R) → <strong>inverse-variance blend</strong> with forward forecast (mu_F = Exp. edge fwd p50, sigma_F from p10/p90 band): posterior_mu = w_F·mu_F + (1−w_F)·mu_R, w_F = sigma_R<sup>2</sup>/(sigma_F<sup>2</sup>+sigma_R<sup>2</sup>) → shift realized draws so mean = posterior_mu → subtract borrow resamples → net quantiles. YieldBOOST: anchor is pair-P&L (NAV decay − distributions), realized series adjusted for D1, re-blended on the dashboard side. Row JSON fields: <code>gross_blend_method</code>, <code>gross_blend_weight_forward</code>, <code>gross_sigma_*_annual</code>, <code>pair_*</code> for YB. Histogram in <code>net_edge_hist_json</code>.
+                  Flow: block-bootstrap daily hedge drag → annual realized gross draws (mu_R, sigma_R) → <strong>inverse-variance blend</strong> with forward Exp. decay p50 (mu_F, sigma_F from p10/p90 band): posterior_mu = w_F·mu_F + (1−w_F)·mu_R → shift realized draws so mean = posterior_mu → subtract borrow resamples → net quantiles. YieldBOOST anchor is put-spread structural gross from the screener; weekly pair MC is diagnostic-only on the dashboard. Row JSON: <code>gross_blend_method</code>, <code>gross_blend_weight_forward</code>, <code>gross_sigma_*_annual</code>, <code>expected_pair_pnl_weekly_mc_*</code>. Histogram in <code>net_edge_hist_json</code>.
                 </p>
               </div>
               <div className="dm-block">
