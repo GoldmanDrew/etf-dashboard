@@ -33,7 +33,7 @@ The dashboard tracks **leveraged, inverse, volatility, and YieldBOOST income ETF
 
 1. **Borrow rate** — what does it cost to short? (IBKR FTP feed, refreshed via `market-hours.yml` ~every 30 min)
 2. **Gross decay** — how fast does the ETF lose value to volatility drag, expense ratio, tracking error, and (for income strategies) put-spread NAV decay? (multiple models, see §4)
-3. **Exp. edge (fwd)** — forward gross pair-trade P&L (short ETF + β-long underlying), in **log-continuous-annual** units on the **same axis as Realized**. LETF/inverse/vol-ETP: closed-form Itô `(β² − β)/2 · σ²` (no cash leg, pre-borrow). YieldBOOST (schema_v=4+): weekly-rebalanced compound Monte-Carlo over forecast σ, 1Y horizon, including borrow inside the per-week PnL — see §4.5. Anchor for the Net edge blend.
+3. **Exp. edge (fwd)** — forward gross pair-trade P&L (short ETF + β-long underlying), in **log-continuous-annual** units on the **same axis as Realized**. LETF/inverse/vol-ETP: closed-form Itô `(β² − β)/2 · σ²` (no cash leg, pre-borrow). YieldBOOST: **put-spread structural gross** from screener (`expected_gross_decay_p*` mirrored to `expected_pair_pnl_p50_annual`); weekly compound MC is diagnostic-only — see §4.5. Anchor for the Net edge blend.
 4. **Net edge** — best estimate of edge after borrow. Inverse-variance Bayesian blend of *Exp. edge (fwd)* and the realized bootstrap, minus borrow. Weight `w_F = sigma_R^2 / (sigma_F^2 + sigma_R^2)`.
 5. **Scenario behaviour** — what does the ETF do under a 0%, ±σ, ±3σ underlying shock at 1M / 3M / 6M / 1Y horizons?
 
@@ -67,7 +67,7 @@ data/etf_screened_today.csv  ───►   data/etf_screened_today.csv (cached)
 | HARQ-Log distributional decay model | Borrow history reconstruction from git |
 | Net edge — inverse-variance blend | Borrow-spike risk model |
 | `product_class` taxonomy + `expected_decay_available` flag | YieldBOOST put-spread Monte-Carlo decay (server-side, `yieldboost_decay.py`) |
-| Inverse-variance blend (B2) + anchor-shift fallback (E2) | YB dashboard-side re-blend with **weekly-rebalanced compound MC** pair-P&L anchor (schema_v=4) |
+| Inverse-variance blend (B2) + anchor-shift fallback (E2) | YB dashboard mirrors screener gross into `expected_pair_pnl_p*`; weekly MC diagnostic in `expected_pair_pnl_weekly_mc_*` |
 | Volatility-ETP empirical roll/tracking adjustment | Scenarios tab (vol/shock grid) |
 | Distribution / yield aggregation for income ETFs | Trade Lab + options snapshot integration |
 | `etf_screened_today.csv` schema | `dashboard_data.json` schema |
@@ -229,14 +229,14 @@ YieldBOOST income ETFs (AMYY, AZYY, BBYY, COYY, CWY, FBYY, HMYY, HOYY, IOYY, MAA
 
 There are **two distinct numbers** for YB:
 
-1. **Gross decay distribution** (`expected_gross_decay_p10/p50/p90/mean_annual`) — server-side put-spread MC in `ls-algo/yieldboost_decay.py`, structural NAV bleed of one share held one year (§4.5.1).
-2. **Forward pair P&L** (`expected_pair_pnl_p10/p25/p50/p75/p90_annual`) — **dashboard-side** weekly-rebalanced compound MC in `scripts/income_schedule.py::simulate_weekly_compound_pair_pnl`, log-continuous-annual axis, on the **same axis as the realized log-drag** (§4.5.2). This is the anchor for the Net edge blend.
+1. **Headline Exp. edge (fwd) / gross decay band** (`expected_gross_decay_p10/p50/p90/mean_annual` → mirrored `expected_pair_pnl_p50_annual`) — server-side put-spread structural gross MC in `ls-algo/yieldboost_decay.py` (§4.5.1). Net-edge anchor.
+2. **Weekly compound pair MC (diagnostic)** (`expected_pair_pnl_weekly_mc_p10/p50/p90_annual`) — dashboard `simulate_weekly_compound_pair_pnl` with distributions + borrow debited weekly (§4.5.2). Shown in tooltips / Scenarios panel — **not** the main-grid headline.
 
 Up through schema_v=3 the forward edge was the buy-and-hold short P&L (`NAV_decay − calibrated_distributions − borrow`). schema_v=4 retired that framing for the **pair-P&L axis** because the realized series (`gross_decay_annual`) is a daily-rebalanced compound log P&L. The two had been on different axes and were 5–15× apart on high-vol underlyings. The Magis closed-form quantities are still emitted as diagnostic-only fields (`expected_pair_pnl_nav_decay_simple_annual`, `expected_pair_pnl_distributions_simple_annual`) but are **not** used in the headline forward or in net edge.
 
 ### 4.5.1 YieldBOOST gross decay (server-side put-spread MC)
 
-As of the YB-unification refactor, this is now modeled **server-side** in `ls-algo/yieldboost_decay.py` and exported through the **same** `expected_gross_decay_p10/p50/p90/mean_annual` columns that every other product class uses. The front-end therefore reads `dist.p50` for the headline cell exactly like LETF / inverse / vol-ETP — no special-case fork.
+As of the YB-unification refactor, this is modeled **server-side** in `ls-algo/yieldboost_decay.py` and exported through `expected_gross_decay_p10/p50/p90/mean_annual`. `build_data.py` mirrors these into `expected_pair_pnl_p50_annual` for schema uniformity — that is the **headline Exp. edge (fwd)** cell.
 
 ```
 # yieldboost_decay.yieldboost_decay_distribution
@@ -251,14 +251,14 @@ with `expense_ratio_annual = 0.99%`. When the underlying's TR history is too sho
 
 **Where this surfaces on the dashboard:**
 
-- Headline `Exp. decay` cell — `dist.p50` (sub-label `Exp. (median)`); same code path as every other product class.
-- Chart-page detail header (`chart-stat`) — same `dist.p50` value with sub-label `put-spread MC · p10/p90 …`.
-- Tooltip — calls out `yieldboost_put_spread` / `yieldboost_put_spread_point` model and notes that the Net edge bootstrap is anchor-shifted to this p50.
-- Income Scenarios table (`Intrinsic NAV Decay` column) — still uses the front-end `yieldBoostIntrinsicAnnualDecay` mechanism for shock/horizon combinations.
+- Headline **Exp. edge (fwd)** — `expectedPairPnlDistribution(r).p50` (= screener put-spread structural gross).
+- Chart-page detail header, Net edge blend, Scenarios heatmap center — same anchor.
+- Income Scenarios table (`Intrinsic NAV Decay`) — closed-form **long lens** NAV path; distinct from Exp. edge (fwd).
+- Weekly pair MC — `expected_pair_pnl_weekly_mc_*` in tooltips / Scenarios diagnostic panel.
 
-The front-end helper `yieldBoostIntrinsicAnnualDecay` survives only as a **fallback** for rows where the server didn't ship the distribution (e.g. mid-day pipeline rerun, missing σ).
+The front-end helper `yieldBoostIntrinsicAnnualDecay` survives only as a **fallback** when pair fields are missing.
 
-Routing logic: `index.html` → `expectedDecayHeadlineValue(r)` → `expectedDecayDistribution(r)` → `dist.p50` (same as every other class). YB fallback fires only when `dist` is null.
+Routing: `expectedDecayHeadlineValue(r)` → `expectedPairPnlDistribution(r).p50` first; legacy gross-band / intrinsic fallbacks when absent.
 
 ### 4.5.2 YieldBOOST forward edge (put-spread structural gross headline, schema_v=4)
 
@@ -441,34 +441,16 @@ Diagnostics on every row:
 - `gross_realized_mean_annual` — `mu_R` before the shift (lets downstream re-blend with a different anchor).
 - `copula_note` — appends `inverse_variance_blend(w_F=0.XX),shift=±X.XXXX` when the blend fires.
 
-#### YieldBOOST anchor override (dashboard side, schema_v=4)
+#### YieldBOOST dashboard fields (schema_v=4, step 5c)
 
-For YieldBOOST rows, `build_data.py` overrides the screener's gross-NAV-decay anchor with the **weekly-rebalanced compound MC pair-P&L** anchor (§4.5.2) and re-blends with the realized series on the same log-axis. This happens in step 5c of the build:
+For YieldBOOST rows, `build_data.py` step 5c:
 
-1. Compute the MC quantiles via `income_schedule.simulate_weekly_compound_pair_pnl(sigma=σ_forecast, beta, capR, borrow)` and write `expected_pair_pnl_p10/p25/p50/p75/p90_annual` + `mean_annual` + `std_annual` (all log-continuous-annual).
-2. Use `gross_decay_annual` (log, daily-rebalanced from screener `adjclose`) **directly** as the realized anchor — **no distribution subtraction**. `gross_decay_annual` is already net of distributions because `adjclose` reinvests them. The previous schema-v3 D1 logic that subtracted `distributions_annual_run_rate` from `gross_decay_annual` was double-counting and has been removed.
-3. Run the inverse-variance blend on the pair-axis:
+1. **Mirrors** screener `expected_gross_decay_p*` into `expected_pair_pnl_p50_annual` (and p10/p90) — headline Exp. edge (fwd), basis `put_spread_structural_gross`.
+2. **Runs** `simulate_weekly_compound_pair_pnl` and stores `expected_pair_pnl_weekly_mc_p10/p50/p90_annual` — diagnostic only (distributions + borrow inside weekly sim).
+3. **Builds** put-spread structural `pair_scenario_grid` anchored to screener Exp. edge p50.
+4. **Does not re-blend** net-edge quantiles on the dashboard — net edge stays on screener output anchored to structural gross.
 
-   ```
-   forward_log    = expected_pair_pnl_p50_annual          (log, includes borrow)
-   forward_var    = expected_pair_pnl_std_annual ** 2
-   realized_log   = gross_decay_annual                    (log, from screener)
-   realized_var   = gross_sigma_realized_annual ** 2      (log, from screener)
-   net_edge_log   = inverse_variance_blend(forward_log, forward_var,
-                                           realized_log, realized_var)
-   ```
-
-4. Shift the published `net_edge_p05/25/50/75/95_annual` quantiles + `net_edge_hist_json` by `posterior_pair_mu − old_gross_anchor_target`. Shape preserved; level updated to the pair axis.
-5. **Do not subtract borrow at the end for YB.** Borrow is already inside `forward_log` (from the simulator). LETF rows continue to subtract borrow once at the end as before.
-
-Diagnostics added per YB row:
-
-- Headline / blend inputs: `expected_pair_pnl_p10/p25/p50/p75/p90_annual`, `_mean_annual`, `_std_annual`.
-- σ-regime triplet (gamma sensitivity): `expected_pair_pnl_at_sigma_lo_p50_annual`, `_mid_p50_annual`, `_hi_p50_annual` (0.7×, 1.0×, 1.3× of forecast σ).
-- Scenario heatmap: `pair_scenario_grid` (see §4.5.3).
-- Diagnostic-only (Magis closed-form, not used in headline): `expected_pair_pnl_nav_decay_simple_annual`, `expected_pair_pnl_distributions_simple_annual`, `expected_pair_pnl_sigma_forward_annual`.
-- Blend bookkeeping: `pair_anchor_target_annual`, `pair_anchor_shift_annual`, `pair_blend_method`, `pair_blend_weight_forward`, `pair_sigma_forward_annual`, `pair_sigma_realized_annual`, `pair_realized_mean_annual`.
-- Schema fields: `expected_pair_pnl_units = "log_continuous_annual"`, `expected_pair_pnl_basis = "put_spread_structural_gross"` (YB headline) | `"letf_ito_analytic"` (LETF).
+Diagnostics per YB row: `expected_pair_pnl_weekly_mc_*`, `expected_pair_pnl_nav_decay_annual`, `expected_pair_pnl_distributions_annual`, σ-regime triplet on structural gross, `pair_scenario_grid`.
 
 For LETF / inverse / vol-ETP rows: `expected_pair_pnl_p* = expected_gross_decay_p*` by identity (no cash leg) — emitted by `build_data.py` step 5c for schema uniformity. Their `pair_scenario_grid` is populated **analytically** via Itô (`(β² − β)/2 · (k·σ)² + β·μ − borrow`); no MC required.
 
@@ -539,13 +521,13 @@ expected_decay_available = product_class in _EXPECTED_DECAY_CLASSES
 
 The dashboard reads `product_class` and `expected_decay_available` and routes every cell on the row through the following table:
 
-| `product_class` | `Gross (realized)` | `Exp. decay` cell | Sub-label | `Net edge` cell | Scenarios tab | Chart-page pill |
+| `product_class` | `Gross (realized)` | `Exp. edge (fwd)` cell | Sub-label | `Net edge` cell | Scenarios tab | Chart-page pill |
 |---|---|---|---|---|---|---|
-| `letf` | realized | HARQ-Log p50 | `p50 · p10/p90` | bootstrap fan | LETF vol-drag grid | `LETF` |
-| `inverse` | realized | HARQ-Log p50 | `p50 · p10/p90` | bootstrap fan | LETF vol-drag grid | `Inverse` |
-| `volatility_etp` | realized | simple Itô + roll/tracking | `vol-adj` | bootstrap fan | LETF vol-drag grid | `Volatility ETP` |
-| `income_yieldboost` | realized | **Put-spread MC p50** | `put-spread · p10/p90` | bootstrap fan, **anchor-shifted to put-spread p50** | **Income put-spread grid** | `YieldBOOST (income)` |
-| `income_put_spread` | realized | HARQ-Log p50 | `p50 · p10/p90` | bootstrap fan (anchor-shifted when expected p50 available) | LETF vol-drag grid | `Income (put-spread)` |
+| `letf` | realized | HARQ-Log p50 (= pair P&L) | `pair · p10/p90` | bootstrap fan | LETF vol-drag grid + pair heatmap | `LETF` |
+| `inverse` | realized | HARQ-Log p50 (= pair P&L) | `pair · p10/p90` | bootstrap fan | LETF vol-drag grid + pair heatmap | `Inverse` |
+| `volatility_etp` | realized | simple Itô + roll/tracking | `vol-adj` | bootstrap fan | LETF vol-drag grid + pair heatmap | `Volatility ETP` |
+| `income_yieldboost` | realized | **Weekly compound MC pair P&L p50** | `pair · p10/p90 log/yr` | bootstrap fan, **re-blended to pair MC anchor** | **Income put-spread grid + pair heatmap** | `YieldBOOST (income)` |
+| `income_put_spread` | realized | HARQ-Log p50 | `pair · p10/p90` | bootstrap fan (anchor-shifted when expected p50 available) | LETF vol-drag grid | `Income (put-spread)` |
 | `passive_low_delta` | realized | **`—` (N/A)** | `passive low-β: N/A by policy` | **`—` (N/A)** | hidden | `Passive low-β` |
 | `other_structured` | realized | `—` | — | realized fallback | hidden | `Structured` |
 
@@ -560,8 +542,8 @@ The front-end helpers that implement this:
 
 ```
 if !expectedDecayAvailableForRow(r): return null   // → "—"
-if isYieldBoostIncomeStrategy(r):   return yieldBoostIntrinsicAnnualDecay(r)
-if expectedDecayDistribution(r):    return dist.p50
+if expectedPairPnlDistribution(r): return pair.p50   // schema_v=4 headline (all classes with forward)
+if expectedDecayDistribution(r):    return dist.p50  // legacy fallback
 return expectedDecayDisplayValue(r) // simple Itô / vol-ETP adjusted
 ```
 
@@ -1215,8 +1197,8 @@ There is no build step. Editing `index.html` is editing production. Validate loc
 ### Invariants
 
 1. **`product_class` is the routing key.** Never branch UI logic on `bucket` when you mean `product_class`.
-2. **`expected_decay_available = false` ⇒ `Exp. decay` cell renders `—`.** No fallback. No hidden tooltip with a number. The realized gross drag is the only honest signal.
-3. **YieldBOOST always uses intrinsic put-spread decay for the headline.** HARQ-Log is preserved in the tooltip only.
+2. **`expected_decay_available = false` ⇒ `Exp. edge (fwd)` cell renders `—`.** No fallback. No hidden tooltip with a number. The realized gross drag is the only honest signal.
+3. **YieldBOOST headline Exp. edge (fwd) = put-spread structural gross** (`expected_pair_pnl_p50_annual` mirrored from screener `expected_gross_decay_p50`). Weekly compound MC (`expected_pair_pnl_weekly_mc_*`) is diagnostic-only. Do not revert YB headline to HARQ-Log vol-drag.
 4. **`Gross (realized)` is always shown if available**, regardless of `product_class`.
 5. **Sign convention is short-favorable positive throughout.** A higher `net_edge_p50` is better for the short side. Don't flip signs in display logic.
 6. **The CSV schema is the contract.** Both `build_data.py` and `backend/main.py` must mirror any column you read in `index.html`.

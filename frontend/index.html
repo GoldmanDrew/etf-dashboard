@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>ETF Borrow Dashboard</title>
+<title>ETF Borrow Dashboard (dev — deprecated)</title>
+<!-- DEPRECATED: use repo-root index.html for GitHub Pages (schema_v=4). This FastAPI dev SPA is not deployed. -->
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -403,6 +404,18 @@ const fmtTime = (iso) => {
 };
 const cls = (...classes) => classes.filter(Boolean).join(' ');
 
+/** schema_v=4 headline forward edge; falls back to legacy screener fields. */
+function forwardEdgeAnnual(r) {
+  const pair = Number(r?.expected_pair_pnl_p50_annual);
+  if (Number.isFinite(pair)) return pair;
+  const p50 = Number(r?.expected_gross_decay_p50_annual);
+  if (Number.isFinite(p50)) return p50;
+  const leg = Number(r?.expected_gross_decay_annual);
+  return Number.isFinite(leg) ? leg : null;
+}
+
+const FORWARD_EDGE_SORT_KEY = 'expected_pair_pnl_p50_annual';
+
 // ── Sparkline SVG ────────────────────────────
 function Sparkline({ data, width = 80, height = 20, color = '#3b82f6' }) {
   if (!data || data.length < 2) return null;
@@ -451,15 +464,22 @@ const COLUMNS = [
   { key: 'borrow_net_annual', label: 'Borrow', w: 88, numeric: true },
   { key: 'borrow_median_60d', label: 'Borrow 60d med', w: 100, numeric: true, hint: 'Median of last up to 60 daily borrow points (fee-only, annualized)' },
   { key: 'shares_available', label: 'Shares Avail', w: 100, numeric: true },
-  { key: 'gross_decay_annual', label: 'Gross (realized)', w: 108, numeric: true, hint: 'Screener point estimate: daily log-drag (or primary gross definition), annualized' },
-  { key: 'expected_gross_decay_annual', label: 'Expected (Itô)', w: 108, numeric: true, hint: '0.5×|β|×|β−1|×σ² — mechanical expectation from screener (point)' },
+  { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 108, numeric: true, hint: 'Trailing hedge drag: mean(β·r_U − r_ETF) × 252 from screener (log/yr axis)' },
+  {
+    key: FORWARD_EDGE_SORT_KEY,
+    label: 'Exp. edge (fwd)',
+    sublabel: 'pair · 1Y',
+    w: 118,
+    numeric: true,
+    hint: 'Median 1Y forward pair P&L (short ETF + β-long underlying, log/yr). LETF/inverse: HARQ-Log vol-drag. YieldBOOST: weekly compound MC. Falls back to legacy Itô point if pair fields missing.',
+  },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
     sublabel: 'median · fan',
     w: 130,
     numeric: true,
-    hint: 'Bootstrap net structural edge (annual). Large number = median. Fan: gray whisker p5–p95, cyan IQR, blue p50. Hover fan for quantiles. Sort uses median.',
+    hint: 'Inverse-variance blend of Exp. edge (fwd) and realized bootstrap, after borrow (YB: borrow in forward MC). Fan p5–p95; dot p50.',
   },
   { key: 'spread', label: 'Spread', w: 90, numeric: true, hint: 'Gross realized − current borrow' },
   { key: 'regime_warning', label: 'Regime', w: 80, numeric: false },
@@ -691,7 +711,7 @@ function TableRow({ record, expanded, onToggle, history }) {
         </td>
         <td>{fmtNum(record.shares_available)}</td>
         <td>{fmt(record.gross_decay_annual)}</td>
-        <td>{fmt(record.expected_gross_decay_annual)}</td>
+        <td>{fmt(forwardEdgeAnnual(record))}</td>
         <td style={{ verticalAlign: 'middle' }}>
           <NetEdgeMergedCell record={record} />
         </td>
@@ -932,7 +952,8 @@ function App() {
       data = data.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
     }
     data.sort((a, b) => {
-      let av = a[sortKey], bv = b[sortKey];
+      let av = sortKey === FORWARD_EDGE_SORT_KEY ? forwardEdgeAnnual(a) : a[sortKey];
+      let bv = sortKey === FORWARD_EDGE_SORT_KEY ? forwardEdgeAnnual(b) : b[sortKey];
       if (av === null || av === undefined) av = sortDesc ? -Infinity : Infinity;
       if (bv === null || bv === undefined) bv = sortDesc ? -Infinity : Infinity;
       if (typeof av === 'string') return sortDesc ? bv.localeCompare(av) : av.localeCompare(bv);
@@ -1092,11 +1113,15 @@ function App() {
             </span>
           </div>
 
+          <p style={{ padding: '8px 24px', margin: 0, fontSize: 11, color: 'var(--warning)', lineHeight: 1.45, maxWidth: 1100, borderBottom: '1px solid var(--border)' }}>
+            <strong>Deprecated dev UI.</strong> Production is repo-root <code>index.html</code> (GitHub Pages, schema_v=4). This FastAPI client is for local backend testing only.
+          </p>
+
           <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
-            <strong style={{ color: 'var(--text-secondary) }}>Decay columns —</strong>{' '}
-            <em>Gross (realized)</em> is the screener&rsquo;s point estimate (daily log-drag or blended/primary).{' '}
-            <em>Expected (Itô)</em> is the mechanical 0.5|β||β−1|σ² from the same run.{' '}
-            <em>Net edge p50 / p5–p95</em> use block resampling of daily log-drag (uncertainty on net edge, not a full tail model).
+            <strong style={{ color: 'var(--text-secondary)' }}>Short lens (+ = good for β-hedged short):</strong>{' '}
+            <em>Gross (realiz.)</em> — trailing hedge drag (β·r<sub>U</sub> − r<sub>ETF</sub>), ×252.{' '}
+            <em>Exp. edge (fwd)</em> — forward structural gross before borrow (log/yr): vol-drag for LETF/inverse; screener put-spread MC for YieldBOOST.{' '}
+            <em>Net edge</em> — bootstrap + inverse-variance blend with forward anchor; fan shows p5–p95.
           </p>
 
           {/* ── Table ─────────────── */}

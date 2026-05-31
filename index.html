@@ -1817,36 +1817,6 @@ function borrowSourceHint(display) {
   return parts.join(' · ');
 }
 
-function decayRoleSummary(r) {
-  const dist = expectedDecayDistribution(r);
-  return {
-    gross: {
-      role: 'realized',
-      label: 'Gross (realized)',
-      detail: 'Trailing β-hedged log-drag × 252 from ls-algo screener history.',
-    },
-    expected: {
-      role: 'forward',
-      label: expectedDecayDisplayLabel(r),
-      detail: isYieldBoostIncomeStrategy(r)
-        ? 'YieldBOOST: 1Y long net TR (−NAV decay + calibrated cash; borrow excluded).'
-        : dist
-          ? `Forward band (${DECAY_DIST_MODEL_LABELS[dist.model] || dist.model || 'model'}, gross, before borrow).`
-          : 'Forward point estimate from screener (Itô / vol-ETP adj.).',
-    },
-    netSpot: {
-      role: 'realized',
-      label: 'Net (spot)',
-      detail: 'gross_decay_annual − borrow_current on this row.',
-    },
-    netEdge: {
-      role: 'forward',
-      label: 'Net edge (p50)',
-      detail: 'Bootstrap fan; level anchored to forward Exp. decay p50 when available.',
-    },
-  };
-}
-
 function navForecastAsOfLabel(navForecastRow) {
   if (!navForecastRow) return null;
   const ts = String(navForecastRow.ts || navForecastRow.as_of || '').trim();
@@ -2538,14 +2508,12 @@ function expectedDecayAvailableForRow(r) {
 const PASSIVE_LOW_BETA_POLICY_TOOLTIP =
   'β ≈ 1: vol-drag ≈ 0 in the Itô identity ½·β·(β−1)·σ², so expected decay is hidden by design. Use Gross (realized) instead.';
 
-// Single number used for sorting and the headline cell value.
-// New semantics (decision A3): forward gross pair-trade P&L, before borrow.
-// Sign convention is short-favorable positive for all product classes.
+// Headline Exp. edge (fwd) cell + sort key. Short-favorable positive; log/yr axis.
 //   - passive_low_beta / expected_decay_available=false → null (renders '—').
 //   - LETF / inverse / vol-ETP: pair P&L = gross vol drag (cash leg absent),
 //     so this equals the prior "Exp. decay" column. Sourced from
 //     `expected_pair_pnl_p50_annual` (server-side mirror of `expected_gross_decay_p50_annual`).
-//   - YieldBOOST: put-spread structural gross from screener (same as Exp. decay
+//   - YieldBOOST: put-spread structural gross from screener (same as Exp. edge
 //     anchor for net edge). Weekly pair MC is a separate diagnostic field.
 function expectedDecayHeadlineValue(r, chartVolLookbackRange) {
   if (!expectedDecayAvailableForRow(r)) return null;
@@ -3393,14 +3361,14 @@ const COLS = [
   { key: 'delta', label: 'Delta', w: 65, hint: 'ls-algo hedge δ: OLS on aligned daily simple returns vs underlying TR, shrunk toward listed leverage (AR(1)-adjusted n_eff).' },
   { key: 'borrow_current', label: 'Borrow Rate', w: 105, hint: 'Spot fee-only borrow on this row (IBKR FTP on full build, else screener CSV). Compare to borrow_history.json tail on chart Borrow tab.' },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
-  { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, sublabel: 'trailing', hint: 'Realized: trailing annualized hedge drag from ls-algo screener (β·r_U − r_ETF) × 252. Not the forward Exp. decay column.' },
+  { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, sublabel: 'trailing', hint: 'Realized: trailing annualized hedge drag from ls-algo screener (β·r_U − r_ETF) × 252. Not the forward Exp. edge (fwd) column.' },
   { key: 'expected_pair_pnl_p50_annual', label: 'Exp. edge (fwd)', sublabel: 'struct · 1Y log/yr', w: 128, hint: 'Forward structural gross decay before borrow (log/yr). YieldBOOST: screener put-spread MC — same anchor as Net edge and Scenarios heatmap. LETF/inverse/vol-ETP: vol-drag identity. Sub-row: p10/p90 band. Hover for vol sensitivity and weekly pair MC diagnostic.' },
   {
     key: 'net_edge_p50_annual',
     label: 'Net edge',
     sublabel: 'best estimate · band',
     w: 130,
-    hint: 'Best estimate of annual edge after borrow, short-favorable + (log/yr). Inverse-variance Bayesian blend: posterior = w_forward × Exp. decay p50 + (1 − w_forward) × realized history, minus borrow. YieldBOOST anchor is put-spread structural gross (not weekly pair MC). Box p25–p75, whisker p5–p95, dot p50.',
+    hint: 'Best estimate of annual edge after borrow, short-favorable + (log/yr). Inverse-variance Bayesian blend: posterior = w_forward × Exp. edge (fwd) p50 + (1 − w_forward) × realized history, minus borrow. YieldBOOST anchor is put-spread structural gross (weekly pair MC is diagnostic-only). Box p25–p75, whisker p5–p95, dot p50.',
   },
   {
     key: SCENARIO_ETF_3M_FLAT_SORT_KEY,
@@ -3455,8 +3423,8 @@ function ExpectedDecayCalculator() {
     <div className="calc-card">
       <div className="calc-title">Expected Decay Calculator</div>
       <div className="calc-helper">
-        This is theoretical gross decay from volatility drag; not a forecast of realized returns.
-        Scenario drag uses <code>dragLog = ½·δ·(δ−1)·σ²·T</code> (this widget shows <code>½·|δ|·|δ−1|·σ²·T</code> for quick magnitude checks).
+        Theoretical Itô vol-drag only — not a forecast. Do <strong>not</strong> use for YieldBOOST; read <strong>Exp. edge (fwd)</strong> or the Scenarios tab instead.
+        Scenario drag uses <code>dragLog = ½·δ·(δ−1)·σ²·T</code> (this widget shows <code>½·|δ|·|δ−1|·σ²·T</code> for magnitude checks).
       </div>
 
       <div className="calc-grid">
@@ -3768,10 +3736,8 @@ function NetEdgeMergedCell({ r }) {
   const anchorSource = r.gross_anchor_source;
   const anchorShift = Number(r.gross_anchor_shift_annual);
   const anchorTarget = Number(r.gross_anchor_target_annual);
-  // Inverse-variance blend diagnostics (decision B2). When YB was re-blended
-  // on the dashboard side (decisions C2 + D1), pair_blend_* fields override
-  // the screener-side gross_blend_* fields with the pair-P&L anchored
-  // posterior. Show the most relevant set per row.
+  // Inverse-variance blend diagnostics (decision B2). YB re-blend (schema_v=4):
+  // pair_blend_* overrides screener gross_blend_* with the pair-MC anchor.
   const isYb = isYieldBoostIncomeStrategy(r);
   const blendMethod = isYb && r?.pair_blend_method
     ? r.pair_blend_method
@@ -4281,8 +4247,8 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
       <div className="scenario-sub" style={{ marginTop: 8, fontSize: 11, lineHeight: 1.5 }}>
         {isPutSpreadStructural ? (
           <>
-            Structural gross pair = put-spread ETF log decay (same engine as Exp. decay) + β × underlying log drift.
-            Center cell (σ×1.0, drift 0%) is calibrated to screener Exp. decay p50
+            Structural gross pair = put-spread ETF log decay (same engine as Exp. edge fwd) + β × underlying log drift.
+            Center cell (σ×1.0, drift 0%) is calibrated to screener Exp. edge p50
             {grid.anchor_p50_annual != null ? <> ({fmtLogYr(grid.anchor_p50_annual)})</> : null}.
             Distributions and borrow enter net edge via the screener bootstrap, not this gross grid.
           </>
@@ -10385,11 +10351,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
           <p style={{ padding: '0 24px 6px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
             <strong style={{ color: 'var(--text-secondary)' }}>Short lens (annual, + better for a β-hedged short):</strong>{' '}
-            <strong>Gross (realized)</strong> — trailing hedge drag from daily log returns (β·r<sub>U</sub> − r<sub>ETF</sub>), ×252.{' '}
-            <strong>Exp. decay</strong> — LETF/inverse/vol-ETP: forward <em>median gross</em> decay (+ = short-favorable). <strong>YieldBOOST income</strong>: 1Y <em>long net</em> TR (−NAV decay + cash, borrow excluded; same engine as Exp. ETF return / Scenarios).{' '}
-            <strong>Net edge</strong> — resample past gross paths and borrow, shift level to that forward median, then subtract borrow; dot = median, whisker = tail risk.{' '}
-            <strong>LETF vol intuition:</strong>{' '}
-            <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text-secondary)' }}>½·β·(β−1)·σ²·T</span> drag in log space (β from regression; σ = forecast for scenarios).
+            <strong>Gross (realized)</strong> — trailing hedge drag (β·r<sub>U</sub> − r<sub>ETF</sub>), ×252.{' '}
+            <strong>Exp. edge (fwd)</strong> — forward structural gross decay before borrow (log/yr). YieldBOOST = screener put-spread MC (Net edge anchor). LETF/inverse/vol-ETP = vol-drag. Weekly pair MC is a YB diagnostic (hover).{' '}
+            <strong>Net edge</strong> — bootstrap of past gross + borrow, level-shifted to Exp. edge fwd via inverse-variance blend; dot = p50, whisker = p5–p95. Details below.
           </p>
           <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
             <strong style={{ color: 'var(--text-secondary)' }}>Long lens (3M, different sign):</strong>{' '}
@@ -10406,15 +10370,15 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               <div className="dm-block">
                 <div className="dm-title">Sign convention &amp; column map</div>
                 <p style={{ margin: '0 0 8px', lineHeight: 1.5 }}>
-                  All edge columns are <em>short-favorable positive</em>.
+                  Edge columns are <em>short-favorable positive</em> (+ = good for a β-hedged short).
                   <br /><br />
-                  <strong>Gross (realized)</strong>: trailing β·r<sub>U</sub> − r<sub>ETF</sub> × 252 (always shown).
+                  <strong>Gross (realized)</strong>: trailing β·r<sub>U</sub> − r<sub>ETF</sub> × 252 (always shown when available).
                   <br /><br />
                   <strong>Exp. edge (fwd)</strong>: forward structural gross decay before borrow (log/yr). YieldBOOST = screener put-spread MC (same anchor as Net edge). LETF/inverse/vol-ETP = vol-drag identity. Weekly pair MC is a separate YB diagnostic.
                   <br /><br />
-                  <strong>Net edge</strong>: inverse-variance Bayesian blend of Exp. decay p50 and the realized bootstrap, minus borrow.
+                  <strong>Net edge</strong>: inverse-variance Bayesian blend of Exp. edge (fwd) p50 and the realized bootstrap, minus borrow.
                   <br /><br />
-                  <strong>Exp. ETF return (3M)</strong>: long total return at 3M (NAV + cash), flat underlying, no borrow. This is a <em>different</em> sign convention (long-favorable) and a different horizon than the Edge columns.
+                  <strong>Exp. ETF return (3M)</strong>: long total return at flat underlying (NAV + cash for income), borrow excluded. Long-favorable sign; different horizon and object than Exp. edge (fwd).
                 </p>
               </div>
               <div className="dm-block">
@@ -10425,7 +10389,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                   <strong>Itô fallback / CSV point</strong> uses one σ:{' '}
                   <code className="dm-formula">σ = √( mean(r²<sub>U,t</sub>) × 252 )</code> on underlying log returns.
                   <br /><br />
-                  <strong>YieldBOOST</strong>: σ-draws from that law (or one trailing σ if thin) feed the weekly 95/88 put-spread engine (<code>yieldboost_put_spread</code> vs <code>_point</code>).
+                  <strong>YieldBOOST</strong>: headline Exp. edge (fwd) = screener put-spread structural gross (<code>yieldboost_put_spread</code> / <code>_point</code>). Weekly compound pair MC (<code>expected_pair_pnl_weekly_mc_*</code>) is diagnostic-only.
                   <br /><br />
                   <strong>Scenarios + Exp. ETF return</strong> share <code>forecast_vol_underlying_annual</code>, a <strong>variance blend</strong>:{' '}
                   <code className="dm-formula">σ²_forecast = ½·σ²_model + ½·σ²_robust6M EWMA</code>
@@ -10436,7 +10400,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                 <div className="dm-title">Net edge fan (visual)</div>
                 <p style={{ margin: '0 0 8px', lineHeight: 1.5 }}>
                   <strong>Whisker</strong> slate = p5–p95 · <strong>Box</strong> cyan = p25–p75 · <strong>Dot</strong> blue = p50.
-                  Flow: block-bootstrap daily hedge drag → annual realized gross draws (mu_R, sigma_R) → <strong>inverse-variance blend</strong> with forward Exp. decay p50 (mu_F, sigma_F from p10/p90 band): posterior_mu = w_F·mu_F + (1−w_F)·mu_R → shift realized draws so mean = posterior_mu → subtract borrow resamples → net quantiles. YieldBOOST anchor is put-spread structural gross from the screener; weekly pair MC is diagnostic-only on the dashboard. Row JSON: <code>gross_blend_method</code>, <code>gross_blend_weight_forward</code>, <code>gross_sigma_*_annual</code>, <code>expected_pair_pnl_weekly_mc_*</code>. Histogram in <code>net_edge_hist_json</code>.
+                  Flow: block-bootstrap daily hedge drag → annual realized gross draws (μ_R, σ_R) → inverse-variance blend with forward Exp. edge (fwd) p50 (μ_F, σ_F from p10/p90 band): posterior = w_F·μ_F + (1−w_F)·μ_R → shift realized draws so mean = posterior → subtract borrow resamples → net quantiles. YieldBOOST anchor is put-spread structural gross from the screener; weekly pair MC is diagnostic-only. Row JSON: <code>gross_blend_method</code>, <code>gross_blend_weight_forward</code>, <code>gross_sigma_*_annual</code>, <code>expected_pair_pnl_weekly_mc_*</code>. Histogram in <code>net_edge_hist_json</code>.
                 </p>
               </div>
               <div className="dm-block">
@@ -10445,24 +10409,21 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                   With r<sub>L</sub>, r<sub>U</sub> daily log returns (ETF, underlying):{' '}
                   <code className="dm-formula">d<sub>t</sub> = β·r<sub>U,t</sub> − r<sub>L,t</sub></code>,{' '}
                   <code className="dm-formula">gross_decay_annual = mean(d_t) × 252</code>.
-                  Same for every product: <em>realized hedge drag</em>, not the YieldBOOST put-spread <strong>Exp. decay</strong> object.
+                  Same for every product: realized hedge drag on the log/yr axis — not the YieldBOOST gross put-spread NAV band.
                 </p>
               </div>
               <div className="dm-block">
                 <div className="dm-title">Exp. edge (fwd) — forward pair-trade P&L median (+ band)</div>
                 <p style={{ margin: '0 0 8px', lineHeight: 1.5 }}>
-                  Forward expected P&L from putting the pair trade on (short ETF + β-long underlying), 1Y horizon, before borrow. Short-favorable positive.
+                  Median 1Y forward pair-trade P&L: short ETF + β-long underlying. Short-favorable positive; log/yr axis (<code>expected_pair_pnl_p50_annual</code>).
                   <br /><br />
-                  <strong>LETF / inverse</strong>: no cash leg → pair P&L equals gross vol-drag.{' '}
-                  <code>expected_pair_pnl_p50_annual</code> mirrors <code>expected_gross_decay_p50_annual</code> (HARQ-Log or <code>simple_ito_fallback</code>).
+                  <strong>LETF / inverse</strong>: no cash leg → equals gross vol-drag. Mirrors <code>expected_gross_decay_p50_annual</code> (HARQ-Log or Itô fallback). Pre-borrow.
                   <br /><br />
-                  <strong>Vol ETPs</strong>: no cash leg → pair P&L equals Itô core + roll/tracking from screener.
+                  <strong>Vol ETPs</strong>: Itô core + roll/tracking from screener. Pre-borrow.
                   <br /><br />
-                  <strong>YieldBOOST income</strong>: <code className="dm-formula">pair_P&L = NAV_decay − distributions</code> at flat underlying, calibrated weekly cash and <code>forecast_vol_underlying_annual</code>. Band maps gross put-spread MC quantiles with the calibrated cash leg held fixed; band width = gross band width.
+                  <strong>YieldBOOST</strong>: screener put-spread structural gross (<code>expected_gross_decay_p50_annual</code> → <code>expected_pair_pnl_p50_annual</code>), before borrow. Weekly compound pair MC (<code>expected_pair_pnl_weekly_mc_p50_annual</code>) includes distributions + borrow — diagnostic only, not the headline cell.
                   <br /><br />
-                  This is the <strong>anchor</strong> for the Net edge inverse-variance blend (decision B2 + C2). YieldBOOST forward MC includes borrow; net-edge quantiles are level-shifted without a second borrow subtract.
-                  <br /><br />
-                  <strong>Passive low-β (non-income)</strong>: hidden by policy.
+                  This is the <strong>anchor</strong> for the Net edge inverse-variance blend. Passive low-β (non-income): hidden by policy.
                 </p>
               </div>
               <div className="dm-block">
@@ -10474,7 +10435,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                   <code className="dm-formula">dragLog = ½·L·(L−1)·σ²·T</code>,{' '}
                   <code className="dm-formula">r<sub>ETF</sub> ≈ e<sup>−dragLog</sup> − 1</code> + dividend accrual when <code>dividend_adjustment</code> exists.
                   <br /><br />
-                  <strong>Income</strong>: long TR = <strong>−NAV decay + cash</strong> from the same weekly model (borrow omitted). ≠ annual Exp. decay headline.
+                  <strong>Income</strong>: long TR = <strong>−NAV decay + cash</strong> (Scenarios closed form; borrow omitted). Different object from Exp. edge (fwd).
                   <br /><br />
                   Hover cell for 1M/6M. Non-income passive Bucket 2: <strong>—</strong>.
                 </p>
@@ -10489,7 +10450,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               <div className="dm-block">
                 <div className="dm-title">Net edge — bootstrap band</div>
                 <p style={{ margin: '0 0 8px', lineHeight: 1.5 }}>
-                  Resample gross + borrow, shift gross to forward p50, subtract borrow → p5…p95. Copula / ρ grid = stress choices (see table footnote), not a full joint tail model of borrow squeezes + spot.
+                  Resample gross + borrow, blend with forward p50 → p5…p95. Copula / ρ grid = stress choices in the bootstrap, not a full joint tail model.
                 </p>
               </div>
             </div>

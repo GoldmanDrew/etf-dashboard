@@ -43,7 +43,7 @@ Real-time IBKR short stock borrow rate monitoring with **distributional decay fo
 │                                                                       │
 │  index.html (React SPA, single file, served as-is)                   │
 │    Reads dashboard_data.json + the smaller per-feature JSONs and     │
-│    renders the interactive dashboard. Routes Exp. decay / Net edge / │
+│    renders the interactive dashboard. Routes Exp. edge (fwd) / Net edge / │
 │    Scenarios per product_class (see "Product Taxonomy" below).       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -57,12 +57,12 @@ Real-time IBKR short stock borrow rate monitoring with **distributional decay fo
 | `letf` | β > 1.5 | HARQ-Log p50 (fallback: simple Itô) — pair P&L = gross vol-drag | Inverse-variance blend (B2) + borrow | LETF vol-drag grid |
 | `inverse` | β < 0 | HARQ-Log p50 (fallback: simple Itô) — pair P&L = gross vol-drag | Inverse-variance blend (B2) + borrow | LETF vol-drag grid |
 | `volatility_etp` | UVIX/SVIX/VXX/VIXY/etc. | Simple Itô + empirical roll/tracking adjustment — pair P&L = gross | Inverse-variance blend (B2) + borrow | LETF vol-drag grid |
-| `income_yieldboost` | `is_yieldboost = true` | **Pair P&L = NAV decay − calibrated distributions** at forecast σ, 1Y | Re-blended on dashboard side with pair-P&L anchor (C2 + D1) + borrow | Income put-spread grid |
+| `income_yieldboost` | `is_yieldboost = true` | **Put-spread structural gross p50** (`expected_pair_pnl_p50_annual`, mirrored from screener) | Screener IV blend + borrow | Income grid + structural gross heatmap |
 | `income_put_spread` | Lev ≈ 1.0 (legacy) | HARQ-Log p50 (fallback: simple Itô) | Inverse-variance blend when band available | LETF grid |
 | `passive_low_delta` | 0 < β ≤ 1.5 (no income overlay) | **`—` (N/A by policy)** | Realized-only bootstrap (no blend) | Hidden |
 | `other_structured` | Fallback | `—` | Realized fallback | Hidden |
 
-The CSV also ships a boolean `expected_decay_available` flag derived from this taxonomy. The dashboard front-end uses it (with a graceful fallback for older builds) to drive the `—`-rendering policy in the Exp. decay / Net edge / Exp. ETF return (3M) columns.
+The CSV also ships a boolean `expected_decay_available` flag derived from this taxonomy. The dashboard front-end uses it (with a graceful fallback for older builds) to drive the `—`-rendering policy in the Exp. edge (fwd) / Net edge / Exp. ETF return (3M) columns.
 
 **Shared forecast volatility:** the main-grid `Exp. ETF return` column and the Scenarios tab now use the same default `forecast_vol_underlying_annual` built in `scripts/build_data.py`. When both legs are available, the builder blends **variance** 50/50:
 
@@ -74,9 +74,14 @@ sigma_forecast^2 = 0.5 * sigma_model^2 + 0.5 * sigma_robust_ewma^2
 
 **Why passive low-β is `—`:** the simple Itô identity says expected gross decay ≈ `(β² − β)/2 · σ²`, which collapses to noise around β ≈ 1. We ship the realized gross drag in the `Gross (realized)` column instead — that's the only honest signal for these products. See `daily_screener.py` Step 5d ("passive_low_delta policy") and `screener_v2_fields._expected_decay_available`.
 
-**Why YieldBOOST gets a dedicated decay model:** YieldBOOST income ETFs (AMYY, AZYY, BBYY, COYY, …) have β ≈ 0.4–0.6 because the 2× LETF NAV is sleeved with a weekly 95/88 SPX-style put-spread. A vanilla HARQ-Log vol-drag p50 of ~2–3% badly understates the actual NAV decay mechanism, which is dominated by the put-spread premium. As of the YB-unification refactor (`ls-algo/yieldboost_decay.py`), the screener now ships a **put-spread Monte-Carlo distribution** for YieldBOOST rows: the underlying's HARQ-Log lognormal moments are sampled, fed through the same `expectedPutSpreadLossWeekly` mechanics that the Scenarios tab uses, compounded 52× minus the 0.99% expense ratio, and exported as `expected_gross_decay_p10/p50/p90/mean_annual` with `expected_gross_decay_dist_model = yieldboost_put_spread` (or `yieldboost_put_spread_point` when the underlying TR history is too short for a full HARQ-Log fit). This means YieldBOOST `Exp. decay` and Net edge ride through the **same column shape** as every other product class — the dashboard simply reads `dist.p50` for the headline and the Net-edge bootstrap is anchor-shifted to that p50 so the pair-trade P&L reflects the put-spread forecast, not just realized noise. The client-side `yieldBoostIntrinsicAnnualDecay` helper survives only as a fallback for rows where the server didn't ship the distribution.
+**Why YieldBOOST gets a dedicated decay model:** YieldBOOST income ETFs (AMYY, AZYY, BBYY, COYY, …) have β ≈ 0.4–0.6 because the 2× LETF NAV is sleeved with a weekly 95/88 SPX-style put-spread. A vanilla HARQ-Log vol-drag p50 of ~2–3% badly understates actual decay. Two numbers apply:
 
-**Net edge — inverse-variance Bayesian blend (decisions A3 + B2 + C2 + D1 + E2):** every product class with a meaningful expected component runs a stationary-block bootstrap of realized daily log-hedge-drag and borrow histories, then enters a Normal-Normal conjugate update with the forward forecast. The level becomes `posterior_mu = w_F · expected_p50 + (1 − w_F) · mu_realized` where `w_F = sigma_R^2 / (sigma_F^2 + sigma_R^2)` and `sigma_F = (p90 − p10) / (2·1.2816)`. When the forecast has no band (`yieldboost_put_spread_point`), the blend falls back to the legacy anchor-shift (B1 / E2). For YieldBOOST rows the dashboard side overrides the screener's gross-NAV-decay anchor with a **forward pair-trade P&L** (NAV decay − calibrated cash distributions) and re-blends with a distribution-adjusted realized series (D1). Diagnostics on every row: `gross_blend_method` / `gross_blend_weight_forward` / `gross_sigma_forward_annual` / `gross_sigma_realized_annual` / `gross_realized_mean_annual` (server) and `pair_blend_*` / `expected_pair_pnl_*` (dashboard-side YB override). Passive low-β rows are realized-only by policy. See `ls-algo/screener_v2_fields.enrich_screener_v2_fields`, `etf-dashboard/scripts/build_data.py` (step 5c), and `tests/test_anchor_shift_bootstrap.py` / `tests/test_income_schedule.py` for the implementation.
+1. **Headline Exp. edge (fwd)** — screener put-spread structural gross (`yieldboost_decay.py` → `expected_gross_decay_p*` mirrored to `expected_pair_pnl_p50_annual`).
+2. **Weekly compound pair MC (diagnostic)** — `simulate_weekly_compound_pair_pnl` → `expected_pair_pnl_weekly_mc_*` (distributions + borrow inside weekly sim; tooltips / Scenarios panel only).
+
+Net edge uses screener bootstrap anchored to structural gross (no dashboard re-blend on weekly MC). Client `yieldBoostIntrinsicAnnualDecay` is a legacy fallback when pair fields are missing.
+
+**Net edge — inverse-variance Bayesian blend:** block-bootstrap of realized log-drag + borrow, blended with forward Exp. edge (fwd) p50, minus borrow. YieldBOOST anchor = put-spread structural gross from screener. Weekly pair MC is diagnostic-only. See `ls-algo/screener_v2_fields.enrich_screener_v2_fields` and `scripts/build_data.py` step 5c.
 
 ## Decay Models in Use
 
@@ -86,9 +91,10 @@ sigma_forecast^2 = 0.5 * sigma_model^2 + 0.5 * sigma_robust_ewma^2
 | **Simple Itô** | `(β² − β)/2 · σ²` | Fallback when distributional model is unavailable; volatility ETP base term |
 | **Volatility ETP empirical roll/tracking** | `simple_ito + empirical_roll_tracking_component` | UVIX / SVIX / VXX / VIXY / etc. |
 | **HARQ-Log anchored empirical lognormal** | `decay_distribution.py` (lognormal IV_T quantiles) | `letf`, `inverse`, `income_put_spread`; emits p10/p50/p90/mean |
-| **YieldBOOST put-spread Monte-Carlo** | `yieldboost_decay.py` (HARQ-Log σ-draws → weekly 95/88 put-spread NAV-decay → 52× compounded − expense ratio) | All `is_yieldboost = True` rows; emits p10/p50/p90/mean (model `yieldboost_put_spread` / `yieldboost_put_spread_point`) |
+| **YieldBOOST put-spread structural gross** | `yieldboost_decay.py` → `expected_gross_decay_p*` mirrored to `expected_pair_pnl_p50_annual` | Headline **Exp. edge (fwd)** for YieldBOOST |
+| **YieldBOOST weekly compound MC (diagnostic)** | `simulate_weekly_compound_pair_pnl` → `expected_pair_pnl_weekly_mc_*` | Tooltips / Scenarios diagnostic panel only |
 | **Income distribution calibration** | `scripts/income_schedule.py` — NAV-normalizes each historical cash event (`yield_i = amount_i / NAV_at_ex_i`), backs out a structural capture ratio (`ratio_i = yield_i / BS_premium(σ_at_ex_i)`), confidence-blends with a cross-fund prior (research median ~0.65 per Magis Capital April 2026 *Bucket 2 Income ETF Structural Decay*), and ships `income_distribution_calibration` on every YieldBOOST row | All `is_yieldboost = True` rows; consumed by `assets/income_scenario.js` so the Scenarios-tab cash projection scales with the scenario σ instead of being frozen at `Σ$/today_price` (the old formulation overstated MTYY by ~85pp). |
-| **Net edge — inverse-variance blend** | Block-bootstrap of daily log-drag + weighted borrow resample, level-shifted to a Normal-Normal posterior mean of `expected_pair_pnl_p50_annual` and the realized bootstrap mean (weight = `sigma_R^2 / (sigma_F^2 + sigma_R^2)`). YieldBOOST anchor uses the calibrated pair-P&L; realized series is distribution-adjusted. | `net_edge_p05/p25/p50/p75/p95_annual` + `net_edge_hist_json`, plus `gross_blend_*` / `pair_blend_*` / `expected_pair_pnl_*` diagnostics |
+| **Net edge — inverse-variance blend** | Block-bootstrap + blend with Exp. edge (fwd) p50, minus borrow. YB anchor = structural gross from screener. | `net_edge_p05/p25/p50/p75/p95_annual` + `net_edge_hist_json`, `gross_blend_*`, `expected_pair_pnl_weekly_mc_*` (diagnostic) |
 | **`delta_v1` NAV forecast** | `nav_anchor · exp(β · log(spot_und / spot_und_anchor)) · (1 − TER_daily)` | Closed-form baseline for LETF / inverse / vol-ETP / passive-β rows; emitted alongside v2/v3 for A/B comparison |
 | **`delta_v2_ito` NAV forecast** | `delta_v1 · exp(−(β² − β)/2 · σ² · Δt)` (σ from `forecast_vol_underlying_annual`, Δt = bdays since anchor / 252) | Adds path-dependent vol drag — pulls down LETFs (β > 1) and inverse (β < 0); same eligibility as `delta_v1` |
 | **`delta_v3_swap_mark` NAV forecast** | `nav_anchor + Σ_legs shares · (spot_now − spot_anchor) / shares_outstanding`, OPTION legs at zero delta | Holdings-aware mark from `etf_holdings_latest.json`; default for LETF / inverse / vol-ETP / passive-β rows when holdings + spots resolve |
@@ -268,7 +274,7 @@ The dashboard includes a standalone **Expected Decay Calculator** that uses the 
 
 Where `T_years = days/252`, `weeks/52`, `months/12`, or `years`. Volatility input accepts either percent style (`130`) or decimal (`1.3`).
 
-This is the same model as the simple Itô fallback in `decay_distribution.py`. For a richer forecast (median / p10 / p90), the main grid uses the HARQ-Log distribution for LETF/inverse/vol-ETP rows and the put-spread Monte-Carlo distribution (`yieldboost_decay.py`) for YieldBOOST rows. For a YieldBOOST product, the calculator's pure Itô output should be **ignored** — read the headline `Exp. decay` cell (which is now the put-spread MC p50) or open the put-spread Scenarios tab instead.
+This is the same model as the simple Itô fallback in `decay_distribution.py`. For a richer forecast, the main grid uses HARQ-Log for LETF/inverse/vol-ETP and put-spread structural gross for YieldBOOST. **Do not use this calculator for YieldBOOST** — read **Exp. edge (fwd)** or the Scenarios tab instead.
 
 ## Environment Variables
 
@@ -315,12 +321,13 @@ This ensures Stats-tab NAV/AUM/shares fields are populated for substantially mor
 | Task | File |
 |------|------|
 | Add a new column to the main table | `index.html` → `COLS` array (~line 2235) |
-| Change the headline `Exp. decay` routing | `index.html` → `expectedDecayHeadlineValue`, `expectedDecayDisplayLabel`, `decayDistTooltip` (~line 1670–1750) |
-| Change the YieldBOOST decay distribution | `ls-algo/yieldboost_decay.py` (server-side put-spread Monte-Carlo) — front-end just consumes `dist.p50/p10/p90` |
+| Change the headline Exp. edge (fwd) routing | `index.html` → `expectedDecayHeadlineValue`, `expectedDecayDisplayLabel`, `decayDistTooltip` |
+| Change YieldBOOST forward pair MC | `scripts/income_schedule.py::simulate_weekly_compound_pair_pnl` + `scripts/build_data.py` step 5c |
+| Change YieldBOOST gross NAV band (diagnostic) | `ls-algo/yieldboost_decay.py` → `expected_gross_decay_p*` |
 | Change the YieldBOOST client-side fallback | `index.html` → `yieldBoostIntrinsicAnnualDecay` (~line 1631) — only used when server distribution missing |
 | Change the put-spread scenario model | `index.html` → `expectedPutSpreadLossWeekly`, `estimateIncomeStyleScenarioReturn` (~line 1790–1845); engine module: `assets/income_scenario.js` (`calibratedWeeklyDistribution`, `estimateIncomeStyleScenarioFromCalibration`) |
 | Change the income distribution calibration | `scripts/income_schedule.py` (server) + `assets/income_scenario.js` (client). The cross-fund prior lives at `DEFAULT_CROSS_FUND_RATIO` (research median 0.65) and is overridden at build time by `derive_cross_fund_ratio` when ≥3 high-confidence funds qualify. Test fixtures: `tests/fixtures/bucket2_research.json`. |
-| Change the net-edge blend gate or weights | `ls-algo/screener_v2_fields.enrich_screener_v2_fields` (band → `sigma_F`, bootstrap → `sigma_R`, inverse-variance blend with anchor-shift fallback) + `etf-dashboard/scripts/build_data.py` step 5c (YB pair-P&L override + D1 re-blend) |
+| Change the net-edge blend gate or weights | `ls-algo/screener_v2_fields.enrich_screener_v2_fields` + `scripts/build_data.py` step 5c (YB pair-MC re-blend) |
 | Add a new product_class | `ls-algo/screener_v2_fields.py` → `_product_class`, `_EXPECTED_DECAY_CLASSES` |
 | Plumb a new CSV column to the SPA | `scripts/build_data.py` → `rec = { … }` block, then read it in `index.html` |
 | Plumb a new CSV column to FastAPI | `backend/models.py` → `ETFRecord`, then `backend/main.py` → `_build_records_from_csv` |
