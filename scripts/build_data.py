@@ -137,6 +137,9 @@ OPTIONS_INCLUDE_UNDERLYING_PEERS = os.environ.get("OPTIONS_INCLUDE_UNDERLYING_PE
 }
 OPTIONS_ACCUMULATE_CACHE = os.environ.get("OPTIONS_ACCUMULATE_CACHE", "1").strip().lower() not in {"0", "false", "no"}
 YIELDBOOST_TRADIER_ONLY = os.environ.get("YIELDBOOST_TRADIER_ONLY", "1").strip().lower() not in {"0", "false", "no"}
+YIELDBOOST_UNDERLYING_STALE_HOURS = float(os.environ.get("YIELDBOOST_UNDERLYING_STALE_HOURS", "4"))
+YIELDBOOST_UNDERLYING_SYMBOLS_PER_RUN = int(os.environ.get("YIELDBOOST_UNDERLYING_SYMBOLS_PER_RUN", "12"))
+YIELDBOOST_UNDERLYING_REFRESH = os.environ.get("YIELDBOOST_UNDERLYING_REFRESH", "stale").strip().lower()
 OPTIONS_MAX_ROWS_PER_SYMBOL = int(os.environ.get("OPTIONS_MAX_ROWS_PER_SYMBOL", "1200"))
 POLYGON_FORCE_SYMBOLS_RAW = [
     s.strip()
@@ -1250,11 +1253,55 @@ def _yieldboost_targeted_refresh_symbols(
     return yb_sleeves, underlying_refresh
 
 
+def _pick_yieldboost_underlyings_to_refresh(
+    underlying_candidates: list[str],
+    prior_symbols: dict,
+    *,
+    refresh_mode: str | None = None,
+    stale_hours: float | None = None,
+    cap: int | None = None,
+) -> tuple[list[str], list[str]]:
+    """Choose which YB underlyings to refresh this run (budget-aware)."""
+    mode = (refresh_mode or YIELDBOOST_UNDERLYING_REFRESH or "stale").strip().lower()
+    stale_secs = float(stale_hours if stale_hours is not None else YIELDBOOST_UNDERLYING_STALE_HOURS) * 3600.0
+    max_n = max(0, int(cap if cap is not None else YIELDBOOST_UNDERLYING_SYMBOLS_PER_RUN))
+    candidates = sorted({norm_sym(s) for s in (underlying_candidates or []) if str(s).strip()})
+    if not candidates:
+        return [], []
+
+    def _age(s: str) -> int:
+        payload = prior_symbols.get(s) if isinstance(prior_symbols, dict) else {}
+        if not isinstance(payload, dict):
+            return 10**9
+        ts = payload.get("updated_at")
+        if not isinstance(ts, str) or not ts:
+            return 10**9
+        try:
+            parsed = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            return max(0, int((dt.datetime.now(dt.UTC) - parsed).total_seconds()))
+        except Exception:
+            return 10**9
+
+    if mode in {"all", "full"}:
+        return candidates, []
+
+    stale_syms = [s for s in candidates if _age(s) >= stale_secs]
+    stale_syms.sort(key=_age, reverse=True)
+    if stale_syms:
+        picked = stale_syms[: max_n or len(stale_syms)]
+    else:
+        # Nothing over threshold — rotate oldest slice so underlyings cannot age out forever.
+        picked = sorted(candidates, key=_age, reverse=True)[: max(1, max_n)]
+    skipped = sorted(set(candidates) - set(picked))
+    return picked, skipped
+
+
 def build_polygon_options_cache(
     symbols: list[str],
     *,
     yieldboost_targeted: bool = False,
     prior_cache: dict | None = None,
+    underlying_refresh_mode: str | None = None,
 ) -> dict:
     """
     Build delayed options snapshot cache from Polygon for UI consumption.
@@ -1333,11 +1380,17 @@ def build_polygon_options_cache(
     symbols_per_run = max(1, OPTIONS_SYMBOLS_PER_RUN)
     shard_interval_minutes = max(1, OPTIONS_SHARD_INTERVAL_MINUTES)
     underlying_refresh: list[str] = []
+    underlying_skipped_fresh: list[str] = []
     if yieldboost_targeted:
-        yb_sleeves, underlying_refresh = _yieldboost_targeted_refresh_symbols(
+        yb_sleeves, underlying_all = _yieldboost_targeted_refresh_symbols(
             all_symbols,
             target_strikes_by_sleeve=target_strikes_by_sleeve,
             held_expiries_by_sleeve=held_expiries_by_sleeve,
+        )
+        underlying_refresh, underlying_skipped_fresh = _pick_yieldboost_underlyings_to_refresh(
+            underlying_all,
+            prior_symbols,
+            refresh_mode=underlying_refresh_mode,
         )
         if yb_sleeves or underlying_refresh:
             all_symbols = sorted(set(yb_sleeves) | set(underlying_refresh))
@@ -1389,6 +1442,7 @@ def build_polygon_options_cache(
         "yieldboost_targeted": bool(yieldboost_targeted),
         "yieldboost_sleeves_only": bool(yieldboost_targeted and not underlying_refresh),
         "yieldboost_underlyings_refreshed": underlying_refresh,
+        "yieldboost_underlyings_skipped_fresh": underlying_skipped_fresh,
         "yieldboost_target_sleeves": sorted(target_strikes_by_sleeve.keys()),
         "shard_interval_minutes": int(shard_interval_minutes),
         "polygon_request_limits": {
@@ -2902,26 +2956,40 @@ def load_yieldboost_sleeve_symbols(*, front_only: bool = True) -> list[str]:
 
 
 def refresh_yieldboost_options_targeted_slice(prior_cache: dict) -> dict:
-    """Second-pass options refresh for all YB 2x sleeves (held-exp + chain fallback).
+    """Second-pass options refresh for YB sleeves + underlyings (held-exp + chain fallback).
 
     Call after a budget-limited bucket-3 ``build_polygon_options_cache`` sweep so
     MSTU/MULL/etc. get ``yieldboost_targeted=True`` prefetch without being
     overwritten by ``spot_only`` rows when the first pass runs out of Tradier budget.
     """
+    from yieldboost_holdings import load_yieldboost_underlying_symbols_from_spreads
+
     sleeves = load_yieldboost_sleeve_symbols(front_only=True)
-    if not sleeves:
+    underlyings = load_yieldboost_underlying_symbols_from_spreads(
+        YIELDBOOST_PUT_SPREADS_FILE,
+        front_only=True,
+    )
+    if not sleeves and not underlyings:
         return prior_cache
     if not TRADIER_TOKEN:
         print("[WARN] TRADIER_TOKEN missing; skipping targeted YieldBOOST options slice")
         return prior_cache
+    refresh_list: list[str] = []
+    seen: set[str] = set()
+    for sym in sleeves + underlyings:
+        ss = norm_sym(sym)
+        if ss and ss not in seen:
+            seen.add(ss)
+            refresh_list.append(ss)
     print(
-        f"  Targeted YieldBOOST chain refresh for {len(sleeves)} sleeves "
-        f"(after bucket-3 sweep)…"
+        f"  Targeted YieldBOOST chain refresh for {len(sleeves)} sleeves + "
+        f"{len(underlyings)} underlyings = {len(refresh_list)} symbols (after bucket-3 sweep)…"
     )
     return build_polygon_options_cache(
-        sleeves,
+        refresh_list,
         yieldboost_targeted=True,
         prior_cache=prior_cache,
+        underlying_refresh_mode="all",
     )
 
 

@@ -197,7 +197,26 @@ def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bda
     df["stale_age_bdays_prior_close"] = (
         by_ticker["stale_age_bdays"].shift(1) if "stale_age_bdays" in df.columns else np.nan
     )
+    if "source_provider" in df.columns:
+        df["source_provider_prior_close"] = by_ticker["source_provider"].shift(1)
+    else:
+        df["source_provider_prior_close"] = None
     df["underlying_return_d1"] = (df["underlying_adj_close"] / df["underlying_adj_close_prior"]) - 1.0
+
+    def _prior_aum_blocks_flow(row: pd.Series) -> bool:
+        stale_age = _f(row.get("stale_age_bdays_prior_close"))
+        if stale_age is not None and stale_age > stale_bdays:
+            return True
+        if not bool(row.get("stale_prior_close")):
+            return False
+        src = str(row.get("source_provider_prior_close") or "").strip().lower()
+        if src == "carry_forward":
+            return True
+        if stale_age is not None and stale_age <= 0:
+            return False
+        if stale_age is not None and stale_age > 0:
+            return True
+        return True
 
     def quality(row: pd.Series) -> str:
         if not bool(row.get("included_in_universe")):
@@ -208,8 +227,7 @@ def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bda
             return "missing_prior_aum"
         if not math.isfinite(float(row.get("underlying_return_d1", np.nan))):
             return "missing_underlying_return"
-        stale_age = _f(row.get("stale_age_bdays_prior_close"))
-        if bool(row.get("stale_prior_close")) or (stale_age is not None and stale_age > stale_bdays):
+        if _prior_aum_blocks_flow(row):
             return "stale_aum"
         return "ok"
 

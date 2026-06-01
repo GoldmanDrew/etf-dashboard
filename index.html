@@ -9414,7 +9414,7 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
   const [sortDesc, setSortDesc] = useState(true);
   const [direction, setDirection] = useState('all');
   const [hideMissingAdv, setHideMissingAdv] = useState(false);
-  const [hideStaleAggregates, setHideStaleAggregates] = useState(false);
+  const [hideStaleAggregates, setHideStaleAggregates] = useState(true);
   const [hideSingleFund, setHideSingleFund] = useState(false);
   const [minFunds, setMinFunds] = useState(0);
 
@@ -9490,28 +9490,40 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
     return out;
   }, [allRows, search, direction, hideMissingAdv, hideStaleAggregates, hideSingleFund, minFunds, sortKey, sortDesc, sortValue]);
 
+  const headlineRows = useMemo(() => {
+    if (mode === 'intraday') {
+      return allRows.filter((row) => row.spot_stale !== true);
+    }
+    return allRows.filter((row) => row.is_latest_global !== false);
+  }, [allRows, mode]);
+
   const headline = useMemo(() => {
     const netOf = (r) => netDollarsOf(r);
     const grossOf = (r) => Number(
       mode === 'intraday' ? r?.estimated_gross_close_rebalance_dollars : r?.gross_moc_dollars,
     );
-    const sortedByAbs = [...allRows].sort(
+    const sortedByAbs = [...headlineRows].sort(
       (a, b) => Math.abs(netOf(b) || 0) - Math.abs(netOf(a) || 0),
     );
-    const buys = allRows.filter((r) => netOf(r) > 0).sort((a, b) => netOf(b) - netOf(a));
-    const sells = allRows.filter((r) => netOf(r) < 0).sort((a, b) => netOf(a) - netOf(b));
-    const grossMoc = allRows.reduce(
+    const buys = headlineRows.filter((r) => netOf(r) > 0).sort((a, b) => netOf(b) - netOf(a));
+    const sells = headlineRows.filter((r) => netOf(r) < 0).sort((a, b) => netOf(a) - netOf(b));
+    const grossMoc = headlineRows.reduce(
       (sum, r) => sum + (Number.isFinite(grossOf(r)) ? grossOf(r) : 0),
       0,
     );
+    const latestEodCount = mode === 'eod'
+      ? allRows.filter((r) => r.is_latest_global !== false).length
+      : headlineRows.length;
     return {
       total: allRows.length,
+      headlineCount: headlineRows.length,
+      latestEodCount,
       topByAbs: sortedByAbs[0] || null,
       topBuy: buys[0] || null,
       topSell: sells[0] || null,
       grossMoc,
     };
-  }, [allRows, mode, netDollarsOf]);
+  }, [allRows, headlineRows, mode, netDollarsOf]);
 
   const handleSort = useCallback((key) => {
     if (sortKey === key) setSortDesc((d) => !d);
@@ -9557,7 +9569,7 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
         Mechanical issuer hedge into the close: <code>{method || 'L × (L − 1) × prior-close AUM × underlying return'}</code>.
         {mode === 'intraday'
           ? <> Snapshot {latestDate ? fmtTime(latestDate) : '—'}{intradayPayload?.minutesToClose != null ? ` · ${intradayPayload.minutesToClose}m to close` : ''}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}.</>
-          : <> Latest aggregate {latestDate || '—'}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}.</>}
+          : <> Latest aggregate {latestDate || '—'}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}{mode === 'eod' ? <> · {fmtNum(headline.latestEodCount)}/{fmtNum(headline.total)} on latest session</> : null}.</>}
         {mode === 'intraday' && intradayError ? <> · <span className="val-negative">{intradayError}</span></> : null}
         {mode === 'intraday' && intradayPayload?.spotSources ? (
           <> · spots: polygon {fmtNum(intradayPayload.spotSources.polygon_snapshot)} · cache {fmtNum(intradayPayload.spotSources.options_cache)} · yf {fmtNum(intradayPayload.spotSources.yfinance_fast_info)}</>
@@ -9593,7 +9605,9 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
           <div className="cs-label">{mode === 'intraday' ? 'Underlyings priced' : 'Underlyings tracked'}</div>
           <div className="cs-value">{fmtNum(headline.total)}</div>
           <div className="cs-sub">
-            {mode === 'intraday' ? <>Σ |gross est.| {fmtCompactSignedMoney(headline.grossMoc)}</> : <>Σ gross MOC {fmtCompactSignedMoney(headline.grossMoc)}</>}
+            {mode === 'intraday'
+              ? <>Σ |gross est.| {fmtCompactSignedMoney(headline.grossMoc)} · {fmtNum(headline.headlineCount)} fresh</>
+              : <>Σ gross MOC {fmtCompactSignedMoney(headline.grossMoc)} · headlines use latest session</>}
           </div>
         </div>
         <div className="chart-stat">

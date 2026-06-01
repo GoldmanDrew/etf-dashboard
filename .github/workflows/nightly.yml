@@ -108,6 +108,10 @@ jobs:
       - name: Build LETF rebalance flows
         run: python scripts/build_letf_rebalance_flows.py
 
+      - name: Freshness diagnostics
+        continue-on-error: true
+        run: python scripts/freshness_diagnostics.py --max-underlying-hours 48 --max-flow-stale-pct 25
+
       - name: Score intraday LETF flow estimates vs realised
         continue-on-error: true
         run: python scripts/score_intraday_flows.py

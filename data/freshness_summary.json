@@ -1,0 +1,69 @@
+{
+  "build_time": "2026-06-01T02:13:14.235281Z",
+  "thresholds": {
+    "max_underlying_hours": 48.0,
+    "max_flow_stale_pct": 25.0
+  },
+  "options": {
+    "build_time": "2026-05-30T21:01:18.255914Z",
+    "yieldboost_targeted": true,
+    "yieldboost_sleeves_only": true,
+    "yieldboost_underlyings_refreshed_count": 0,
+    "yieldboost_underlyings_skipped_fresh_count": 0,
+    "oldest_symbol": "AAL",
+    "oldest_symbol_age_minutes": 77887
+  },
+  "vrp": {
+    "worst_underlying_symbol": null,
+    "worst_underlying_options_age_minutes": 10131,
+    "underlying_options_as_of_min": "2026-05-23T20:20:07.875272Z",
+    "iv_coverage_front_pct": 0.9677
+  },
+  "flow": {
+    "latest_date": "2026-05-29",
+    "build_time": "2026-06-01T02:09:21.509805Z",
+    "underlyings_total": 228,
+    "underlyings_stale": 72,
+    "underlyings_stale_pct": 31.58,
+    "top_stale_by_abs_net_moc": [
+      {
+        "underlying": "MRVL",
+        "date": "2026-05-28",
+        "abs_net_moc_dollars": 31451601.09
+      },
+      {
+        "underlying": "NOW",
+        "date": "2026-05-28",
+        "abs_net_moc_dollars": 24856066.62
+      },
+      {
+        "underlying": "SNOW",
+        "date": "2026-05-28",
+        "abs_net_moc_dollars": 13432544.57
+      },
+      {
+        "underlying": "RDW",
+        "date": "2026-05-28",
+        "abs_net_moc_dollars": 11570648.24
+      },
+      {
+        "underlying": "INTC",
+        "date": "2026-05-28",
+        "abs_net_moc_dollars": 10842777.25
+      }
+    ]
+  },
+  "metrics": {
+    "latest_date": "2026-05-29",
+    "latest_ok": 475,
+    "latest_stale_ok": 123,
+    "latest_missing": 1
+  },
+  "violations": [
+    "options_cache.yieldboost_sleeves_only=true (underlyings not refreshed)",
+    "oldest symbol cache AAL is 1298h old (limit 48h)",
+    "vrp worst underlying ? quote 168h old (limit 48h)",
+    "flow 72/228 underlyings stale (31.6% > 25%)"
+  ],
+  "ok": false
+}

@@ -128,6 +128,8 @@
       ? Number(vrpHealth.worst_sleeve_options_age_minutes) : null;
     const worstUndOptMin = Number.isFinite(Number(vrpHealth && vrpHealth.worst_underlying_options_age_minutes))
       ? Number(vrpHealth.worst_underlying_options_age_minutes) : null;
+    const worstUndSym = vrpHealth && vrpHealth.worst_underlying_symbol
+      ? String(vrpHealth.worst_underlying_symbol).toUpperCase() : null;
     const holdingsDays = vrpHealth && vrpHealth.holdings_age_trading_days != null
       ? Number(vrpHealth.holdings_age_trading_days)
       : holdingsAgeDays(vrpHealth && vrpHealth.holdings_as_of);
@@ -161,7 +163,7 @@
       : bottleneck.kind === 'worst_sleeve_quote'
         ? 'worst sleeve quote'
         : bottleneck.kind === 'worst_underlying_quote'
-          ? 'worst und. quote'
+          ? (worstUndSym ? worstUndSym + ' und. quote' : 'worst und. quote')
           : bottleneck.kind === 'options_cache'
             ? 'options cache'
             : 'build';

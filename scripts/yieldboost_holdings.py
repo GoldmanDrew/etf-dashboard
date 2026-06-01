@@ -1057,6 +1057,7 @@ def build_vrp_health_payload(
     # feed actually says.
     options_as_of_min: str | None = None
     underlying_options_as_of_min: str | None = None
+    worst_underlying_symbol: str | None = None
     per_row_stale_minutes: list[int] = []
     for row in vrp_rows:
         sleeve = str(row.get("sleeve_2x") or "").upper()
@@ -1076,6 +1077,7 @@ def build_vrp_health_payload(
         if und_ts:
             if underlying_options_as_of_min is None or str(und_ts) < underlying_options_as_of_min:
                 underlying_options_as_of_min = str(und_ts)
+                worst_underlying_symbol = str(row.get("underlying") or row.get("spot_underlying") or "").upper() or None
 
     holdings_as_of = None
     for row in front_spreads:
@@ -1148,6 +1150,7 @@ def build_vrp_health_payload(
         "options_as_of_max": options_as_of_max,
         "options_as_of_min": options_as_of_min,
         "underlying_options_as_of_min": underlying_options_as_of_min,
+        "worst_underlying_symbol": worst_underlying_symbol,
         "worst_sleeve_options_age_minutes": worst_options_age_minutes,
         "worst_underlying_options_age_minutes": worst_underlying_age_minutes,
         "stale_after_minutes": int(stale_after_minutes),

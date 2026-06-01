@@ -108,6 +108,26 @@ _MARKET_FALLBACK_PROVIDERS: frozenset[str] = frozenset({"yfinance", "polygon"})
 _MERGE_IDENTITY_MAX_REL_ERR = float(os.getenv("ETF_METRICS_MERGE_IDENTITY_MAX_REL_ERR", "0.05"))
 
 
+def issuer_valuation_stale_flags(valuation_date: date | None, as_of: date) -> tuple[bool, int | None]:
+    """Return (stale, stale_age_bdays) for issuer rows keyed by valuation session.
+
+    When the feed publishes the *next* session early (valuation_date > as_of), the
+    figures are not stale — the row is stored at valuation_date via SKIP anchor.
+    Only true lag (valuation_date < as_of) marks stale with positive business-day age.
+    """
+    if valuation_date is None or valuation_date == as_of:
+        return False, None
+    if valuation_date > as_of:
+        return False, None
+    try:
+        age_b = int(np.busday_count(str(valuation_date), str(as_of)))
+    except Exception:
+        age_b = None
+    if age_b is not None and age_b <= 0:
+        return False, None
+    return True, age_b
+
+
 def _positive_float(v: object) -> float | None:
     if v is None or pd.isna(v):
         return None
@@ -599,16 +619,12 @@ class DirexionProvider:
         # Bear-fund swaps have negative MV paired with negative HP, so impliedAUM stays positive.
         aum = float(abs(aum_val)) if aum_val is not None and not pd.isna(aum_val) else None
         nav = float(aum / shares) if aum and shares > 0 else None
-        stale = False
-        age_b = None
-        if trade_date and trade_date != as_of:
-            stale = True
-            try:
-                age_b = int(np.busday_count(str(trade_date), str(as_of)))
-            except Exception:
-                age_b = None
-        status = _classify_status(nav, aum, shares)
         valuation_date = trade_date if trade_date is not None else as_of
+        stale, age_b = issuer_valuation_stale_flags(
+            valuation_date if isinstance(valuation_date, date) else None,
+            as_of,
+        )
+        status = _classify_status(nav, aum, shares)
         return ProviderResult(
             date=valuation_date, ticker=ticker.upper(),
             nav=nav, aum=aum, shares_outstanding=shares,
@@ -692,20 +708,13 @@ class RoundhillProvider:
         aum_f = float(aum) if pd.notna(aum) and aum > 0 else None
         sh_f = float(shares) if pd.notna(shares) and shares > 0 else None
 
-        stale = False
-        age_b = None
         rd = pd.to_datetime(row_date, errors="coerce").date() if row_date is not None and not isinstance(row_date, date) else row_date
-        if isinstance(rd, date) and rd != as_of:
-            stale = True
-            try:
-                age_b = int(np.busday_count(str(rd), str(as_of)))
-            except Exception:
-                age_b = None
-        elif not isinstance(rd, date):
+        if not isinstance(rd, date):
             rd = as_of
+        valuation_date = rd if isinstance(rd, date) else as_of
+        stale, age_b = issuer_valuation_stale_flags(valuation_date, as_of)
 
         status = _classify_status(nav_f, aum_f, sh_f)
-        valuation_date = rd if isinstance(rd, date) else as_of
         return ProviderResult(
             date=valuation_date, ticker=t, nav=nav_f, aum=aum_f, shares_outstanding=sh_f,
             source_provider=self.name,
@@ -819,14 +828,7 @@ class YieldMaxProvider:
             row_date = self._parse_date(as_of_str)
             valuation_date = row_date if row_date is not None else as_of
 
-            stale = False
-            age_b = None
-            if row_date and row_date != as_of:
-                stale = True
-                try:
-                    age_b = int(np.busday_count(str(row_date), str(as_of)))
-                except Exception:
-                    age_b = None
+            stale, age_b = issuer_valuation_stale_flags(row_date, as_of)
             status = _classify_status(nav, aum, shares)
             res = ProviderResult(
                 date=valuation_date, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
@@ -950,14 +952,7 @@ class REXSharesProvider:
                         continue
 
             valuation_date = row_date if row_date is not None else as_of
-            stale = False
-            age_b = None
-            if row_date and row_date != as_of:
-                stale = True
-                try:
-                    age_b = int(np.busday_count(str(row_date), str(as_of)))
-                except Exception:
-                    age_b = None
+            stale, age_b = issuer_valuation_stale_flags(row_date, as_of)
 
             status = _classify_status(nav, aum, shares)
             res = ProviderResult(
@@ -1221,14 +1216,7 @@ class GraniteSharesProvider:
 
             nav_date = self._parse_nav_date(payload.get("NavDate"))
             valuation_date = nav_date if nav_date is not None else as_of
-            stale = False
-            age_b = None
-            if nav_date and nav_date != as_of:
-                stale = True
-                try:
-                    age_b = int(np.busday_count(str(nav_date), str(as_of)))
-                except Exception:
-                    age_b = None
+            stale, age_b = issuer_valuation_stale_flags(nav_date, as_of)
 
             status = _classify_status(nav_f, aum_f, shares_f)
             res = ProviderResult(

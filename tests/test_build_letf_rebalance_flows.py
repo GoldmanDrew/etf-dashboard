@@ -119,11 +119,35 @@ def test_long_and_inverse_flows_add_on_up_day():
 def test_stale_prior_aum_is_not_aggregated():
     metrics = _metrics()
     metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale"] = True
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_age_bdays"] = 1
 
     fund = flows.build_fund_flows(_universe(), metrics)
     upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
     assert upro["quality_flag"] == "stale_aum"
     assert bool(upro["included_in_aggregate"]) is False
+
+
+def test_issuer_timing_stale_age_nonpositive_does_not_block_flow():
+    metrics = _metrics()
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale"] = True
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_age_bdays"] = -1
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "source_provider"] = "direxion"
+
+    fund = flows.build_fund_flows(_universe(), metrics)
+    upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
+    assert upro["quality_flag"] == "ok"
+    assert bool(upro["included_in_aggregate"]) is True
+
+
+def test_carry_forward_prior_still_blocks_flow():
+    metrics = _metrics()
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale"] = True
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_age_bdays"] = 1
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "source_provider"] = "carry_forward"
+
+    fund = flows.build_fund_flows(_universe(), metrics)
+    upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
+    assert upro["quality_flag"] == "stale_aum"
 
 
 def test_load_universe_excludes_yieldboost_and_uses_delta_when_leverage_missing(tmp_path: Path):
