@@ -4151,6 +4151,7 @@ function YbScenarioAnchorPanel({ r }) {
 }
 
 function NetEdgeBridgePanel({ r }) {
+  if (!isYieldBoostIncomeStrategy(r)) return null;
   if (!expectedDecayAvailableForRow(r)) return null;
   const IS = typeof window !== 'undefined' ? window.IncomeScenario : null;
   const muF = Number(r?.expected_gross_decay_p50_annual);
@@ -4226,6 +4227,7 @@ function _heatmapCellColor(v) {
 }
 
 function PairScenarioHeatmap({ r, forecastSigma }) {
+  if (!isYieldBoostIncomeStrategy(r)) return null;
   const grid = r?.pair_scenario_grid || null;
   const pair = expectedPairPnlDistribution(r);
   const weeklyMc = pair?.weeklyMc || expectedPairPnlWeeklyMc(r);
@@ -7004,32 +7006,36 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
       {activePanel === 'scenarios' && (
         <div className="chart-section">
-          <div style={{
-            margin: '0 0 14px',
-            padding: '12px 16px',
-            borderRadius: 10,
-            border: '1px solid rgba(139,92,246,0.45)',
-            background: 'rgba(139,92,246,0.09)',
-            fontSize: 13,
-            lineHeight: 1.5,
-            color: 'var(--text-secondary)',
-          }}>
-            <strong style={{ color: 'var(--text-primary)' }}>Three views on this tab:</strong>{' '}
-            (1) <strong>Structural gross heatmap</strong> — put-spread engine anchored to Exp. decay p50 (same family as net edge).
-            (2) <strong>Income scenario tables</strong> — long TR / net short with calibrated distributions.
-            (3) <strong>Net edge bridge</strong> — how realized gross is blended to forward Exp. decay.
-            Weekly-rebalanced pair MC is a <strong>diagnostic</strong> (distributions + borrow inside the sim), not the main-grid headline.
-          </div>
-          {isYieldBoostIncomeStrategy(r) ? <YbScenarioAnchorPanel r={r} /> : null}
-          <PairScenarioHeatmap r={r} forecastSigma={forecastVolForScenario(r, chartVolLookbackRange)?.sigma} />
-          {expectedDecayAvailableForRow(r) ? <NetEdgeBridgePanel r={r} /> : null}
-          <ScenarioDistributionsPanel
-            etfSym={etfSym}
-            series={etfDistributionsSeries}
-            loadError={etfDistributionsError}
-            modeledAnnualYield={incomeAnnualYieldForChart}
-            calibration={r?.income_distribution_calibration || null}
-          />
+          {isYieldBoostIncomeStrategy(r) ? (
+            <>
+              <div style={{
+                margin: '0 0 14px',
+                padding: '12px 16px',
+                borderRadius: 10,
+                border: '1px solid rgba(139,92,246,0.45)',
+                background: 'rgba(139,92,246,0.09)',
+                fontSize: 13,
+                lineHeight: 1.5,
+                color: 'var(--text-secondary)',
+              }}>
+                <strong style={{ color: 'var(--text-primary)' }}>Three views on this tab:</strong>{' '}
+                (1) <strong>Structural gross heatmap</strong> — put-spread engine anchored to Exp. decay p50 (same family as net edge).
+                (2) <strong>Income scenario tables</strong> — long TR / net short with calibrated distributions.
+                (3) <strong>Net edge bridge</strong> — how realized gross is blended to forward Exp. decay.
+                Weekly-rebalanced pair MC is a <strong>diagnostic</strong> (distributions + borrow inside the sim), not the main-grid headline.
+              </div>
+              <YbScenarioAnchorPanel r={r} />
+              <PairScenarioHeatmap r={r} forecastSigma={forecastVolForScenario(r, chartVolLookbackRange)?.sigma} />
+              <NetEdgeBridgePanel r={r} />
+              <ScenarioDistributionsPanel
+                etfSym={etfSym}
+                series={etfDistributionsSeries}
+                loadError={etfDistributionsError}
+                modeledAnnualYield={incomeAnnualYieldForChart}
+                calibration={r?.income_distribution_calibration || null}
+              />
+            </>
+          ) : null}
           {isIncomeStrategyScenario ? (
             <>
               <div className="scenario-card" style={{ marginTop: 0 }}>
@@ -7155,7 +7161,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   Scenarios σ: <strong>{fmt(scenarioSigmaBest)}</strong> ({scenarioSigmaSource}) · ref {fmt(scenarioSigmaRef)}
                 </div>
                 <div className="scenario-sub">
-                  Leverage <strong>L</strong> = {Number.isFinite(Number(scenarioLeverage)) ? scenarioLeverage.toFixed(3) : '—'} · cells = long <strong>total return</strong> without borrow (see Net edge); cash dates above
+                  Leverage <strong>L</strong> = {Number.isFinite(Number(scenarioLeverage)) ? scenarioLeverage.toFixed(3) : '—'} · cells = long <strong>total return</strong> without borrow (see Net edge)
                 </div>
               </div>
               <div className="tf-group" style={{ marginLeft: 0 }}>
