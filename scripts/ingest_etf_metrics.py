@@ -1890,7 +1890,7 @@ def main() -> None:
             incoming["underlying_adj_close"] = None
         LOGGER.info("underlying_adj_close fetch returned no rows")
 
-    max_stale_business_days = int(os.getenv("ETF_METRICS_MAX_STALE_BUSINESS_DAYS", "3"))
+    max_stale_business_days = int(os.getenv("ETF_METRICS_MAX_STALE_BUSINESS_DAYS", "5"))
     incoming = apply_stale_carry_forward(
         existing=existing,
         incoming=incoming,

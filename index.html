@@ -1768,6 +1768,101 @@ function realizedVolTooltip(r, leg = 'underlying') {
   return lines.join('\n');
 }
 
+const FORECAST_VOL_ETF_SOURCE_LABELS = {
+  robust_ewma_6m: '6M · robust EWMA',
+  raw_ewma_6m: '6M · EWMA',
+  realized_6m: '6M · realized',
+  screener_csv: 'screener CSV',
+  unavailable: '—',
+};
+
+const FORECAST_VOL_UND_SOURCE_LABELS = {
+  '50_50_model_robust_ewma': 'forecast · 50/50 blend',
+  model_only: 'forecast · model',
+  expected_decay_implied_sigma: 'forecast · model',
+  yieldboost_put_spread_implied_sigma: 'forecast · YB implied',
+  robust_ewma_only: 'forecast · robust 6M',
+  raw_ewma_fallback: 'forecast · EWMA',
+  realized_vol_fallback: 'forecast · realized 6M',
+  chart_ewma_fallback: 'chart EWMA fallback',
+  unavailable: '—',
+};
+
+function volHeadlineValue(r, leg = 'underlying', chartVolLookbackRange = '6M') {
+  if (leg === 'underlying') {
+    const fv = forecastVolForScenario(r, chartVolLookbackRange);
+    const v = Number(fv?.sigma);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  }
+  const built = Number(r?.forecast_vol_etf_annual);
+  if (Number.isFinite(built) && built > 0) return built;
+  const slot = r?.realized_vol?.['6M'];
+  const robust = Number(slot?.etf_robust_ewma);
+  if (Number.isFinite(robust) && robust > 0) return robust;
+  const ewma = Number(slot?.etf_ewma);
+  if (Number.isFinite(ewma) && ewma > 0) return ewma;
+  const plain = Number(slot?.etf);
+  if (Number.isFinite(plain) && plain > 0) return plain;
+  const csv = Number(r?.vol_etf_annual);
+  return Number.isFinite(csv) && csv > 0 ? csv : null;
+}
+
+function volHeadlineSublabel(r, leg = 'underlying', chartVolLookbackRange = '6M') {
+  if (leg === 'underlying') {
+    const fv = forecastVolForScenario(r, chartVolLookbackRange);
+    if (fv?.isFallback) return FORECAST_VOL_UND_SOURCE_LABELS.chart_ewma_fallback;
+    const src = r?.forecast_vol_source || fv?.source;
+    return FORECAST_VOL_UND_SOURCE_LABELS[src] || 'forecast · blend';
+  }
+  const src = r?.forecast_vol_etf_source;
+  return FORECAST_VOL_ETF_SOURCE_LABELS[src] || '6M · robust EWMA';
+}
+
+function volHeadlineTooltip(r, leg = 'underlying', chartVolLookbackRange = '6M') {
+  const name = leg === 'etf' ? 'ETF' : 'underlying';
+  const value = volHeadlineValue(r, leg, chartVolLookbackRange);
+  const realized = realizedVolHeadlineMeta(r, leg);
+  const lines = [
+    `Best-estimate σ (${name}) for the main grid.`,
+    leg === 'underlying'
+      ? 'Same forecast blend as Scenarios and Exp. ETF return (50/50 model-implied + robust 6M EWMA when both exist).'
+      : '6M robust EWMA on ETF returns when available (no forward model leg for ETF).',
+    `Displayed: ${Number.isFinite(Number(value)) ? fmt(Number(value)) : '—'}`,
+  ];
+  if (leg === 'underlying') {
+    const fv = forecastVolForScenario(r, chartVolLookbackRange);
+    if (Number.isFinite(Number(fv?.model))) lines.push(`Model σ: ${fmt(Number(fv.model))}`);
+    if (Number.isFinite(Number(fv?.robustEwma))) lines.push(`Robust 6M EWMA: ${fmt(Number(fv.robustEwma))}`);
+    if (fv?.source) lines.push(`Source: ${fv.source}${fv.isFallback ? ' (fallback)' : ''}`);
+    if (fv?.eventAdjusted) lines.push('Robust EWMA clipped at least one unusually large daily move.');
+  } else {
+    const slot = r?.realized_vol?.['6M'];
+    if (slot) {
+      const bits = [
+        Number.isFinite(Number(slot?.etf)) ? `plain ${fmt(Number(slot.etf))}` : null,
+        Number.isFinite(Number(slot?.etf_ewma)) ? `EWMA ${fmt(Number(slot.etf_ewma))}` : null,
+        Number.isFinite(Number(slot?.etf_robust_ewma)) ? `robust ${fmt(Number(slot.etf_robust_ewma))}` : null,
+      ].filter(Boolean);
+      if (bits.length) lines.push(`6M ladder: ${bits.join(' · ')}`);
+    }
+    if (r?.forecast_vol_etf_source) lines.push(`Source: ${r.forecast_vol_etf_source}`);
+    if (r?.forecast_vol_etf_event_adjusted) lines.push('Robust EWMA clipped at least one unusually large daily move.');
+  }
+  if (Number.isFinite(Number(realized.headline))) {
+    lines.push(`Realized headline (${realized.winLabel || 'ladder'}): ${fmt(Number(realized.headline))}`);
+  }
+  const rv = r?.realized_vol;
+  if (rv && typeof rv === 'object') {
+    const bits = STATS_VOL_LADDER_KEYS.map((wk) => {
+      const slot = rv[wk];
+      const v = leg === 'etf' ? slot?.etf : slot?.underlying;
+      return Number.isFinite(Number(v)) ? `${STATS_VOL_LADDER_LABELS[wk] || wk} ${fmt(Number(v))}` : null;
+    }).filter(Boolean);
+    if (bits.length) lines.push(`Plain realized ladder: ${bits.join(' · ')}`);
+  }
+  return lines.join('\n');
+}
+
 function borrowHistoryTailPoint(series) {
   const rows = Array.isArray(series) ? series : [];
   if (!rows.length) return null;
@@ -2458,7 +2553,8 @@ function expectedPairPnlWeeklyMc(r) {
 // and the 1M ETF flat-underlying scenario all agree.
 const YB_DEFAULT_EXPENSE_RATIO_ANNUAL = 0.0099;
 function yieldBoostUnderlyingSigmaAnnual(r) {
-  const v = Number(r?.vol_underlying_annual);
+  const fv = forecastVolForScenario(r, '6M');
+  const v = Number(fv?.sigma);
   if (Number.isFinite(v) && v > 0) return v;
   const ewma6m = Number(r?.realized_vol?.['6M']?.underlying_ewma);
   if (Number.isFinite(ewma6m) && ewma6m > 0) return ewma6m;
@@ -3381,16 +3477,16 @@ const COLS = [
   {
     key: 'vol_underlying_annual',
     label: 'Vol Und',
-    sublabel: 'realized σ',
+    sublabel: 'forecast · blend',
     w: 88,
-    hint: 'Realized σ headline from build_data Yahoo ladder (prefers 12M); falls back to screener CSV. Not forecast_vol / scenario σ.',
+    hint: 'Best-estimate σ: forecast_vol_underlying_annual (50/50 model-implied + robust 6M EWMA). Same as Scenarios / Exp. ETF return. Hover for realized ladder.',
   },
   {
     key: 'vol_etf_annual',
     label: 'Vol ETF',
-    sublabel: 'realized σ',
+    sublabel: '6M · robust',
     w: 88,
-    hint: 'Realized σ on ETF; same ladder policy as Vol Und. Chart timeframe pill may show a different window.',
+    hint: 'Best-estimate σ: forecast_vol_etf_annual (6M robust EWMA on ETF returns). Hover for ladder and 12M realized headline.',
   },
 ];
 
@@ -3927,14 +4023,14 @@ function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheT
             </div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">Und. vol (realized)</div>
-            <div className="dval" title={realizedVolTooltip(r, 'underlying')}>{fmt(r.vol_underlying_annual)}</div>
-            <div className="detail-item-hint">{realizedVolSublabel(r, 'underlying')}</div>
+            <div className="dlabel">Und. vol (best est.)</div>
+            <div className="dval" title={volHeadlineTooltip(r, 'underlying', chartVolLookbackRange)}>{fmt(volHeadlineValue(r, 'underlying', chartVolLookbackRange))}</div>
+            <div className="detail-item-hint">{volHeadlineSublabel(r, 'underlying', chartVolLookbackRange)}</div>
           </div>
           <div className="detail-item">
-            <div className="dlabel">ETF vol (realized)</div>
-            <div className="dval" title={realizedVolTooltip(r, 'etf')}>{fmt(r.vol_etf_annual)}</div>
-            <div className="detail-item-hint">{realizedVolSublabel(r, 'etf')}</div>
+            <div className="dlabel">ETF vol (best est.)</div>
+            <div className="dval" title={volHeadlineTooltip(r, 'etf', chartVolLookbackRange)}>{fmt(volHeadlineValue(r, 'etf', chartVolLookbackRange))}</div>
+            <div className="detail-item-hint">{volHeadlineSublabel(r, 'etf', chartVolLookbackRange)}</div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Borrow feed</div>
@@ -5902,19 +5998,27 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   }, [tradeUnderlyingGroup.peers, etfSym, annualCarryDrag]);
   const defaultIvBySymbol = useMemo(() => {
     const out = {
-      [undSym]: Number.isFinite(Number(realizedUnd)) && Number(realizedUnd) > 0 ? Number(realizedUnd) : 0.8,
-      [etfSym]: Number.isFinite(Number(realizedEtf)) && Number(realizedEtf) > 0 ? Number(realizedEtf) : 0.8,
+      [undSym]: (() => {
+        const v = volHeadlineValue(r, 'underlying', chartVolLookbackRange);
+        return Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0.8;
+      })(),
+      [etfSym]: (() => {
+        const v = volHeadlineValue(r, 'etf', chartVolLookbackRange);
+        return Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0.8;
+      })(),
     };
     for (const p of tradeUnderlyingGroup.peers) {
       const sym = p.symbol;
       if (out[sym] != null) continue;
-      const vUnd = Number(p?.vol_underlying_annual ?? p?.forecast_vol_underlying_annual);
-      const vEtf = Number(p?.vol_etf_annual);
-      const v = Number.isFinite(vEtf) && vEtf > 0 ? vEtf : (Number.isFinite(vUnd) && vUnd > 0 ? vUnd : 0.8);
+      const vEtf = volHeadlineValue(p, 'etf', chartVolLookbackRange);
+      const vUnd = volHeadlineValue(p, 'underlying', chartVolLookbackRange);
+      const v = Number.isFinite(Number(vEtf)) && Number(vEtf) > 0
+        ? Number(vEtf)
+        : (Number.isFinite(Number(vUnd)) && Number(vUnd) > 0 ? Number(vUnd) : 0.8);
       out[sym] = v;
     }
     return out;
-  }, [undSym, etfSym, realizedUnd, realizedEtf, tradeUnderlyingGroup.peers]);
+  }, [undSym, etfSym, r, chartVolLookbackRange, tradeUnderlyingGroup.peers]);
   const resolveLegIv = useCallback((leg, contract) => {
     const legIv = normalizeOptionIv(leg?.iv);
     if (legIv != null) return legIv;
@@ -6493,15 +6597,15 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 </div>
               );
             })()}
-            <div className="chart-stat" title={realizedVolTooltip(r, 'underlying')}>
+            <div className="chart-stat" title={volHeadlineTooltip(r, 'underlying', chartVolLookbackRange)}>
               <div className="cs-label">Vol Und</div>
-              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>{realizedVolSublabel(r, 'underlying')}</div>
-              <div className="cs-value">{fmt(r.vol_underlying_annual)}</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>{volHeadlineSublabel(r, 'underlying', chartVolLookbackRange)}</div>
+              <div className="cs-value">{fmt(volHeadlineValue(r, 'underlying', chartVolLookbackRange))}</div>
             </div>
-            <div className="chart-stat" title={realizedVolTooltip(r, 'etf')}>
+            <div className="chart-stat" title={volHeadlineTooltip(r, 'etf', chartVolLookbackRange)}>
               <div className="cs-label">Vol ETF</div>
-              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>{realizedVolSublabel(r, 'etf')}</div>
-              <div className="cs-value">{fmt(r.vol_etf_annual)}</div>
+              <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>{volHeadlineSublabel(r, 'etf', chartVolLookbackRange)}</div>
+              <div className="cs-value">{fmt(volHeadlineValue(r, 'etf', chartVolLookbackRange))}</div>
             </div>
             <div className="chart-stat" title={volShapeTooltip(r, { volShapeHistory, metricsBuildTime: ETF_METRICS_CACHE?.buildTime, dashboardBuildTime })}>
               <div className="cs-label">Vol shape</div>
@@ -10139,11 +10243,19 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         ? computeScenarioEtf3mFlatUnd(a, chartVolLookbackRange)
         : sortKey === 'expected_pair_pnl_p50_annual' || sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
         ? expectedDecayHeadlineValue(a, chartVolLookbackRange)
+        : sortKey === 'vol_underlying_annual'
+        ? volHeadlineValue(a, 'underlying', chartVolLookbackRange)
+        : sortKey === 'vol_etf_annual'
+        ? volHeadlineValue(a, 'etf', chartVolLookbackRange)
         : a[sortKey];
       let bv = sortKey === SCENARIO_ETF_3M_FLAT_SORT_KEY
         ? computeScenarioEtf3mFlatUnd(b, chartVolLookbackRange)
         : sortKey === 'expected_pair_pnl_p50_annual' || sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
         ? expectedDecayHeadlineValue(b, chartVolLookbackRange)
+        : sortKey === 'vol_underlying_annual'
+        ? volHeadlineValue(b, 'underlying', chartVolLookbackRange)
+        : sortKey === 'vol_etf_annual'
+        ? volHeadlineValue(b, 'etf', chartVolLookbackRange)
         : b[sortKey];
       if (av == null) av = sortDesc ? -Infinity : Infinity;
       if (bv == null) bv = sortDesc ? -Infinity : Infinity;
@@ -10372,7 +10484,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
             <strong style={{ color: 'var(--text-secondary)' }}>Long lens (3M, different sign):</strong>{' '}
             <strong>Exp. ETF return</strong> — long <strong>total return</strong> if the underlying is flat, <strong>borrow excluded</strong>; income names add <strong>cash payouts</strong> on top of the NAV path (+ is good for longs, bad for naked shorts). Same forecast σ as Scenarios. Hover for 1M/6M. Passive low-β (non-income): <strong>—</strong>.{' '}
-            <strong>Vol Und / Vol ETF</strong> — trailing <strong>realized</strong> σ (12M preferred); <em>not</em> the scenario σ above.
+            <strong>Vol Und / Vol ETF</strong> — best-estimate σ (Vol Und = forecast blend, same as Scenarios; Vol ETF = 6M robust EWMA). Hover for realized ladder.
             {data?.uncertainty_footnote && (
               <span> {data.uncertainty_footnote}</span>
             )}
@@ -10407,7 +10519,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                   <br /><br />
                   <strong>Scenarios + Exp. ETF return</strong> share <code>forecast_vol_underlying_annual</code>, a <strong>variance blend</strong>:{' '}
                   <code className="dm-formula">σ²_forecast = ½·σ²_model + ½·σ²_robust6M EWMA</code>
-                  (model σ from forward decay; EWMA leg can be event-clipped). <strong>Vol Und / Vol ETF</strong> in the grid are <strong>trailing realized</strong> σ (12M→shorter), not this forecast.
+                  (model σ from forward decay; EWMA leg can be event-clipped). <strong>Vol Und</strong> in the grid uses this same forecast blend. <strong>Vol ETF</strong> uses 6M robust EWMA on ETF returns (no forward model leg). Realized ladders remain on the Stats tab.
                 </p>
               </div>
               <div className="dm-block">
@@ -10560,8 +10672,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         >
                           {expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}
                         </td>
-                        <td title={realizedVolTooltip(r, "underlying")}>{fmt(r.vol_underlying_annual)}</td>
-                        <td title={realizedVolTooltip(r, "etf")}>{fmt(r.vol_etf_annual)}</td>
+                        <td title={volHeadlineTooltip(r, "underlying", chartVolLookbackRange)}>{fmt(volHeadlineValue(r, 'underlying', chartVolLookbackRange))}</td>
+                        <td title={volHeadlineTooltip(r, "etf", chartVolLookbackRange)}>{fmt(volHeadlineValue(r, 'etf', chartVolLookbackRange))}</td>
                       </tr>
                       {expanded && <DetailRow r={r} chartVolLookbackRange={chartVolLookbackRange} dashboardBuildTime={data.build_time} metricsCacheTick={metricsCacheTick} borrowHistoryMap={borrowHistoryMap} />}
                     </React.Fragment>

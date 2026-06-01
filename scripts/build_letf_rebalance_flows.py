@@ -194,7 +194,7 @@ def _derive_aum_from_identity(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-_PARTIAL_AUM_FILL_BDAYS = 5
+_PARTIAL_AUM_FILL_BDAYS = 8
 
 
 def _busday_gap(start: object, end: object) -> int | None:
@@ -280,6 +280,14 @@ def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bda
     else:
         df["source_provider_prior_close"] = None
     df["underlying_return_d1"] = (df["underlying_adj_close"] / df["underlying_adj_close_prior"]) - 1.0
+
+    implied_prior_aum = pd.to_numeric(df.get("nav_prior_close"), errors="coerce") * pd.to_numeric(
+        df.get("shares_outstanding_prior_close"), errors="coerce"
+    )
+    aum_prior = pd.to_numeric(df["aum_prior_close"], errors="coerce")
+    fill_prior = (aum_prior.isna() | (aum_prior <= 0)) & implied_prior_aum.notna() & (implied_prior_aum > 0)
+    if fill_prior.any():
+        df.loc[fill_prior, "aum_prior_close"] = implied_prior_aum[fill_prior]
 
     def _prior_aum_blocks_flow(row: pd.Series) -> bool:
         return prior_stale_aum_blocks_flow(

@@ -71,6 +71,11 @@ class ETFRecord(BaseModel):
     forecast_vol_source: Optional[str] = None
     forecast_vol_event_adjusted: Optional[bool] = None
     forecast_vol_note: Optional[str] = None
+    # Best-estimate ETF vol headline (6M robust EWMA ladder; see build_data.py).
+    forecast_vol_etf_annual: Optional[float] = None
+    forecast_vol_etf_source: Optional[str] = None
+    forecast_vol_etf_window: Optional[str] = None
+    forecast_vol_etf_event_adjusted: Optional[bool] = None
 
     # Underlying volatility shape from ls-algo (60d primary display window).
     und_rv_20d_daily_annual: Optional[float] = None

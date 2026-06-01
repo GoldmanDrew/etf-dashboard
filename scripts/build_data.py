@@ -3676,6 +3676,52 @@ def _build_forecast_vol_fields(
     }
 
 
+def _build_forecast_vol_etf_fields(
+    *,
+    realized_vol: dict,
+    vol_etf_csv: float | None,
+) -> dict:
+    """Best-estimate ETF vol headline: 6M robust EWMA with shorter fallbacks."""
+    default_window = realized_vol.get("6M") or {}
+
+    def positive_float(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if np.isfinite(f) and f > 0 else None
+
+    robust_f = positive_float(default_window.get("etf_robust_ewma"))
+    raw_f = positive_float(default_window.get("etf_ewma"))
+    plain_f = positive_float(default_window.get("etf"))
+    csv_f = positive_float(vol_etf_csv)
+
+    forecast = None
+    source = "unavailable"
+    window = "6M"
+    if robust_f is not None:
+        forecast = robust_f
+        source = "robust_ewma_6m"
+    elif raw_f is not None:
+        forecast = raw_f
+        source = "raw_ewma_6m"
+    elif plain_f is not None:
+        forecast = plain_f
+        source = "realized_6m"
+    elif csv_f is not None:
+        forecast = csv_f
+        source = "screener_csv"
+        window = None
+
+    event_flag = bool(default_window.get("etf_robust_event_flag"))
+    return {
+        "forecast_vol_etf_annual": round(float(forecast), 6) if forecast is not None and np.isfinite(float(forecast)) else None,
+        "forecast_vol_etf_source": source,
+        "forecast_vol_etf_window": window,
+        "forecast_vol_etf_event_adjusted": event_flag,
+    }
+
+
 # ──────────────────────────────────────────────
 # Bucketing
 # ──────────────────────────────────────────────
@@ -4357,6 +4403,12 @@ def build():
             expected_decay=expected_decay_for_forecast,
             is_yieldboost=bool(is_yieldboost),
             realized_vol=realized_vol,
+        )
+        forecast_vol_fields.update(
+            _build_forecast_vol_etf_fields(
+                realized_vol=realized_vol,
+                vol_etf_csv=vol_etf_csv,
+            )
         )
 
         rec = {

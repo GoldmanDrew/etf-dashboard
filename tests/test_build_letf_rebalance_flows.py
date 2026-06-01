@@ -181,13 +181,27 @@ def test_issuer_timing_stale_age_nonpositive_does_not_block_flow():
     assert bool(upro["included_in_aggregate"]) is True
 
 
-def test_carry_forward_prior_still_blocks_flow():
+def test_carry_forward_prior_within_stale_budget_allows_flow():
     metrics = _metrics()
     metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale"] = True
     metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_age_bdays"] = 1
     metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "source_provider"] = "carry_forward"
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_kind"] = "carry_forward"
 
     fund = flows.build_fund_flows(_universe(), metrics)
+    upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
+    assert upro["quality_flag"] == "ok"
+    assert bool(upro["included_in_aggregate"]) is True
+
+
+def test_carry_forward_prior_older_than_stale_budget_blocks_flow():
+    metrics = _metrics()
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale"] = True
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_age_bdays"] = 4
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "source_provider"] = "carry_forward"
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_kind"] = "carry_forward"
+
+    fund = flows.build_fund_flows(_universe(), metrics, stale_bdays=3)
     upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
     assert upro["quality_flag"] == "stale_aum"
 
