@@ -24,15 +24,17 @@ from etf_providers import (
 
 
 def test_issuer_valuation_stale_flags_future_publish_not_stale():
-    stale, age = issuer_valuation_stale_flags(date(2026, 5, 29), date(2026, 5, 28))
+    stale, age, kind = issuer_valuation_stale_flags(date(2026, 5, 29), date(2026, 5, 28))
     assert stale is False
     assert age is None
+    assert kind == "issuer_early"
 
 
 def test_issuer_valuation_stale_flags_lag_is_stale():
-    stale, age = issuer_valuation_stale_flags(date(2026, 5, 27), date(2026, 5, 29))
+    stale, age, kind = issuer_valuation_stale_flags(date(2026, 5, 27), date(2026, 5, 29))
     assert stale is True
     assert age == 2
+    assert kind == "issuer_lag"
 
 
 def test_skip_anchor_provider_set_includes_merged():

@@ -15,12 +15,18 @@ import argparse
 import json
 import logging
 import math
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from etf_providers import prior_stale_aum_blocks_flow
+from ingest_etf_metrics import ensure_stale_kind_column
 
 LOGGER = logging.getLogger("letf_rebalance_flows")
 
@@ -171,7 +177,73 @@ def load_metrics(parquet_path: Path = METRICS_PARQUET, csv_path: Path = METRICS_
         out["stale"] = out["stale"].map(_truthy)
     else:
         out["stale"] = False
+    out = ensure_stale_kind_column(out)
     return out.dropna(subset=["date", "ticker"]).sort_values(["ticker", "date"]).reset_index(drop=True)
+
+
+def _derive_aum_from_identity(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill missing AUM from NAV × shares when both legs are present."""
+    out = df.copy()
+    nav = pd.to_numeric(out.get("nav"), errors="coerce")
+    shares = pd.to_numeric(out.get("shares_outstanding"), errors="coerce")
+    aum = pd.to_numeric(out.get("aum"), errors="coerce")
+    implied = nav * shares
+    use_implied = (~aum.notna() | (aum <= 0)) & implied.notna() & (implied > 0)
+    if use_implied.any():
+        out.loc[use_implied, "aum"] = implied[use_implied]
+    return out
+
+
+_PARTIAL_AUM_FILL_BDAYS = 5
+
+
+def _busday_gap(start: object, end: object) -> int | None:
+    try:
+        if hasattr(start, "date"):
+            start = start.date()
+        if hasattr(end, "date"):
+            end = end.date()
+        return int(np.busday_count(str(start), str(end)))
+    except Exception:
+        return None
+
+
+def _fill_partial_aum_for_flow(df: pd.DataFrame, *, max_gap_bdays: int = _PARTIAL_AUM_FILL_BDAYS) -> pd.DataFrame:
+    """Carry last ok AUM/shares forward across short partial gaps before prior-close shift.
+
+    Issuer rows often publish NAV-only partials for T+0 while AUM/shares remain on the
+    prior ok row. Without this, ``shift(1)`` yields ``missing_prior_aum`` on the next
+    session even though usable fund size exists within a few business days.
+    """
+    if df.empty or max_gap_bdays <= 0:
+        return df
+    out = df.sort_values(["ticker", "date"]).copy()
+    out["aum"] = pd.to_numeric(out.get("aum"), errors="coerce")
+    out["shares_outstanding"] = pd.to_numeric(out.get("shares_outstanding"), errors="coerce")
+
+    def _fill_group(g: pd.DataFrame) -> pd.DataFrame:
+        last_ok: pd.Series | None = None
+        rows: list[dict[str, object]] = []
+        for _, row in g.iterrows():
+            row = row.copy()
+            aum = row.get("aum")
+            shares = row.get("shares_outstanding")
+            has_aum = pd.notna(aum) and float(aum) > 0
+            if not has_aum and last_ok is not None:
+                gap = _busday_gap(last_ok["date"], row["date"])
+                if gap is not None and gap <= max_gap_bdays:
+                    row["aum"] = last_ok["aum"]
+                    if (not pd.notna(shares) or float(shares) <= 0) and pd.notna(last_ok.get("shares_outstanding")):
+                        row["shares_outstanding"] = last_ok["shares_outstanding"]
+            rows.append(row.to_dict())
+            if pd.notna(row.get("aum")) and float(row["aum"]) > 0:
+                last_ok = pd.Series(row)
+        return pd.DataFrame(rows)
+
+    pieces: list[pd.DataFrame] = []
+    for _, g in out.groupby("ticker", sort=False):
+        pieces.append(_fill_group(g))
+    return pd.concat(pieces, ignore_index=True)
 
 
 def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bdays: int = 3) -> pd.DataFrame:
@@ -183,6 +255,8 @@ def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bda
     df["leverage"] = pd.to_numeric(df["leverage"], errors="coerce")
     df["aum"] = pd.to_numeric(df.get("aum"), errors="coerce")
     df["underlying_adj_close"] = pd.to_numeric(df.get("underlying_adj_close"), errors="coerce")
+    df = _derive_aum_from_identity(df)
+    df = _fill_partial_aum_for_flow(df)
     df = df.sort_values(["ticker", "date"]).copy()
 
     by_ticker = df.groupby("ticker", sort=False)
@@ -197,6 +271,10 @@ def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bda
     df["stale_age_bdays_prior_close"] = (
         by_ticker["stale_age_bdays"].shift(1) if "stale_age_bdays" in df.columns else np.nan
     )
+    if "stale_kind" in df.columns:
+        df["stale_kind_prior_close"] = by_ticker["stale_kind"].shift(1)
+    else:
+        df["stale_kind_prior_close"] = None
     if "source_provider" in df.columns:
         df["source_provider_prior_close"] = by_ticker["source_provider"].shift(1)
     else:
@@ -204,19 +282,13 @@ def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bda
     df["underlying_return_d1"] = (df["underlying_adj_close"] / df["underlying_adj_close_prior"]) - 1.0
 
     def _prior_aum_blocks_flow(row: pd.Series) -> bool:
-        stale_age = _f(row.get("stale_age_bdays_prior_close"))
-        if stale_age is not None and stale_age > stale_bdays:
-            return True
-        if not bool(row.get("stale_prior_close")):
-            return False
-        src = str(row.get("source_provider_prior_close") or "").strip().lower()
-        if src == "carry_forward":
-            return True
-        if stale_age is not None and stale_age <= 0:
-            return False
-        if stale_age is not None and stale_age > 0:
-            return True
-        return True
+        return prior_stale_aum_blocks_flow(
+            stale_prior_close=bool(row.get("stale_prior_close")),
+            stale_age_bdays_prior_close=_f(row.get("stale_age_bdays_prior_close")),
+            stale_kind_prior_close=row.get("stale_kind_prior_close"),
+            source_provider_prior_close=row.get("source_provider_prior_close"),
+            stale_bdays=stale_bdays,
+        )
 
     def quality(row: pd.Series) -> str:
         if not bool(row.get("included_in_universe")):
@@ -250,6 +322,7 @@ def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bda
         "underlying_adj_close_prior", "underlying_adj_close", "underlying_return_d1",
         "rebalance_signed_dollars", "rebalance_abs_dollars", "abs_rebalance_pct_prior_aum",
         "included_in_aggregate", "quality_flag", "source_provider", "status",
+        "stale_kind_prior_close",
     ]
     for col in cols:
         if col not in df.columns:
@@ -608,6 +681,35 @@ def _json_clean(v: Any) -> Any:
     return v
 
 
+def _flow_quality_summary(fund_flows: pd.DataFrame, latest_date: str) -> dict[str, Any]:
+    if fund_flows.empty:
+        return {}
+    day = fund_flows[fund_flows["date"].astype(str) == str(latest_date)]
+    if day.empty:
+        return {}
+    quality_counts = day["quality_flag"].astype(str).value_counts().astype(int).to_dict()
+    stale_aum = day[day["quality_flag"].astype(str) == "stale_aum"]
+    by_kind: dict[str, int] = {}
+    if not stale_aum.empty and "stale_kind_prior_close" in stale_aum.columns:
+        by_kind = (
+            stale_aum["stale_kind_prior_close"]
+            .fillna("unknown")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .replace({"": "unknown", "none": "unknown"})
+            .value_counts()
+            .astype(int)
+            .to_dict()
+        )
+    return {
+        "fund_rows_total": int(len(day)),
+        "quality_counts": quality_counts,
+        "stale_aum_by_prior_kind": by_kind,
+        "included_in_aggregate": int(day["included_in_aggregate"].astype(bool).sum()),
+    }
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -679,6 +781,7 @@ def write_outputs(
                 "latest_date": global_latest_date,
                 "method": "L*(L-1)*prior_close_aum*underlying_return",
                 "adv_window_days": _ADV_WINDOW_DAYS,
+                "flow_quality_on_latest_date": _flow_quality_summary(fund_flows, global_latest_date),
                 "by_underlying": by_underlying,
             }
 

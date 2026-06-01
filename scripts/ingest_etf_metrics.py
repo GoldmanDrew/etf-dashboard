@@ -60,6 +60,7 @@ from etf_providers import (
     ProviderResult,
     _build_session,
     build_default_stack,
+    infer_stale_kind,
     merge_provider_attempts,
 )
 from etf_holdings_providers import (
@@ -101,6 +102,7 @@ REQUIRED_COLUMNS = [
     "underlying_adj_close",
     "stale",
     "stale_age_bdays",
+    "stale_kind",
     "source_provider",
     "source_url",
     "ingested_at_utc",
@@ -163,6 +165,7 @@ def _records_to_df(records: list[ProviderResult], ingested_at: datetime) -> pd.D
             "underlying_adj_close": None,
             "stale": bool(r.stale),
             "stale_age_bdays": r.stale_age_bdays,
+            "stale_kind": r.stale_kind,
             "source_provider": r.source_provider,
             "source_url": r.source_url,
             "ingested_at_utc": ingested_at.isoformat(),
@@ -414,6 +417,8 @@ def enforce_status_consistency(df: pd.DataFrame) -> pd.DataFrame:
         out["stale"] = False
     if "stale_age_bdays" not in out.columns:
         out["stale_age_bdays"] = None
+    if "stale_kind" not in out.columns:
+        out["stale_kind"] = None
     nav = pd.to_numeric(out["nav"], errors="coerce")
     aum = pd.to_numeric(out["aum"], errors="coerce")
     shares = pd.to_numeric(out["shares_outstanding"], errors="coerce")
@@ -435,6 +440,24 @@ def enforce_status_consistency(df: pd.DataFrame) -> pd.DataFrame:
     # Stale flags only meaningful for ok/partial rows
     out.loc[out["status"] == "missing", "stale"] = False
     out.loc[out["status"] == "missing", "stale_age_bdays"] = None
+    out.loc[out["status"] == "missing", "stale_kind"] = None
+    return out
+
+
+def ensure_stale_kind_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Backfill stale_kind on legacy rows using provider + stale flags."""
+    out = df.copy()
+    if "stale_kind" not in out.columns:
+        out["stale_kind"] = None
+    mask = out["stale_kind"].isna() | (out["stale_kind"].astype(str).str.strip() == "")
+    if not mask.any():
+        return out
+    for idx in out.index[mask]:
+        out.at[idx, "stale_kind"] = infer_stale_kind(
+            stale=bool(out.at[idx, "stale"]) if "stale" in out.columns else False,
+            stale_age_bdays=out.at[idx, "stale_age_bdays"] if "stale_age_bdays" in out.columns else None,
+            source_provider=out.at[idx, "source_provider"] if "source_provider" in out.columns else None,
+        )
     return out
 
 
@@ -645,6 +668,7 @@ def apply_stale_carry_forward(
         out.at[idx, "status"] = "ok"
         out.at[idx, "stale"] = True
         out.at[idx, "stale_age_bdays"] = int(age_bdays)
+        out.at[idx, "stale_kind"] = "carry_forward"
         out.at[idx, "source_provider"] = "carry_forward"
         out.at[idx, "source_url"] = f"carry_forward://{sym}?from={last['date']}"
     return out
@@ -1405,6 +1429,7 @@ def save_yieldboost_put_spreads(
 
 def save_outputs(df: pd.DataFrame) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    df = ensure_stale_kind_column(df)
     df.to_parquet(PARQUET_PATH, index=False)
     df.to_csv(CSV_PATH, index=False)
 
@@ -1440,6 +1465,33 @@ def save_outputs(df: pd.DataFrame) -> None:
         pd.to_numeric(latest.get("stale", 0), errors="coerce").fillna(0).astype(int)
         if not latest.empty else pd.Series(dtype=int)
     )
+    stale_by_kind: dict[str, int] = {}
+    if not latest.empty and "stale_kind" in latest.columns:
+        stale_rows = latest[latest_stale_series.astype(bool)]
+        if not stale_rows.empty:
+            stale_by_kind = (
+                stale_rows["stale_kind"]
+                .fillna("unknown")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .replace({"": "unknown", "none": "unknown"})
+                .value_counts()
+                .astype(int)
+                .to_dict()
+            )
+    flow_blockers = 0
+    if not latest.empty and "stale_kind" in latest.columns:
+        from etf_providers import prior_stale_aum_blocks_flow
+
+        for _, row in latest.iterrows():
+            if prior_stale_aum_blocks_flow(
+                stale_prior_close=bool(row.get("stale")),
+                stale_age_bdays_prior_close=row.get("stale_age_bdays"),
+                stale_kind_prior_close=row.get("stale_kind"),
+                source_provider_prior_close=row.get("source_provider"),
+            ):
+                flow_blockers += 1
     provider_status_counts: dict[str, int] = {}
     if not latest.empty:
         grp = latest.groupby(["source_provider", "status"], dropna=False).size().reset_index(name="count")
@@ -1462,6 +1514,8 @@ def save_outputs(df: pd.DataFrame) -> None:
         "latest_partial": int((latest_status == "partial").sum()) if not latest.empty else 0,
         "latest_missing": int((latest_status == "missing").sum()) if not latest.empty else 0,
         "latest_stale_ok": int(latest_stale_series.sum()) if not latest.empty else 0,
+        "latest_stale_by_kind": stale_by_kind,
+        "flow_blockers_prior_stale": int(flow_blockers),
         "latest_provider_counts": (
             latest_provider.value_counts(dropna=False).astype(int).to_dict() if not latest.empty else {}
         ),
@@ -1489,6 +1543,7 @@ def _anchor(res: ProviderResult, end_date: date) -> ProviderResult:
         age = None
     res.stale = True
     res.stale_age_bdays = age
+    res.stale_kind = "anchor_lag"
     res.date = end_date
     return res
 

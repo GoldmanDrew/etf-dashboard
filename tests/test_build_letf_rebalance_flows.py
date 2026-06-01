@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -116,10 +117,51 @@ def test_long_and_inverse_flows_add_on_up_day():
     assert spy["n_funds"] == 2
 
 
-def test_stale_prior_aum_is_not_aggregated():
+def test_partial_gap_aum_fill_avoids_missing_prior_aum():
+    metrics = _metrics()
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "aum"] = 1_000_000_000.0
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "shares_outstanding"] = 10_000_000.0
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "status"] = "ok"
+    partial = {
+        "date": pd.Timestamp("2026-05-19"),
+        "ticker": "UPRO",
+        "nav": 101.0,
+        "aum": np.nan,
+        "shares_outstanding": np.nan,
+        "underlying_adj_close": 101.0,
+        "stale": False,
+        "stale_age_bdays": 0,
+        "source_provider": "merged",
+        "status": "partial",
+    }
+    metrics = pd.concat([metrics, pd.DataFrame([partial])], ignore_index=True)
+    metrics = metrics.sort_values(["ticker", "date"]).drop_duplicates(subset=["ticker", "date"], keep="last")
+
+    fund = flows.build_fund_flows(_universe(), metrics)
+    upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
+    assert upro["quality_flag"] == "ok"
+    assert float(upro["aum_prior_close"]) == pytest.approx(1_000_000_000.0)
+
+
+def test_issuer_lag_prior_does_not_block_flow():
     metrics = _metrics()
     metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale"] = True
     metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_age_bdays"] = 1
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "source_provider"] = "direxion"
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_kind"] = "issuer_lag"
+
+    fund = flows.build_fund_flows(_universe(), metrics)
+    upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
+    assert upro["quality_flag"] == "ok"
+    assert bool(upro["included_in_aggregate"]) is True
+
+
+def test_stale_prior_anchor_lag_blocks_flow():
+    metrics = _metrics()
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale"] = True
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_age_bdays"] = 1
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "source_provider"] = "polygon"
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_kind"] = "anchor_lag"
 
     fund = flows.build_fund_flows(_universe(), metrics)
     upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]

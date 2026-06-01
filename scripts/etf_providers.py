@@ -15,7 +15,7 @@ Layered fetch strategy (per ticker, tried in order):
   10) PolygonProvider (last-resort close + meta)
 
 Each provider returns a ProviderResult with:
-  nav, aum, shares_outstanding, source_provider, source_url, status, stale, stale_age_bdays
+  nav, aum, shares_outstanding, source_provider, source_url, status, stale, stale_age_bdays, stale_kind
 
 Statuses:
   - 'ok'      : all three of (nav, aum, shares) present and positive
@@ -58,6 +58,7 @@ class ProviderResult:
     status: str  # 'ok' | 'partial' | 'missing'
     stale: bool = False
     stale_age_bdays: Optional[int] = None
+    stale_kind: Optional[str] = None
 
 
 def _classify_status(nav, aum, shares) -> str:
@@ -108,24 +109,111 @@ _MARKET_FALLBACK_PROVIDERS: frozenset[str] = frozenset({"yfinance", "polygon"})
 _MERGE_IDENTITY_MAX_REL_ERR = float(os.getenv("ETF_METRICS_MERGE_IDENTITY_MAX_REL_ERR", "0.05"))
 
 
-def issuer_valuation_stale_flags(valuation_date: date | None, as_of: date) -> tuple[bool, int | None]:
-    """Return (stale, stale_age_bdays) for issuer rows keyed by valuation session.
+STALE_KIND_ISSUER_LAG = "issuer_lag"
+STALE_KIND_ISSUER_EARLY = "issuer_early"
+STALE_KIND_CARRY_FORWARD = "carry_forward"
+STALE_KIND_ANCHOR_LAG = "anchor_lag"
+STALE_KIND_PROSHARES_FALLBACK = "proshares_fallback"
+
+_ISSUER_SESSION_PROVIDERS: frozenset[str] = frozenset({
+    "rex_shares",
+    "yieldmax",
+    "proshares",
+    "roundhill",
+    "direxion",
+    "granite_shares",
+    "defiance",
+    "tradr_axs",
+    "merged",
+})
+
+
+def issuer_valuation_stale_flags(valuation_date: date | None, as_of: date) -> tuple[bool, int | None, str | None]:
+    """Return (stale, stale_age_bdays, stale_kind) for issuer valuation sessions.
 
     When the feed publishes the *next* session early (valuation_date > as_of), the
     figures are not stale — the row is stored at valuation_date via SKIP anchor.
     Only true lag (valuation_date < as_of) marks stale with positive business-day age.
     """
     if valuation_date is None or valuation_date == as_of:
-        return False, None
+        return False, None, None
     if valuation_date > as_of:
-        return False, None
+        return False, None, STALE_KIND_ISSUER_EARLY
     try:
         age_b = int(np.busday_count(str(valuation_date), str(as_of)))
     except Exception:
         age_b = None
     if age_b is not None and age_b <= 0:
-        return False, None
-    return True, age_b
+        return False, None, None
+    return True, age_b, STALE_KIND_ISSUER_LAG
+
+
+def infer_stale_kind(
+    *,
+    stale: bool,
+    stale_age_bdays: object = None,
+    source_provider: object = None,
+    explicit_kind: object = None,
+) -> str | None:
+    """Infer stale_kind for legacy rows missing the column."""
+    if explicit_kind is not None and str(explicit_kind).strip():
+        return str(explicit_kind).strip().lower()
+    src = str(source_provider or "").strip().lower()
+    if src == STALE_KIND_CARRY_FORWARD:
+        return STALE_KIND_CARRY_FORWARD
+    if not stale:
+        try:
+            age = int(stale_age_bdays) if stale_age_bdays is not None and not pd.isna(stale_age_bdays) else None
+        except (TypeError, ValueError):
+            age = None
+        if age is not None and age < 0:
+            return STALE_KIND_ISSUER_EARLY
+        return None
+    if src == "proshares":
+        return STALE_KIND_PROSHARES_FALLBACK
+    if src in _ISSUER_SESSION_PROVIDERS:
+        return STALE_KIND_ISSUER_LAG
+    return STALE_KIND_ANCHOR_LAG
+
+
+def prior_stale_aum_blocks_flow(
+    *,
+    stale_prior_close: bool,
+    stale_age_bdays_prior_close: float | None,
+    stale_kind_prior_close: str | None,
+    source_provider_prior_close: str | None,
+    stale_bdays: int = 3,
+) -> bool:
+    """Return True when prior-close AUM should block LETF flow aggregation."""
+    stale_age = stale_age_bdays_prior_close
+    if stale_age is not None and stale_age > stale_bdays:
+        return True
+
+    kind = str(stale_kind_prior_close or "").strip().lower()
+    if not kind:
+        kind = infer_stale_kind(
+            stale=bool(stale_prior_close),
+            stale_age_bdays=stale_age,
+            source_provider=source_provider_prior_close,
+        ) or ""
+
+    if kind in ("", STALE_KIND_ISSUER_EARLY, STALE_KIND_ISSUER_LAG):
+        return False
+    if kind == STALE_KIND_CARRY_FORWARD:
+        return True
+    if kind in (STALE_KIND_ANCHOR_LAG, STALE_KIND_PROSHARES_FALLBACK):
+        return stale_age is not None and stale_age > 0
+
+    if not stale_prior_close:
+        return False
+    src = str(source_provider_prior_close or "").strip().lower()
+    if src == STALE_KIND_CARRY_FORWARD:
+        return True
+    if stale_age is not None and stale_age <= 0:
+        return False
+    if src in _ISSUER_SESSION_PROVIDERS:
+        return False
+    return stale_age is not None and stale_age > 0
 
 
 def _positive_float(v: object) -> float | None:
@@ -270,10 +358,20 @@ def merge_provider_attempts(
 
     stale = any(r.stale for r in attempts)
     stale_age: int | None = None
+    stale_kind: str | None = None
     for r in attempts:
         if r.stale_age_bdays is not None:
             stale_age = max(stale_age or 0, int(r.stale_age_bdays))
-    if not stale:
+    if stale:
+        stale_attempts = [r for r in attempts if r.stale]
+        if stale_attempts:
+            worst = max(stale_attempts, key=lambda r: int(r.stale_age_bdays or 0))
+            stale_kind = worst.stale_kind or infer_stale_kind(
+                stale=True,
+                stale_age_bdays=worst.stale_age_bdays,
+                source_provider=worst.source_provider,
+            )
+    else:
         stale_age = None
 
     valuation_date = nav_valuation_date
@@ -289,6 +387,7 @@ def merge_provider_attempts(
         status=status,
         stale=stale,
         stale_age_bdays=stale_age,
+        stale_kind=stale_kind,
     )
 
 
@@ -471,6 +570,7 @@ class ProSharesProvider:
         exact = g[g["Date"] == as_of]
         stale = False
         age_b = None
+        stale_kind = None
         if not exact.empty:
             row = exact.iloc[0]
         else:
@@ -483,6 +583,7 @@ class ProSharesProvider:
             except Exception:
                 age_b = None
             stale = True
+            stale_kind = STALE_KIND_PROSHARES_FALLBACK
 
         nav = pd.to_numeric(row.get("NAV"), errors="coerce")
         aum = pd.to_numeric(row.get("Assets Under Management"), errors="coerce")
@@ -498,7 +599,7 @@ class ProSharesProvider:
         return ProviderResult(
             date=row_d, ticker=t, nav=nav_f, aum=aum_f, shares_outstanding=sh_f,
             source_provider=self.name, source_url=self.URL + f"#ticker={t}&date={row['Date']}",
-            status=status, stale=stale, stale_age_bdays=age_b,
+            status=status, stale=stale, stale_age_bdays=age_b, stale_kind=stale_kind,
         )
 
 
@@ -620,7 +721,7 @@ class DirexionProvider:
         aum = float(abs(aum_val)) if aum_val is not None and not pd.isna(aum_val) else None
         nav = float(aum / shares) if aum and shares > 0 else None
         valuation_date = trade_date if trade_date is not None else as_of
-        stale, age_b = issuer_valuation_stale_flags(
+        stale, age_b, stale_kind = issuer_valuation_stale_flags(
             valuation_date if isinstance(valuation_date, date) else None,
             as_of,
         )
@@ -629,7 +730,7 @@ class DirexionProvider:
             date=valuation_date, ticker=ticker.upper(),
             nav=nav, aum=aum, shares_outstanding=shares,
             source_provider=self.name, source_url=src,
-            status=status, stale=stale, stale_age_bdays=age_b,
+            status=status, stale=stale, stale_age_bdays=age_b, stale_kind=stale_kind,
         )
 
 
@@ -712,14 +813,14 @@ class RoundhillProvider:
         if not isinstance(rd, date):
             rd = as_of
         valuation_date = rd if isinstance(rd, date) else as_of
-        stale, age_b = issuer_valuation_stale_flags(valuation_date, as_of)
+        stale, age_b, stale_kind = issuer_valuation_stale_flags(valuation_date, as_of)
 
         status = _classify_status(nav_f, aum_f, sh_f)
         return ProviderResult(
             date=valuation_date, ticker=t, nav=nav_f, aum=aum_f, shares_outstanding=sh_f,
             source_provider=self.name,
             source_url=self.URL + f"#ticker={t}&date={row_date}",
-            status=status, stale=stale, stale_age_bdays=age_b,
+            status=status, stale=stale, stale_age_bdays=age_b, stale_kind=stale_kind,
         )
 
 
@@ -828,12 +929,12 @@ class YieldMaxProvider:
             row_date = self._parse_date(as_of_str)
             valuation_date = row_date if row_date is not None else as_of
 
-            stale, age_b = issuer_valuation_stale_flags(row_date, as_of)
+            stale, age_b, stale_kind = issuer_valuation_stale_flags(row_date, as_of)
             status = _classify_status(nav, aum, shares)
             res = ProviderResult(
                 date=valuation_date, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
                 source_provider=self.name, source_url=url + f"#as_of={row_date}",
-                status=status, stale=stale, stale_age_bdays=age_b,
+                status=status, stale=stale, stale_age_bdays=age_b, stale_kind=stale_kind,
             )
             self._cache[ck] = res
             return res
@@ -952,13 +1053,13 @@ class REXSharesProvider:
                         continue
 
             valuation_date = row_date if row_date is not None else as_of
-            stale, age_b = issuer_valuation_stale_flags(row_date, as_of)
+            stale, age_b, stale_kind = issuer_valuation_stale_flags(row_date, as_of)
 
             status = _classify_status(nav, aum, shares)
             res = ProviderResult(
                 date=valuation_date, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
                 source_provider=self.name, source_url=url + f"#as_of={row_date}",
-                status=status, stale=stale, stale_age_bdays=age_b,
+                status=status, stale=stale, stale_age_bdays=age_b, stale_kind=stale_kind,
             )
             self._cache[ck] = res
             return res
@@ -1216,7 +1317,7 @@ class GraniteSharesProvider:
 
             nav_date = self._parse_nav_date(payload.get("NavDate"))
             valuation_date = nav_date if nav_date is not None else as_of
-            stale, age_b = issuer_valuation_stale_flags(nav_date, as_of)
+            stale, age_b, stale_kind = issuer_valuation_stale_flags(nav_date, as_of)
 
             status = _classify_status(nav_f, aum_f, shares_f)
             res = ProviderResult(
@@ -1224,7 +1325,7 @@ class GraniteSharesProvider:
                 nav=nav_f, aum=aum_f, shares_outstanding=shares_f,
                 source_provider=self.name,
                 source_url=api_url + f"#nav_date={nav_date}",
-                status=status, stale=stale, stale_age_bdays=age_b,
+                status=status, stale=stale, stale_age_bdays=age_b, stale_kind=stale_kind,
             )
             self._cache[ck] = res
             return res

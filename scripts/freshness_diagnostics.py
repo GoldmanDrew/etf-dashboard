@@ -124,12 +124,16 @@ def _check_flow(flow: dict, *, max_stale_pct: float) -> tuple[dict, list[str]]:
         key=lambda x: x[2],
         reverse=True,
     )[:5]
+    quality = flow.get("flow_quality_on_latest_date") if isinstance(flow.get("flow_quality_on_latest_date"), dict) else {}
     return {
         "latest_date": flow.get("latest_date"),
         "build_time": flow.get("build_time"),
         "underlyings_total": total,
         "underlyings_stale": stale,
         "underlyings_stale_pct": round(pct, 2),
+        "fund_rows_on_latest_date": quality.get("fund_rows_total"),
+        "fund_quality_counts": quality.get("quality_counts"),
+        "stale_aum_by_prior_kind": quality.get("stale_aum_by_prior_kind"),
         "top_stale_by_abs_net_moc": [
             {"underlying": u, "date": d, "abs_net_moc_dollars": n} for u, d, n in top_stale
         ],
@@ -140,12 +144,13 @@ def _check_metrics(health: dict) -> tuple[dict, list[str]]:
     violations: list[str] = []
     latest_stale = int(health.get("latest_stale_ok") or 0)
     latest_ok = int(health.get("latest_ok") or 0)
-    total = latest_ok + latest_stale + int(health.get("latest_partial") or 0) + int(health.get("latest_missing") or 0)
     return {
         "latest_date": health.get("latest_date"),
         "latest_ok": latest_ok,
         "latest_stale_ok": latest_stale,
         "latest_missing": health.get("latest_missing"),
+        "latest_stale_by_kind": health.get("latest_stale_by_kind") or {},
+        "flow_blockers_prior_stale": health.get("flow_blockers_prior_stale"),
     }, violations
 
 

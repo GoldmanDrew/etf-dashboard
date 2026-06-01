@@ -1,36 +1,52 @@
 {
-  "build_time": "2026-06-01T02:13:14.235281Z",
+  "build_time": "2026-06-01T16:08:21.631117Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-05-30T21:01:18.255914Z",
+    "build_time": "2026-06-01T14:51:40.072414Z",
     "yieldboost_targeted": true,
-    "yieldboost_sleeves_only": true,
-    "yieldboost_underlyings_refreshed_count": 0,
-    "yieldboost_underlyings_skipped_fresh_count": 0,
+    "yieldboost_sleeves_only": false,
+    "yieldboost_underlyings_refreshed_count": 12,
+    "yieldboost_underlyings_prefetched_count": 12,
+    "yieldboost_underlyings_skipped_fresh_count": 18,
+    "yieldboost_refresh_order_head": [
+      "BABA",
+      "ETHA",
+      "AMZN",
+      "CRCL",
+      "AMD",
+      "TLT",
+      "SOXX",
+      "MSTR"
+    ],
     "oldest_symbol": "AAL",
-    "oldest_symbol_age_minutes": 77887
+    "oldest_symbol_age_minutes": 78723
   },
   "vrp": {
-    "worst_underlying_symbol": null,
-    "worst_underlying_options_age_minutes": 10131,
-    "underlying_options_as_of_min": "2026-05-23T20:20:07.875272Z",
+    "worst_underlying_symbol": "RGTI",
+    "worst_underlying_options_age_minutes": 8692,
+    "underlying_options_as_of_min": "2026-05-26T14:16:22.148743Z",
     "iv_coverage_front_pct": 0.9677
   },
   "flow": {
     "latest_date": "2026-05-29",
-    "build_time": "2026-06-01T02:09:21.509805Z",
+    "build_time": "2026-06-01T16:08:13.747842Z",
     "underlyings_total": 228,
-    "underlyings_stale": 72,
-    "underlyings_stale_pct": 31.58,
+    "underlyings_stale": 62,
+    "underlyings_stale_pct": 27.19,
+    "fund_rows_on_latest_date": 312,
+    "fund_quality_counts": {
+      "missing_prior_aum": 5,
+      "ok": 239,
+      "product_class:passive_low_delta": 61,
+      "stale_aum": 7
+    },
+    "stale_aum_by_prior_kind": {
+      "carry_forward": 7
+    },
     "top_stale_by_abs_net_moc": [
-      {
-        "underlying": "MRVL",
-        "date": "2026-05-28",
-        "abs_net_moc_dollars": 31451601.09
-      },
       {
         "underlying": "NOW",
         "date": "2026-05-28",
@@ -50,6 +66,11 @@
         "underlying": "INTC",
         "date": "2026-05-28",
         "abs_net_moc_dollars": 10842777.25
+      },
+      {
+        "underlying": "RDDT",
+        "date": "2026-05-28",
+        "abs_net_moc_dollars": 10132921.64
       }
     ]
   },
@@ -57,13 +78,17 @@
     "latest_date": "2026-05-29",
     "latest_ok": 475,
     "latest_stale_ok": 123,
-    "latest_missing": 1
+    "latest_missing": 1,
+    "latest_stale_by_kind": {
+      "issuer_lag": 109,
+      "carry_forward": 14
+    },
+    "flow_blockers_prior_stale": 15
   },
   "violations": [
-    "options_cache.yieldboost_sleeves_only=true (underlyings not refreshed)",
-    "oldest symbol cache AAL is 1298h old (limit 48h)",
-    "vrp worst underlying ? quote 168h old (limit 48h)",
-    "flow 72/228 underlyings stale (31.6% > 25%)"
+    "oldest symbol cache AAL is 1312h old (limit 48h)",
+    "vrp worst underlying RGTI quote 144h old (limit 48h)",
+    "flow 62/228 underlyings stale (27.2% > 25%)"
   ],
   "ok": false
 }
