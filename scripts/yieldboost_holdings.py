@@ -819,10 +819,9 @@ def load_holdings_latest_dataframe(
     hist = hist[HOLDINGS_COLUMNS]
     hist["as_of_date"] = pd.to_datetime(hist["as_of_date"], errors="coerce").dt.date
     hist["etf_ticker"] = hist["etf_ticker"].astype(str).str.upper()
-    latest = hist.sort_values(["etf_ticker", "as_of_date"])
-    latest = latest.groupby("etf_ticker", group_keys=False).apply(
-        lambda g: g[g["as_of_date"] == g["as_of_date"].max()],
-    )
+    from etf_holdings_providers import latest_holdings_per_etf
+
+    latest = latest_holdings_per_etf(hist)
     return normalize_holdings_dataframe(latest.reset_index(drop=True))
 
 

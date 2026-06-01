@@ -66,6 +66,7 @@ from etf_holdings_providers import (
     HOLDINGS_COLUMNS,
     build_default_holdings_stack,
     fetch_all_holdings,
+    latest_holdings_per_etf,
 )
 from etf_metrics_format import sanitize_metrics_json_df, write_metrics_daily_json
 
@@ -1345,10 +1346,7 @@ def save_holdings_outputs(
     )
 
     # Latest snapshot: keep only the newest as_of_date per ETF — that's what the UI renders.
-    latest = combo.sort_values(["etf_ticker", "as_of_date"])
-    latest = latest.groupby("etf_ticker", group_keys=False).apply(
-        lambda g: g[g["as_of_date"] == g["as_of_date"].max()]
-    )
+    latest = latest_holdings_per_etf(combo)
     latest.to_csv(latest_csv_path, index=False)
     if "etf_ticker" not in pd.read_csv(latest_csv_path, nrows=0).columns:
         raise RuntimeError(f"holdings CSV missing etf_ticker column: {latest_csv_path}")

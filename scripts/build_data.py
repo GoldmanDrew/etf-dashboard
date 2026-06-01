@@ -3979,8 +3979,12 @@ def refresh_yieldboost_holdings_slice(
     if holdings_df is None or holdings_df.empty:
         print("[WARN] YieldBOOST holdings fetch returned empty; keeping prior snapshot")
         return False
-    save_holdings_outputs(holdings_df)
-    save_yieldboost_put_spreads(holdings_df, underlying_by_ticker=underlying_map)
+    try:
+        save_holdings_outputs(holdings_df)
+        save_yieldboost_put_spreads(holdings_df, underlying_by_ticker=underlying_map)
+    except Exception as exc:
+        print(f"[WARN] YieldBOOST holdings persist failed ({exc}); continuing to options refresh")
+        return False
     print(f"  YieldBOOST holdings refreshed ({len(holdings_df)} rows)")
     return True
 

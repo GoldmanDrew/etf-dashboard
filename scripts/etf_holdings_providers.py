@@ -1055,6 +1055,15 @@ HOLDINGS_COLUMNS = [
 ]
 
 
+def latest_holdings_per_etf(hist: pd.DataFrame) -> pd.DataFrame:
+    """Keep only the newest as_of_date row(s) per ETF; preserves etf_ticker column."""
+    if hist.empty:
+        return hist.copy()
+    latest = hist.sort_values(["etf_ticker", "as_of_date"])
+    max_dates = latest.groupby("etf_ticker", group_keys=False)["as_of_date"].transform("max")
+    return latest.loc[latest["as_of_date"] == max_dates].copy()
+
+
 def _rows_to_df(rows: Iterable[HoldingRow]) -> pd.DataFrame:
     records = [asdict(r) for r in rows]
     if not records:
