@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from datetime import date
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS) not in sys.path:
@@ -204,6 +205,36 @@ def test_carry_forward_prior_older_than_stale_budget_blocks_flow():
     fund = flows.build_fund_flows(_universe(), metrics, stale_bdays=3)
     upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
     assert upro["quality_flag"] == "stale_aum"
+
+
+def test_session_extend_enables_flow_on_global_session():
+    from ingest_etf_metrics import extend_metrics_session_coverage
+
+    metrics = pd.DataFrame([
+        {
+            "date": pd.Timestamp("2026-05-28"),
+            "ticker": "NOWL",
+            "nav": 5.66,
+            "aum": 218_023_700.0,
+            "shares_outstanding": 38_500_000.0,
+            "underlying_adj_close": 100.0,
+            "stale": False,
+            "stale_age_bdays": 0,
+            "stale_kind": "issuer_lag",
+            "source_provider": "granite_shares",
+            "status": "ok",
+        },
+    ])
+    extended = extend_metrics_session_coverage(
+        metrics,
+        session_date=date(2026, 5, 29),
+        tickers=["NOWL"],
+        max_lag_bdays=2,
+    )
+    assert len(extended) == 2
+    row = extended[extended["date"] == pd.Timestamp("2026-05-29")].iloc[0]
+    assert row["stale_kind"] == "issuer_session_extend"
+    assert float(row["aum"]) == pytest.approx(218_023_700.0)
 
 
 def test_load_universe_excludes_yieldboost_and_uses_delta_when_leverage_missing(tmp_path: Path):

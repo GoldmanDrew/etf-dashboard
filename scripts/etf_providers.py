@@ -114,6 +114,7 @@ STALE_KIND_ISSUER_EARLY = "issuer_early"
 STALE_KIND_CARRY_FORWARD = "carry_forward"
 STALE_KIND_ANCHOR_LAG = "anchor_lag"
 STALE_KIND_PROSHARES_FALLBACK = "proshares_fallback"
+STALE_KIND_ISSUER_SESSION_EXTEND = "issuer_session_extend"
 
 _ISSUER_SESSION_PROVIDERS: frozenset[str] = frozenset({
     "rex_shares",
@@ -197,7 +198,7 @@ def prior_stale_aum_blocks_flow(
             source_provider=source_provider_prior_close,
         ) or ""
 
-    if kind in ("", STALE_KIND_ISSUER_EARLY, STALE_KIND_ISSUER_LAG, STALE_KIND_CARRY_FORWARD):
+    if kind in ("", STALE_KIND_ISSUER_EARLY, STALE_KIND_ISSUER_LAG, STALE_KIND_ISSUER_SESSION_EXTEND, STALE_KIND_CARRY_FORWARD):
         return False
     if kind in (STALE_KIND_ANCHOR_LAG, STALE_KIND_PROSHARES_FALLBACK):
         return stale_age is not None and stale_age > 0

@@ -58,6 +58,7 @@ _SPLIT_RATIOS: tuple[float, ...] = tuple(
 
 from etf_providers import (
     ProviderResult,
+    STALE_KIND_ISSUER_SESSION_EXTEND,
     _build_session,
     build_default_stack,
     infer_stale_kind,
@@ -459,6 +460,69 @@ def ensure_stale_kind_column(df: pd.DataFrame) -> pd.DataFrame:
             source_provider=out.at[idx, "source_provider"] if "source_provider" in out.columns else None,
         )
     return out
+
+
+def _metrics_busday_gap(start: object, end: object) -> int | None:
+    try:
+        if hasattr(start, "date"):
+            start = start.date()
+        if hasattr(end, "date"):
+            end = end.date()
+        return int(np.busday_count(str(start), str(end)))
+    except Exception:
+        return None
+
+
+def extend_metrics_session_coverage(
+    df: pd.DataFrame,
+    session_date: date,
+    tickers: Iterable[str],
+    *,
+    max_lag_bdays: int = 2,
+) -> pd.DataFrame:
+    """Add session_date rows for tickers whose issuer last published within max_lag_bdays.
+
+    Granite/REX/Polygon often publish T+0 on the prior calendar row while Direxion
+    rows advance the panel max date. Without this, LETF flow has no fund row on the
+    global session for otherwise healthy tickers.
+    """
+    if df.empty or max_lag_bdays <= 0:
+        return df
+    out = ensure_stale_kind_column(df.copy())
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.normalize()
+    session_ts = pd.Timestamp(session_date).normalize()
+    session_rows: list[dict[str, object]] = []
+
+    for ticker in tickers:
+        sym = str(ticker).upper()
+        hist = out[out["ticker"].astype(str).str.upper() == sym].sort_values("date")
+        if hist.empty or not hist[hist["date"] == session_ts].empty:
+            continue
+        prior = hist[hist["date"] < session_ts]
+        if prior.empty:
+            continue
+        last = prior.iloc[-1]
+        gap = _metrics_busday_gap(last["date"], session_ts)
+        if gap is None or gap < 1 or gap > max_lag_bdays:
+            continue
+        if str(last.get("status") or "") not in {"ok", "partial"}:
+            continue
+        row = last.to_dict()
+        row["date"] = session_ts
+        row["stale"] = True
+        row["stale_age_bdays"] = int(gap)
+        row["stale_kind"] = STALE_KIND_ISSUER_SESSION_EXTEND
+        session_rows.append(row)
+
+    if not session_rows:
+        return out
+    added = pd.DataFrame(session_rows)
+    for col in REQUIRED_COLUMNS:
+        if col not in added.columns:
+            added[col] = None
+    combo = pd.concat([out, added[REQUIRED_COLUMNS]], ignore_index=True)
+    combo = combo.drop_duplicates(subset=["date", "ticker"], keep="last")
+    return combo.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 
 def validate_df(df: pd.DataFrame) -> None:
@@ -1927,6 +1991,13 @@ def main() -> None:
     merged, n_vol_bf = backfill_shares_traded_gaps(merged)
     if n_vol_bf:
         LOGGER.info("Backfilled Yahoo shares_traded on %d historical row(s)", n_vol_bf)
+    session_extend_bdays = int(os.getenv("ETF_METRICS_SESSION_EXTEND_BDAYS", "2"))
+    merged = extend_metrics_session_coverage(
+        merged,
+        session_date=resolved_end_date,
+        tickers=tickers,
+        max_lag_bdays=session_extend_bdays,
+    )
     validate_df(merged)
     save_outputs(merged)
     LOGGER.info("Saved merged summary: %s", get_summary(merged))

@@ -26,7 +26,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from etf_providers import prior_stale_aum_blocks_flow
-from ingest_etf_metrics import ensure_stale_kind_column
+from ingest_etf_metrics import ensure_stale_kind_column, extend_metrics_session_coverage
 
 LOGGER = logging.getLogger("letf_rebalance_flows")
 
@@ -195,6 +195,49 @@ def _derive_aum_from_identity(df: pd.DataFrame) -> pd.DataFrame:
 
 
 _PARTIAL_AUM_FILL_BDAYS = 8
+_SESSION_EXTEND_BDAYS = 2
+
+
+def _apply_underlying_close_from_volume_panel(
+    metrics: pd.DataFrame,
+    universe: pd.DataFrame,
+    volume_panel: pd.DataFrame,
+) -> pd.DataFrame:
+    """Patch underlying_adj_close on metrics rows using yfinance close panel."""
+    if metrics.empty or volume_panel.empty or "underlying" not in universe.columns:
+        return metrics
+    out = metrics.copy()
+    if "underlying_adj_close" not in out.columns:
+        out["underlying_adj_close"] = np.nan
+    und_by_ticker = (
+        universe.dropna(subset=["ticker", "underlying"])
+        .assign(ticker=lambda d: d["ticker"].astype(str).str.upper())
+        .set_index("ticker")["underlying"]
+        .astype(str)
+        .str.upper()
+        .to_dict()
+    )
+    panel = volume_panel.copy()
+    panel["date"] = pd.to_datetime(panel["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    close_map = {
+        (str(r["underlying"]).upper(), str(r["date"])): float(r["close"])
+        for _, r in panel.iterrows()
+        if pd.notna(r.get("close")) and float(r["close"]) > 0
+    }
+    out["date_str"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    for idx, row in out.iterrows():
+        sym = str(row.get("ticker") or "").upper()
+        und = und_by_ticker.get(sym)
+        d = row.get("date_str")
+        if not und or not d:
+            continue
+        close = close_map.get((str(und).upper(), str(d)))
+        if close is None:
+            continue
+        cur = pd.to_numeric(out.at[idx, "underlying_adj_close"], errors="coerce")
+        if pd.isna(cur) or float(cur) <= 0:
+            out.at[idx, "underlying_adj_close"] = close
+    return out.drop(columns=["date_str"], errors="ignore")
 
 
 def _busday_gap(start: object, end: object) -> int | None:
@@ -244,6 +287,49 @@ def _fill_partial_aum_for_flow(df: pd.DataFrame, *, max_gap_bdays: int = _PARTIA
     for _, g in out.groupby("ticker", sort=False):
         pieces.append(_fill_group(g))
     return pd.concat(pieces, ignore_index=True)
+
+
+def _aggregate_stale_reason(
+    *,
+    session_lag_bdays: int,
+    fund_rows_on_global: int,
+    ok_funds_on_global: int,
+) -> str:
+    if session_lag_bdays <= 0:
+        return "current_session"
+    if fund_rows_on_global <= 0:
+        if session_lag_bdays == 1:
+            return "issuer_publish_lag"
+        return "missing_metrics"
+    if ok_funds_on_global <= 0:
+        return "quality_excluded"
+    if session_lag_bdays == 1:
+        return "issuer_publish_lag"
+    return "session_lag"
+
+
+def _flow_stale_summary(
+    by_underlying: dict[str, Any],
+    *,
+    global_latest_date: str,
+    fund_flows: pd.DataFrame,
+) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    for meta in by_underlying.values():
+        if meta.get("is_latest_global") is not False:
+            continue
+        reason = str(meta.get("aggregate_stale_reason") or "unknown")
+        counts[reason] = counts.get(reason, 0) + 1
+    return {
+        "global_latest_date": global_latest_date,
+        "underlyings_stale": sum(counts.values()),
+        "underlyings_stale_by_reason": counts,
+        "underlyings_actionable_stale": int(
+            counts.get("session_lag", 0)
+            + counts.get("missing_metrics", 0)
+            + counts.get("quality_excluded", 0)
+        ),
+    }
 
 
 def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bdays: int = 3) -> pd.DataFrame:
@@ -760,13 +846,24 @@ def write_outputs(
                 aggregates.loc[idx_per_und]
                 .sort_values("net_moc_dollars", key=lambda s: s.abs(), ascending=False)
             )
+            global_day = fund_flows[fund_flows["date"].astype(str) == str(global_latest_date)]
             by_underlying: dict[str, Any] = {}
             for _, row in latest_rows.iterrows():
                 und = str(row["underlying"])
                 row_date = str(row.get("date") or "")
+                session_lag = _busday_gap(row_date, global_latest_date) or 0
+                und_day = global_day[global_day["underlying"].astype(str) == und]
+                ok_funds = int(und_day["included_in_aggregate"].astype(bool).sum()) if not und_day.empty else 0
+                stale_reason = _aggregate_stale_reason(
+                    session_lag_bdays=int(session_lag),
+                    fund_rows_on_global=int(len(und_day)),
+                    ok_funds_on_global=ok_funds,
+                )
                 by_underlying[und] = {
                     "date": row_date,
                     "is_latest_global": row_date == global_latest_date,
+                    "session_lag_bdays": int(session_lag),
+                    "aggregate_stale_reason": stale_reason,
                     "underlying": und,
                     "net_moc_dollars": _round(row.get("net_moc_dollars"), 2),
                     "gross_moc_dollars": _round(row.get("gross_moc_dollars"), 2),
@@ -790,6 +887,11 @@ def write_outputs(
                 "method": "L*(L-1)*prior_close_aum*underlying_return",
                 "adv_window_days": _ADV_WINDOW_DAYS,
                 "flow_quality_on_latest_date": _flow_quality_summary(fund_flows, global_latest_date),
+                "flow_stale_summary": _flow_stale_summary(
+                    by_underlying,
+                    global_latest_date=global_latest_date,
+                    fund_flows=fund_flows,
+                ),
                 "by_underlying": by_underlying,
             }
 
@@ -808,16 +910,27 @@ def build_all(
     adv_window: int = _ADV_WINDOW_DAYS,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     universe = load_universe(universe_path)
-    metrics = load_metrics(metrics_parquet, metrics_csv)
-    fund_flows = build_fund_flows(universe, metrics, stale_bdays=stale_bdays)
-    aggregates = build_underlying_aggregates(fund_flows)
-
     underlyings = sorted({u for u in universe["underlying"].dropna().tolist() if u})
     volume_panel = load_or_refresh_underlying_volume_panel(
         underlyings,
         cache_path=volume_cache_path,
         skip_fetch=skip_volume_fetch,
     )
+
+    metrics = load_metrics(metrics_parquet, metrics_csv)
+    session_date = pd.to_datetime(metrics["date"], errors="coerce").max()
+    if pd.notna(session_date):
+        metrics = extend_metrics_session_coverage(
+            metrics,
+            session_date=session_date.date(),
+            tickers=sorted(universe["ticker"].astype(str).str.upper().unique()),
+            max_lag_bdays=_SESSION_EXTEND_BDAYS,
+        )
+        metrics = _apply_underlying_close_from_volume_panel(metrics, universe, volume_panel)
+
+    fund_flows = build_fund_flows(universe, metrics, stale_bdays=stale_bdays)
+    aggregates = build_underlying_aggregates(fund_flows)
+
     adv_panel = compute_adv_panel(volume_panel, window=adv_window)
     fund_flows, aggregates = annotate_with_adv(fund_flows, aggregates, adv_panel)
     return fund_flows, aggregates

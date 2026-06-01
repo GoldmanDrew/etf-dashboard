@@ -113,11 +113,21 @@ def _check_flow(flow: dict, *, max_stale_pct: float) -> tuple[dict, list[str]]:
     total = len(by_u)
     stale = sum(1 for v in by_u.values() if isinstance(v, dict) and v.get("is_latest_global") is False)
     pct = (100.0 * stale / total) if total else 0.0
-    if pct > max_stale_pct:
-        violations.append(f"flow {stale}/{total} underlyings stale ({pct:.1f}% > {max_stale_pct:.0f}%)")
+
+    stale_summary = flow.get("flow_stale_summary") if isinstance(flow.get("flow_stale_summary"), dict) else {}
+    by_reason = stale_summary.get("underlyings_stale_by_reason") or {}
+    actionable = int(stale_summary.get("underlyings_actionable_stale") or 0)
+    actionable_pct = (100.0 * actionable / total) if total else 0.0
+    issuer_lag = int(by_reason.get("issuer_publish_lag") or 0)
+
+    if actionable_pct > max_stale_pct:
+        violations.append(
+            f"flow {actionable}/{total} underlyings actionable-stale "
+            f"({actionable_pct:.1f}% > {max_stale_pct:.0f}%)"
+        )
     top_stale = sorted(
         (
-            (k, v.get("date"), abs(float(v.get("net_moc_dollars") or 0)))
+            (k, v.get("date"), abs(float(v.get("net_moc_dollars") or 0)), v.get("aggregate_stale_reason"))
             for k, v in by_u.items()
             if isinstance(v, dict) and v.get("is_latest_global") is False
         ),
@@ -131,11 +141,16 @@ def _check_flow(flow: dict, *, max_stale_pct: float) -> tuple[dict, list[str]]:
         "underlyings_total": total,
         "underlyings_stale": stale,
         "underlyings_stale_pct": round(pct, 2),
+        "underlyings_issuer_publish_lag": issuer_lag,
+        "underlyings_actionable_stale": actionable,
+        "underlyings_actionable_stale_pct": round(actionable_pct, 2),
+        "underlyings_stale_by_reason": by_reason,
         "fund_rows_on_latest_date": quality.get("fund_rows_total"),
         "fund_quality_counts": quality.get("quality_counts"),
         "stale_aum_by_prior_kind": quality.get("stale_aum_by_prior_kind"),
         "top_stale_by_abs_net_moc": [
-            {"underlying": u, "date": d, "abs_net_moc_dollars": n} for u, d, n in top_stale
+            {"underlying": u, "date": d, "abs_net_moc_dollars": n, "reason": r}
+            for u, d, n, r in top_stale
         ],
     }, violations
 
