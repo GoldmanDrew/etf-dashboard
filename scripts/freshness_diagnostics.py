@@ -40,8 +40,15 @@ def _check_options(cache: dict, *, max_underlying_hours: float) -> tuple[dict, l
     symbols = cache.get("symbols") if isinstance(cache.get("symbols"), dict) else {}
     und_refreshed = cache.get("yieldboost_underlyings_refreshed") or []
     sleeves_only = bool(cache.get("yieldboost_sleeves_only"))
+    max_underlying_min = int(max_underlying_hours * 60)
     if sleeves_only and cache.get("yieldboost_targeted"):
         violations.append("options_cache.yieldboost_sleeves_only=true (underlyings not refreshed)")
+
+    prefetched = cache.get("yieldboost_underlyings_prefetched")
+    if und_refreshed and prefetched is not None and int(prefetched) < min(3, len(und_refreshed)):
+        violations.append(
+            f"only {prefetched}/{len(und_refreshed)} YB underlyings prefetched this run"
+        )
 
     und_ages: list[tuple[str, int]] = []
     for sym, payload in symbols.items():
@@ -53,8 +60,18 @@ def _check_options(cache: dict, *, max_underlying_hours: float) -> tuple[dict, l
             und_ages.append((str(sym).upper(), age))
     und_ages.sort(key=lambda x: x[1], reverse=True)
 
+    und_set = {str(u).upper() for u in und_refreshed}
+    if und_set:
+        yb_und_ages = [(s, a) for s, a in und_ages if s in und_set]
+        if yb_und_ages:
+            worst_und, worst_und_age = max(yb_und_ages, key=lambda x: x[1])
+            if worst_und_age > max_underlying_min:
+                violations.append(
+                    f"YB underlying {worst_und} cache {worst_und_age // 60}h old "
+                    f"(limit {max_underlying_hours:.0f}h)"
+                )
+
     worst_sym, worst_age = und_ages[0] if und_ages else (None, None)
-    max_underlying_min = int(max_underlying_hours * 60)
     if worst_age is not None and worst_age > max_underlying_min:
         violations.append(
             f"oldest symbol cache {worst_sym} is {worst_age // 60}h old (limit {max_underlying_hours:.0f}h)"
@@ -65,7 +82,9 @@ def _check_options(cache: dict, *, max_underlying_hours: float) -> tuple[dict, l
         "yieldboost_targeted": cache.get("yieldboost_targeted"),
         "yieldboost_sleeves_only": sleeves_only,
         "yieldboost_underlyings_refreshed_count": len(und_refreshed),
+        "yieldboost_underlyings_prefetched_count": prefetched,
         "yieldboost_underlyings_skipped_fresh_count": len(cache.get("yieldboost_underlyings_skipped_fresh") or []),
+        "yieldboost_refresh_order_head": cache.get("yieldboost_refresh_order_head"),
         "oldest_symbol": worst_sym,
         "oldest_symbol_age_minutes": worst_age,
     }, violations

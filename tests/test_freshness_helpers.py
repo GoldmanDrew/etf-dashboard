@@ -10,6 +10,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from build_data import (  # noqa: E402
+    _order_yieldboost_refresh_symbols,
     _pick_yieldboost_underlyings_to_refresh,
     _yieldboost_targeted_refresh_symbols,
 )
@@ -58,3 +59,22 @@ def test_pick_underlyings_stale_mode_prioritizes_old():
     assert len(picked) == 2
     assert "SOXX" not in picked
     assert "SOXX" in skipped
+
+
+def test_order_yieldboost_refresh_puts_stale_underlyings_before_sleeves():
+    old = (datetime.now(UTC) - timedelta(days=5)).isoformat().replace("+00:00", "Z")
+    fresh = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    prior = {
+        "AMD": {"updated_at": old},
+        "SOXX": {"updated_at": old},
+        "SOXL": {"updated_at": fresh},
+        "AMDL": {"updated_at": fresh},
+    }
+    order = _order_yieldboost_refresh_symbols(
+        ["AMD", "SOXX"],
+        ["SOXL", "AMDL"],
+        prior,
+    )
+    assert order.index("AMD") < order.index("SOXL")
+    assert order.index("SOXX") < order.index("AMDL")
+    assert order[:2] == ["AMD", "SOXX"]

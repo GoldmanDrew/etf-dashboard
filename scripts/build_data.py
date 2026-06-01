@@ -1296,6 +1296,42 @@ def _pick_yieldboost_underlyings_to_refresh(
     return picked, skipped
 
 
+def _symbol_cache_age_seconds(payload: dict | None) -> int:
+    if not isinstance(payload, dict):
+        return 10**9
+    ts = payload.get("updated_at")
+    if not isinstance(ts, str) or not ts:
+        return 10**9
+    try:
+        parsed = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return max(0, int((dt.datetime.now(dt.UTC) - parsed).total_seconds()))
+    except Exception:
+        return 10**9
+
+
+def _order_yieldboost_refresh_symbols(
+    underlying_refresh: list[str],
+    yb_sleeves: list[str],
+    prior_symbols: dict,
+) -> list[str]:
+    """Order YB refresh: stale underlyings first (oldest cache), then sleeves."""
+    und = sorted(
+        {norm_sym(s) for s in (underlying_refresh or []) if str(s).strip()},
+        key=lambda s: _symbol_cache_age_seconds(
+            prior_symbols.get(s) if isinstance(prior_symbols, dict) else None
+        ),
+        reverse=True,
+    )
+    sleeves = sorted({norm_sym(s) for s in (yb_sleeves or []) if str(s).strip()})
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for sym in und + sleeves:
+        if sym and sym not in seen:
+            seen.add(sym)
+            ordered.append(sym)
+    return ordered
+
+
 def build_polygon_options_cache(
     symbols: list[str],
     *,
@@ -1381,6 +1417,9 @@ def build_polygon_options_cache(
     shard_interval_minutes = max(1, OPTIONS_SHARD_INTERVAL_MINUTES)
     underlying_refresh: list[str] = []
     underlying_skipped_fresh: list[str] = []
+    yb_sleeves: list[str] = []
+    refresh_symbols: list[str] = []
+    seen_refresh: set[str] = set()
     if yieldboost_targeted:
         yb_sleeves, underlying_all = _yieldboost_targeted_refresh_symbols(
             all_symbols,
@@ -1394,34 +1433,34 @@ def build_polygon_options_cache(
         )
         if yb_sleeves or underlying_refresh:
             all_symbols = sorted(set(yb_sleeves) | set(underlying_refresh))
-        forced_symbols = list(all_symbols)
-        symbols_per_run = max(symbols_per_run, len(all_symbols))
+        refresh_symbols = _order_yieldboost_refresh_symbols(
+            underlying_refresh, yb_sleeves, prior_symbols,
+        )
+        seen_refresh = set(refresh_symbols)
+        symbols_per_run = max(symbols_per_run, len(refresh_symbols))
         shard_count = 1
     else:
         forced_symbols = [norm_sym(s) for s in get_polygon_force_symbols() if str(s).strip()]
         shard_count = max(1, OPTIONS_SHARD_COUNT)
-    forced_set = set(forced_symbols)
-    slot = int(time.time() // (shard_interval_minutes * 60)) % shard_count
-    shard_candidates = [s for s in all_symbols if (hash(s) % shard_count) == slot and s not in forced_set]
-    # Prioritize low-quality/stale symbols first inside the active shard.
-    shard_candidates.sort(
-        key=lambda s: (
-            _coverage_score_for_symbol_payload(prior_symbols.get(s) if isinstance(prior_symbols, dict) else {}),
-            -_cache_age_seconds(prior_symbols.get(s) if isinstance(prior_symbols, dict) else {}),
-            s,
+        forced_set = set(forced_symbols)
+        slot = int(time.time() // (shard_interval_minutes * 60)) % shard_count
+        shard_candidates = [s for s in all_symbols if (hash(s) % shard_count) == slot and s not in forced_set]
+        # Prioritize low-quality/stale symbols first inside the active shard.
+        shard_candidates.sort(
+            key=lambda s: (
+                _coverage_score_for_symbol_payload(prior_symbols.get(s) if isinstance(prior_symbols, dict) else {}),
+                -_cache_age_seconds(prior_symbols.get(s) if isinstance(prior_symbols, dict) else {}),
+                s,
+            )
         )
-    )
-    refresh_candidates = forced_symbols + shard_candidates
-    seen_refresh = set()
-    refresh_symbols: list[str] = []
-    for s in refresh_candidates:
-        if s and s not in seen_refresh:
-            seen_refresh.add(s)
-            refresh_symbols.append(s)
-        if len(refresh_symbols) >= symbols_per_run:
-            break
-    # Guarantee tradier-chain symbols are refreshed each run, then trim (non-yieldboost only).
-    if not yieldboost_targeted:
+        refresh_candidates = forced_symbols + shard_candidates
+        for s in refresh_candidates:
+            if s and s not in seen_refresh:
+                seen_refresh.add(s)
+                refresh_symbols.append(s)
+            if len(refresh_symbols) >= symbols_per_run:
+                break
+        # Guarantee tradier-chain symbols are refreshed each run, then trim (non-yieldboost only).
         for s in sorted(tradier_chain_symbols):
             if s in all_symbols and s not in seen_refresh:
                 refresh_symbols.insert(0, s)
@@ -1443,6 +1482,7 @@ def build_polygon_options_cache(
         "yieldboost_sleeves_only": bool(yieldboost_targeted and not underlying_refresh),
         "yieldboost_underlyings_refreshed": underlying_refresh,
         "yieldboost_underlyings_skipped_fresh": underlying_skipped_fresh,
+        "yieldboost_refresh_order_head": refresh_symbols[:8] if yieldboost_targeted else [],
         "yieldboost_target_sleeves": sorted(target_strikes_by_sleeve.keys()),
         "shard_interval_minutes": int(shard_interval_minutes),
         "polygon_request_limits": {
@@ -2370,6 +2410,36 @@ def build_polygon_options_cache(
             out["yieldboost_chain_mid_backfill"] = int(filled)
             print(f"  YieldBOOST chain mid backfill: {filled} held legs from last/close/prevclose")
 
+    def _prefetch_yieldboost_underlying_chains() -> None:
+        """Refresh underlying option chains before sleeves consume Tradier budget."""
+        underlying_set = set(underlying_refresh)
+        prefetched = 0
+        for sym in refresh_symbols:
+            nsym = norm_sym(sym)
+            if nsym not in underlying_set or nsym in target_strikes_by_sleeve:
+                continue
+            tradier_spot = tradier_spot_map.get(sym)
+            tradier_rows, spot_val, chain_err = _fetch_tradier_chain(
+                sym, tradier_spot, phase="chain",
+            )
+            if tradier_rows:
+                _set_symbol_entry(
+                    sym,
+                    spot_val if spot_val is not None else tradier_spot,
+                    tradier_rows,
+                    "tradier_underlying_chain",
+                )
+                prefetched += 1
+            elif chain_err:
+                out.setdefault("errors_by_symbol", {})
+                out["errors_by_symbol"][sym] = f"tradier_underlying: {chain_err}"
+        out["yieldboost_underlyings_prefetched"] = int(prefetched)
+        if prefetched:
+            print(
+                f"  YieldBOOST underlying chains prefetched: {prefetched} / "
+                f"{len(underlying_refresh)} (before sleeves)"
+            )
+
     def _prefetch_yieldboost_sleeve_chains() -> None:
         """Fetch Tradier chains for all YB sleeves before OCC quotes.
 
@@ -2433,6 +2503,7 @@ def build_polygon_options_cache(
 
     if yieldboost_targeted and TRADIER_TOKEN:
         tradier_budget["phase"] = "chain"
+        _prefetch_yieldboost_underlying_chains()
         _prefetch_yieldboost_sleeve_chains()
         tradier_budget["phase"] = "held"
         _supplement_yieldboost_occ_quotes(force_all_front=True)
@@ -2453,8 +2524,11 @@ def build_polygon_options_cache(
             nsym = norm_sym(sym)
             held_exp = sorted(str(e) for e in held_expiries_by_sleeve.get(nsym, set()))
             prior_payload = out["symbols"].get(sym) if isinstance(out["symbols"].get(sym), dict) else None
+            # Sleeves are prefetched above; skip re-fetch. Underlyings must not skip on
+            # stale cache — that was leaving AMD/SOXX quotes days old despite refresh list.
             if (
                 yieldboost_targeted
+                and nsym in target_strikes_by_sleeve
                 and prior_payload
                 and (prior_payload.get("options") or [])
             ):
