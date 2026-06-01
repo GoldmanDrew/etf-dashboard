@@ -34,6 +34,30 @@ def _age_minutes(ts: str | None, now: datetime) -> int | None:
     return max(0, int((now - dt).total_seconds() // 60))
 
 
+def _load_monitored_options_symbols() -> set[str]:
+    try:
+        from build_data import load_monitored_options_symbols
+
+        return load_monitored_options_symbols()
+    except Exception:
+        return set()
+
+
+def _freshness_enforced_options_symbols(cache: dict) -> set[str]:
+    """Symbols whose quote age can fail diagnostics (last refresh batch + YB underlyings)."""
+    enforced: set[str] = set()
+    for key in ("refresh_symbols",):
+        val = cache.get(key)
+        if isinstance(val, list):
+            enforced.update(str(s).upper() for s in val if s)
+    und_refreshed = cache.get("yieldboost_underlyings_refreshed") or []
+    enforced.update(str(u).upper() for u in und_refreshed if u)
+    if not enforced:
+        head = cache.get("yieldboost_refresh_order_head") or []
+        enforced.update(str(s).upper() for s in head if s)
+    return enforced
+
+
 def _check_options(cache: dict, *, max_underlying_hours: float) -> tuple[dict, list[str]]:
     violations: list[str] = []
     now = datetime.now(UTC)
@@ -50,15 +74,25 @@ def _check_options(cache: dict, *, max_underlying_hours: float) -> tuple[dict, l
             f"only {prefetched}/{len(und_refreshed)} YB underlyings prefetched this run"
         )
 
+    monitored = _load_monitored_options_symbols()
+    enforced = _freshness_enforced_options_symbols(cache)
+    if not enforced and und_refreshed:
+        enforced = {str(u).upper() for u in und_refreshed}
+
     und_ages: list[tuple[str, int]] = []
+    enforced_ages: list[tuple[str, int]] = []
     for sym, payload in symbols.items():
         if not isinstance(payload, dict):
             continue
         ts = payload.get("updated_at")
         age = _age_minutes(str(ts) if ts else None, now)
         if age is not None:
-            und_ages.append((str(sym).upper(), age))
+            sym_u = str(sym).upper()
+            und_ages.append((sym_u, age))
+            if not enforced or sym_u in enforced:
+                enforced_ages.append((sym_u, age))
     und_ages.sort(key=lambda x: x[1], reverse=True)
+    enforced_ages.sort(key=lambda x: x[1], reverse=True)
 
     und_set = {str(u).upper() for u in und_refreshed}
     if und_set:
@@ -71,11 +105,20 @@ def _check_options(cache: dict, *, max_underlying_hours: float) -> tuple[dict, l
                     f"(limit {max_underlying_hours:.0f}h)"
                 )
 
-    worst_sym, worst_age = und_ages[0] if und_ages else (None, None)
+    scope_ages = enforced_ages if enforced_ages else und_ages
+    worst_sym, worst_age = scope_ages[0] if scope_ages else (None, None)
     if worst_age is not None and worst_age > max_underlying_min:
+        scope_label = "enforced" if enforced else "symbol"
         violations.append(
-            f"oldest symbol cache {worst_sym} is {worst_age // 60}h old (limit {max_underlying_hours:.0f}h)"
+            f"oldest {scope_label} cache {worst_sym} is {worst_age // 60}h old "
+            f"(limit {max_underlying_hours:.0f}h)"
         )
+
+    cached_monitored = {str(s).upper() for s in symbols if str(s).upper() in monitored} if monitored else set()
+    missing_monitored = sorted(monitored - cached_monitored) if monitored else []
+    stale_enforced = [
+        s for s, a in enforced_ages if a > max_underlying_min
+    ]
 
     return {
         "build_time": cache.get("build_time"),
@@ -85,8 +128,16 @@ def _check_options(cache: dict, *, max_underlying_hours: float) -> tuple[dict, l
         "yieldboost_underlyings_prefetched_count": prefetched,
         "yieldboost_underlyings_skipped_fresh_count": len(cache.get("yieldboost_underlyings_skipped_fresh") or []),
         "yieldboost_refresh_order_head": cache.get("yieldboost_refresh_order_head"),
+        "monitored_symbols_count": len(monitored),
+        "freshness_enforced_count": len(enforced),
+        "cached_monitored_count": len(cached_monitored),
+        "missing_monitored_symbols": missing_monitored[:20],
+        "stale_enforced_symbols": stale_enforced[:20],
+        "pruned_unmonitored_count": cache.get("pruned_unmonitored_count"),
         "oldest_symbol": worst_sym,
         "oldest_symbol_age_minutes": worst_age,
+        "oldest_enforced_symbol": worst_sym if enforced_ages else None,
+        "oldest_enforced_symbol_age_minutes": worst_age if enforced_ages else None,
     }, violations
 
 

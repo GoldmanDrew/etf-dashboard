@@ -1478,6 +1478,7 @@ def build_polygon_options_cache(
         "forced_symbols": get_polygon_force_symbols(),
         "tradier_chain_symbols": sorted(tradier_chain_symbols),
         "refresh_symbols_count": int(len(refresh_symbols)),
+        "refresh_symbols": [norm_sym(s) for s in refresh_symbols],
         "yieldboost_targeted": bool(yieldboost_targeted),
         "yieldboost_sleeves_only": bool(yieldboost_targeted and not underlying_refresh),
         "yieldboost_underlyings_refreshed": underlying_refresh,
@@ -2914,6 +2915,7 @@ def build_polygon_options_cache(
         out.pop("errors", None)
     if not out["errors_by_symbol"]:
         out.pop("errors_by_symbol", None)
+    prune_unmonitored_options_cache(out)
     if out["symbols_count"] == 0 and isinstance(prior_cache, dict):
         prior_symbols = prior_cache.get("symbols")
         if isinstance(prior_symbols, dict) and prior_symbols:
@@ -2993,6 +2995,99 @@ def select_symbols_for_polygon_cache(records: list[dict]) -> list[str]:
             return ordered
 
     return ordered
+
+
+def _records_from_screener_csv(csv_path: Path) -> list[dict]:
+    """Minimal dashboard-style records from the local screener CSV."""
+    if not csv_path.exists():
+        return []
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception:
+        return []
+    if "ETF" not in df.columns:
+        return []
+    out: list[dict] = []
+    for _, row in df.iterrows():
+        sym = norm_sym(row.get("ETF"))
+        und = norm_sym(row.get("Underlying"))
+        if not sym:
+            continue
+        out.append({
+            "symbol": sym,
+            "underlying": und,
+            "bucket": "bucket_3_inverse",
+        })
+    return out
+
+
+def load_records_for_options_monitoring() -> list[dict]:
+    """Records used to define the monitored options-cache universe."""
+    if OUTPUT_FILE.exists():
+        try:
+            payload = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
+            recs = payload.get("records")
+            if isinstance(recs, list) and recs:
+                return [r for r in recs if isinstance(r, dict)]
+        except Exception:
+            pass
+    return _records_from_screener_csv(OUTPUT_DIR / "etf_screened_today.csv")
+
+
+def load_monitored_options_symbols(records: list[dict] | None = None) -> set[str]:
+    """Universe + YieldBOOST symbols whose options cache freshness we enforce."""
+    if records is None:
+        records = load_records_for_options_monitoring()
+    monitored: set[str] = set()
+    if OPTIONS_INCLUDE_YIELDBOOST:
+        monitored.update(load_yieldboost_option_symbols())
+
+    b3_symbols: set[str] = set()
+    b3_underlyings: set[str] = set()
+    for rec in records:
+        if OPTIONS_ONLY_BUCKET3 and str(rec.get("bucket")) != "bucket_3_inverse":
+            continue
+        s = norm_sym(rec.get("symbol"))
+        u = norm_sym(rec.get("underlying"))
+        if s:
+            b3_symbols.add(s)
+        if OPTIONS_INCLUDE_BUCKET3_UNDERLYING and u:
+            b3_underlyings.add(u)
+
+    peer_symbols: set[str] = set()
+    if OPTIONS_INCLUDE_UNDERLYING_PEERS and b3_underlyings:
+        for rec in records:
+            u = norm_sym(rec.get("underlying"))
+            s = norm_sym(rec.get("symbol"))
+            if u in b3_underlyings and s:
+                peer_symbols.add(s)
+
+    for s in get_polygon_force_symbols():
+        ss = norm_sym(s)
+        if not OPTIONS_ONLY_BUCKET3 or ss in b3_symbols or ss in b3_underlyings or ss in peer_symbols:
+            monitored.add(ss)
+    monitored.update(b3_symbols)
+    monitored.update(b3_underlyings)
+    monitored.update(peer_symbols)
+    return {s for s in monitored if s}
+
+
+def prune_unmonitored_options_cache(out: dict, monitored: set[str] | None = None) -> int:
+    """Drop stale out-of-universe symbols so diagnostics are not dominated by orphans."""
+    if monitored is None:
+        monitored = load_monitored_options_symbols()
+    sym_map = out.get("symbols")
+    if not isinstance(sym_map, dict) or not monitored:
+        return 0
+    drop = [s for s in sym_map if norm_sym(s) not in monitored]
+    for s in drop:
+        del sym_map[s]
+    if drop:
+        out["pruned_unmonitored_symbols"] = sorted({norm_sym(s) for s in drop})[:50]
+        out["pruned_unmonitored_count"] = int(len(drop))
+    out["symbols_count"] = len(sym_map)
+    out["monitored_symbols_count"] = int(len(monitored))
+    return len(drop)
 
 
 def get_polygon_force_symbols() -> list[str]:

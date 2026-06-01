@@ -1383,7 +1383,7 @@
 <script src="assets/trade_lab.js?v=tl-v2"></script>
 <script src="assets/pair_backtest.js?v=pb-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
-<script src="assets/vrp_ui.js?v=vrp-ui-1"></script>
+<script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
 <script type="text/babel">
@@ -1405,6 +1405,7 @@ const LETF_INTRADAY_METRICS_URL = "data/letf_intraday_flow_metrics.json";
 const VOL_SHAPE_HISTORY_URL = "data/vol_shape_history.json";
 const VRP_LIVE_URL = "data/vrp_live.json";
 const VRP_HEALTH_URL = "data/vrp_health.json";
+const FRESHNESS_SUMMARY_URL = "data/freshness_summary.json";
 const VRP_FIELD_DICT_URL = "data/vrp_field_dictionary.json";
 const YIELDBOOST_PUT_SPREADS_URL = "data/yieldboost_put_spreads_latest.json";
 /** @type {{ symbols: Record<string, { series: object[], vcrMedian: number|null, window: number }>, buildTime: string|null }|null} */
@@ -1996,6 +1997,7 @@ async function loadLetfRebalanceFlowsCache() {
     latestDate: latestPayload?.latest_date || null,
     buildTime: latestPayload?.build_time || dailyPayload?.build_time || null,
     method: latestPayload?.method || null,
+    flowStaleSummary: latestPayload?.flow_stale_summary || null,
   };
   return LETF_REBALANCE_FLOWS_CACHE;
 }
@@ -5105,8 +5107,24 @@ function LetfIntradayConvergenceChart({ series, underlying, latestRealized, late
   );
 }
 
-function VrpFreshnessBar({ mode, data, vrpHealth, row, compact = false }) {
+function VrpFreshnessBar({ mode, data, vrpHealth, freshnessSummary, row, compact = false }) {
   if (mode === 'fleet') {
+    if (freshnessSummary && VrpUi.domainFreshnessPills) {
+      const pills = VrpUi.domainFreshnessPills(freshnessSummary, data, vrpHealth);
+      return (
+        <span className="fresh-badge-row" style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {['options', 'metrics', 'flow'].map((key) => {
+            const p = pills[key];
+            if (!p) return null;
+            return (
+              <span key={key} className={cls('fresh-badge', p.className)} title={p.detail || ''}>
+                {p.label}
+              </span>
+            );
+          })}
+        </span>
+      );
+    }
     const f = VrpUi.fleetFreshness(data, vrpHealth);
     return (
       <span className={cls('fresh-badge', f.className)} title={f.detail || ''}>
@@ -9509,6 +9527,7 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
   const buildTime = mode === 'intraday'
     ? (intradayPayload?.buildTime || null)
     : (payload?.buildTime || null);
+  const flowStaleSummary = payload?.flowStaleSummary || null;
   const method = mode === 'intraday'
     ? (intradayPayload?.method || 'L × (L − 1) × prior-close AUM × return so far')
     : (payload?.method || null);
@@ -9673,7 +9692,15 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
         Mechanical issuer hedge into the close: <code>{method || 'L × (L − 1) × prior-close AUM × underlying return'}</code>.
         {mode === 'intraday'
           ? <> Snapshot {latestDate ? fmtTime(latestDate) : '—'}{intradayPayload?.minutesToClose != null ? ` · ${intradayPayload.minutesToClose}m to close` : ''}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}.</>
-          : <> Latest aggregate {latestDate || '—'}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}{mode === 'eod' ? <> · {fmtNum(headline.latestEodCount)}/{fmtNum(headline.total)} on latest session</> : null}.</>}
+          : <> Latest aggregate {latestDate || '—'}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}{mode === 'eod' ? <> · {fmtNum(headline.latestEodCount)}/{fmtNum(headline.total)} on latest session</> : null}
+            {mode === 'eod' && flowStaleSummary ? (
+              <> · {Number(flowStaleSummary.underlyings_actionable_stale || 0) > 0
+                ? <span className="val-negative">{fmtNum(flowStaleSummary.underlyings_actionable_stale)} actionable stale</span>
+                : (Number(flowStaleSummary.underlyings_stale || 0) > 0
+                  ? <span className="val-warning">{fmtNum(flowStaleSummary.underlyings_stale)} T+1 lag</span>
+                  : 'all current')}
+              </>
+            ) : null}.</>}
         {mode === 'intraday' && intradayError ? <> · <span className="val-negative">{intradayError}</span></> : null}
         {mode === 'intraday' && intradayPayload?.spotSources ? (
           <> · spots: polygon {fmtNum(intradayPayload.spotSources.polygon_snapshot)} · cache {fmtNum(intradayPayload.spotSources.options_cache)} · yf {fmtNum(intradayPayload.spotSources.yfinance_fast_info)}</>
@@ -9829,6 +9856,9 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
           <tbody>
             {filtered.slice(0, 500).map((row) => {
               const stale = row.is_latest_global === false || (mode === 'intraday' && row.spot_stale === true);
+              const staleReason = row.aggregate_stale_reason
+                ? (VrpUi.flowStaleReasonLabel ? VrpUi.flowStaleReasonLabel(row.aggregate_stale_reason) : row.aggregate_stale_reason)
+                : null;
               const top = (row.top_contributors || [])[0] || null;
               const topDollars = mode === 'intraday' ? top?.estimated_close_rebalance_dollars : top?.rebalance_signed_dollars;
               const dateLabel = mode === 'intraday'
@@ -9840,7 +9870,9 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
                 <tr key={row.underlying} style={stale ? { opacity: 0.7 } : undefined}>
                   <td>
                     <strong>{row.underlying}</strong>
-                    {stale ? <span className="cs-sub" style={{ marginLeft: 6 }}>· stale</span> : null}
+                    {stale && staleReason ? (
+                      <span className="cs-sub" style={{ marginLeft: 6 }} title={row.aggregate_stale_reason || ''}>· {staleReason}</span>
+                    ) : (stale ? <span className="cs-sub" style={{ marginLeft: 6 }}>· stale</span> : null)}
                   </td>
                   <td>{dateLabel}</td>
                   <td
@@ -9958,6 +9990,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   // can show the worst-of clock (build_time, options refresh, holdings_as_of,
   // worst per-row sleeve/underlying quote age) rather than just build_time.
   const [vrpHealth, setVrpHealth] = useState(null);
+  const [freshnessSummary, setFreshnessSummary] = useState(null);
   const [vrpFieldDict, setVrpFieldDict] = useState(null);
 
   useEffect(() => {
@@ -9967,6 +10000,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       fetch(`${VRP_HEALTH_URL}${cacheBust}`, { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null))
         .then((p) => { if (!cancelled && p) setVrpHealth(p); })
+        .catch(() => { /* best-effort */ });
+      fetch(`${FRESHNESS_SUMMARY_URL}${cacheBust}`, { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((p) => { if (!cancelled && p) setFreshnessSummary(p); })
         .catch(() => { /* best-effort */ });
     };
     refetchHealth();
@@ -10316,7 +10353,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <div className="topbar-meta">
             <span className={cls('dot', data.ibkr_ftp_success ? 'dot-green' : 'dot-amber')} />
             {data.ibkr_ftp_success ? 'IBKR Live' : 'CSV Data'}
-            <VrpFreshnessBar mode="fleet" data={data} vrpHealth={vrpHealth} />
+            <VrpFreshnessBar mode="fleet" data={data} vrpHealth={vrpHealth} freshnessSummary={freshnessSummary} />
             <span style={{ margin: '0 4px' }}>·</span>
             <span title={data.build_time ? `UTC: ${data.build_time}` : ''}>Built {fmtTime(data.build_time)}</span>
             {data.last_commit && <>

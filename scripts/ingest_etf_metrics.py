@@ -222,6 +222,85 @@ def repair_shares_vs_aum_nav(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return out, n_bad
 
 
+def repair_nav_only_partial_aum(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Fill AUM/shares on partial rows that only have NAV using Yahoo fallback."""
+    if df.empty:
+        return df, 0
+    out = df.copy()
+    nav = pd.to_numeric(out.get("nav"), errors="coerce")
+    aum = pd.to_numeric(out.get("aum"), errors="coerce")
+    shares = pd.to_numeric(out.get("shares_outstanding"), errors="coerce")
+    partial = out["status"].astype(str) == "partial"
+    needs = partial & nav.notna() & (nav > 0) & (~aum.notna() | (aum <= 0))
+    if not needs.any():
+        return out, 0
+
+    from etf_providers import YFinanceProvider
+
+    yf = YFinanceProvider()
+    if not yf._enabled:
+        return out, 0
+
+    n_repaired = 0
+    for idx in out.index[needs]:
+        ticker = str(out.at[idx, "ticker"]).upper()
+        d = pd.to_datetime(out.at[idx, "date"]).date()
+        res = yf.fetch_for_date(ticker, d)
+        updated = False
+        if res.aum is not None and float(res.aum) > 0:
+            out.at[idx, "aum"] = float(res.aum)
+            updated = True
+        if res.shares_outstanding is not None and float(res.shares_outstanding) > 0:
+            out.at[idx, "shares_outstanding"] = float(res.shares_outstanding)
+            updated = True
+        if updated:
+            nav_v = pd.to_numeric(out.at[idx, "nav"], errors="coerce")
+            aum_v = pd.to_numeric(out.at[idx, "aum"], errors="coerce")
+            sh_v = pd.to_numeric(out.at[idx, "shares_outstanding"], errors="coerce")
+            if (pd.isna(aum_v) or float(aum_v) <= 0) and pd.notna(nav_v) and pd.notna(sh_v):
+                if float(nav_v) > 0 and float(sh_v) > 0:
+                    out.at[idx, "aum"] = float(nav_v) * float(sh_v)
+            n_repaired += 1
+
+    if n_repaired:
+        out = enforce_status_consistency(out)
+    return out, n_repaired
+
+
+def prune_expired_carry_forward_rows(
+    df: pd.DataFrame,
+    *,
+    max_stale_bdays: int = 3,
+) -> tuple[pd.DataFrame, int]:
+    """Downgrade carry-forward rows whose age exceeds the stale budget."""
+    if df.empty or max_stale_bdays <= 0:
+        return df, 0
+    out = ensure_stale_kind_column(df.copy())
+    kind = out.get("stale_kind", pd.Series(dtype=object)).astype(str).str.lower()
+    provider = out.get("source_provider", pd.Series(dtype=object)).astype(str).str.lower()
+    is_cf = (kind == "carry_forward") | provider.eq("carry_forward")
+    if not is_cf.any():
+        return out, 0
+    age = pd.to_numeric(out.get("stale_age_bdays"), errors="coerce")
+    expired = is_cf & age.notna() & (age > max_stale_bdays)
+    n = int(expired.sum())
+    if not n:
+        return out, 0
+    for col in (
+        "nav", "aum", "shares_outstanding", "close_price",
+        "etf_adj_close", "shares_traded", "underlying_adj_close",
+    ):
+        if col in out.columns:
+            out.loc[expired, col] = None
+    out.loc[expired, "status"] = "missing"
+    out.loc[expired, "stale"] = False
+    out.loc[expired, "stale_age_bdays"] = None
+    out.loc[expired, "stale_kind"] = None
+    out.loc[expired, "source_provider"] = None
+    out.loc[expired, "source_url"] = None
+    return out, n
+
+
 def _load_split_price_mult_hints_json(path: Path | None) -> dict[str, dict[date, float]]:
     """Map (ticker, calendar date) -> ``shares_prev / shares_curr`` on the ex-date row.
 
@@ -1579,6 +1658,7 @@ def save_outputs(df: pd.DataFrame) -> None:
         "latest_missing": int((latest_status == "missing").sum()) if not latest.empty else 0,
         "latest_stale_ok": int(latest_stale_series.sum()) if not latest.empty else 0,
         "latest_stale_by_kind": stale_by_kind,
+        "latest_session_extend": int(stale_by_kind.get("issuer_session_extend", 0)),
         "flow_blockers_prior_stale": int(flow_blockers),
         "latest_provider_counts": (
             latest_provider.value_counts(dropna=False).astype(int).to_dict() if not latest.empty else {}
@@ -1991,6 +2071,9 @@ def main() -> None:
     merged, n_vol_bf = backfill_shares_traded_gaps(merged)
     if n_vol_bf:
         LOGGER.info("Backfilled Yahoo shares_traded on %d historical row(s)", n_vol_bf)
+    merged, n_nav_partial = repair_nav_only_partial_aum(merged)
+    if n_nav_partial:
+        LOGGER.info("Repaired nav-only partial AUM on %d row(s) via Yahoo fallback", n_nav_partial)
     session_extend_bdays = int(os.getenv("ETF_METRICS_SESSION_EXTEND_BDAYS", "2"))
     merged = extend_metrics_session_coverage(
         merged,
@@ -1998,6 +2081,16 @@ def main() -> None:
         tickers=tickers,
         max_lag_bdays=session_extend_bdays,
     )
+    merged, n_cf_pruned = prune_expired_carry_forward_rows(
+        merged,
+        max_stale_bdays=max_stale_business_days,
+    )
+    if n_cf_pruned:
+        LOGGER.info(
+            "Pruned %d expired carry-forward row(s) older than %d business days",
+            n_cf_pruned,
+            max_stale_business_days,
+        )
     validate_df(merged)
     save_outputs(merged)
     LOGGER.info("Saved merged summary: %s", get_summary(merged))

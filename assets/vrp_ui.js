@@ -185,6 +185,68 @@
     return { label: 'Fresh (' + minutes + 'm old, ' + labelKind + ')', className: 'fresh-good', detail: 'bottleneck=' + labelKind };
   }
 
+  function flowStaleReasonLabel(reason) {
+    const r = String(reason || '').toLowerCase();
+    if (r === 'issuer_publish_lag') return 'T+1 lag';
+    if (r === 'session_lag') return 'session lag';
+    if (r === 'missing_metrics') return 'missing metrics';
+    if (r === 'quality_excluded') return 'excluded';
+    if (r === 'current_session') return 'current';
+    return reason || 'stale';
+  }
+
+  function _freshPill(label, detail, tone) {
+    const className = tone === 'good' ? 'fresh-good' : tone === 'warn' ? 'fresh-warn' : 'fresh-bad';
+    return { label: label, className: className, detail: detail || '', tone: tone };
+  }
+
+  function domainFreshnessPills(freshnessSummary, data, vrpHealth) {
+    const opts = (freshnessSummary && freshnessSummary.options) || {};
+    const met = (freshnessSummary && freshnessSummary.metrics) || {};
+    const flow = (freshnessSummary && freshnessSummary.flow) || {};
+    const maxH = Number(freshnessSummary?.thresholds?.max_underlying_hours) || 48;
+    const maxMin = maxH * 60;
+    const warnAt = Math.max(24 * 60, maxMin * 0.5);
+    const staleAt = maxMin;
+
+    const optAge = Number.isFinite(Number(opts.oldest_enforced_symbol_age_minutes))
+      ? Number(opts.oldest_enforced_symbol_age_minutes)
+      : (Number.isFinite(Number(opts.oldest_symbol_age_minutes)) ? Number(opts.oldest_symbol_age_minutes) : null);
+    let optionsTone = 'good';
+    if (optAge != null && optAge >= staleAt) optionsTone = 'bad';
+    else if (optAge != null && optAge >= warnAt) optionsTone = 'warn';
+    const optLabel = optAge == null
+      ? 'Options: —'
+      : (optAge >= 24 * 60
+        ? 'Options: ' + Math.round(optAge / 60) + 'h'
+        : 'Options: ' + optAge + 'm');
+    const options = _freshPill(optLabel, opts.oldest_enforced_symbol || opts.oldest_symbol || '', optionsTone);
+
+    const blockers = Number(met.flow_blockers_prior_stale) || 0;
+    const staleOk = Number(met.latest_stale_ok) || 0;
+    const partial = Number(met.latest_missing) || 0;
+    let metricsTone = 'good';
+    if (blockers > 0) metricsTone = 'bad';
+    else if (staleOk > 0 || partial > 0) metricsTone = 'warn';
+    const metrics = _freshPill(
+      blockers > 0 ? ('Metrics: ' + blockers + ' blockers') : ('Metrics: ' + (Number(met.latest_ok) || 0) + ' ok'),
+      met.latest_date || '',
+      metricsTone,
+    );
+
+    const actionable = Number(flow.underlyings_actionable_stale) || 0;
+    const issuerLag = Number(flow.underlyings_issuer_publish_lag) || 0;
+    let flowTone = 'good';
+    if (actionable > 0) flowTone = 'bad';
+    else if (issuerLag > 0) flowTone = 'warn';
+    const flowLabel = actionable > 0
+      ? ('Flow: ' + actionable + ' stale')
+      : (issuerLag > 0 ? ('Flow: ' + issuerLag + ' T+1') : 'Flow: ok');
+    const flowPill = _freshPill(flowLabel, flow.latest_date || '', flowTone);
+
+    return { options: options, metrics: metrics, flow: flowPill };
+  }
+
   const exported = {
     SIGNAL_THRESHOLDS,
     fmtEdgePp,
@@ -196,6 +258,8 @@
     hintFor,
     rowFreshness,
     fleetFreshness,
+    flowStaleReasonLabel,
+    domainFreshnessPills,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
