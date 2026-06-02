@@ -47,14 +47,7 @@ import numpy as np
 import pandas as pd
 
 # Split price multipliers for ``repair_close_price_split_basis_mismatch``.
-# Mirrors ls-algo ``splits._SPLIT_RATIOS`` (this repo does not vendor ``splits.py``).
-_INTEGER_SPLIT_FACTORS: tuple[int, ...] = (2, 3, 4, 5, 10, 15, 20, 25, 50)
-_SPLIT_RATIOS: tuple[float, ...] = tuple(
-    sorted(
-        set(list(_INTEGER_SPLIT_FACTORS) + [1.0 / f for f in _INTEGER_SPLIT_FACTORS]),
-        reverse=True,
-    )
-)
+from split_adjustments import SPLIT_RATIOS as _SPLIT_RATIOS, load_split_hints_from_corporate_actions
 
 from etf_providers import (
     ProviderResult,
@@ -302,40 +295,8 @@ def prune_expired_carry_forward_rows(
 
 
 def _load_split_price_mult_hints_json(path: Path | None) -> dict[str, dict[date, float]]:
-    """Map (ticker, calendar date) -> ``shares_prev / shares_curr`` on the ex-date row.
-
-    ``data/corporate_actions.json`` uses Polygon-style ``ratio_from`` / ``ratio_to`` where
-    ``ratio_from / ratio_to`` matches the per-share price rescale (and share-count step)
-    for both reverse and forward splits. Execution dates are expanded by ±1 calendar day
-    so rows stamped one day off the reference feed still pick up the hint.
-    """
-    out: dict[str, dict[date, float]] = {}
-    p = path or (DATA_DIR / "corporate_actions.json")
-    if not p.exists():
-        return out
-    try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return out
-    for ev in payload.get("events") or []:
-        if str(ev.get("type") or "") not in {"reverse_split", "forward_split"}:
-            continue
-        ticker = str(ev.get("ticker") or "").strip().upper()
-        ed = ev.get("execution_date")
-        rf, rt = ev.get("ratio_from"), ev.get("ratio_to")
-        if not ticker or not ed or rf is None or rt is None:
-            continue
-        try:
-            d0 = date.fromisoformat(str(ed)[:10])
-            mult = float(rf) / float(rt)
-        except (ValueError, TypeError, ZeroDivisionError):
-            continue
-        if mult <= 0:
-            continue
-        for delta in (-1, 0, 1):
-            d1 = d0 + timedelta(days=delta)
-            out.setdefault(ticker, {})[d1] = mult
-    return out
+    """Map (ticker, calendar date) -> price mult; delegates to ``split_adjustments``."""
+    return load_split_hints_from_corporate_actions(path)
 
 
 def _nearest_split_price_mult_from_shares(sh_prev: float, sh_curr: float, *, rel_tol: float = 0.075) -> float | None:

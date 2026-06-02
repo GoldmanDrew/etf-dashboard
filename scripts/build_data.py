@@ -30,6 +30,13 @@ import pandas as pd
 import requests
 
 from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_metrics
+from split_adjustments import (
+    apply_split_adjustments_to_points,
+    cum_split_factor,
+    load_split_hints_from_corporate_actions,
+    merge_split_events,
+    parse_yahoo_split_events,
+)
 from income_schedule import (
     DEFAULT_CROSS_FUND_RATIO,
     DEFAULT_EXPENSE_RATIO_ANNUAL,
@@ -3402,9 +3409,36 @@ def _scope_series_window(
     return scoped if scoped else points[-2:]
 
 
+def _manual_split_events(symbol: str) -> list[tuple[dt.date, float]]:
+    sym = norm_sym(symbol)
+    raw_ov = _MANUAL_SPLIT_OVERRIDES.get(sym)
+    if not raw_ov:
+        return []
+    try:
+        return sorted((dt.date.fromisoformat(ds), float(m)) for ds, m in raw_ov.items())
+    except (TypeError, ValueError):
+        return []
+
+
+def _symbol_split_events(
+    symbol: str,
+    yahoo_splits: list[tuple[dt.date, float]],
+    corp_hints: dict[str, dict[dt.date, float]],
+) -> list[tuple[dt.date, float]]:
+    sym = norm_sym(symbol)
+    return merge_split_events(
+        yahoo_splits,
+        _manual_split_events(sym),
+        hints=corp_hints.get(sym),
+    )
+
+
 def _build_market_windows(
     points: list[tuple[dt.date, float, float]],
     dividends: list[tuple[dt.date, float]],
+    *,
+    split_events: list[tuple[dt.date, float]] | None = None,
+    asof_calendar: dt.date | None = None,
 ) -> dict:
     """
     Build per-window stats from (date, close, adj_close) plus dividends.
@@ -3415,6 +3449,8 @@ def _build_market_windows(
 
     points = sorted(points, key=lambda x: x[0])
     dividends = sorted(dividends, key=lambda x: x[0])
+    split_events = split_events or []
+    asof_calendar = asof_calendar or points[-1][0]
     results: dict[str, dict] = {}
 
     for window in VOL_WINDOWS:
@@ -3437,12 +3473,16 @@ def _build_market_windows(
                 continue
             total_dividends += float(amount)
 
+        split_factor_start_to_end = cum_split_factor(start_date, end_date, split_events)
+        split_factor_end_to_asof = cum_split_factor(end_date, asof_calendar, split_events)
+        start_close_on_end_basis = start_close * split_factor_start_to_end
+
         price_return = None
         adj_return = None
         dividend_yield = None
-        if start_close > 0:
-            price_return = (end_close / start_close) - 1.0
-            dividend_yield = total_dividends / start_close
+        if start_close_on_end_basis > 0:
+            price_return = (end_close / start_close_on_end_basis) - 1.0
+            dividend_yield = total_dividends / start_close_on_end_basis
         if start_adj > 0:
             adj_return = (end_adj / start_adj) - 1.0
 
@@ -3461,6 +3501,10 @@ def _build_market_windows(
             "end_close": round(float(end_close), 6),
             "start_adj_close": round(float(start_adj), 6),
             "end_adj_close": round(float(end_adj), 6),
+            "start_close_on_end_basis": round(float(start_close_on_end_basis), 6),
+            "split_factor_start_to_end": round(float(split_factor_start_to_end), 6),
+            "split_factor_end_to_asof": round(float(split_factor_end_to_asof), 6),
+            "price_basis": "split_adjusted_end",
             "total_dividends": round(float(total_dividends), 6),
             "dividend_yield": round(float(dividend_yield), 6) if dividend_yield is not None else None,
             "price_return": round(float(price_return), 6) if price_return is not None else None,
@@ -3468,32 +3512,6 @@ def _build_market_windows(
         }
 
     return results
-
-
-def _apply_manual_split_adjustments(
-    symbol: str,
-    points: list[tuple[dt.date, float, float]],
-) -> list[tuple[dt.date, float, float]]:
-    """Scale historical closes when Yahoo adj series is wrong (see _MANUAL_SPLIT_OVERRIDES)."""
-    sym = norm_sym(symbol)
-    raw_ov = _MANUAL_SPLIT_OVERRIDES.get(sym)
-    if not raw_ov or not points:
-        return points
-    try:
-        lines = sorted((dt.date.fromisoformat(ds), float(m)) for ds, m in raw_ov.items())
-    except (TypeError, ValueError):
-        return points
-    out: list[tuple[dt.date, float, float]] = []
-    for d, px_close, px_adj in points:
-        mult = 1.0
-        for eff, m in lines:
-            if d < eff:
-                mult *= m
-        if mult != 1.0:
-            out.append((d, float(px_close * mult), float(px_adj * mult)))
-        else:
-            out.append((d, px_close, px_adj))
-    return out
 
 
 def _fetch_yahoo_symbol_series(
@@ -3514,7 +3532,7 @@ def _fetch_yahoo_symbol_series(
             payload = resp.json()
             result = payload.get("chart", {}).get("result", [None])[0]
             if not result:
-                return {"points": [], "dividends": []}
+                return {"points": [], "dividends": [], "yahoo_splits": []}
 
             timestamps = result.get("timestamp") or []
             close_values = (result.get("indicators", {}).get("quote", [{}])[0].get("close")) or []
@@ -3563,14 +3581,15 @@ def _fetch_yahoo_symbol_series(
                         continue
                     dividends.append((ev_date, float(amt)))
 
-            points = _apply_manual_split_adjustments(symbol, points)
-            return {"points": points, "dividends": dividends}
+            split_map = (result.get("events") or {}).get("splits") or {}
+            yahoo_splits = parse_yahoo_split_events(split_map if isinstance(split_map, dict) else None)
+            return {"points": points, "dividends": dividends, "yahoo_splits": yahoo_splits}
         except Exception as e:
             last_err = e
             if attempt < REALIZED_VOL_RETRIES:
                 continue
     print(f"  Warning: Yahoo history fetch failed for {symbol}: {last_err}")
-    return {"points": [], "dividends": []}
+    return {"points": [], "dividends": [], "yahoo_splits": []}
 
 
 def compute_realized_vol_map(symbols: set[str]) -> dict[str, dict]:
@@ -3589,13 +3608,31 @@ def compute_realized_vol_map(symbols: set[str]) -> dict[str, dict]:
     )
     session = requests.Session()
     session.headers.update({"User-Agent": "etf-dashboard-builder/1.0"})
+    corp_hints = load_split_hints_from_corporate_actions()
+    asof_calendar = dt.date.today()
 
     ok = 0
     for i, sym in enumerate(clean_symbols, start=1):
         series = _fetch_yahoo_symbol_series(session, sym, range_value=REALIZED_VOL_RANGE)
         points = series.get("points") or []
         dividends = series.get("dividends") or []
-        windows = _build_market_windows(points, dividends) if points else {}
+        split_events = _symbol_split_events(
+            sym,
+            series.get("yahoo_splits") or [],
+            corp_hints,
+        )
+        if points and split_events:
+            points = apply_split_adjustments_to_points(points, split_events)
+        windows = (
+            _build_market_windows(
+                points,
+                dividends,
+                split_events=split_events,
+                asof_calendar=asof_calendar,
+            )
+            if points
+            else {}
+        )
         if windows:
             out[sym] = windows
             ok += 1
@@ -4381,6 +4418,18 @@ def build():
                 "underlying_start_close": und_w.get("start_close"),
                 "etf_end_close": etf_w.get("end_close"),
                 "underlying_end_close": und_w.get("end_close"),
+                "etf_start_adj_close": etf_w.get("start_adj_close"),
+                "underlying_start_adj_close": und_w.get("start_adj_close"),
+                "etf_end_adj_close": etf_w.get("end_adj_close"),
+                "underlying_end_adj_close": und_w.get("end_adj_close"),
+                "etf_start_close_on_end_basis": etf_w.get("start_close_on_end_basis"),
+                "underlying_start_close_on_end_basis": und_w.get("start_close_on_end_basis"),
+                "etf_split_factor_start_to_end": etf_w.get("split_factor_start_to_end"),
+                "underlying_split_factor_start_to_end": und_w.get("split_factor_start_to_end"),
+                "etf_split_factor_end_to_asof": etf_w.get("split_factor_end_to_asof"),
+                "underlying_split_factor_end_to_asof": und_w.get("split_factor_end_to_asof"),
+                "etf_price_basis": etf_w.get("price_basis"),
+                "underlying_price_basis": und_w.get("price_basis"),
                 "etf_start_date": etf_w.get("start_date"),
                 "etf_end_date": etf_w.get("end_date"),
                 "underlying_start_date": und_w.get("start_date"),

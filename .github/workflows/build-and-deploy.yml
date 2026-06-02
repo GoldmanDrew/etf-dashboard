@@ -63,6 +63,10 @@ jobs:
       - name: Pull latest main (metrics / corporate-actions commits)
         run: git pull --ff-only origin main
 
+      - name: Refresh corporate actions if stale
+        continue-on-error: true
+        run: python scripts/ensure_corporate_actions_fresh.py --max-age-hours 6
+
       # build_data.py is Polygon / Tradier quota-sensitive and can transiently
       # fail (rate-limit, API outages, upstream issuer feeds going 503 for an
       # hour, etc.).  Previously that failure cascaded into the Pages deploy

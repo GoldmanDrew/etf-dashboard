@@ -1379,6 +1379,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
+<script src="assets/chart_returns.js?v=cr-v1"></script>
 <script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v2"></script>
 <script src="assets/pair_backtest.js?v=pb-v7"></script>
@@ -5676,16 +5677,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const undAdjRet = Number(divPoint?.underlying_adj_return);
   const etfStartClose = Number(divPoint?.etf_start_close);
   const undStartClose = Number(divPoint?.underlying_start_close);
-  const etfLivePriceRet = (hasCachedSpotEtf && Number.isFinite(etfStartClose) && etfStartClose > 0)
-    ? (tradeSpotEtf / etfStartClose) - 1
-    : etfPriceRet;
-  const undLivePriceRet = (hasCachedSpotUnd && Number.isFinite(undStartClose) && undStartClose > 0)
-    ? (tradeSpotUnderlying / undStartClose) - 1
-    : undPriceRet;
-  const etfAdjRetDisplay = (Number.isFinite(etfLivePriceRet) && Number.isFinite(etfDivYield)) ? (etfLivePriceRet + etfDivYield) : etfAdjRet;
-  const undAdjRetDisplay = (Number.isFinite(undLivePriceRet) && Number.isFinite(undDivYield)) ? (undLivePriceRet + undDivYield) : undAdjRet;
-  const etfDivLift = (Number.isFinite(etfAdjRetDisplay) && Number.isFinite(etfLivePriceRet)) ? (etfAdjRetDisplay - etfLivePriceRet) : null;
-  const undDivLift = (Number.isFinite(undAdjRetDisplay) && Number.isFinite(undLivePriceRet)) ? (undAdjRetDisplay - undLivePriceRet) : null;
+  const etfEndClose = Number(divPoint?.etf_end_close);
+  const undEndClose = Number(divPoint?.underlying_end_close);
+  const etfSplitEndToAsof = Number(divPoint?.etf_split_factor_end_to_asof);
+  const undSplitEndToAsof = Number(divPoint?.underlying_split_factor_end_to_asof);
   const etfWindowDates = divPoint?.etf_start_date && divPoint?.etf_end_date ? `${divPoint.etf_start_date} to ${divPoint.etf_end_date}` : 'window unavailable';
   const undWindowDates = divPoint?.underlying_start_date && divPoint?.underlying_end_date ? `${divPoint.underlying_start_date} to ${divPoint.underlying_end_date}` : 'window unavailable';
   const scenarioFns = window.ScenarioReturns || {};
@@ -6190,6 +6185,73 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const optionsErrEtf = optionsCache?.errors_by_symbol?.[etfSym];
   const hasCachedSpotUnd = Number.isFinite(Number(optionsCache?.symbols?.[undSym]?.spot));
   const hasCachedSpotEtf = Number.isFinite(Number(optionsCache?.symbols?.[etfSym]?.spot));
+  const chartRetFns = window.ChartReturns || {};
+  const etfDivYieldAdj = Number.isFinite(etfDivYield)
+    ? etfDivYield
+    : (typeof chartRetFns.splitAdjustedDividendYield === 'function'
+      ? chartRetFns.splitAdjustedDividendYield(
+        etfDivTotal,
+        etfStartClose,
+        divPoint?.etf_split_factor_start_to_end,
+      )
+      : null);
+  const undDivYieldAdj = Number.isFinite(undDivYield)
+    ? undDivYield
+    : (typeof chartRetFns.splitAdjustedDividendYield === 'function'
+      ? chartRetFns.splitAdjustedDividendYield(
+        undDivTotal,
+        undStartClose,
+        divPoint?.underlying_split_factor_start_to_end,
+      )
+      : null);
+  const etfLivePriceRet = (hasCachedSpotEtf && Number.isFinite(etfEndClose) && etfEndClose > 0)
+    ? (typeof chartRetFns.livePriceReturnFromWindow === 'function'
+      ? chartRetFns.livePriceReturnFromWindow({
+        liveSpot: tradeSpotEtf,
+        endClose: etfEndClose,
+        priceReturn: etfPriceRet,
+        splitFactorEndToAsof: etfSplitEndToAsof,
+      })
+      : etfPriceRet)
+    : etfPriceRet;
+  const undLivePriceRet = (hasCachedSpotUnd && Number.isFinite(undEndClose) && undEndClose > 0)
+    ? (typeof chartRetFns.livePriceReturnFromWindow === 'function'
+      ? chartRetFns.livePriceReturnFromWindow({
+        liveSpot: tradeSpotUnderlying,
+        endClose: undEndClose,
+        priceReturn: undPriceRet,
+        splitFactorEndToAsof: undSplitEndToAsof,
+      })
+      : undPriceRet)
+    : undPriceRet;
+  const etfAdjRetDisplay = (hasCachedSpotEtf && typeof chartRetFns.liveAdjReturnFromWindow === 'function')
+    ? chartRetFns.liveAdjReturnFromWindow({
+      liveSpot: tradeSpotEtf,
+      endClose: etfEndClose,
+      priceReturn: etfPriceRet,
+      splitFactorEndToAsof: etfSplitEndToAsof,
+      dividendYield: etfDivYieldAdj ?? etfDivYield,
+    })
+    : ((Number.isFinite(etfAdjRet))
+      ? etfAdjRet
+      : ((Number.isFinite(etfLivePriceRet) && Number.isFinite(etfDivYieldAdj ?? etfDivYield))
+        ? (etfLivePriceRet + (etfDivYieldAdj ?? etfDivYield))
+        : null));
+  const undAdjRetDisplay = (hasCachedSpotUnd && typeof chartRetFns.liveAdjReturnFromWindow === 'function')
+    ? chartRetFns.liveAdjReturnFromWindow({
+      liveSpot: tradeSpotUnderlying,
+      endClose: undEndClose,
+      priceReturn: undPriceRet,
+      splitFactorEndToAsof: undSplitEndToAsof,
+      dividendYield: undDivYieldAdj ?? undDivYield,
+    })
+    : ((Number.isFinite(undAdjRet))
+      ? undAdjRet
+      : ((Number.isFinite(undLivePriceRet) && Number.isFinite(undDivYieldAdj ?? undDivYield))
+        ? (undLivePriceRet + (undDivYieldAdj ?? undDivYield))
+        : null));
+  const etfDivLift = (Number.isFinite(etfAdjRetDisplay) && Number.isFinite(etfLivePriceRet)) ? (etfAdjRetDisplay - etfLivePriceRet) : null;
+  const undDivLift = (Number.isFinite(undAdjRetDisplay) && Number.isFinite(undLivePriceRet)) ? (undAdjRetDisplay - undLivePriceRet) : null;
 
   useEffect(() => {
     setTradeBaseLegs([
@@ -6466,22 +6528,22 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="chart-stat">
               <div className="cs-label">{etfSym} Dividends ({activeTf.label})</div>
               <div className="cs-value">{Number.isFinite(etfDivTotal) ? fmtUsd(etfDivTotal) : '—'}</div>
-              <div className="cs-sub">{Number.isFinite(etfDivYield) ? `${fmt(etfDivYield)} of start px` : etfWindowDates}</div>
+              <div className="cs-sub">{Number.isFinite(etfDivYieldAdj ?? etfDivYield) ? `${fmt(etfDivYieldAdj ?? etfDivYield)} of adj start px` : etfWindowDates}</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">{undSym || 'Underlying'} Dividends ({activeTf.label})</div>
               <div className="cs-value">{Number.isFinite(undDivTotal) ? fmtUsd(undDivTotal) : '—'}</div>
-              <div className="cs-sub">{Number.isFinite(undDivYield) ? `${fmt(undDivYield)} of start px` : undWindowDates}</div>
+              <div className="cs-sub">{Number.isFinite(undDivYieldAdj ?? undDivYield) ? `${fmt(undDivYieldAdj ?? undDivYield)} of adj start px` : undWindowDates}</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">{etfSym} Price vs Adj Return</div>
               <div className="cs-value">{Number.isFinite(etfLivePriceRet) ? fmt(etfLivePriceRet) : '—'} / {Number.isFinite(etfAdjRetDisplay) ? fmt(etfAdjRetDisplay) : '—'}</div>
-              <div className="cs-sub">live spot vs start px • dividend lift: {etfDivLift == null ? '—' : fmt(etfDivLift)}</div>
+              <div className="cs-sub">live spot vs window end (split-adj) • dividend lift: {etfDivLift == null ? '—' : fmt(etfDivLift)}</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">{undSym || 'Underlying'} Price vs Adj Return</div>
               <div className="cs-value">{Number.isFinite(undLivePriceRet) ? fmt(undLivePriceRet) : '—'} / {Number.isFinite(undAdjRetDisplay) ? fmt(undAdjRetDisplay) : '—'}</div>
-              <div className="cs-sub">live spot vs start px • dividend lift: {undDivLift == null ? '—' : fmt(undDivLift)}</div>
+              <div className="cs-sub">live spot vs window end (split-adj) • dividend lift: {undDivLift == null ? '—' : fmt(undDivLift)}</div>
             </div>
           </div>
         </div>

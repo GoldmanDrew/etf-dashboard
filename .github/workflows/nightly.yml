@@ -124,6 +124,10 @@ jobs:
         continue-on-error: true
         run: python scripts/ingest_event_calendar.py
 
+      - name: Refresh corporate actions if stale
+        continue-on-error: true
+        run: python scripts/ensure_corporate_actions_fresh.py --max-age-hours 6
+
       - name: Full dashboard build
         id: build_data
         continue-on-error: true
