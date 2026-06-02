@@ -36,6 +36,50 @@ SYNTH_IV_MIN = 0.01                   # reject synthesized IVs outside (1%, 800%
 SYNTH_IV_MAX = 8.0
 IV_DISAGREEMENT_GRADE_CAP_PCT = 0.35  # far-sleeve vs underlying-derived IV gap that caps grade at C
 
+# ── Short-YieldBOOST structural-edge join + quote-sync gates ───────────────
+# The YB-Edge table historically ranked on ``edge_pp_of_max_loss`` -- the
+# kernel-aware richness of the fund's FRONT put spread, in % of that spread's
+# one-week max-loss. That is a *tactical vol overlay* on the hedge the fund
+# holds; it is NOT the edge of shorting the YieldBOOST ETF, and its units are
+# not comparable across names. The accurate, relative, apples-to-apples short
+# edge already lives in the screener: ``net_edge_p50_annual`` (annualized, nets
+# decay/borrow/carry; ``edge_sign_convention = short_favorable_positive`` so
+# higher = better short). We join it per YB ticker and keep the vol overlay as
+# an explicitly secondary, sign-corrected modifier.
+#
+# Sign correction: the fund is SHORT its front spread (collects the credit). A
+# RICH spread (positive ``edge_pp_of_max_loss``) means the income engine is
+# being over-paid for the vol it sells -> a mild HEADWIND to shorting the fund.
+# A CHEAP spread is a mild tailwind. So the short-thesis alignment is the
+# NEGATIVE of the put-spread edge. We never let the put-spread edge masquerade
+# as the short signal.
+SHORT_EDGE_SCREENER_COLUMNS = (
+    "net_edge_p50_annual",
+    "net_edge_p05_annual",
+    "net_edge_p25_annual",
+    "net_edge_p75_annual",
+    "net_edge_p95_annual",
+    "expected_gross_decay_p50_annual",
+    "expected_gross_decay_annual",
+    "borrow_fee_annual",
+    "income_distributions_annual",
+    "edge_sign_convention",
+)
+SHORT_EDGE_FLAG_COLUMNS = (
+    "inverse_shortable",
+    "purgatory",
+    "strategy_blacklisted",
+    "exclude_borrow_spike",
+    "exclude_no_shares",
+)
+# Sleeve-quote vs underlying-quote timestamp divergence beyond this many hours
+# means the row is NOT a synchronized snapshot (the XEY case: ETHU quote fresh,
+# ETHA underlying quote ~7d stale). We flag, never silently rank, such rows.
+QUOTE_SYNC_MAX_GAP_HOURS = 24.0
+# Net-edge thresholds (annualized fraction; short_favorable_positive convention).
+SHORT_SIGNAL_STRONG = 0.15
+SHORT_SIGNAL_SELL = 0.05
+
 GRANITE_BASE = "https://www.graniteshares.com"
 
 
@@ -2025,3 +2069,290 @@ def load_underlying_map_from_screener(csv_path: Path) -> dict[str, str]:
         if etf and und:
             out[etf] = und
     return out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Short-YieldBOOST structural edge: screener join + sync gates
+# ──────────────────────────────────────────────────────────────────────────
+def _parse_bool(val: object) -> bool | None:
+    """CSV booleans arrive as 'True'/'False'/'' — keep None distinct from False."""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    txt = str(val).strip().lower()
+    if txt in ("", "nan", "none"):
+        return None
+    if txt in ("true", "1", "yes", "y", "t"):
+        return True
+    if txt in ("false", "0", "no", "n", "f"):
+        return False
+    return None
+
+
+def load_short_edge_by_yb_from_screener(
+    csv_path: Path | str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Per-YB structural short-edge fields from the screener.
+
+    Returns ``{YB_TICKER: {<numeric fields>, <flags>, asof_date}}`` plus a
+    special ``"__asof__"`` key holding the max ``asof_date`` across YB rows
+    (the screener snapshot date used for the cross-dataset sync gate). The
+    numeric ranker is ``net_edge_p50_annual`` (``short_favorable_positive``).
+    """
+    path = Path(csv_path) if csv_path else DEFAULT_SCREENER_CSV
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return {}
+    if "ETF" not in df.columns or "product_class" not in df.columns:
+        return {}
+    yb_df = df[df["product_class"] == "income_yieldboost"]
+    out: dict[str, dict[str, Any]] = {}
+    asof_dates: list[date] = []
+    for _, row in yb_df.iterrows():
+        etf = str(row.get("ETF") or "").strip().upper()
+        if not etf:
+            continue
+        rec: dict[str, Any] = {}
+        for col in SHORT_EDGE_SCREENER_COLUMNS:
+            if col == "edge_sign_convention":
+                val = row.get(col)
+                rec[col] = None if val is None or (isinstance(val, float) and math.isnan(val)) else str(val)
+                continue
+            rec[col] = _parse_float(row.get(col))
+        for col in SHORT_EDGE_FLAG_COLUMNS:
+            rec[col] = _parse_bool(row.get(col))
+        asof = _parse_date(row.get("asof_date"))
+        rec["asof_date"] = asof.isoformat() if asof else None
+        if asof:
+            asof_dates.append(asof)
+        out[etf] = rec
+    if asof_dates:
+        out["__asof__"] = max(asof_dates).isoformat()
+    return out
+
+
+def is_directly_shortable(rec: dict[str, Any] | None) -> bool:
+    """Conservative shortability read from screener exclusion flags.
+
+    ``purgatory`` / ``exclude_no_shares`` (no borrowable shares of the YB ETF
+    itself), ``strategy_blacklisted`` and a live ``exclude_borrow_spike`` all
+    mean the name is not cleanly shortable *right now*. We do not hard-drop
+    these rows (Bucket-2 may still locate borrow); we flag and sink them.
+    """
+    if not rec:
+        return False
+    blockers = (
+        rec.get("purgatory") is True
+        or rec.get("exclude_no_shares") is True
+        or rec.get("strategy_blacklisted") is True
+        or rec.get("exclude_borrow_spike") is True
+    )
+    return not blockers
+
+
+def compute_short_thesis_alignment(edge_pp_of_max_loss: float | None) -> dict[str, Any]:
+    """Sign-correct the front put-spread edge for the SHORT-the-ETF thesis.
+
+    The YB fund is short its front spread, so a rich spread (positive edge) is a
+    headwind to shorting the fund. ``alignment_pp`` is therefore the negative of
+    the raw edge; the raw value is preserved separately by the caller.
+    """
+    e = _parse_float(edge_pp_of_max_loss)
+    if e is None:
+        return {"alignment_pp": None, "direction": "unknown", "label": "—"}
+    alignment = -e
+    if alignment > 1.0:
+        direction, label = "tailwind", "cheap hedge (+ for short)"
+    elif alignment < -1.0:
+        direction, label = "headwind", "rich hedge (− for short)"
+    else:
+        direction, label = "neutral", "fairly-priced hedge"
+    return {"alignment_pp": round(alignment, 2), "direction": direction, "label": label}
+
+
+def compute_short_signal(
+    net_edge_p50: float | None,
+    net_edge_p05: float | None = None,
+    *,
+    shortable: bool = True,
+) -> dict[str, Any]:
+    """Headline SHORT signal derived from the screener net annual edge.
+
+    Uses ``net_edge_p50_annual`` (short_favorable_positive). A robust STRONG
+    SHORT additionally requires the p05 lower band to stay positive so a wide
+    downside tail can't earn the top label.
+    """
+    p50 = _parse_float(net_edge_p50)
+    p05 = _parse_float(net_edge_p05)
+    if p50 is None:
+        return {"label": "no edge data", "tier": "none", "rank": -1e9}
+    if not shortable:
+        # Keep the numeric rank so it still sorts, but cap the headline.
+        return {"label": "short blocked (borrow)", "tier": "blocked", "rank": p50}
+    if p50 >= SHORT_SIGNAL_STRONG and (p05 is None or p05 > 0):
+        tier, label = "strong", "STRONG SHORT"
+    elif p50 >= SHORT_SIGNAL_SELL:
+        tier, label = "short", "short"
+    elif p50 > 0:
+        tier, label = "lean", "lean short"
+    else:
+        tier, label = "avoid", "avoid"
+    return {"label": label, "tier": tier, "rank": p50}
+
+
+def evaluate_quote_sync(
+    row: dict[str, Any],
+    *,
+    screener_asof: str | None = None,
+    max_gap_hours: float = QUOTE_SYNC_MAX_GAP_HOURS,
+) -> dict[str, Any]:
+    """Cross-input timestamp synchronization gate for one VRP row.
+
+    The integrity risk (XEY case) is that the sleeve option quote, the
+    underlying option quote, the holdings snapshot and the screener snapshot
+    describe *different* moments, so model fair and market mid are not a single
+    synchronized picture. We measure the largest pairwise gap among the
+    available timestamps and flag the row when it exceeds ``max_gap_hours``.
+
+    Note: we deliberately gate on TIMESTAMP divergence, not on a raw
+    spot_2x/spot_underlying price ratio. The 2x sleeve NAV is rebased at
+    inception, so its price level is not ``beta`` times the underlying level;
+    a price-ratio test would be economically meaningless here.
+    """
+    def _to_dt(val: object, *, end_of_day: bool = False) -> datetime | None:
+        if val is None:
+            return None
+        txt = str(val).strip()
+        if not txt:
+            return None
+        try:
+            if "T" in txt or " " in txt:
+                return datetime.fromisoformat(txt.replace("Z", "+00:00"))
+            d = _parse_date(txt)
+            if d is None:
+                return None
+            hh = 20 if end_of_day else 0  # ~US close in UTC for date-only stamps
+            return datetime(d.year, d.month, d.day, hh, 0, tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+    stamps: dict[str, datetime | None] = {
+        "sleeve_quote": _to_dt(row.get("options_as_of")),
+        "underlying_quote": _to_dt(row.get("underlying_options_as_of")),
+        "holdings": _to_dt(row.get("holdings_as_of"), end_of_day=True),
+        "screener": _to_dt(screener_asof, end_of_day=True),
+    }
+    present = {k: v for k, v in stamps.items() if v is not None}
+    # Normalize to tz-aware UTC for safe subtraction.
+    norm: dict[str, datetime] = {}
+    for k, v in present.items():
+        norm[k] = v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+
+    sleeve = norm.get("sleeve_quote")
+    und = norm.get("underlying_quote")
+    quote_gap_hours = None
+    if sleeve is not None and und is not None:
+        quote_gap_hours = round(abs((sleeve - und).total_seconds()) / 3600.0, 2)
+
+    max_gap_hours_seen = None
+    if len(norm) >= 2:
+        vals = list(norm.values())
+        span = max(vals) - min(vals)
+        max_gap_hours_seen = round(span.total_seconds() / 3600.0, 2)
+
+    reasons: list[str] = []
+    sync_ok = True
+    if sleeve is None or und is None:
+        sync_ok = False
+        if sleeve is None:
+            reasons.append("missing sleeve quote time")
+        if und is None:
+            reasons.append("missing underlying quote time")
+    elif quote_gap_hours is not None and quote_gap_hours > max_gap_hours:
+        sync_ok = False
+        reasons.append(f"sleeve vs underlying quote gap {quote_gap_hours:.0f}h > {max_gap_hours:.0f}h")
+    if max_gap_hours_seen is not None and max_gap_hours_seen > max_gap_hours and sync_ok:
+        # All quote times agree but holdings/screener lag the live quotes.
+        sync_ok = False
+        reasons.append(f"input span {max_gap_hours_seen:.0f}h > {max_gap_hours:.0f}h")
+
+    return {
+        "sync_ok": sync_ok,
+        "sync_reason": "; ".join(reasons) if reasons else "inputs within sync window",
+        "quote_sync_gap_hours": quote_gap_hours,
+        "max_input_gap_hours": max_gap_hours_seen,
+    }
+
+
+def _short_edge_why_sentence(row: dict[str, Any]) -> str:
+    """One-line, auditable rationale for a row's rank (the 'why here?' popover)."""
+    def _pct(v: object) -> str:
+        f = _parse_float(v)
+        return f"{f * 100:.0f}%" if f is not None else "—"
+
+    parts = [f"Net short edge (p50) {_pct(row.get('net_edge_p50_annual'))} ann."]
+    band_lo = _parse_float(row.get("net_edge_p05_annual"))
+    band_hi = _parse_float(row.get("net_edge_p95_annual"))
+    if band_lo is not None and band_hi is not None:
+        parts.append(f"band {_pct(band_lo)}…{_pct(band_hi)}")
+    parts.append(f"gross decay {_pct(row.get('expected_gross_decay_p50_annual'))}")
+    bf = _parse_float(row.get("borrow_fee_annual"))
+    parts.append(f"borrow {_pct(bf) if bf is not None else 'n/a'}")
+    align = (row.get("short_thesis_alignment") or {}).get("label")
+    if align and align != "—":
+        parts.append(f"hedge: {align}")
+    if not row.get("short_directly_shortable", True):
+        parts.append("no clean borrow (purgatory/no-shares)")
+    if not (row.get("quote_sync") or {}).get("sync_ok", True):
+        parts.append("NOT SYNCED")
+    return "; ".join(parts) + "."
+
+
+def enrich_vrp_rows_with_short_edge(
+    payload: dict[str, Any],
+    short_edge_map: dict[str, dict[str, Any]] | None,
+    *,
+    screener_asof: str | None = None,
+) -> dict[str, Any]:
+    """Attach structural short-edge fields, sign-corrected overlay, signal and
+    sync gate to each row of a ``vrp_live`` payload.
+
+    Non-destructive: every existing field is preserved; we only add keys. The
+    primary ranker becomes ``net_edge_p50_annual``; ``edge_pp_of_max_loss`` is
+    kept verbatim and additionally exposed as a sign-corrected modifier.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    short_edge_map = short_edge_map or {}
+    if screener_asof is None:
+        screener_asof = short_edge_map.get("__asof__")
+    rows = payload.get("rows") or []
+    for row in rows:
+        yb = str(row.get("yb_etf") or "").strip().upper()
+        rec = short_edge_map.get(yb) or {}
+        for col in SHORT_EDGE_SCREENER_COLUMNS:
+            row[col] = rec.get(col)
+        for col in SHORT_EDGE_FLAG_COLUMNS:
+            row[col] = rec.get(col)
+        row["short_edge_asof"] = rec.get("asof_date") or screener_asof
+        shortable = is_directly_shortable(rec) if rec else None
+        row["short_directly_shortable"] = shortable
+        row["short_thesis_alignment"] = compute_short_thesis_alignment(
+            row.get("edge_pp_of_max_loss")
+        )
+        row["short_signal"] = compute_short_signal(
+            rec.get("net_edge_p50_annual"),
+            rec.get("net_edge_p05_annual"),
+            shortable=bool(shortable) if shortable is not None else True,
+        )
+        row["quote_sync"] = evaluate_quote_sync(row, screener_asof=screener_asof)
+        row["short_edge_why"] = _short_edge_why_sentence(row)
+    payload["short_edge_screener_asof"] = screener_asof
+    payload["short_edge_join_count"] = sum(
+        1 for r in rows if r.get("net_edge_p50_annual") is not None
+    )
+    return payload

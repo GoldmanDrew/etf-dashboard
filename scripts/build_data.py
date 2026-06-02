@@ -3211,7 +3211,9 @@ def refresh_yieldboost_vrp_files(
         build_vrp_live_payload,
         build_yieldboost_options_target,
         build_yieldboost_rv_maps,
+        enrich_vrp_rows_with_short_edge,
         load_holdings_latest_dataframe,
+        load_short_edge_by_yb_from_screener,
         load_sleeve_by_yb_from_screener,
         load_underlying_map_from_screener,
         normalize_holdings_dataframe,
@@ -3282,6 +3284,15 @@ def refresh_yieldboost_vrp_files(
         rv_map_base=rv_map_base,
         event_calendar=event_calendar,
     )
+    # Join the accurate, relative short-the-ETF edge (net_edge_p50_annual,
+    # decay/borrow decomposition, shortability flags) plus the sign-corrected
+    # vol overlay and the cross-dataset quote-sync gate. Non-destructive: only
+    # adds keys, so the existing vol/greeks columns are untouched.
+    try:
+        short_edge_map = load_short_edge_by_yb_from_screener(screener_csv)
+        vrp_payload = enrich_vrp_rows_with_short_edge(vrp_payload, short_edge_map)
+    except Exception as exc:
+        print(f"  [WARN] short-edge enrichment skipped: {exc}")
     write_json(VRP_LIVE_FILE, vrp_payload)
     health_payload = build_vrp_health_payload(
         spreads_payload,

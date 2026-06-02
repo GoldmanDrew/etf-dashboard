@@ -69,6 +69,78 @@
     return (entry && entry.tooltip) ? String(entry.tooltip) : '';
   }
 
+  // ── Short-YieldBOOST structural edge (the unbiased primary ranker) ────────
+  // net_edge_p50_annual uses edge_sign_convention = short_favorable_positive:
+  // higher = more attractive to SHORT the YB ETF. This is annualized and
+  // comparable across names — unlike edge_pp_of_max_loss (a 1-week put-spread
+  // vol overlay in % of that spread's max-loss).
+  const SHORT_SIGNAL = { STRONG: 0.15, SHORT: 0.05 };
+
+  function fmtPctAnnual(v, digits) {
+    if (!isFiniteNum(v)) return '\u2014';
+    const n = Number(v) * 100;
+    const d = digits == null ? 1 : digits;
+    return (n >= 0 ? '+' : '') + n.toFixed(d) + '%';
+  }
+
+  function shortEdgeColor(p50) {
+    if (!isFiniteNum(p50)) return 'var(--text-muted)';
+    const e = Number(p50);
+    if (e >= SHORT_SIGNAL.STRONG) return '#10b981';
+    if (e >= SHORT_SIGNAL.SHORT) return '#34d399';
+    if (e > 0) return 'var(--text-muted)';
+    return '#ef4444';
+  }
+
+  // Headline SHORT signal from the screener net annual edge. p05>0 required for
+  // the STRONG tier so a wide downside tail can't earn the top label. When the
+  // name is not cleanly shortable (purgatory / no borrowable shares) the label
+  // is capped but the row still sorts by p50.
+  function shortSignalFor(p50, p05, opts) {
+    opts = opts || {};
+    if (!isFiniteNum(p50)) {
+      return { label: 'no edge data', color: 'var(--text-muted)', bg: 'transparent', weight: 400, tier: 'none' };
+    }
+    const e = Number(p50);
+    if (opts.shortable === false) {
+      return { label: 'short blocked', color: '#fff', bg: '#6b7280', weight: 700, tier: 'blocked' };
+    }
+    if (e >= SHORT_SIGNAL.STRONG && (!isFiniteNum(p05) || Number(p05) > 0)) {
+      return { label: 'STRONG SHORT', color: '#fff', bg: '#10b981', weight: 700, tier: 'strong' };
+    }
+    if (e >= SHORT_SIGNAL.SHORT) {
+      return { label: 'short', color: '#10b981', bg: 'rgba(16,185,129,0.15)', weight: 600, tier: 'short' };
+    }
+    if (e > 0) return { label: 'lean short', color: '#10b981', bg: 'transparent', weight: 500, tier: 'lean' };
+    return { label: 'avoid', color: '#fff', bg: '#ef4444', weight: 700, tier: 'avoid' };
+  }
+
+  // Sign-corrected put-spread overlay: rich hedge (positive edge_pp) is a
+  // HEADWIND to the short, so alignment = −edge_pp. Raw edge is shown elsewhere.
+  function shortThesisAlignment(edgePp) {
+    if (!isFiniteNum(edgePp)) return { alignmentPp: null, direction: 'unknown', label: '\u2014', color: 'var(--text-muted)' };
+    const a = -Number(edgePp);
+    if (a > 1) return { alignmentPp: a, direction: 'tailwind', label: 'cheap hedge (+)', color: '#10b981' };
+    if (a < -1) return { alignmentPp: a, direction: 'headwind', label: 'rich hedge (\u2212)', color: '#f59e0b' };
+    return { alignmentPp: a, direction: 'neutral', label: 'fair hedge', color: 'var(--text-muted)' };
+  }
+
+  // Cross-dataset quote-sync badge. Prefers the server-computed row.quote_sync
+  // (timestamp divergence among sleeve quote / underlying quote / holdings /
+  // screener); falls back to client freshness if absent.
+  function syncBadge(row) {
+    row = row || {};
+    const qs = row.quote_sync || {};
+    if (qs.sync_ok === false) {
+      return { ok: false, label: 'NOT SYNCED', color: '#fff', bg: '#ef4444', detail: qs.sync_reason || 'inputs not synchronized' };
+    }
+    if (qs.sync_ok === true) {
+      const gap = isFiniteNum(qs.quote_sync_gap_hours) ? Math.round(Number(qs.quote_sync_gap_hours)) + 'h' : '';
+      return { ok: true, label: 'synced', color: '#10b981', bg: 'rgba(16,185,129,0.15)', detail: (qs.sync_reason || 'within window') + (gap ? ' · gap ' + gap : '') };
+    }
+    return { ok: null, label: '\u2014', color: 'var(--text-muted)', bg: 'transparent', detail: 'sync not evaluated' };
+  }
+
   function ageMinutesSince(isoLike) {
     if (!isoLike) return null;
     const t = new Date(isoLike).getTime();
@@ -249,12 +321,18 @@
 
   const exported = {
     SIGNAL_THRESHOLDS,
+    SHORT_SIGNAL,
     fmtEdgePp,
     fmtIvPp,
     fmtUsd,
+    fmtPctAnnual,
     edgeColor,
+    shortEdgeColor,
     gradePillStyle,
     signalFor,
+    shortSignalFor,
+    shortThesisAlignment,
+    syncBadge,
     hintFor,
     rowFreshness,
     fleetFreshness,
