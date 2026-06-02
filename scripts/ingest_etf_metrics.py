@@ -83,6 +83,7 @@ HOLDINGS_PARQUET_PATH = DATA_DIR / "etf_holdings_daily.parquet"
 HOLDINGS_LATEST_CSV_PATH = DATA_DIR / "etf_holdings_latest.csv"
 HOLDINGS_LATEST_JSON_PATH = DATA_DIR / "etf_holdings_latest.json"
 YIELDBOOST_PUT_SPREADS_PATH = DATA_DIR / "yieldboost_put_spreads_latest.json"
+CORPORATE_ACTIONS_PATH = DATA_DIR / "corporate_actions.json"
 
 REQUIRED_COLUMNS = [
     "date",
@@ -292,6 +293,54 @@ def prune_expired_carry_forward_rows(
     out.loc[expired, "source_provider"] = None
     out.loc[expired, "source_url"] = None
     return out, n
+
+
+def load_executed_delisted_off_universe(
+    *,
+    universe: set[str] | None = None,
+    corporate_actions_path: Path | None = None,
+    as_of: date | None = None,
+) -> set[str]:
+    """Return delisted tickers absent from the active screener (orphan latest rows).
+
+    Historical parquet rows are preserved; this only trims the latest snapshot /
+    health counts for funds that have executed delistings in ``corporate_actions.json``.
+    If a delisted ticker is still in today's screener, it is kept (screener wins).
+    """
+    path = corporate_actions_path or CORPORATE_ACTIONS_PATH
+    if not path.exists():
+        return set()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        LOGGER.warning("corporate_actions unreadable for delisted filter: %s", exc)
+        return set()
+    events = payload.get("events") if isinstance(payload, dict) else None
+    if not isinstance(events, list):
+        return set()
+    active = {_normalize_symbol(t) for t in (universe or set()) if str(t).strip()}
+    ref = as_of or date.today()
+    out: set[str] = set()
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if str(ev.get("type") or "").strip().lower() != "delisting":
+            continue
+        if str(ev.get("status") or "").strip().lower() != "executed":
+            continue
+        sym = _normalize_symbol(ev.get("ticker"))
+        if not sym or sym in active:
+            continue
+        exec_raw = ev.get("execution_date")
+        if exec_raw:
+            try:
+                exec_date = date.fromisoformat(str(exec_raw)[:10])
+            except ValueError:
+                exec_date = None
+            if exec_date is not None and exec_date > ref:
+                continue
+        out.add(sym)
+    return out
 
 
 def _load_split_price_mult_hints_json(path: Path | None) -> dict[str, dict[date, float]]:
@@ -1551,6 +1600,24 @@ def save_outputs(df: pd.DataFrame) -> None:
         latest_rows = work.loc[idx].sort_values("ticker").reset_index(drop=True)
     else:
         latest_rows = work.iloc[0:0]
+    off_universe_delisted: set[str] = set()
+    if not latest_rows.empty and UNIVERSE_CSV.exists():
+        try:
+            off_universe_delisted = load_executed_delisted_off_universe(
+                universe=set(load_universe_tickers()),
+            )
+        except Exception as exc:
+            LOGGER.warning("delisted latest filter skipped: %s", exc)
+        if off_universe_delisted:
+            before = len(latest_rows)
+            latest_rows = latest_rows[
+                ~latest_rows["ticker"].astype(str).str.upper().isin(off_universe_delisted)
+            ].reset_index(drop=True)
+            LOGGER.info(
+                "Excluded %d delisted off-universe ticker(s) from latest snapshot: %s",
+                before - len(latest_rows),
+                sorted(off_universe_delisted),
+            )
     latest_rows_json = _sanitize_json_df(latest_rows)
     latest_map_json = {str(r["ticker"]).upper(): r.to_dict() for _, r in latest_rows_json.iterrows()}
     with open(LATEST_JSON_PATH, "w", encoding="utf-8") as f:

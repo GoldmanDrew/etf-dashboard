@@ -1316,6 +1316,16 @@ def _symbol_cache_age_seconds(payload: dict | None) -> int:
         return 10**9
 
 
+def _sleeve_chain_refresh_priority(sym: str, prior_symbols: dict) -> tuple[int, str]:
+    """Sort sleeves with empty/missing chains ahead of populated ones."""
+    payload = prior_symbols.get(sym) if isinstance(prior_symbols, dict) else None
+    if not isinstance(payload, dict):
+        return (0, sym)
+    opts = payload.get("options")
+    n_opts = len(opts) if isinstance(opts, list) else 0
+    return (0 if n_opts <= 0 else 1, sym)
+
+
 def _order_yieldboost_refresh_symbols(
     underlying_refresh: list[str],
     yb_sleeves: list[str],
@@ -1329,7 +1339,10 @@ def _order_yieldboost_refresh_symbols(
         ),
         reverse=True,
     )
-    sleeves = sorted({norm_sym(s) for s in (yb_sleeves or []) if str(s).strip()})
+    sleeves = sorted(
+        {norm_sym(s) for s in (yb_sleeves or []) if str(s).strip()},
+        key=lambda s: _sleeve_chain_refresh_priority(s, prior_symbols),
+    )
     ordered: list[str] = []
     seen: set[str] = set()
     for sym in und + sleeves:

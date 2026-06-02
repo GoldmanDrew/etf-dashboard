@@ -141,6 +141,9 @@ jobs:
           OPTIONS_ONLY_BUCKET3: "1"
           OPTIONS_INCLUDE_BUCKET3_UNDERLYING: "1"
           OPTIONS_ACCUMULATE_CACHE: "1"
+          TRADIER_MAX_TOTAL_REQUESTS: "500"
+          TRADIER_CHAIN_MAX_TOTAL_REQUESTS: "400"
+          TRADIER_CHAIN_SYMBOLS: "MSTU,MULL,TECL,TSLL"
         run: python scripts/build_data.py
 
       - name: Refresh YieldBOOST VRP (sleeves + Tradier OCC)
@@ -155,7 +158,10 @@ jobs:
           OPTIONS_ONLY_BUCKET3: "0"
           POLYGON_MAX_REQUESTS_PER_MINUTE: "25"
           POLYGON_MAX_TOTAL_REQUESTS: "120"
-          YIELDBOOST_OCC_QUOTES_MAX_REQUESTS: "12"
+          TRADIER_MAX_TOTAL_REQUESTS: "500"
+          TRADIER_CHAIN_MAX_TOTAL_REQUESTS: "400"
+          TRADIER_CHAIN_SYMBOLS: "MSTU,MULL,TECL,TSLL"
+          YIELDBOOST_OCC_QUOTES_MAX_REQUESTS: "32"
         run: python scripts/build_data.py --yieldboost-vrp-only
 
       - name: Score borrow spike predictions
@@ -211,6 +217,7 @@ jobs:
             data/event_calendar_inferred.json
             data/event_calendar_combined.json
             data/ci_state.json
+            data/freshness_summary.json
           commit_message: "chore: nightly metrics and full build"
 
       - name: Deploy Pages

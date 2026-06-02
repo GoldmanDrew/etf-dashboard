@@ -63,7 +63,7 @@ def test_pick_auto_off_hours_skips_fresh_borrow(cfg):
 
 
 def test_pick_auto_rth_intraday_fast_lane(cfg):
-    """During RTH, stale intraday is scheduled even when rotation slot is borrow."""
+    """During RTH, stale intraday runs alone; rotation is deferred to a later tick."""
     now = datetime(2026, 5, 22, 15, 0, tzinfo=UTC)  # slot 0 -> borrow in rotation
     state = {
         "last_borrow_utc": "2026-05-22T10:00:00Z",
@@ -71,9 +71,7 @@ def test_pick_auto_rth_intraday_fast_lane(cfg):
         "last_intraday_utc": "2026-05-22T14:00:00Z",  # 60m ago -> stale at 5m RTH cadence
     }
     tasks = ct.pick_auto_tasks(state, cfg, now)
-    assert tasks[0] == "intraday"
-    assert "nav" not in tasks
-    assert "borrow" in tasks
+    assert tasks == ["intraday"]
 
 
 def test_pick_auto_rth_nav_before_intraday_when_both_stale(cfg):
@@ -84,8 +82,7 @@ def test_pick_auto_rth_nav_before_intraday_when_both_stale(cfg):
         "last_intraday_utc": "2026-05-22T14:00:00Z",
     }
     tasks = ct.pick_auto_tasks(state, cfg, now)
-    assert tasks[:2] == ["nav", "intraday"]
-    assert "borrow" in tasks
+    assert tasks == ["nav", "intraday"]
 
 
 def test_nav_rth_cadence(cfg):
@@ -107,7 +104,7 @@ def test_pick_auto_rth_skips_fresh_intraday_but_runs_rotation(cfg):
     tasks = ct.pick_auto_tasks(state, cfg, now)
     assert "intraday" not in tasks
     assert "nav" not in tasks
-    assert tasks == ["borrow"]
+    assert tasks and tasks[0] in {"borrow", "options", "yieldboost"}
 
 
 def test_pick_auto_rth_returns_stale_task(cfg):

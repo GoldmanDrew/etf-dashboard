@@ -1,6 +1,7 @@
 """Tests for freshness helpers and YB underlying refresh selection."""
 from __future__ import annotations
 
+import json
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -79,8 +80,8 @@ def test_order_yieldboost_refresh_puts_stale_underlyings_before_sleeves():
     prior = {
         "AMD": {"updated_at": old},
         "SOXX": {"updated_at": old},
-        "SOXL": {"updated_at": fresh},
-        "AMDL": {"updated_at": fresh},
+        "SOXL": {"updated_at": fresh, "options": [{"strike": 47.0}]},
+        "AMDL": {"updated_at": fresh, "options": []},
     }
     order = _order_yieldboost_refresh_symbols(
         ["AMD", "SOXX"],
@@ -90,6 +91,40 @@ def test_order_yieldboost_refresh_puts_stale_underlyings_before_sleeves():
     assert order.index("AMD") < order.index("SOXL")
     assert order.index("SOXX") < order.index("AMDL")
     assert set(order[:2]) == {"AMD", "SOXX"}
+    # Empty-chain sleeves refresh before populated ones.
+    assert order.index("AMDL") < order.index("SOXL")
+
+
+def test_load_executed_delisted_off_universe_excludes_orphans_only():
+    from ingest_etf_metrics import load_executed_delisted_off_universe
+
+    payload = {
+        "events": [
+            {
+                "type": "delisting",
+                "status": "executed",
+                "ticker": "ENPX",
+                "execution_date": "2026-04-21",
+            },
+            {
+                "type": "delisting",
+                "status": "executed",
+                "ticker": "SPY",
+                "execution_date": "2026-04-21",
+            },
+        ]
+    }
+    path = Path(__file__).resolve().parent / "_tmp_corp_actions.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        off = load_executed_delisted_off_universe(
+            universe={"AAPU"},
+            corporate_actions_path=path,
+            as_of=date(2026, 6, 2),
+        )
+    finally:
+        path.unlink(missing_ok=True)
+    assert off == {"ENPX", "SPY"}
 
 
 def test_load_monitored_options_symbols_from_records():

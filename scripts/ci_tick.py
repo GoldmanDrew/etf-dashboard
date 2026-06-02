@@ -227,10 +227,12 @@ def pick_auto_tasks(state: dict, config: dict, now: datetime) -> list[str]:
             tasks.append("nav")
         if is_stale("intraday", state, config, now, rth=True):
             tasks.append("intraday")
+        # Do not bundle borrow/options/yieldboost with fast-lane work: those tasks can
+        # exceed the workflow timeout and cancel before nav/intraday artifacts commit.
+        if tasks:
+            return tasks
         secondary = _pick_rotation_secondary(state, config, now)
-        if secondary and secondary not in tasks:
-            tasks.append(secondary)
-        return tasks
+        return [secondary] if secondary else []
 
     if is_stale("borrow", state, config, now):
         return ["borrow"]
@@ -376,6 +378,7 @@ def main() -> int:
             state[f"last_{state_key}_attempt_utc"] = now_iso
             state[f"last_{state_key}_error"] = err_msg
             print(f"[ci_tick] Task '{task}' failed ({err_msg}); continuing with remaining tasks.")
+            save_state(state)
             continue
         except Exception as exc:  # pragma: no cover - belt & suspenders
             err_msg = repr(exc)[:160]
@@ -383,12 +386,12 @@ def main() -> int:
             state[f"last_{state_key}_attempt_utc"] = now_iso
             state[f"last_{state_key}_error"] = err_msg
             print(f"[ci_tick] Task '{task}' crashed ({err_msg}); continuing with remaining tasks.")
+            save_state(state)
             continue
         state[f"last_{state_key}_utc"] = now_iso
         state.pop(f"last_{state_key}_error", None)
         succeeded.append(task)
-
-    save_state(state)
+        save_state(state)
 
     files = _merge_commit_paths(config, succeeded) if succeeded else []
     print(f"[ci_tick] Commit candidates: {' '.join(files) or '(none)'}")
