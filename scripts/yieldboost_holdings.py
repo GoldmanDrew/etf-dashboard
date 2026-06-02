@@ -62,6 +62,10 @@ SHORT_EDGE_SCREENER_COLUMNS = (
     "expected_gross_decay_p50_annual",
     "expected_gross_decay_annual",
     "borrow_fee_annual",
+    "borrow_current",
+    "borrow_for_net_annual",
+    "borrow_avg_annual",
+    "borrow_median_60d",
     "income_distributions_annual",
     "edge_sign_convention",
 )
@@ -2288,6 +2292,58 @@ def evaluate_quote_sync(
     }
 
 
+def borrow_carry_display_meta(row: dict[str, Any]) -> dict[str, Any]:
+    """How to show borrow in the carry column and tooltips.
+
+    Prefer **live** IBKR fee when shares are borrowable today; when current is
+    missing (purgatory / no shares), fall back to **historical average**, then
+    60d median — always labeled so it is not mistaken for a live quote.
+
+    ``borrow_for_net_annual`` is what the screener used inside
+    ``net_edge_p50_annual`` (often 0 when ``exclude_no_shares``).
+    """
+    current = _parse_float(row.get("borrow_fee_annual"))
+    if current is None:
+        current = _parse_float(row.get("borrow_current"))
+    avg = _parse_float(row.get("borrow_avg_annual"))
+    med60 = _parse_float(row.get("borrow_median_60d"))
+    for_net = _parse_float(row.get("borrow_for_net_annual"))
+
+    if current is not None:
+        display, source, label = current, "live", "live"
+    elif avg is not None:
+        display, source, label = avg, "hist_avg", "~hist avg"
+    elif med60 is not None:
+        display, source, label = med60, "hist_med60", "~hist 60d"
+    else:
+        display, source, label = None, "none", "—"
+
+    tooltip_parts = []
+    if current is not None:
+        tooltip_parts.append(f"live borrow {current * 100:.1f}% ann")
+    else:
+        tooltip_parts.append("live borrow: none (no shares / purgatory)")
+    if avg is not None:
+        tooltip_parts.append(f"hist avg {avg * 100:.1f}%")
+    if med60 is not None:
+        tooltip_parts.append(f"60d med {med60 * 100:.1f}%")
+    if for_net is not None:
+        tooltip_parts.append(f"net-edge model used {for_net * 100:.1f}% borrow")
+    else:
+        tooltip_parts.append("net-edge model borrow: unknown")
+
+    return {
+        "display_annual": round(display, 6) if display is not None else None,
+        "source": source,
+        "source_label": label,
+        "live_annual": round(current, 6) if current is not None else None,
+        "avg_annual": round(avg, 6) if avg is not None else None,
+        "median_60d_annual": round(med60, 6) if med60 is not None else None,
+        "for_net_annual": round(for_net, 6) if for_net is not None else None,
+        "tooltip": "; ".join(tooltip_parts),
+    }
+
+
 def _short_edge_why_sentence(row: dict[str, Any]) -> str:
     """One-line, auditable rationale for a row's rank (the 'why here?' popover)."""
     def _pct(v: object) -> str:
@@ -2300,8 +2356,16 @@ def _short_edge_why_sentence(row: dict[str, Any]) -> str:
     if band_lo is not None and band_hi is not None:
         parts.append(f"band {_pct(band_lo)}…{_pct(band_hi)}")
     parts.append(f"gross decay {_pct(row.get('expected_gross_decay_p50_annual'))}")
-    bf = _parse_float(row.get("borrow_fee_annual"))
-    parts.append(f"borrow {_pct(bf) if bf is not None else 'n/a'}")
+    bmeta = row.get("borrow_carry") or borrow_carry_display_meta(row)
+    bdisp = bmeta.get("display_annual")
+    blabel = bmeta.get("source_label") or "—"
+    if bdisp is not None:
+        parts.append(f"borrow {_pct(bdisp)} ({blabel})")
+    else:
+        parts.append("borrow n/a")
+    for_net = _parse_float(bmeta.get("for_net_annual"))
+    if for_net is not None and bmeta.get("source") != "live":
+        parts.append(f"net-edge assumed borrow {_pct(for_net)}")
     align = (row.get("short_thesis_alignment") or {}).get("label")
     if align and align != "—":
         parts.append(f"hedge: {align}")
@@ -2350,6 +2414,7 @@ def enrich_vrp_rows_with_short_edge(
             shortable=bool(shortable) if shortable is not None else True,
         )
         row["quote_sync"] = evaluate_quote_sync(row, screener_asof=screener_asof)
+        row["borrow_carry"] = borrow_carry_display_meta(row)
         row["short_edge_why"] = _short_edge_why_sentence(row)
     payload["short_edge_screener_asof"] = screener_asof
     payload["short_edge_join_count"] = sum(

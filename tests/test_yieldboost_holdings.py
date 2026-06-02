@@ -23,6 +23,7 @@ from yieldboost_holdings import (  # noqa: E402
     compute_short_signal,
     compute_short_thesis_alignment,
     data_grade,
+    borrow_carry_display_meta,
     enrich_vrp_rows_with_short_edge,
     evaluate_quote_sync,
     is_directly_shortable,
@@ -1542,6 +1543,51 @@ def test_enrich_vrp_rows_with_short_edge_non_destructive():
     assert row["quote_sync"]["sync_ok"] is True
     assert "Net short edge" in row["short_edge_why"]
     assert out["short_edge_join_count"] == 1
+
+
+def test_borrow_carry_display_prefers_live_then_avg():
+    live = borrow_carry_display_meta({
+        "borrow_fee_annual": 0.05,
+        "borrow_avg_annual": 0.12,
+        "borrow_for_net_annual": 0.05,
+    })
+    assert live["source"] == "live"
+    assert live["display_annual"] == 0.05
+    assert "live borrow" in live["tooltip"]
+    assert "net-edge model used 5.0%" in live["tooltip"]
+
+    hist = borrow_carry_display_meta({
+        "borrow_fee_annual": None,
+        "borrow_avg_annual": 0.19,
+        "borrow_median_60d": 0.055,
+        "borrow_for_net_annual": 0.0,
+    })
+    assert hist["source"] == "hist_avg"
+    assert hist["display_annual"] == 0.19
+    assert hist["source_label"] == "~hist avg"
+    assert "net-edge model used 0.0%" in hist["tooltip"]
+
+
+def test_enrich_vrp_rows_includes_borrow_carry():
+    payload = {"rows": [{"yb_etf": "CWY", "edge_pp_of_max_loss": 1.0,
+                         "options_as_of": "2026-06-02T17:00:00Z",
+                         "underlying_options_as_of": "2026-06-02T17:00:00Z"}]}
+    short_map = {
+        "CWY": {
+            "net_edge_p50_annual": 0.76, "net_edge_p05_annual": 0.18,
+            "expected_gross_decay_p50_annual": 0.80,
+            "borrow_fee_annual": None, "borrow_avg_annual": 0.039,
+            "borrow_for_net_annual": 0.0,
+            "purgatory": True, "exclude_no_shares": True,
+            "strategy_blacklisted": False, "exclude_borrow_spike": False,
+            "inverse_shortable": False,
+        },
+    }
+    out = enrich_vrp_rows_with_short_edge(payload, short_map)
+    bc = out["rows"][0]["borrow_carry"]
+    assert bc["source"] == "hist_avg"
+    assert "net-edge model used" in bc["tooltip"]
+    assert "hist avg" in out["rows"][0]["short_edge_why"]
 
 
 def test_enrich_vrp_rows_missing_screener_row_is_safe():

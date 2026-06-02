@@ -125,6 +125,31 @@
     return { alignmentPp: a, direction: 'neutral', label: 'fair hedge', color: 'var(--text-muted)' };
   }
 
+  // Borrow in the carry column: live IBKR fee when available; otherwise
+  // historical avg (then 60d med) with a ~hist tag. Tooltip always shows what
+  // borrow_for_net_annual the screener used inside net_edge_p50_annual.
+  function formatBorrowCarry(row) {
+    row = row || {};
+    const meta = row.borrow_carry || {};
+    const display = meta.display_annual;
+    if (display == null || !isFiniteNum(display)) {
+      return {
+        text: '\u2014',
+        color: 'var(--text-muted)',
+        isHistorical: false,
+        title: meta.tooltip || 'No live or historical borrow on file',
+      };
+    }
+    const isHistorical = meta.source === 'hist_avg' || meta.source === 'hist_med60';
+    const tag = isHistorical ? ' ' + (meta.source_label || '~hist') : '';
+    return {
+      text: fmtPctAnnual(display) + tag,
+      color: '#ef4444',
+      isHistorical,
+      title: meta.tooltip || '',
+    };
+  }
+
   // Cross-dataset quote-sync badge. Prefers the server-computed row.quote_sync
   // (timestamp divergence among sleeve quote / underlying quote / holdings /
   // screener); falls back to client freshness if absent.
@@ -332,6 +357,7 @@
     signalFor,
     shortSignalFor,
     shortThesisAlignment,
+    formatBorrowCarry,
     syncBadge,
     hintFor,
     rowFreshness,

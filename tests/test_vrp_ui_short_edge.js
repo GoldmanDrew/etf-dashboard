@@ -53,3 +53,31 @@ test("fmtPctAnnual formats fractions as signed percentages", () => {
   assert.equal(VrpUi.fmtPctAnnual(-0.05, 0), "-5%");
   assert.equal(VrpUi.fmtPctAnnual(null), "\u2014");
 });
+
+test("formatBorrowCarry shows live borrow without hist tag", () => {
+  const live = VrpUi.formatBorrowCarry({
+    borrow_carry: {
+      display_annual: 0.0425,
+      source: "live",
+      source_label: "live",
+      tooltip: "live borrow 4.3% ann; net-edge model used 4.3% borrow",
+    },
+  });
+  assert.equal(live.isHistorical, false);
+  assert.ok(live.text.includes("+4.3%"));
+  assert.ok(!live.text.includes("~hist"));
+});
+
+test("formatBorrowCarry falls back to historical with tag", () => {
+  const hist = VrpUi.formatBorrowCarry({
+    borrow_carry: {
+      display_annual: 0.19,
+      source: "hist_avg",
+      source_label: "~hist avg",
+      tooltip: "live borrow: none; hist avg 19.0%; net-edge model used 0.0% borrow",
+    },
+  });
+  assert.equal(hist.isHistorical, true);
+  assert.ok(hist.text.includes("~hist avg"));
+  assert.ok(hist.title.includes("net-edge model used 0.0%"));
+});

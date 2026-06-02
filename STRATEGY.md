@@ -120,7 +120,7 @@ nothing is removed):
 | Sync | `quote_sync.sync_ok` | Cross-dataset timestamp sync (sleeve quote vs underlying quote vs holdings vs screener). NOT SYNCED = inputs describe different moments (the XEY case). |
 | Short? | `short_directly_shortable` | ? = purgatory / no borrowable shares / borrow spike / blacklisted. Flagged, not hidden. |
 
-**? Carry decomposition** (`expected_gross_decay_p50_annual` ? `borrow_fee_annual` ? `income_distributions_annual`): the gross decay (the short's fuel) net of the borrow and distribution carry that `net_edge_p50_annual` already accounts for.
+**? Carry decomposition** (`expected_gross_decay_p50_annual` ? **Borrow** ? `income_distributions_annual`): the gross decay (the short's fuel) net of borrow and distribution carry. **Borrow** shows live IBKR fee when shortable; when current is missing (purgatory / no shares) it falls back to **~hist avg** (then 60d median) so you can stress-test cost — hover shows `borrow_for_net_annual`, what the screener actually used inside `net_edge_p50_annual` (often 0% when `exclude_no_shares`, which can overstate net edge on un-shortable names).
 
 **? Vol overlay (second-order, front put spread):**
 

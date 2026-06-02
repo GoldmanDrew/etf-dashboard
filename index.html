@@ -9196,7 +9196,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
               <Th k="short_directly_shortable" label="Short?" align="center" hint="Cleanly borrowable now? False = purgatory / no shares / borrow spike / blacklisted (Bucket-2 may still locate)." />
               {/* ② Carry decomposition */}
               {!collapseCarry && <Th k="expected_gross_decay_p50_annual" label="Gross decay" hint="Median annualized structural NAV decay (the short's fuel). From the screener decay distribution." />}
-              {!collapseCarry && <Th k="borrow_fee_annual" label="Borrow" hint="Annualized borrow fee — the carry cost of the short. Blank = no borrowable shares (see Short?)." />}
+              {!collapseCarry && <Th k="borrow_fee_annual" label="Borrow" hint="Live IBKR borrow when shortable; if missing (no shares), shows ~hist avg then 60d median. Hover shows borrow_for_net used inside net edge (often 0% when exclude_no_shares)." />}
               {!collapseCarry && <Th k="income_distributions_annual" label="Distrib." hint="Annualized distribution you pay away to the lender as a short. Blank if not reported for this name." />}
               {/* ③ Vol overlay */}
               {collapseOverlay ? (
@@ -9254,6 +9254,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
               const bandDim = (p05 != null && Number(p05) < 0);
               const why = r.short_edge_why || '';
               const shortable = r.short_directly_shortable;
+              const borrowDisp = VrpUi.formatBorrowCarry(r);
               const pill = (s, title) => (
                 <span style={{
                   display: 'inline-block', padding: '2px 8px', borderRadius: 12, fontSize: 10,
@@ -9316,9 +9317,13 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
                     </td>
                   )}
                   {!collapseCarry && (
-                    <td style={{ padding: '5px 8px', textAlign: 'right', color: r.borrow_fee_annual != null ? '#ef4444' : 'var(--text-muted)' }}
-                        title="Annualized borrow fee (carry cost of the short).">
-                      {r.borrow_fee_annual != null ? VrpUi.fmtPctAnnual(r.borrow_fee_annual) : '—'}
+                    <td style={{
+                      padding: '5px 8px', textAlign: 'right',
+                      color: borrowDisp.color,
+                      fontStyle: borrowDisp.isHistorical ? 'italic' : 'normal',
+                    }}
+                        title={borrowDisp.title}>
+                      {borrowDisp.text}
                     </td>
                   )}
                   {!collapseCarry && (
