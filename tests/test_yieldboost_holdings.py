@@ -20,7 +20,13 @@ from yieldboost_holdings import (  # noqa: E402
     build_vrp_health_payload,
     build_vrp_live_payload,
     build_yieldboost_rv_map,
+    compute_short_signal,
+    compute_short_thesis_alignment,
     data_grade,
+    enrich_vrp_rows_with_short_edge,
+    evaluate_quote_sync,
+    is_directly_shortable,
+    load_short_edge_by_yb_from_screener,
     lookup_contract_iv,
     extract_rv_30d_annual,
     format_occ_ticker,
@@ -1394,3 +1400,157 @@ def test_yieldboost_targeted_refresh_symbols_keeps_underlyings():
     assert sleeves == ["AMDL", "AMZZ"]
     assert underlyings == ["AMD", "AMZN"]
     assert sorted(set(sleeves) | set(underlyings)) == ["AMD", "AMDL", "AMZN", "AMZZ"]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Short-YieldBOOST structural edge join + sync gates
+# ──────────────────────────────────────────────────────────────────────────
+def test_short_thesis_alignment_negates_spread_edge():
+    """Rich front spread (positive edge) must read as a HEADWIND to shorting."""
+    rich = compute_short_thesis_alignment(20.0)
+    assert rich["alignment_pp"] == -20.0
+    assert rich["direction"] == "headwind"
+    cheap = compute_short_thesis_alignment(-15.0)
+    assert cheap["alignment_pp"] == 15.0
+    assert cheap["direction"] == "tailwind"
+    assert compute_short_thesis_alignment(None)["direction"] == "unknown"
+
+
+def test_compute_short_signal_tiers_and_p05_guard():
+    """STRONG SHORT needs p50>=15% AND a positive p05 lower band."""
+    assert compute_short_signal(0.20, 0.05)["tier"] == "strong"
+    # Same median but downside tail dips negative -> demote from strong to short.
+    assert compute_short_signal(0.20, -0.01)["tier"] == "short"
+    assert compute_short_signal(0.07, 0.0)["tier"] == "short"
+    assert compute_short_signal(0.01)["tier"] == "lean"
+    assert compute_short_signal(-0.05)["tier"] == "avoid"
+    assert compute_short_signal(None)["tier"] == "none"
+    # Not borrowable -> label capped, but numeric rank preserved for sorting.
+    blocked = compute_short_signal(0.30, 0.10, shortable=False)
+    assert blocked["tier"] == "blocked"
+    assert blocked["rank"] == 0.30
+
+
+def test_is_directly_shortable_flags():
+    assert is_directly_shortable({"purgatory": False, "exclude_no_shares": False}) is True
+    assert is_directly_shortable({"purgatory": True}) is False
+    assert is_directly_shortable({"exclude_no_shares": True}) is False
+    assert is_directly_shortable({"strategy_blacklisted": True}) is False
+    assert is_directly_shortable({"exclude_borrow_spike": True}) is False
+    assert is_directly_shortable(None) is False
+
+
+def test_evaluate_quote_sync_flags_stale_underlying():
+    """The XEY case: sleeve quote fresh, underlying quote ~7d stale -> NOT SYNCED."""
+    row = {
+        "options_as_of": "2026-05-30T17:23:00Z",
+        "underlying_options_as_of": "2026-05-23T20:20:00Z",
+        "holdings_as_of": "2026-05-29",
+    }
+    res = evaluate_quote_sync(row, screener_asof="2026-05-30")
+    assert res["sync_ok"] is False
+    assert res["quote_sync_gap_hours"] > 24
+
+
+def test_evaluate_quote_sync_ok_when_aligned():
+    row = {
+        "options_as_of": "2026-05-30T17:23:00Z",
+        "underlying_options_as_of": "2026-05-30T17:10:00Z",
+        "holdings_as_of": "2026-05-30",
+    }
+    res = evaluate_quote_sync(row, screener_asof="2026-05-30")
+    assert res["sync_ok"] is True
+    assert res["quote_sync_gap_hours"] < 1
+
+
+def test_evaluate_quote_sync_missing_underlying_is_unsynced():
+    res = evaluate_quote_sync({"options_as_of": "2026-05-30T17:23:00Z"})
+    assert res["sync_ok"] is False
+    assert "missing underlying quote time" in res["sync_reason"]
+
+
+def test_load_short_edge_by_yb_from_screener(tmp_path):
+    csv = tmp_path / "screener.csv"
+    pd.DataFrame(
+        [
+            {
+                "ETF": "cwy", "Underlying": "CRWV", "product_class": "income_yieldboost",
+                "net_edge_p50_annual": 0.75, "net_edge_p05_annual": 0.18,
+                "net_edge_p95_annual": 1.28, "expected_gross_decay_p50_annual": 0.80,
+                "borrow_fee_annual": "", "income_distributions_annual": "",
+                "inverse_shortable": "False", "purgatory": "True",
+                "strategy_blacklisted": "False", "exclude_borrow_spike": "False",
+                "exclude_no_shares": "True",
+                "edge_sign_convention": "short_favorable_positive",
+                "asof_date": "2026-06-02",
+            },
+            {
+                "ETF": "AAPU", "Underlying": "AAPL", "product_class": "letf_long",
+                "net_edge_p50_annual": 0.02, "asof_date": "2026-06-02",
+            },
+        ]
+    ).to_csv(csv, index=False)
+    out = load_short_edge_by_yb_from_screener(csv)
+    assert "AAPU" not in out  # only income_yieldboost rows
+    assert out["__asof__"] == "2026-06-02"
+    rec = out["CWY"]
+    assert rec["net_edge_p50_annual"] == 0.75
+    assert rec["purgatory"] is True
+    assert rec["borrow_fee_annual"] is None  # empty cell -> None, not 0
+    assert is_directly_shortable(rec) is False
+
+
+def test_enrich_vrp_rows_with_short_edge_non_destructive():
+    payload = {
+        "build_time": "2026-06-02T19:00:00Z",
+        "rows": [
+            {
+                "yb_etf": "CWY", "underlying": "CRWV",
+                "edge_pp_of_max_loss": 12.0,
+                "spread_mid_market": 0.5, "model_fair": 0.4,
+                "options_as_of": "2026-06-02T17:00:00Z",
+                "underlying_options_as_of": "2026-06-02T16:55:00Z",
+                "holdings_as_of": "2026-06-02",
+            }
+        ],
+    }
+    short_map = {
+        "__asof__": "2026-06-02",
+        "CWY": {
+            "net_edge_p50_annual": 0.75, "net_edge_p05_annual": 0.18,
+            "net_edge_p95_annual": 1.28, "expected_gross_decay_p50_annual": 0.80,
+            "borrow_fee_annual": None, "income_distributions_annual": None,
+            "purgatory": False, "exclude_no_shares": False,
+            "strategy_blacklisted": False, "exclude_borrow_spike": False,
+            "inverse_shortable": True,
+            "edge_sign_convention": "short_favorable_positive",
+            "asof_date": "2026-06-02",
+        },
+    }
+    out = enrich_vrp_rows_with_short_edge(payload, short_map)
+    row = out["rows"][0]
+    # Existing fields preserved.
+    assert row["edge_pp_of_max_loss"] == 12.0
+    assert row["spread_mid_market"] == 0.5
+    # Structural fields joined.
+    assert row["net_edge_p50_annual"] == 0.75
+    assert row["short_signal"]["tier"] == "strong"
+    # Sign-corrected overlay: rich spread -> headwind.
+    assert row["short_thesis_alignment"]["alignment_pp"] == -12.0
+    assert row["short_thesis_alignment"]["direction"] == "headwind"
+    assert row["short_directly_shortable"] is True
+    assert row["quote_sync"]["sync_ok"] is True
+    assert "Net short edge" in row["short_edge_why"]
+    assert out["short_edge_join_count"] == 1
+
+
+def test_enrich_vrp_rows_missing_screener_row_is_safe():
+    payload = {"rows": [{"yb_etf": "ZZZZ", "edge_pp_of_max_loss": 5.0,
+                         "options_as_of": "2026-06-02T17:00:00Z",
+                         "underlying_options_as_of": "2026-06-02T17:00:00Z"}]}
+    out = enrich_vrp_rows_with_short_edge(payload, {})
+    row = out["rows"][0]
+    assert row["net_edge_p50_annual"] is None
+    assert row["short_signal"]["tier"] == "none"
+    assert row["short_directly_shortable"] is None
+    assert out["short_edge_join_count"] == 0
