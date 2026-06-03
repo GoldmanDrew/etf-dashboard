@@ -37,6 +37,7 @@ from split_adjustments import (
     load_split_hints_from_corporate_actions,
     merge_split_events,
     parse_yahoo_split_events,
+    split_factor_end_to_asof_safe,
 )
 from income_schedule import (
     DEFAULT_CROSS_FUND_RATIO,
@@ -3499,7 +3500,9 @@ def _build_market_windows(
             total_dividends += float(amount)
 
         split_factor_start_to_end = cum_split_factor(start_date, end_date, split_events)
-        split_factor_end_to_asof = cum_split_factor(end_date, asof_calendar, split_events)
+        split_factor_end_to_asof = split_factor_end_to_asof_safe(
+            points, end_date, asof_calendar, split_events,
+        )
         start_close_on_end_basis = start_close * split_factor_start_to_end
 
         price_return = None

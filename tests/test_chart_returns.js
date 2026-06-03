@@ -9,6 +9,7 @@ const {
   nearestSplitRatio,
   inferSplitFactorEndToLive,
   livePriceReturnFromWindow,
+  liveTrReturnFromWindow,
   liveAdjReturnFromWindow,
   splitAdjustedDividendYield,
 } = require("../assets/chart_returns.js");
@@ -29,6 +30,29 @@ test("MTYY live return uses split factor not raw start", () => {
   assert.ok(Number.isFinite(ret));
   assert.ok(ret < 0, `expected negative return, got ${ret}`);
   assert.ok(ret > -0.25, `return too negative: ${ret}`);
+});
+
+test("ignore stale split factor when live and end are same basis", () => {
+  const ret = livePriceReturnFromWindow({
+    liveSpot: 23,
+    endClose: 22.94,
+    priceReturn: (22.94 / 64.08) - 1,
+    splitFactorEndToAsof: 6,
+  });
+  assert.ok(Math.abs(ret - ((23 / 22.94) * (1 + (22.94 / 64.08 - 1)) - 1)) < 1e-6);
+  assert.ok(ret > -0.7 && ret < -0.5, `expected ~-64%, got ${ret}`);
+});
+
+test("liveTrReturnFromWindow chains adj return from end adj close", () => {
+  const tr = liveTrReturnFromWindow({
+    liveSpot: 23,
+    endClose: 22.94,
+    endAdjClose: 22.94,
+    trReturn: -0.37,
+    splitFactorEndToAsof: 6,
+  });
+  assert.ok(Number.isFinite(tr));
+  assert.ok(tr > -0.45 && tr < -0.25);
 });
 
 test("heuristic infers split when metadata missing", () => {

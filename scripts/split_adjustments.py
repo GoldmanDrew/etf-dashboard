@@ -220,12 +220,15 @@ def infer_split_factor_end_to_live(
     known_factor: float | None = None,
     rel_tol: float = 0.075,
 ) -> float:
-    """Infer split factor from live/end ratio when corp-action metadata is stale."""
-    if known_factor is not None and math.isfinite(known_factor) and known_factor > 0:
-        return float(known_factor)
+    """Reconcile live spot to window-end close basis across a possible split."""
     if not (math.isfinite(live_spot) and math.isfinite(end_close) and live_spot > 0 and end_close > 0):
         return 1.0
     ratio = live_spot / end_close
+    if abs(ratio - 1.0) <= 0.03:
+        return 1.0
+    if known_factor is not None and math.isfinite(known_factor) and known_factor > 0 and known_factor != 1.0:
+        if abs(live_spot / known_factor / end_close - 1.0) <= max(0.05, rel_tol):
+            return float(known_factor)
     if abs(ratio - 1.0) <= 0.02:
         return 1.0
     guessed = nearest_split_ratio(ratio, rel_tol=rel_tol)
@@ -264,3 +267,19 @@ def corporate_actions_build_time(path: Path | None = None) -> dt.datetime | None
         return dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         return None
+
+
+def split_factor_end_to_asof_safe(
+    points: list[tuple[dt.date, float, float]],
+    end_date: dt.date,
+    asof_calendar: dt.date,
+    events: list[tuple[dt.date, float]],
+) -> float:
+    """Only scale live spot when Yahoo *close* actually jumped between window end and asof."""
+    if end_date >= asof_calendar or not events:
+        return 1.0
+    between = [(d, m) for d, m in events if end_date < d <= asof_calendar]
+    if not between:
+        return 1.0
+    verified = filter_splits_needing_close_basis_fix(points, between)
+    return cum_split_factor(end_date, asof_calendar, verified)

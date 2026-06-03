@@ -33,13 +33,21 @@
     return bestR;
   }
 
+  /**
+   * Reconcile live spot to window-end close basis across a possible split.
+   * When live/end already match (continuous Yahoo through a reverse split), ignore
+   * stale corp-action factors that would wrongly scale live down ~6×.
+   */
   function inferSplitFactorEndToLive(liveSpot, endClose, knownFactor, relTol = 0.075) {
-    const k = Number(knownFactor);
-    if (Number.isFinite(k) && k > 0) return k;
     const live = Number(liveSpot);
     const end = Number(endClose);
     if (!Number.isFinite(live) || !Number.isFinite(end) || live <= 0 || end <= 0) return 1;
     const ratio = live / end;
+    if (Math.abs(ratio - 1) <= 0.03) return 1;
+    const k = Number(knownFactor);
+    if (Number.isFinite(k) && k > 0 && k !== 1) {
+      if (Math.abs(live / k / end - 1) <= Math.max(0.05, relTol)) return k;
+    }
     if (Math.abs(ratio - 1) <= 0.02) return 1;
     const guessed = nearestSplitRatio(ratio, relTol);
     return guessed != null ? guessed : 1;
@@ -70,6 +78,38 @@
   }
 
   /**
+   * Extend Yahoo total-return (adj close) over the window using end adj as anchor.
+   */
+  function liveTrReturnFromWindow({
+    liveSpot,
+    endClose,
+    endAdjClose,
+    trReturn,
+    priceReturn,
+    splitFactorEndToAsof,
+    splitFactorEndToLive,
+    dividendYield,
+  }) {
+    const endRef = Number(endAdjClose) > 0 ? Number(endAdjClose) : Number(endClose);
+    const storedTr = Number(trReturn);
+    if (Number.isFinite(storedTr) && endRef > 0) {
+      const live = Number(liveSpot);
+      if (!Number.isFinite(live) || live <= 0) return storedTr;
+      const factor = inferSplitFactorEndToLive(live, endRef, splitFactorEndToLive ?? splitFactorEndToAsof);
+      const liveOnBasis = live / factor;
+      return (liveOnBasis / endRef) * (1 + storedTr) - 1;
+    }
+    return liveAdjReturnFromWindow({
+      liveSpot,
+      endClose,
+      priceReturn,
+      splitFactorEndToAsof,
+      splitFactorEndToLive,
+      dividendYield,
+    });
+  }
+
+  /**
    * Total return with explicit dividend yield (fraction of split-adjusted start).
    */
   function liveAdjReturnFromWindow(args) {
@@ -94,6 +134,7 @@
     nearestSplitRatio,
     inferSplitFactorEndToLive,
     livePriceReturnFromWindow,
+    liveTrReturnFromWindow,
     liveAdjReturnFromWindow,
     splitAdjustedDividendYield,
   };

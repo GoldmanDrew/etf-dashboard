@@ -1438,11 +1438,11 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
-<script src="assets/chart_returns.js?v=cr-v1"></script>
+<script src="assets/chart_returns.js?v=cr-v2"></script>
 <script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v2"></script>
 <script src="assets/pair_backtest.js?v=pb-v7"></script>
-<script src="assets/realized_decay.js?v=rd-v3"></script>
+<script src="assets/realized_decay.js?v=rd-v4"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
@@ -5371,6 +5371,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             : 'chart',
   );
   const [decayRollWindow, setDecayRollWindow] = useState(60);
+  const [corpActionsPayload, setCorpActionsPayload] = useState(null);
   const [scenarioHorizon, setScenarioHorizon] = useState('1M');
   const [mcPathCount, setMcPathCount] = useState(500);
   const [mcSeed, setMcSeed] = useState(42);
@@ -5735,6 +5736,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   }, []);
   useEffect(() => {
     let cancelled = false;
+    fetchJson(CORPORATE_ACTIONS_URL)
+      .then((payload) => { if (!cancelled) setCorpActionsPayload(payload); })
+      .catch(() => { if (!cancelled) setCorpActionsPayload(null); });
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
     const run = async () => {
       if (LETF_REBALANCE_FLOWS_CACHE?.byTicker) {
         if (!cancelled) setLetfFlowsCache(LETF_REBALANCE_FLOWS_CACHE);
@@ -5858,6 +5866,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const undStartClose = Number(divPoint?.underlying_start_close);
   const etfEndClose = Number(divPoint?.etf_end_close);
   const undEndClose = Number(divPoint?.underlying_end_close);
+  const etfEndAdjClose = Number(divPoint?.etf_end_adj_close);
+  const undEndAdjClose = Number(divPoint?.underlying_end_adj_close);
+  const etfStartAdjClose = Number(divPoint?.etf_start_adj_close);
   const etfSplitEndToAsof = Number(divPoint?.etf_split_factor_end_to_asof);
   const undSplitEndToAsof = Number(divPoint?.underlying_split_factor_end_to_asof);
   const etfWindowDates = divPoint?.etf_start_date && divPoint?.etf_end_date ? `${divPoint.etf_start_date} to ${divPoint.etf_end_date}` : 'window unavailable';
@@ -5898,11 +5909,23 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const b = Number(r?.beta);
     return Number.isFinite(b) ? b : NaN;
   }, [r]);
+  const decaySplitEvents = useMemo(() => (
+    typeof RealizedDecayFns.parseSplitEventsFromCorp === 'function'
+      ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, etfSym)
+      : []
+  ), [corpActionsPayload, etfSym]);
+  const decayTrInputRows = useMemo(() => {
+    const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
+    const withNavTr = buildTotalReturnBacktestSeries(raw, etfDistributionsSeries);
+    return typeof RealizedDecayFns.prepareDecayTrRows === 'function'
+      ? RealizedDecayFns.prepareDecayTrRows(withNavTr, decaySplitEvents)
+      : [];
+  }, [etfMetricsMap, etfSym, etfDistributionsSeries, decaySplitEvents]);
   const realizedDailyDragSeries = useMemo(() => (
     typeof RealizedDecayFns.buildDailyLogDragSeries === 'function'
-      ? RealizedDecayFns.buildDailyLogDragSeries(etfBacktestSeries, decayBeta)
+      ? RealizedDecayFns.buildDailyLogDragSeries(decayTrInputRows, decayBeta)
       : []
-  ), [etfBacktestSeries, decayBeta]);
+  ), [decayTrInputRows, decayBeta]);
   const decayBorrowAnnual = useMemo(() => {
     const usedPts = etfBorrowSeries.filter(borrowHistoryPointForAvg);
     const vals = usedPts.map((x) => Number(x?.borrow_current)).filter(Number.isFinite);
@@ -6450,10 +6473,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       })
       : undPriceRet)
     : undPriceRet;
-  const etfAdjRetDisplay = (hasCachedSpotEtf && typeof chartRetFns.liveAdjReturnFromWindow === 'function')
-    ? chartRetFns.liveAdjReturnFromWindow({
+  const etfAdjRetDisplay = (hasCachedSpotEtf && typeof chartRetFns.liveTrReturnFromWindow === 'function')
+    ? chartRetFns.liveTrReturnFromWindow({
       liveSpot: tradeSpotEtf,
       endClose: etfEndClose,
+      endAdjClose: etfEndAdjClose,
+      trReturn: etfAdjRet,
       priceReturn: etfPriceRet,
       splitFactorEndToAsof: etfSplitEndToAsof,
       dividendYield: etfDivYieldAdj ?? etfDivYield,
@@ -6463,10 +6488,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       : ((Number.isFinite(etfLivePriceRet) && Number.isFinite(etfDivYieldAdj ?? etfDivYield))
         ? (etfLivePriceRet + (etfDivYieldAdj ?? etfDivYield))
         : null));
-  const undAdjRetDisplay = (hasCachedSpotUnd && typeof chartRetFns.liveAdjReturnFromWindow === 'function')
-    ? chartRetFns.liveAdjReturnFromWindow({
+  const undAdjRetDisplay = (hasCachedSpotUnd && typeof chartRetFns.liveTrReturnFromWindow === 'function')
+    ? chartRetFns.liveTrReturnFromWindow({
       liveSpot: tradeSpotUnderlying,
       endClose: undEndClose,
+      endAdjClose: undEndAdjClose,
+      trReturn: undAdjRet,
       priceReturn: undPriceRet,
       splitFactorEndToAsof: undSplitEndToAsof,
       dividendYield: undDivYieldAdj ?? undDivYield,
@@ -6767,7 +6794,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="chart-stat">
               <div className="cs-label">{etfSym} Price vs Adj Return</div>
               <div className="cs-value">{Number.isFinite(etfLivePriceRet) ? fmt(etfLivePriceRet) : '—'} / {Number.isFinite(etfAdjRetDisplay) ? fmt(etfAdjRetDisplay) : '—'}</div>
-              <div className="cs-sub">live spot vs window end (split-adj) • dividend lift: {etfDivLift == null ? '—' : fmt(etfDivLift)}</div>
+              <div className="cs-sub">live spot vs window end (split-adj) • dividend lift: {etfDivLift == null ? '—' : fmt(etfDivLift)} • TR = Yahoo adj close</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">{undSym || 'Underlying'} Price vs Adj Return</div>
@@ -7914,10 +7941,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         <div className="chart-section">
           <div className="scenario-title">Realized pair return — gross &amp; net by horizon</div>
           <div className="scenario-sub" style={{ marginBottom: 10 }}>
-            Period return over the trailing window (not annualized):{' '}
+            Period return over the trailing window (not annualized) on <strong>total-return</strong> prices
+            (ETF: Yahoo adj close / NAV TR; underlying: split-adj close).{' '}
             <code>gross = β·log(U<sub>end</sub>/U<sub>start</sub>) − log(L<sub>end</sub>/L<sub>start</sub>)</code>,{' '}
             <code>net = gross − borrow<sub>avg</sub> × (N/252)</code>.
-            Short-favorable +. ETF leg uses total-return NAV when distributions are known.
+            Reverse splits are applied via adj close or corporate-actions scaling.
           </div>
 
           {etfMetricsLoading ? (

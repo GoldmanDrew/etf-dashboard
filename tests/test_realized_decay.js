@@ -7,6 +7,9 @@ const {
   buildRollingPeriodReturnSeries,
   logToSimplePeriod,
   periodBorrowLog,
+  prepareDecayTrRows,
+  etfTrPrice,
+  cumSplitFactor,
 } = require("../assets/realized_decay.js");
 
 function makeFlatSeries(n, etfDrift = 0, undDrift = 0) {
@@ -72,4 +75,22 @@ test("rolling period series length", () => {
 
 test("logToSimplePeriod", () => {
   assert.ok(Math.abs(logToSimplePeriod(0.1) - 0.105170918) < 1e-6);
+});
+
+test("prefers etf_adj_close over raw close for TR drag", () => {
+  const rows = [
+    { date: "2024-01-01", close_price: 100, etf_adj_close: 100, underlying_adj_close: 50 },
+    { date: "2024-01-02", close_price: 50, etf_adj_close: 99, underlying_adj_close: 50 },
+  ];
+  const tr = prepareDecayTrRows(rows, []);
+  const daily = buildDailyLogDragSeries(tr, 2);
+  assert.equal(daily.length, 1);
+  assert.ok(Math.abs(daily[0].drag - (2 * Math.log(50 / 50) - Math.log(99 / 100))) < 1e-9);
+});
+
+test("cumSplitFactor scales pre-split close to latest basis", () => {
+  const events = [{ date: "2024-01-02", mult: 6 }];
+  assert.ok(Math.abs(cumSplitFactor("2024-01-01", "2024-01-02", events) - 6) < 1e-9);
+  const px = etfTrPrice({ date: "2024-01-01", close_price: 4, underlying_adj_close: 1 }, events, "2024-01-02");
+  assert.ok(Math.abs(px - 24) < 1e-9);
 });

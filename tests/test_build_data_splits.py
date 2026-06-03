@@ -52,8 +52,23 @@ def test_build_market_windows_mtyy_split_metadata():
     )
     w = windows["1M"]
     assert w["price_return"] == pytest.approx((3.934 / 4.709) - 1, rel=1e-4)
-    assert w["split_factor_end_to_asof"] == pytest.approx(6.0)
+    # No Yahoo bar spans the split → cannot verify a close jump → do not scale live spot.
+    assert w["split_factor_end_to_asof"] == pytest.approx(1.0)
     assert w["dividend_yield"] == pytest.approx(0.371 / 4.709, rel=1e-4)
+
+
+def test_split_factor_end_to_asof_applies_discontinuous_jump():
+    from split_adjustments import split_factor_end_to_asof_safe
+
+    points = [
+        (dt.date(2026, 6, 1), 3.934, 3.934),
+        (dt.date(2026, 6, 3), 23.604, 23.604),
+    ]
+    events = [(dt.date(2026, 6, 2), 6.0)]
+    fac = split_factor_end_to_asof_safe(
+        points, dt.date(2026, 6, 1), dt.date(2026, 6, 3), events,
+    )
+    assert fac == pytest.approx(6.0)
 
 
 def test_live_return_mtyy_post_split_spot():
@@ -78,6 +93,17 @@ def test_live_return_mtyy_realistic_spot_not_plus_300pct():
     live_ret = (live_spot / factor / end_close) * (1 + stored_ret) - 1
     assert live_ret < 0
     assert live_ret > -0.25
+
+
+def test_live_return_continuous_yahoo_ignores_stale_factor():
+    end_close = 22.94
+    live_spot = 23.0
+    stored_ret = (22.94 / 64.08) - 1.0
+    factor = infer_split_factor_end_to_live(live_spot, end_close, known_factor=6.0)
+    assert factor == pytest.approx(1.0)
+    live_ret = (live_spot / factor / end_close) * (1 + stored_ret) - 1
+    assert live_ret == pytest.approx((23 / 22.94) * (1 + stored_ret) - 1, rel=1e-6)
+    assert live_ret > -0.7 and live_ret < -0.5
 
 
 def test_forward_split_within_window_normalizes_start():
@@ -156,3 +182,18 @@ def test_build_market_windows_mtyy_continuous_yahoo_6m():
     assert w["price_return"] == pytest.approx((22.94 / 64.08) - 1, rel=1e-3)
     assert w["adj_return"] == pytest.approx((22.94 / 36.502) - 1, rel=1e-3)
     assert w["end_close"] == pytest.approx(22.94, rel=1e-3)
+
+
+def test_split_factor_end_to_asof_skips_continuous_mtyy():
+    from split_adjustments import split_factor_end_to_asof_safe
+
+    points = [
+        (dt.date(2026, 6, 1), 23.604, 23.604),
+        (dt.date(2026, 6, 2), 22.99, 22.99),
+        (dt.date(2026, 6, 3), 22.94, 22.94),
+    ]
+    events = [(dt.date(2026, 6, 2), 6.0)]
+    fac = split_factor_end_to_asof_safe(
+        points, dt.date(2026, 6, 1), dt.date(2026, 6, 3), events,
+    )
+    assert fac == pytest.approx(1.0)

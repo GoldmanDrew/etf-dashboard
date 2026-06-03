@@ -14,38 +14,111 @@
     return NaN;
   }
 
+  function parseDate(s) {
+    const d = String(s || "").trim().slice(0, 10);
+    return d.length === 10 ? d : "";
+  }
+
   function logToSimplePeriod(logRet) {
     const x = toNum(logRet);
     if (!Number.isFinite(x)) return null;
     return Math.expm1(x);
   }
 
-  /** ETF leg for log-drag: total-return NAV when present, else close/NAV. */
-  function etfPriceForDrag(row) {
-    const tr = toNum(row && row.nav_total_return);
-    if (tr > 0) return tr;
-    const adj = toNum(row && row.etf_adj_close);
-    if (adj > 0) return adj;
-    const nav = toNum(row && row.nav);
-    if (nav > 0) return nav;
-    const close = toNum(row && row.close_price);
-    return close > 0 ? close : NaN;
+  /** Parse corporate_actions.json events for one ticker → sorted [{date, mult}]. */
+  function parseSplitEventsFromCorp(corpPayload, ticker) {
+    const sym = String(ticker || "").trim().toUpperCase();
+    if (!sym || !corpPayload) return [];
+    const events = [];
+    for (const ev of corpPayload.events || []) {
+      const t = String(ev?.ticker || "").trim().toUpperCase();
+      if (t !== sym) continue;
+      const typ = String(ev?.type || "");
+      if (typ !== "reverse_split" && typ !== "forward_split") continue;
+      const ed = parseDate(ev?.execution_date);
+      const rf = toNum(ev?.ratio_from);
+      const rt = toNum(ev?.ratio_to);
+      if (!ed || !Number.isFinite(rf) || !Number.isFinite(rt) || rt === 0) continue;
+      const mult = rf / rt;
+      if (mult > 0) events.push({ date: ed, mult });
+    }
+    return events.sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  /** Map price at fromDate onto toDate raw-close basis (same as Python cum_split_factor). */
+  function cumSplitFactor(fromDate, toDate, events) {
+    const from = parseDate(fromDate);
+    const to = parseDate(toDate);
+    if (!from || !to || from === to || !events?.length) return 1;
+    let mult = 1;
+    if (from < to) {
+      for (const ev of events) {
+        if (from < ev.date && ev.date <= to) mult *= ev.mult;
+      }
+    } else {
+      for (const ev of events) {
+        if (to < ev.date && ev.date <= from) mult /= ev.mult;
+      }
+    }
+    return Number.isFinite(mult) && mult > 0 ? mult : 1;
   }
 
   /**
-   * Daily log hedge drag: d_t = β·r_U,t − r_L,t.
-   * @param {object[]} rows — sorted ascending by date; needs ETF px + underlying_adj_close
-   * @param {number} beta — hedge ratio (record.delta)
+   * ETF total-return price: Yahoo adj close (splits + divs), else NAV TR, else split-scaled close.
+   */
+  function etfTrPrice(row, splitEvents, latestDate) {
+    const adj = toNum(row && row.etf_adj_close);
+    if (adj > 0) return adj;
+    const tr = toNum(row && row.nav_total_return);
+    if (tr > 0) return tr;
+    const raw = toNum(row && row.close_price) || toNum(row && row.nav);
+    if (!(raw > 0)) return NaN;
+    const ds = parseDate(row && row.date);
+    const latest = parseDate(latestDate);
+    if (!ds || !latest) return raw;
+    return raw * cumSplitFactor(ds, latest, splitEvents);
+  }
+
+  function undTrPrice(row) {
+    return toNum(row && row.underlying_adj_close);
+  }
+
+  /**
+   * Normalize metrics rows to TR prices on a common latest-date basis for decay math.
+   */
+  function prepareDecayTrRows(rows, splitEvents) {
+    const sorted = (Array.isArray(rows) ? rows : [])
+      .filter((row) => parseDate(row && row.date))
+      .sort((a, b) => parseDate(a.date).localeCompare(parseDate(b.date)));
+    if (!sorted.length) return [];
+    const latestDate = parseDate(sorted[sorted.length - 1].date);
+    const events = Array.isArray(splitEvents) ? splitEvents : [];
+    return sorted
+      .map((row) => ({
+        date: parseDate(row.date),
+        trEtfPx: etfTrPrice(row, events, latestDate),
+        trUndPx: undTrPrice(row),
+      }))
+      .filter((x) => x.date && x.trEtfPx > 0 && x.trUndPx > 0);
+  }
+
+  /**
+   * Daily log hedge drag on total-return prices: d_t = β·r_U,t − r_L,t.
    */
   function buildDailyLogDragSeries(rows, beta) {
     const b = toNum(beta);
     if (!Number.isFinite(b)) return [];
     const clean = (Array.isArray(rows) ? rows : [])
-      .map((row) => ({
-        date: String((row && row.date) || "").trim(),
-        etfPx: etfPriceForDrag(row),
-        undPx: toNum(row && row.underlying_adj_close),
-      }))
+      .map((row) => {
+        const date = parseDate(row && row.date);
+        const etfPx = toNum(row && row.trEtfPx) > 0
+          ? toNum(row.trEtfPx)
+          : etfTrPrice(row, [], null);
+        const undPx = toNum(row && row.trUndPx) > 0
+          ? toNum(row.trUndPx)
+          : undTrPrice(row);
+        return { date, etfPx, undPx };
+      })
       .filter((x) => x.date && x.etfPx > 0 && x.undPx > 0)
       .sort((a, b2) => a.date.localeCompare(b2.date));
     if (clean.length < 2) return [];
@@ -114,11 +187,6 @@
     };
   }
 
-  /**
-   * Trailing period gross / net pair return for fixed horizons ending at last obs.
-   * Gross = Σ d_t over window (≡ β·log(U_end/U_start) − log(L_end/L_start) with fixed β).
-   * Net = grossLog − borrow_annual × (N/252).
-   */
   function computeHorizonPeriodReturns(dailySeries, horizons, borrowAnnual) {
     const hs = Array.isArray(horizons) && horizons.length ? horizons : DEFAULT_HORIZONS;
     const series = Array.isArray(dailySeries) ? dailySeries : [];
@@ -139,7 +207,6 @@
     return { horizons: rows, nDays: n, endDate, borrowAnnual: toNum(borrowAnnual) };
   }
 
-  /** Rolling trailing period gross / net at each end date for one lookback window. */
   function buildRollingPeriodReturnSeries(dailySeries, windowDays, borrowAnnual) {
     const w = Math.max(1, Math.floor(toNum(windowDays) || 60));
     const series = Array.isArray(dailySeries) ? dailySeries : [];
@@ -167,11 +234,16 @@
   const exported = {
     TRADING_DAYS_PER_YEAR,
     DEFAULT_HORIZONS,
+    parseSplitEventsFromCorp,
+    cumSplitFactor,
+    prepareDecayTrRows,
     buildDailyLogDragSeries,
     computeHorizonPeriodReturns,
     buildRollingPeriodReturnSeries,
     logToSimplePeriod,
     periodBorrowLog,
+    etfTrPrice,
+    undTrPrice,
   };
 
   if (typeof module !== "undefined" && module.exports) {
