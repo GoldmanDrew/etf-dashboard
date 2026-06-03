@@ -83,6 +83,37 @@ def parse_yahoo_split_events(split_map: dict | None) -> list[tuple[dt.date, floa
     return sorted(events.items())
 
 
+def dedupe_split_events(
+    events: list[tuple[dt.date, float]],
+    *,
+    max_day_spread: int = 5,
+) -> list[tuple[dt.date, float]]:
+    """Collapse duplicate corp-action hints (±N days) and Yahoo into one event per ratio."""
+    if not events:
+        return []
+    clusters: list[list[tuple[dt.date, float]]] = []
+    for d, m in sorted(events):
+        if m <= 0:
+            continue
+        placed = False
+        for cluster in clusters:
+            cd, cm = cluster[0]
+            if abs(float(m) - float(cm)) > 1e-6:
+                continue
+            if abs((d - cd).days) <= max_day_spread:
+                cluster.append((d, float(m)))
+                placed = True
+                break
+        if not placed:
+            clusters.append([(d, float(m))])
+    out: list[tuple[dt.date, float]] = []
+    for cluster in clusters:
+        # Prefer the latest date in the cluster (typically Yahoo's bar date).
+        best = max(cluster, key=lambda x: x[0])
+        out.append(best)
+    return sorted(out)
+
+
 def merge_split_events(
     *sources: list[tuple[dt.date, float]] | None,
     hints: dict[dt.date, float] | None = None,
@@ -99,7 +130,51 @@ def merge_split_events(
         for d, m in hints.items():
             if m > 0:
                 merged.setdefault(d, float(m))
-    return sorted(merged.items())
+    return dedupe_split_events(sorted(merged.items()))
+
+
+def split_close_jump_ratio(
+    points: list[tuple[dt.date, float, float]],
+    effective: dt.date,
+) -> float | None:
+    """``close_after / close_before`` at the first bar on/after ``effective``."""
+    if not points:
+        return None
+    before = [p for p in points if p[0] < effective]
+    on_after = [p for p in points if p[0] >= effective]
+    if not before or not on_after:
+        return None
+    c_before = float(before[-1][1])
+    c_after = float(on_after[0][1])
+    if not (math.isfinite(c_before) and math.isfinite(c_after) and c_before > 0):
+        return None
+    return c_after / c_before
+
+
+def filter_splits_needing_close_basis_fix(
+    points: list[tuple[dt.date, float, float]],
+    events: list[tuple[dt.date, float]],
+    *,
+    rel_tol: float = 0.15,
+) -> list[tuple[dt.date, float]]:
+    """
+    Keep only splits where Yahoo *close* jumps at the event (not already back-adjusted).
+
+    When Yahoo's close series is continuous through a reverse split (common for recent
+    listings), applying a mechanical factor would inflate pre-split closes ~6× and
+    produce nonsense returns (e.g. MTYY −99%).
+    """
+    if not events:
+        return []
+    out: list[tuple[dt.date, float]] = []
+    for eff, mult in events:
+        jump = split_close_jump_ratio(points, eff)
+        if jump is None:
+            continue
+        expected = nearest_split_ratio(jump, rel_tol=rel_tol)
+        if expected is not None and abs(expected - float(mult)) <= max(1e-6, rel_tol * abs(mult)):
+            out.append((eff, float(mult)))
+    return out
 
 
 def cum_split_factor(

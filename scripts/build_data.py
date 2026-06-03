@@ -33,6 +33,7 @@ from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_met
 from split_adjustments import (
     apply_split_adjustments_to_points,
     cum_split_factor,
+    filter_splits_needing_close_basis_fix,
     load_split_hints_from_corporate_actions,
     merge_split_events,
     parse_yahoo_split_events,
@@ -3640,13 +3641,22 @@ def compute_realized_vol_map(symbols: set[str]) -> dict[str, dict]:
         series = _fetch_yahoo_symbol_series(session, sym, range_value=REALIZED_VOL_RANGE)
         points = series.get("points") or []
         dividends = series.get("dividends") or []
-        split_events = _symbol_split_events(
+        merged_splits = _symbol_split_events(
             sym,
             series.get("yahoo_splits") or [],
             corp_hints,
         )
-        if points and split_events:
-            points = apply_split_adjustments_to_points(points, split_events)
+        manual_splits = _manual_split_events(sym)
+        # Only adjust price-basis when Yahoo close actually jumps at the split.
+        # Do not also call apply_split_adjustments_to_points — cum_split_factor in
+        # _build_market_windows handles discontinuities; double scaling caused −99% MTYY.
+        split_events = filter_splits_needing_close_basis_fix(points, merged_splits)
+        if manual_splits:
+            known = {(d, m) for d, m in split_events}
+            for ev in manual_splits:
+                if ev not in known:
+                    split_events.append(ev)
+            split_events = sorted(split_events)
         windows = (
             _build_market_windows(
                 points,

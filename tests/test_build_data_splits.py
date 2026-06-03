@@ -14,6 +14,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 from split_adjustments import (  # noqa: E402
     cum_split_factor,
+    dedupe_split_events,
+    filter_splits_needing_close_basis_fix,
     infer_split_factor_end_to_live,
     load_split_hints_from_corporate_actions,
     merge_split_events,
@@ -106,3 +108,51 @@ def test_merge_split_events_prefers_explicit():
     b = [(dt.date(2026, 6, 2), 5.0)]
     merged = merge_split_events(a, b)
     assert merged == [(dt.date(2026, 6, 2), 5.0)]
+
+
+def test_dedupe_corp_hint_padding_triple_mtyy():
+    hints = {
+        dt.date(2026, 6, 1): 6.0,
+        dt.date(2026, 6, 2): 6.0,
+        dt.date(2026, 6, 3): 6.0,
+    }
+    merged = merge_split_events([(dt.date(2026, 6, 2), 6.0)], hints=hints)
+    assert merged == [(dt.date(2026, 6, 3), 6.0)]
+
+
+def test_filter_keeps_smup_style_reverse_split():
+    points = [
+        (dt.date(2026, 1, 23), 421.25, 421.25),
+        (dt.date(2026, 1, 26), 36.25, 36.25),
+    ]
+    events = [(dt.date(2026, 1, 26), 0.1)]
+    assert filter_splits_needing_close_basis_fix(points, events) == events
+
+
+def test_filter_skips_continuous_yahoo_mtyy():
+    """Yahoo close is flat through MTYY 1-for-6 — do not apply mechanical ×6."""
+    points = [
+        (dt.date(2026, 5, 28), 24.0, 23.622),
+        (dt.date(2026, 6, 1), 23.604, 23.604),
+        (dt.date(2026, 6, 2), 22.99, 22.99),
+        (dt.date(2026, 6, 3), 22.94, 22.94),
+    ]
+    events = [(dt.date(2026, 6, 2), 6.0)]
+    assert filter_splits_needing_close_basis_fix(points, events) == []
+
+
+def test_build_market_windows_mtyy_continuous_yahoo_6m():
+    points = [
+        (dt.date(2025, 12, 3), 64.08, 36.502),
+        (dt.date(2026, 6, 3), 22.94, 22.94),
+    ]
+    windows = build_data._build_market_windows(
+        points,
+        dividends=[(dt.date(2026, 5, 15), 0.371)],
+        split_events=[],
+        asof_calendar=dt.date(2026, 6, 3),
+    )
+    w = windows["6M"]
+    assert w["price_return"] == pytest.approx((22.94 / 64.08) - 1, rel=1e-3)
+    assert w["adj_return"] == pytest.approx((22.94 / 36.502) - 1, rel=1e-3)
+    assert w["end_close"] == pytest.approx(22.94, rel=1e-3)
