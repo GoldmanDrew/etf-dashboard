@@ -5736,7 +5736,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   }, []);
   useEffect(() => {
     let cancelled = false;
-    fetchJson(CORPORATE_ACTIONS_URL)
+    const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+    fetch(`${CORPORATE_ACTIONS_URL}${cacheBust}`, { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
       .then((payload) => { if (!cancelled) setCorpActionsPayload(payload); })
       .catch(() => { if (!cancelled) setCorpActionsPayload(null); });
     return () => { cancelled = true; };
