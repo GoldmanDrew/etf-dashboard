@@ -20,6 +20,18 @@
     return Number.isFinite(n) ? Math.max(0, n) / 252 : 0;
   }
 
+  /**
+   * Annual borrow **cost** drag per $1 ETF short MV (fee-only).
+   * Production `borrow_current` / IBKR fee_annual: positive magnitude.
+   * Legacy/tests short_favorable_positive fee: negative rate.
+   */
+  function annualBorrowCostDragPerShortDollar(canon) {
+    const n = toNum(canon);
+    if (!Number.isFinite(n)) return 0;
+    if (n < 0) return -n;
+    return Math.max(0, n);
+  }
+
   function normalizeSeries(rows, opts) {
     const valueKey = (opts && opts.valueKey) || "total_return";
     const priceKey = (opts && opts.priceKey) || "close_price";
@@ -356,11 +368,11 @@
    * - **β ≥ 0**: short ETF, long underlying (borrow on ETF short only).
    * - **β < 0**: short ETF, short underlying (borrow on ETF short only; underlying short borrow 0%).
    *
-   * **Borrow (etf-dashboard / short_favorable_positive):** `borrow_current` from `opts.borrowHistory`
-   * is the canonical annual rate where **negative = fee (cost to short)**, **positive = rebate**.
-   * Daily cash drag per $ ETF short at EOD is **−rate / 252** (trapezoid on ETF price). Forward-fill
-   * the latest history point with `date <= row date`, then fall back to `opts.avgBorrowAnnual`
-   * (same convention) when unknown.
+   * **Borrow (ETF short only):** `borrow_current` from `opts.borrowHistory` is fee-only (IBKR /
+   * `borrow_history.json`: **positive** annual fee). Legacy negative values are short_favorable_positive
+   * fees. Daily cash drag = **costDrag(rate) / 252 ×** trapezoid ETF short MV (`costDrag` via
+   * `annualBorrowCostDragPerShortDollar`). Forward-fill the latest history point with `date <= row date`,
+   * then fall back to `opts.avgBorrowAnnual` when unknown.
    *
    * **Rebalancing:** Every **N** trading days, if **|β-adj net/gross − anchor|** exceeds
    * `netGrossTolerancePct` (percentage points), rebalance to target notionals and reset the anchor.
@@ -499,7 +511,7 @@
 
       advanceBorrowForDate(cur.date);
       const canon = Number.isFinite(lastBorrowCanon) ? lastBorrowCanon : borrowAnnualFallback;
-      const annualDragPerShortDollar = Number.isFinite(canon) ? -canon : 0;
+      const annualDragPerShortDollar = annualBorrowCostDragPerShortDollar(canon);
       const borrowBase = qE * 0.5 * (prev.pl + cur.pl);
       const borrowDay = borrowBase * (annualDragPerShortDollar / 252);
       cumBorrow += borrowDay;
@@ -533,9 +545,9 @@
         netPnl,
         longPnl: cumEtf,
         shortPnl: cumUnd,
-        borrow: -cumBorrow,
-        distributions: -cumDistributions,
-        tCosts: -cumTc,
+        borrow: cumBorrow,
+        distributions: cumDistributions,
+        tCosts: cumTc,
         netGross: netGrossBeta,
         netGrossRaw,
         netGrossBeta,
@@ -602,6 +614,7 @@
     median,
     buildDistributionByDate,
     computeEtfShortDayPnl,
+    annualBorrowCostDragPerShortDollar,
     runPairBacktest,
     slippageCost,
     exposureRatio,

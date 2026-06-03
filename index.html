@@ -403,6 +403,55 @@
     cursor: help;
   }
 
+  /* ── Realized decay horizons (Decay tab) ── */
+  .decay-horizons-wrap { margin-top: 8px; }
+  .decay-horizons-bars {
+    display: flex; align-items: flex-end; gap: 10px; min-height: 220px;
+    padding: 12px 8px 0; border: 1px solid var(--border); border-radius: 8px;
+    background: rgba(11, 19, 34, 0.35);
+  }
+  .decay-horizon-col {
+    flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 6px;
+  }
+  .decay-horizon-bar-stack {
+    position: relative; width: 100%; max-width: 72px; height: 160px;
+    display: flex; flex-direction: column; justify-content: flex-end;
+  }
+  .decay-horizon-zero {
+    position: absolute; left: 0; right: 0; height: 1px; background: rgba(255,255,255,0.35);
+  }
+  .decay-horizon-bar {
+    width: 100%; border-radius: 4px 4px 0 0; min-height: 2px;
+    transition: opacity 0.15s;
+  }
+  .decay-horizon-bar.pos { background: rgba(16, 185, 129, 0.85); }
+  .decay-horizon-bar.neg { background: rgba(239, 68, 68, 0.85); }
+  .decay-horizon-bar.insufficient { opacity: 0.45; }
+  .decay-horizon-val {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600;
+    text-align: center; line-height: 1.2;
+  }
+  .decay-horizon-label {
+    font-size: 10px; color: var(--text-muted); font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .decay-horizon-table {
+    width: 100%; margin-top: 14px; border-collapse: collapse; font-size: 12px;
+  }
+  .decay-horizon-table th, .decay-horizon-table td {
+    padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right;
+  }
+  .decay-horizon-table th:first-child, .decay-horizon-table td:first-child { text-align: left; }
+  .decay-horizon-pills { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 8px; }
+  .decay-horizon-pill {
+    padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 600;
+    border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .decay-horizon-pill.active {
+    background: var(--accent-blue); border-color: var(--accent-blue); color: #fff;
+  }
+
   /* ── Info Page ────────────── */
   .info-page { padding: 24px; max-width: 860px; }
   .info-row {
@@ -1383,6 +1432,7 @@
 <script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v2"></script>
 <script src="assets/pair_backtest.js?v=pb-v7"></script>
+<script src="assets/realized_decay.js?v=rd-v1"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
@@ -3462,6 +3512,82 @@ function SimpleSeriesPlot({
   );
 }
 
+const RealizedDecayFns = window.RealizedDecay || {};
+const REALIZED_DECAY_HORIZONS = RealizedDecayFns.DEFAULT_HORIZONS || [5, 20, 60, 120, 251];
+
+/** Bar chart: trailing annualized gross decay (log/yr) at fixed trading-day horizons. */
+function RealizedDecayHorizonsBarChart({ horizons, screenerAnnual, beta }) {
+  const pts = (Array.isArray(horizons) ? horizons : []).filter((h) => h && Number.isFinite(Number(h.annual)));
+  if (!pts.length) {
+    return <div className="scenario-warning">Need overlapping ETF + underlying daily prices (etf_metrics_daily).</div>;
+  }
+  const vals = pts.map((p) => Number(p.annual));
+  let lo = Math.min(...vals, Number.isFinite(Number(screenerAnnual)) ? Number(screenerAnnual) : vals[0]);
+  let hi = Math.max(...vals, Number.isFinite(Number(screenerAnnual)) ? Number(screenerAnnual) : vals[0]);
+  if (!(hi > lo)) { lo -= 0.02; hi += 0.02; }
+  const pad = (hi - lo) * 0.08 || 0.02;
+  lo -= pad;
+  hi += pad;
+  const span = Math.max(1e-9, hi - lo);
+  const zeroFrac = (0 - lo) / span;
+  const zeroPct = Math.min(100, Math.max(0, zeroFrac * 100));
+  const screenerOk = Number.isFinite(Number(screenerAnnual));
+  const screenerPct = screenerOk ? Math.min(100, Math.max(0, ((Number(screenerAnnual) - lo) / span) * 100)) : null;
+
+  return (
+    <div className="decay-horizons-wrap">
+      <div className="decay-horizons-bars" role="img" aria-label="Realized gross decay by horizon">
+        {pts.map((p) => {
+          const v = Number(p.annual);
+          const valPct = Math.min(100, Math.max(0, ((v - lo) / span) * 100));
+          const barBottom = Math.min(zeroPct, valPct);
+          const barTop = Math.max(zeroPct, valPct);
+          const barH = Math.max(2, barTop - barBottom);
+          const signCls = v >= 0 ? 'pos' : 'neg';
+          const tip = [
+            `${p.horizonDays}d window · ${p.obs} obs`,
+            p.startDate && p.endDate ? `${p.startDate} → ${p.endDate}` : null,
+            `Annualized: ${fmtLogYr(v)} log/yr`,
+            p.cumulative != null ? `Cumulative log drag: ${fmtLogYr(p.cumulative)}` : null,
+            !p.sufficient ? '(partial window — history shorter than horizon)' : null,
+          ].filter(Boolean).join('\n');
+          return (
+            <div key={p.horizonDays} className="decay-horizon-col" title={tip}>
+              <div className={`decay-horizon-val ${signCls}`} style={{ color: v >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
+                {fmtLogYr(v)}
+              </div>
+              <div className="decay-horizon-bar-stack">
+                <div className="decay-horizon-zero" style={{ bottom: `${zeroPct}%` }} />
+                {screenerPct != null && (
+                  <div
+                    className="decay-horizon-zero"
+                    style={{ bottom: `${screenerPct}%`, background: 'rgba(139, 92, 246, 0.75)', height: 2 }}
+                    title={`Screener full-sample gross: ${fmtLogYr(screenerAnnual)} log/yr`}
+                  />
+                )}
+                <div
+                  className={cls('decay-horizon-bar', signCls, !p.sufficient && 'insufficient')}
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    right: 0,
+                    bottom: `${barBottom}%`,
+                    height: `${barH}%`,
+                  }}
+                />
+              </div>
+              <div className="decay-horizon-label">{p.horizonDays}d</div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="scenario-sub" style={{ marginTop: 8 }}>
+        β = {Number.isFinite(Number(beta)) ? Number(beta).toFixed(3) : '—'} · short-favorable + · dashed purple = screener <code>gross_decay_annual</code>
+      </div>
+    </div>
+  );
+}
+
 // ── Columns ─────────────────────────────────
 const COLS = [
   { key: 'symbol', label: 'Symbol', w: 100, hint: 'BL = strategy blacklist (shown for context; not sized in trade plan / rebalancer).' },
@@ -4632,7 +4758,7 @@ function PairBacktestChart({ result }) {
     ['netPnl', 'Net PnL', 'rgba(6,182,212,0.98)'],
     ['longPnl', `${legEtf} (cum)`, 'rgba(16,185,129,0.95)'],
     ['shortPnl', `${legUnd} (cum)`, 'rgba(139,92,246,0.95)'],
-    ['borrow', 'Borrow', 'rgba(239,68,68,0.95)'],
+    ['borrow', 'Borrow cost', 'rgba(239,68,68,0.95)'],
     ['distributions', 'Distributions (short)', 'rgba(244,114,182,0.95)'],
     ['transactionCosts', 'T-costs', 'rgba(245,158,11,0.95)'],
   ];
@@ -5202,8 +5328,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     [chartVolLookbackRange],
   );
   const [activePanel, setActivePanel] = useState(
-    defaultPanel === 'backtest' ? 'backtest' : defaultPanel === 'flow' ? 'flow' : defaultPanel === 'trade' ? 'trade' : 'chart',
+    defaultPanel === 'backtest' ? 'backtest'
+      : defaultPanel === 'flow' ? 'flow'
+        : defaultPanel === 'trade' ? 'trade'
+          : defaultPanel === 'decay' ? 'decay'
+            : 'chart',
   );
+  const [decayRollWindow, setDecayRollWindow] = useState(60);
   const [scenarioHorizon, setScenarioHorizon] = useState('1M');
   const [mcPathCount, setMcPathCount] = useState(500);
   const [mcSeed, setMcSeed] = useState(42);
@@ -5367,6 +5498,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   }, [showBacktestPanel, activePanel]);
   useEffect(() => {
     if (!showBacktestPanel && activePanel === 'flow') setActivePanel('chart');
+  }, [showBacktestPanel, activePanel]);
+  useEffect(() => {
+    if (!showBacktestPanel && activePanel === 'decay') setActivePanel('chart');
   }, [showBacktestPanel, activePanel]);
 
   const bucketLabel = r.bucket === 'bucket_1_high_beta' ? 'Bucket 1 — High β'
@@ -5722,6 +5856,27 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     return buildTotalReturnBacktestSeries(raw, etfDistributionsSeries);
   }, [etfMetricsMap, etfSym, etfDistributionsSeries]);
+  const decayBeta = useMemo(() => {
+    const d = Number(r?.delta);
+    if (Number.isFinite(d)) return d;
+    const b = Number(r?.beta);
+    return Number.isFinite(b) ? b : NaN;
+  }, [r]);
+  const realizedDailyDragSeries = useMemo(() => (
+    typeof RealizedDecayFns.buildDailyLogDragSeries === 'function'
+      ? RealizedDecayFns.buildDailyLogDragSeries(etfBacktestSeries, decayBeta)
+      : []
+  ), [etfBacktestSeries, decayBeta]);
+  const realizedDecayHorizons = useMemo(() => (
+    typeof RealizedDecayFns.computeHorizonDecays === 'function'
+      ? RealizedDecayFns.computeHorizonDecays(realizedDailyDragSeries, REALIZED_DECAY_HORIZONS)
+      : { horizons: [], nDays: 0, endDate: null }
+  ), [realizedDailyDragSeries]);
+  const realizedDecayRollingSeries = useMemo(() => (
+    typeof RealizedDecayFns.buildRollingGrossDecaySeries === 'function'
+      ? RealizedDecayFns.buildRollingGrossDecaySeries(realizedDailyDragSeries, decayRollWindow)
+      : []
+  ), [realizedDailyDragSeries, decayRollWindow]);
   const volShapeHistory = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     const pre = VOL_SHAPE_HISTORY_CACHE?.symbols?.[etfSym];
@@ -6496,6 +6651,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <button className={cls('chart-view-btn', activePanel === 'vrp' && 'active')} onClick={() => setActivePanel('vrp')}>Vol / VRP</button>
           )}
           <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => setActivePanel('borrow')}>Borrow</button>
+          {showBacktestPanel && (
+            <button className={cls('chart-view-btn', activePanel === 'decay' && 'active')} onClick={() => setActivePanel('decay')}>Decay</button>
+          )}
           {showBacktestPanel && (
             <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => setActivePanel('backtest')}>Backtest</button>
           )}
@@ -7700,6 +7858,87 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         </div>
       )}
 
+      {activePanel === 'decay' && showBacktestPanel && (
+        <div className="chart-section">
+          <div className="scenario-title">Realized hedge drag — ETF vs underlying</div>
+          <div className="scenario-sub" style={{ marginBottom: 10 }}>
+            Actual gross decay from daily prices:{' '}
+            <code>d<sub>t</sub> = β·r<sub>U,t</sub> − r<sub>L,t</sub></code>, annualized as{' '}
+            <code>mean(d) × 252</code> over the trailing window (same log/yr axis as Gross realiz. on the grid).
+            ETF leg uses total-return NAV when distributions are known; underlying uses split-adjusted close.
+          </div>
+
+          {etfMetricsLoading ? (
+            <div className="scenario-warning">Loading ETF metrics…</div>
+          ) : etfMetricsError ? (
+            <div className="scenario-warning">{etfMetricsError}</div>
+          ) : (
+            <>
+              <RealizedDecayHorizonsBarChart
+                horizons={realizedDecayHorizons.horizons}
+                screenerAnnual={r.gross_decay_annual}
+                beta={decayBeta}
+              />
+
+              <table className="decay-horizon-table">
+                <thead>
+                  <tr>
+                    <th>Horizon</th>
+                    <th>Annualized (log/yr)</th>
+                    <th>Cumulative log drag</th>
+                    <th>Window</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(realizedDecayHorizons.horizons || []).map((h) => (
+                    <tr key={`decay-h-${h.horizonDays}`}>
+                      <td>{h.horizonDays} trading days</td>
+                      <td style={{ color: h.annual >= 0 ? 'var(--positive)' : 'var(--negative)', fontFamily: 'JetBrains Mono, monospace' }}>
+                        {h.annual != null && Number.isFinite(h.annual) ? fmtLogYr(h.annual) : '—'}
+                      </td>
+                      <td style={{ fontFamily: 'JetBrains Mono, monospace' }}>
+                        {h.cumulative != null && Number.isFinite(h.cumulative) ? fmtLogYr(h.cumulative) : '—'}
+                      </td>
+                      <td style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                        {h.startDate && h.endDate ? `${h.startDate} → ${h.endDate}` : '—'}
+                        {!h.sufficient ? ' · partial' : ''}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <div className="scenario-sub" style={{ marginTop: 16 }}>
+                Rolling annualized gross decay ({realizedDecayHorizons.nDays || 0} daily obs through{' '}
+                {realizedDecayHorizons.endDate || '—'})
+              </div>
+              <div className="decay-horizon-pills">
+                {REALIZED_DECAY_HORIZONS.map((w) => (
+                  <button
+                    key={`decay-roll-${w}`}
+                    type="button"
+                    className={cls('decay-horizon-pill', decayRollWindow === w && 'active')}
+                    onClick={() => setDecayRollWindow(w)}
+                  >
+                    {w}d
+                  </button>
+                ))}
+              </div>
+              <SimpleSeriesPlot
+                series={realizedDecayRollingSeries}
+                valueKey="gross_decay_annual"
+                color="rgba(59,130,246,0.95)"
+                label={`Rolling ${decayRollWindow}d realized gross decay`}
+                formatValue={(v) => fmtLogYr(v)}
+                zeroLabel="0 log/yr"
+                referenceValue={r.gross_decay_annual}
+                referenceLabel={Number.isFinite(Number(r.gross_decay_annual)) ? `Screener ${fmtLogYr(r.gross_decay_annual)}` : undefined}
+              />
+            </>
+          )}
+        </div>
+      )}
+
       {activePanel === 'backtest' && showBacktestPanel && (
         <div className="chart-section">
           <div className="scenario-title">Pair backtest — ETF vs underlying replay</div>
@@ -7709,7 +7948,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               : <>short <strong>{etfSym}</strong> and short <strong>{String(undSym || '').toUpperCase()}</strong> (ETF short borrow only; underlying short treated as 0% borrow).</>}
             {' '}Notional <strong>h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>|</strong> (default <strong>1/|β|</strong>); gross <strong>G</strong> at rebalance: <code>MV<sub>ETF</sub> = h·G/(1+h)</code>, <code>MV<sub>und</sub> = G/(1+h)</code>.
             Uses every day with both legs priced. ETF short leg: Yahoo <strong>adj. close total return</strong> when <code>etf_adj_close</code> is on file (<code>−MV × adjReturn</code>; distributions embedded), else raw close/NAV plus explicit ex-date distribution debits from <code>etf_distributions.json</code> (never both). Underlying long: Yahoo adj. close. Sizing, borrow, and t-costs use tradeable close/NAV.
-            Borrow: <strong>short_favorable_positive</strong> — <code>borrow_current</code> from history by date (forward-filled), else hist. avg / spot from this row; negative = fee, positive = rebate. Daily drag <code>−rate/252 ×</code> trapezoid ETF short MV (underlying short borrow 0%).
+            Borrow: <code>borrow_current</code> from history by date (forward-filled fee-only, positive annual % from IBKR), else hist. avg / spot from this row. Daily cost <code>rate/252 ×</code> trapezoid ETF short MV (underlying short borrow 0%).
           </div>
 
           <div className="trade-card" style={{ marginBottom: 12 }}>
@@ -7774,9 +8013,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   <div className="cs-sub">Cumulative mark-to-market (before borrow &amp; costs)</div>
                 </div>
                 <div className="chart-stat">
-                  <div className="cs-label">Borrow paid</div>
+                  <div className="cs-label">Borrow cost</div>
                   <div className="cs-value">{fmtMoney(pairBacktestResult.summary.borrowPaid)}</div>
-                  <div className="cs-sub">−rate/252 × trapezoid ETF short MV</div>
+                  <div className="cs-sub">rate/252 × trapezoid ETF short MV (ETF leg only)</div>
                 </div>
                 {(Number(pairBacktestResult.summary.distributionsPaid) || 0) > 0 ? (
                   <div className="chart-stat">
@@ -7795,7 +8034,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="trade-head">
                   <div>
                     <div className="scenario-title">{etfSym} vs {String(undSym || '').toUpperCase()} — PnL breakdown</div>
-                    <div className="scenario-sub">Net = ETF leg + und leg − borrow − distributions (explicit fallback only) − transaction costs.</div>
+                    <div className="scenario-sub">Net = ETF leg + und leg − borrow cost − distributions (explicit fallback only) − transaction costs. Borrow cost is a positive dollar drag subtracted from net.</div>
                   </div>
                 </div>
                 <PairBacktestChart result={pairBacktestResult} />
@@ -7810,7 +8049,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <th>Net PnL</th>
                       <th>{pairBacktestResult?.legChartLabels?.etf || 'ETF'}</th>
                       <th>{pairBacktestResult?.legChartLabels?.und || 'Und'}</th>
-                      <th>Borrow</th>
+                      <th>Borrow cost</th>
                       <th>T-costs</th>
                       <th>Net/gross</th>
                       <th>Rebal</th>
@@ -10317,7 +10556,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   useEffect(() => {
     const handleHash = () => {
       const hash = window.location.hash;
-      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest|flow|trade|vrp))?$/i.exec(hash);
+      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest|flow|trade|vrp|decay))?$/i.exec(hash);
       if (chartMatch && data) {
         const sym = decodeURIComponent(chartMatch[1]).toUpperCase();
         const rec = (data.records || []).find(r => r.symbol === sym);
@@ -10333,7 +10572,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               : panel === 'flow' ? 'flow'
                 : panel === 'trade' ? 'trade'
                   : panel === 'vrp' ? 'vrp'
-                    : 'chart',
+                    : panel === 'decay' ? 'decay'
+                      : 'chart',
           );
           return;
         }

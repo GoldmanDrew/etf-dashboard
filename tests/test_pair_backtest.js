@@ -9,6 +9,7 @@ const {
   computePairBacktestRiskSeries,
   computeEtfShortDayPnl,
   buildDistributionByDate,
+  annualBorrowCostDragPerShortDollar,
   MIN_TRADING_DAYS_FOR_CAGR,
 } = require("../assets/pair_backtest.js");
 
@@ -94,6 +95,33 @@ test("slippage increases with participation and exposure ratio is net over gross
   const low = slippageCost(10_000, 1_000_000, { floorBps: 1, impactBps: 20, capBps: 100 });
   const high = slippageCost(100_000, 1_000_000, { floorBps: 1, impactBps: 20, capBps: 100 });
   assert.ok(high > low);
+});
+
+test("annualBorrowCostDragPerShortDollar: positive IBKR fee and negative SFP fee", () => {
+  assert.equal(annualBorrowCostDragPerShortDollar(0.3), 0.3);
+  assert.equal(annualBorrowCostDragPerShortDollar(-0.3), 0.3);
+  assert.equal(annualBorrowCostDragPerShortDollar(0), 0);
+});
+
+test("flat prices: positive fee fallback reduces net PnL", () => {
+  const rows = [];
+  for (let d = 1; d <= 10; d += 1) {
+    const day = `2024-01-${String(d).padStart(2, "0")}`;
+    rows.push({ date: day, close_price: 10, underlying_adj_close: 20 });
+  }
+  const out = simulateInversePairBacktest(rows, {
+    gross: 10000,
+    hedgeRatio: 2,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0.1,
+  });
+  assert.equal(out.ok, true);
+  assert.ok(out.summary.borrowPaid > 0);
+  assert.ok(out.summary.netPnl < 0);
+  assert.equal(out.summary.longPnl, 0);
+  assert.equal(out.summary.shortPnl, 0);
 });
 
 test("flat prices: only borrow drag on short leg (canonical negative fee)", () => {
@@ -239,6 +267,58 @@ test("borrowHistory time series increases drag vs flat fallback when fees are hi
   const flat = simulateInversePairBacktest(rows, { ...baseOpts, borrowHistory: [] });
   assert.equal(withHist.ok, true);
   assert.ok(withHist.summary.borrowPaid > flat.summary.borrowPaid * 2);
+});
+
+test("positive borrow_history fee (production) accrues cost and lowers net", () => {
+  const rows = [];
+  for (let d = 1; d <= 6; d += 1) {
+    rows.push({
+      date: `2024-08-${String(d).padStart(2, "0")}`,
+      close_price: 10,
+      underlying_adj_close: 20,
+    });
+  }
+  const hist = [{ date: "2024-08-01", borrow_current: 0.3 }];
+  const out = simulateInversePairBacktest(rows, {
+    gross: 10000,
+    hedgeRatio: 1,
+    beta: 1,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0,
+    borrowHistory: hist,
+  });
+  assert.equal(out.ok, true);
+  assert.ok(out.summary.borrowPaid > 0);
+  const legs = out.summary.longPnl + out.summary.shortPnl;
+  assert.ok(out.summary.netPnl < legs - 1e-9);
+});
+
+test("net PnL accounting identity: legs − borrow − t-costs", () => {
+  const rows = [];
+  for (let d = 1; d <= 12; d += 1) {
+    rows.push({
+      date: `2024-10-${String(d).padStart(2, "0")}`,
+      close_price: 10 + d * 0.1,
+      underlying_adj_close: 20 - d * 0.05,
+    });
+  }
+  const out = simulateInversePairBacktest(rows, {
+    gross: 100000,
+    hedgeRatio: 0.75,
+    beta: -1,
+    everyNDays: 5,
+    netGrossTolerancePct: 10,
+    slippageBps: 27,
+    avgBorrowAnnual: 1.1,
+    borrowHistory: [{ date: "2024-10-01", borrow_current: 1.1 }],
+  });
+  assert.equal(out.ok, true);
+  const s = out.summary;
+  const expected = s.longPnl + s.shortPnl - s.borrowPaid - s.tCosts;
+  assert.ok(Math.abs(s.netPnl - expected) < 1e-6);
+  assert.ok(s.borrowPaid > 0);
 });
 
 test("computePairBacktestRiskSeries: flat equity implies zero vol and Sharpe", () => {
