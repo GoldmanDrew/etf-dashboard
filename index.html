@@ -427,6 +427,16 @@
   .decay-horizon-bar.pos { background: rgba(16, 185, 129, 0.85); }
   .decay-horizon-bar.neg { background: rgba(239, 68, 68, 0.85); }
   .decay-horizon-bar.insufficient { opacity: 0.45; }
+  .decay-horizon-bar.gross { background: rgba(59, 130, 246, 0.9); }
+  .decay-horizon-bar.net { background: rgba(6, 182, 212, 0.9); }
+  .decay-horizon-dual-bars {
+    position: relative; width: 100%; max-width: 80px; height: 160px;
+    display: flex; align-items: flex-end; justify-content: center; gap: 5px;
+  }
+  .decay-horizon-bar-stack--single {
+    position: relative; width: 34px; height: 160px;
+    display: flex; flex-direction: column; justify-content: flex-end;
+  }
   .decay-horizon-val {
     font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600;
     text-align: center; line-height: 1.2;
@@ -1432,7 +1442,7 @@
 <script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v2"></script>
 <script src="assets/pair_backtest.js?v=pb-v7"></script>
-<script src="assets/realized_decay.js?v=rd-v1"></script>
+<script src="assets/realized_decay.js?v=rd-v3"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
@@ -3515,66 +3525,89 @@ function SimpleSeriesPlot({
 const RealizedDecayFns = window.RealizedDecay || {};
 const REALIZED_DECAY_HORIZONS = RealizedDecayFns.DEFAULT_HORIZONS || [5, 20, 60, 120, 251];
 
-/** Bar chart: trailing annualized gross decay (log/yr) at fixed trading-day horizons. */
-function RealizedDecayHorizonsBarChart({ horizons, screenerAnnual, beta }) {
-  const pts = (Array.isArray(horizons) ? horizons : []).filter((h) => h && Number.isFinite(Number(h.annual)));
+function fmtPxRange(start, end) {
+  const a = Number(start);
+  const b = Number(end);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return '—';
+  return `${fmtUsd(a)} → ${fmtUsd(b)}`;
+}
+
+/** Grouped bars: period gross vs net (simple return over trailing N sessions). */
+function RealizedDecayHorizonsBarChart({ horizons, beta, borrowAnnual, etfLabel, undLabel }) {
+  const pts = (Array.isArray(horizons) ? horizons : []).filter(
+    (h) => h && Number.isFinite(Number(h.grossSimple)) && Number.isFinite(Number(h.netSimple)),
+  );
   if (!pts.length) {
     return <div className="scenario-warning">Need overlapping ETF + underlying daily prices (etf_metrics_daily).</div>;
   }
-  const vals = pts.map((p) => Number(p.annual));
-  let lo = Math.min(...vals, Number.isFinite(Number(screenerAnnual)) ? Number(screenerAnnual) : vals[0]);
-  let hi = Math.max(...vals, Number.isFinite(Number(screenerAnnual)) ? Number(screenerAnnual) : vals[0]);
-  if (!(hi > lo)) { lo -= 0.02; hi += 0.02; }
-  const pad = (hi - lo) * 0.08 || 0.02;
+  const vals = pts.flatMap((p) => [Number(p.grossSimple), Number(p.netSimple)]);
+  let lo = Math.min(...vals, 0);
+  let hi = Math.max(...vals, 0);
+  if (!(hi > lo)) { lo -= 0.01; hi += 0.01; }
+  const pad = (hi - lo) * 0.1 || 0.01;
   lo -= pad;
   hi += pad;
   const span = Math.max(1e-9, hi - lo);
-  const zeroFrac = (0 - lo) / span;
-  const zeroPct = Math.min(100, Math.max(0, zeroFrac * 100));
-  const screenerOk = Number.isFinite(Number(screenerAnnual));
-  const screenerPct = screenerOk ? Math.min(100, Math.max(0, ((Number(screenerAnnual) - lo) / span) * 100)) : null;
+  const zeroPct = Math.min(100, Math.max(0, ((0 - lo) / span) * 100));
+  const fmtPeriod = (v) => {
+    if (!Number.isFinite(Number(v))) return '—';
+    const n = Number(v) * 100;
+    return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+  };
+
+  function MiniBar({ value, kind, insufficient }) {
+    const v = Number(value);
+    const valPct = Math.min(100, Math.max(0, ((v - lo) / span) * 100));
+    const barBottom = Math.min(zeroPct, valPct);
+    const barTop = Math.max(zeroPct, valPct);
+    const barH = Math.max(2, barTop - barBottom);
+    const signCls = v >= 0 ? 'pos' : 'neg';
+    return (
+      <div className="decay-horizon-bar-stack--single">
+        <div className="decay-horizon-zero" style={{ bottom: `${zeroPct}%` }} />
+        <div
+          className={cls('decay-horizon-bar', kind, signCls, insufficient && 'insufficient')}
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: `${barBottom}%`,
+            height: `${barH}%`,
+          }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="decay-horizons-wrap">
-      <div className="decay-horizons-bars" role="img" aria-label="Realized gross decay by horizon">
+      <div className="decay-horizons-bars" role="img" aria-label="Period gross and net hedge return by horizon">
         {pts.map((p) => {
-          const v = Number(p.annual);
-          const valPct = Math.min(100, Math.max(0, ((v - lo) / span) * 100));
-          const barBottom = Math.min(zeroPct, valPct);
-          const barTop = Math.max(zeroPct, valPct);
-          const barH = Math.max(2, barTop - barBottom);
-          const signCls = v >= 0 ? 'pos' : 'neg';
           const tip = [
-            `${p.horizonDays}d window · ${p.obs} obs`,
+            `${p.horizonDays} trading days · ${p.obs} obs`,
             p.startDate && p.endDate ? `${p.startDate} → ${p.endDate}` : null,
-            `Annualized: ${fmtLogYr(v)} log/yr`,
-            p.cumulative != null ? `Cumulative log drag: ${fmtLogYr(p.cumulative)}` : null,
+            `${etfLabel || 'ETF'}: ${fmtPxRange(p.etfStartPx, p.etfEndPx)}`,
+            `${undLabel || 'Und'}: ${fmtPxRange(p.undStartPx, p.undEndPx)}`,
+            `Gross: ${fmtPeriod(p.grossSimple)} (${fmtLogYr(p.grossLog)} log)`,
+            `Net: ${fmtPeriod(p.netSimple)} (${fmtLogYr(p.netLog)} log, after borrow)`,
+            Number.isFinite(Number(borrowAnnual))
+              ? `Borrow drag: ${fmt(Number(borrowAnnual) * (p.obs / 252))} over period`
+              : null,
             !p.sufficient ? '(partial window — history shorter than horizon)' : null,
           ].filter(Boolean).join('\n');
           return (
             <div key={p.horizonDays} className="decay-horizon-col" title={tip}>
-              <div className={`decay-horizon-val ${signCls}`} style={{ color: v >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
-                {fmtLogYr(v)}
+              <div style={{ display: 'flex', gap: 8, fontFamily: 'JetBrains Mono, monospace', fontSize: 10 }}>
+                <span style={{ color: Number(p.grossSimple) >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
+                  G {fmtPeriod(p.grossSimple)}
+                </span>
+                <span style={{ color: Number(p.netSimple) >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
+                  N {fmtPeriod(p.netSimple)}
+                </span>
               </div>
-              <div className="decay-horizon-bar-stack">
-                <div className="decay-horizon-zero" style={{ bottom: `${zeroPct}%` }} />
-                {screenerPct != null && (
-                  <div
-                    className="decay-horizon-zero"
-                    style={{ bottom: `${screenerPct}%`, background: 'rgba(139, 92, 246, 0.75)', height: 2 }}
-                    title={`Screener full-sample gross: ${fmtLogYr(screenerAnnual)} log/yr`}
-                  />
-                )}
-                <div
-                  className={cls('decay-horizon-bar', signCls, !p.sufficient && 'insufficient')}
-                  style={{
-                    position: 'absolute',
-                    left: 0,
-                    right: 0,
-                    bottom: `${barBottom}%`,
-                    height: `${barH}%`,
-                  }}
-                />
+              <div className="decay-horizon-dual-bars">
+                <MiniBar value={p.grossSimple} kind="gross" insufficient={!p.sufficient} />
+                <MiniBar value={p.netSimple} kind="net" insufficient={!p.sufficient} />
               </div>
               <div className="decay-horizon-label">{p.horizonDays}d</div>
             </div>
@@ -3582,7 +3615,10 @@ function RealizedDecayHorizonsBarChart({ horizons, screenerAnnual, beta }) {
         })}
       </div>
       <div className="scenario-sub" style={{ marginTop: 8 }}>
-        β = {Number.isFinite(Number(beta)) ? Number(beta).toFixed(3) : '—'} · short-favorable + · dashed purple = screener <code>gross_decay_annual</code>
+        β = {Number.isFinite(Number(beta)) ? Number(beta).toFixed(3) : '—'} · short-favorable + ·{' '}
+        <span style={{ color: 'rgba(59,130,246,0.95)' }}>■</span> gross ·{' '}
+        <span style={{ color: 'rgba(6,182,212,0.95)' }}>■</span> net (gross − avg borrow × N/252) ·{' '}
+        borrow {Number.isFinite(Number(borrowAnnual)) ? fmt(borrowAnnual) : '—'} avg
       </div>
     </div>
   );
@@ -5867,16 +5903,32 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       ? RealizedDecayFns.buildDailyLogDragSeries(etfBacktestSeries, decayBeta)
       : []
   ), [etfBacktestSeries, decayBeta]);
+  const decayBorrowAnnual = useMemo(() => {
+    const usedPts = etfBorrowSeries.filter(borrowHistoryPointForAvg);
+    const vals = usedPts.map((x) => Number(x?.borrow_current)).filter(Number.isFinite);
+    if (vals.length) return vals.reduce((a, b) => a + b, 0) / vals.length;
+    if (Number.isFinite(Number(r?.borrow_avg_annual))) return Number(r.borrow_avg_annual);
+    const c = Number(getBorrowRate(r));
+    return Number.isFinite(c) ? c : 0;
+  }, [etfBorrowSeries, r]);
   const realizedDecayHorizons = useMemo(() => (
-    typeof RealizedDecayFns.computeHorizonDecays === 'function'
-      ? RealizedDecayFns.computeHorizonDecays(realizedDailyDragSeries, REALIZED_DECAY_HORIZONS)
+    typeof RealizedDecayFns.computeHorizonPeriodReturns === 'function'
+      ? RealizedDecayFns.computeHorizonPeriodReturns(
+        realizedDailyDragSeries,
+        REALIZED_DECAY_HORIZONS,
+        decayBorrowAnnual,
+      )
       : { horizons: [], nDays: 0, endDate: null }
-  ), [realizedDailyDragSeries]);
+  ), [realizedDailyDragSeries, decayBorrowAnnual]);
   const realizedDecayRollingSeries = useMemo(() => (
-    typeof RealizedDecayFns.buildRollingGrossDecaySeries === 'function'
-      ? RealizedDecayFns.buildRollingGrossDecaySeries(realizedDailyDragSeries, decayRollWindow)
+    typeof RealizedDecayFns.buildRollingPeriodReturnSeries === 'function'
+      ? RealizedDecayFns.buildRollingPeriodReturnSeries(
+        realizedDailyDragSeries,
+        decayRollWindow,
+        decayBorrowAnnual,
+      )
       : []
-  ), [realizedDailyDragSeries, decayRollWindow]);
+  ), [realizedDailyDragSeries, decayRollWindow, decayBorrowAnnual]);
   const volShapeHistory = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     const pre = VOL_SHAPE_HISTORY_CACHE?.symbols?.[etfSym];
@@ -7860,12 +7912,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
       {activePanel === 'decay' && showBacktestPanel && (
         <div className="chart-section">
-          <div className="scenario-title">Realized hedge drag — ETF vs underlying</div>
+          <div className="scenario-title">Realized pair return — gross &amp; net by horizon</div>
           <div className="scenario-sub" style={{ marginBottom: 10 }}>
-            Actual gross decay from daily prices:{' '}
-            <code>d<sub>t</sub> = β·r<sub>U,t</sub> − r<sub>L,t</sub></code>, annualized as{' '}
-            <code>mean(d) × 252</code> over the trailing window (same log/yr axis as Gross realiz. on the grid).
-            ETF leg uses total-return NAV when distributions are known; underlying uses split-adjusted close.
+            Period return over the trailing window (not annualized):{' '}
+            <code>gross = β·log(U<sub>end</sub>/U<sub>start</sub>) − log(L<sub>end</sub>/L<sub>start</sub>)</code>,{' '}
+            <code>net = gross − borrow<sub>avg</sub> × (N/252)</code>.
+            Short-favorable +. ETF leg uses total-return NAV when distributions are known.
           </div>
 
           {etfMetricsLoading ? (
@@ -7876,32 +7928,46 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <>
               <RealizedDecayHorizonsBarChart
                 horizons={realizedDecayHorizons.horizons}
-                screenerAnnual={r.gross_decay_annual}
                 beta={decayBeta}
+                borrowAnnual={decayBorrowAnnual}
+                etfLabel={etfSym}
+                undLabel={undSym || 'Underlying'}
               />
 
               <table className="decay-horizon-table">
                 <thead>
                   <tr>
                     <th>Horizon</th>
-                    <th>Annualized (log/yr)</th>
-                    <th>Cumulative log drag</th>
+                    <th>Gross</th>
+                    <th>Net</th>
+                    <th>Borrow drag</th>
                     <th>Window</th>
+                    <th>{etfSym} px</th>
+                    <th>{undSym || 'Und'} px</th>
                   </tr>
                 </thead>
                 <tbody>
                   {(realizedDecayHorizons.horizons || []).map((h) => (
                     <tr key={`decay-h-${h.horizonDays}`}>
                       <td>{h.horizonDays} trading days</td>
-                      <td style={{ color: h.annual >= 0 ? 'var(--positive)' : 'var(--negative)', fontFamily: 'JetBrains Mono, monospace' }}>
-                        {h.annual != null && Number.isFinite(h.annual) ? fmtLogYr(h.annual) : '—'}
+                      <td style={{ color: h.grossSimple >= 0 ? 'var(--positive)' : 'var(--negative)', fontFamily: 'JetBrains Mono, monospace' }}>
+                        {h.grossSimple != null && Number.isFinite(h.grossSimple) ? fmt(h.grossSimple) : '—'}
                       </td>
-                      <td style={{ fontFamily: 'JetBrains Mono, monospace' }}>
-                        {h.cumulative != null && Number.isFinite(h.cumulative) ? fmtLogYr(h.cumulative) : '—'}
+                      <td style={{ color: h.netSimple >= 0 ? 'var(--positive)' : 'var(--negative)', fontFamily: 'JetBrains Mono, monospace' }}>
+                        {h.netSimple != null && Number.isFinite(h.netSimple) ? fmt(h.netSimple) : '—'}
+                      </td>
+                      <td style={{ fontFamily: 'JetBrains Mono, monospace', color: 'var(--text-muted)' }}>
+                        {h.borrowLog != null && Number.isFinite(h.borrowLog) ? fmt(h.borrowLog) : '—'}
                       </td>
                       <td style={{ color: 'var(--text-muted)', fontSize: 11 }}>
                         {h.startDate && h.endDate ? `${h.startDate} → ${h.endDate}` : '—'}
                         {!h.sufficient ? ' · partial' : ''}
+                      </td>
+                      <td style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, whiteSpace: 'nowrap' }}>
+                        {fmtPxRange(h.etfStartPx, h.etfEndPx)}
+                      </td>
+                      <td style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, whiteSpace: 'nowrap' }}>
+                        {fmtPxRange(h.undStartPx, h.undEndPx)}
                       </td>
                     </tr>
                   ))}
@@ -7909,7 +7975,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               </table>
 
               <div className="scenario-sub" style={{ marginTop: 16 }}>
-                Rolling annualized gross decay ({realizedDecayHorizons.nDays || 0} daily obs through{' '}
+                Rolling {decayRollWindow}d period return ({realizedDecayHorizons.nDays || 0} daily obs through{' '}
                 {realizedDecayHorizons.endDate || '—'})
               </div>
               <div className="decay-horizon-pills">
@@ -7926,13 +7992,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               </div>
               <SimpleSeriesPlot
                 series={realizedDecayRollingSeries}
-                valueKey="gross_decay_annual"
+                valueKey="gross_period"
                 color="rgba(59,130,246,0.95)"
-                label={`Rolling ${decayRollWindow}d realized gross decay`}
-                formatValue={(v) => fmtLogYr(v)}
-                zeroLabel="0 log/yr"
-                referenceValue={r.gross_decay_annual}
-                referenceLabel={Number.isFinite(Number(r.gross_decay_annual)) ? `Screener ${fmtLogYr(r.gross_decay_annual)}` : undefined}
+                label={`Rolling ${decayRollWindow}d gross period return`}
+                formatValue={(v) => fmt(v)}
+                zeroLabel="0%"
+                overlayValueKey="net_period"
+                overlayColor="rgba(6,182,212,0.95)"
+                overlayLabel="Net"
               />
             </>
           )}
