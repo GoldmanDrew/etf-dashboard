@@ -99,30 +99,83 @@
   function shortSignalFor(p50, p05, opts) {
     opts = opts || {};
     if (!isFiniteNum(p50)) {
-      return { label: 'no edge data', color: 'var(--text-muted)', bg: 'transparent', weight: 400, tier: 'none' };
+      return { label: '\u2014', color: 'var(--text-muted)', bg: 'transparent', weight: 400, tier: 'none' };
     }
     const e = Number(p50);
     if (opts.shortable === false) {
-      return { label: 'short blocked', color: '#fff', bg: '#6b7280', weight: 700, tier: 'blocked' };
+      return {
+        label: 'No locate',
+        color: '#fff',
+        bg: '#6b7280',
+        weight: 600,
+        tier: 'nolocate',
+        title: 'High modeled edge but IBKR has no borrowable shares (purgatory / no locate).',
+      };
     }
     if (e >= SHORT_SIGNAL.STRONG && (!isFiniteNum(p05) || Number(p05) > 0)) {
-      return { label: 'STRONG SHORT', color: '#fff', bg: '#10b981', weight: 700, tier: 'strong' };
+      return { label: 'Top', color: '#fff', bg: '#10b981', weight: 700, tier: 'top' };
     }
     if (e >= SHORT_SIGNAL.SHORT) {
-      return { label: 'short', color: '#10b981', bg: 'rgba(16,185,129,0.15)', weight: 600, tier: 'short' };
+      return { label: 'Good', color: '#10b981', bg: 'rgba(16,185,129,0.15)', weight: 600, tier: 'good' };
     }
-    if (e > 0) return { label: 'lean short', color: '#10b981', bg: 'transparent', weight: 500, tier: 'lean' };
-    return { label: 'avoid', color: '#fff', bg: '#ef4444', weight: 700, tier: 'avoid' };
+    if (e > 0) return { label: 'Thin', color: '#10b981', bg: 'transparent', weight: 500, tier: 'thin' };
+    return { label: 'Skip', color: '#fff', bg: '#ef4444', weight: 700, tier: 'skip' };
   }
 
-  // Sign-corrected put-spread overlay: rich hedge (positive edge_pp) is a
-  // HEADWIND to the short, so alignment = −edge_pp. Raw edge is shown elsewhere.
+  // Sign-corrected: rich fund hedge = headwind to shorting the YB ETF.
   function shortThesisAlignment(edgePp) {
     if (!isFiniteNum(edgePp)) return { alignmentPp: null, direction: 'unknown', label: '\u2014', color: 'var(--text-muted)' };
     const a = -Number(edgePp);
-    if (a > 1) return { alignmentPp: a, direction: 'tailwind', label: 'cheap hedge (+)', color: '#10b981' };
-    if (a < -1) return { alignmentPp: a, direction: 'headwind', label: 'rich hedge (\u2212)', color: '#f59e0b' };
-    return { alignmentPp: a, direction: 'neutral', label: 'fair hedge', color: 'var(--text-muted)' };
+    if (a > 1) return { alignmentPp: a, direction: 'tailwind', label: 'helps', color: '#10b981' };
+    if (a < -1) return { alignmentPp: a, direction: 'headwind', label: 'hurts', color: '#f59e0b' };
+    return { alignmentPp: a, direction: 'neutral', label: 'neutral', color: 'var(--text-muted)' };
+  }
+
+  // Fund hedge richness vs model (plain words — not spread trade verbs).
+  function hedgeRichnessFor(edgePp, opts) {
+    opts = opts || {};
+    if (!isFiniteNum(edgePp)) return { label: '\u2014', color: 'var(--text-muted)' };
+    if (opts.blockSignal) return { label: 'stale', color: '#6b7280' };
+    const e = Number(edgePp);
+    if (e >= SIGNAL_THRESHOLDS.SELL) return { label: 'rich', color: '#f59e0b' };
+    if (e >= 0) return { label: 'fair', color: 'var(--text-muted)' };
+    if (e >= SIGNAL_THRESHOLDS.FADE) return { label: 'fair', color: 'var(--text-muted)' };
+    return { label: 'cheap', color: '#10b981' };
+  }
+
+  function freshLabel(row) {
+    row = row || {};
+    const qs = row.quote_sync || {};
+    if (qs.sync_ok === false) {
+      return { label: 'stale', color: '#ef4444', title: qs.sync_reason || 'inputs not synchronized' };
+    }
+    if (qs.sync_ok === true) {
+      return { label: 'yes', color: '#10b981', title: qs.sync_reason || 'within window' };
+    }
+    return { label: '\u2014', color: 'var(--text-muted)', title: '' };
+  }
+
+  // Borrow: live fee when locate exists; else ~hist avg (see borrow_carry on row).
+  function formatBorrowCarry(row) {
+    row = row || {};
+    const meta = row.borrow_carry || {};
+    const display = meta.display_annual;
+    if (display == null || !isFiniteNum(display)) {
+      return {
+        text: '\u2014',
+        color: 'var(--text-muted)',
+        isHistorical: false,
+        title: meta.tooltip || 'No live or historical borrow on file',
+      };
+    }
+    const isHistorical = meta.source === 'hist_avg' || meta.source === 'hist_med60';
+    const tag = isHistorical ? ' ' + (meta.source_label || '~hist') : '';
+    return {
+      text: fmtPctAnnual(display) + tag,
+      color: '#ef4444',
+      isHistorical,
+      title: meta.tooltip || '',
+    };
   }
 
   // Cross-dataset quote-sync badge. Prefers the server-computed row.quote_sync
@@ -332,6 +385,9 @@
     signalFor,
     shortSignalFor,
     shortThesisAlignment,
+    hedgeRichnessFor,
+    freshLabel,
+    formatBorrowCarry,
     syncBadge,
     hintFor,
     rowFreshness,

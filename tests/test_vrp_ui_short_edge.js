@@ -10,32 +10,39 @@ const assert = require("node:assert/strict");
 const VrpUi = require("../assets/vrp_ui.js");
 
 test("shortSignalFor tiers off net_edge_p50_annual (short_favorable_positive)", () => {
-  assert.equal(VrpUi.shortSignalFor(0.20, 0.05).tier, "strong");
-  assert.equal(VrpUi.shortSignalFor(0.07, 0.0).tier, "short");
-  assert.equal(VrpUi.shortSignalFor(0.01).tier, "lean");
-  assert.equal(VrpUi.shortSignalFor(-0.05).tier, "avoid");
+  assert.equal(VrpUi.shortSignalFor(0.20, 0.05).tier, "top");
+  assert.equal(VrpUi.shortSignalFor(0.07, 0.0).tier, "good");
+  assert.equal(VrpUi.shortSignalFor(0.01).tier, "thin");
+  assert.equal(VrpUi.shortSignalFor(-0.05).tier, "skip");
   assert.equal(VrpUi.shortSignalFor(null).tier, "none");
 });
 
-test("STRONG SHORT requires a positive p05 lower band", () => {
-  // Same median, but downside tail dips negative -> demote to plain short.
-  assert.equal(VrpUi.shortSignalFor(0.20, -0.01).tier, "short");
+test("Top requires a positive p05 lower band", () => {
+  assert.equal(VrpUi.shortSignalFor(0.20, -0.01).tier, "good");
 });
 
-test("not-shortable caps the label but keeps it visible", () => {
+test("no locate caps the label but keeps it visible", () => {
   const s = VrpUi.shortSignalFor(0.30, 0.10, { shortable: false });
-  assert.equal(s.tier, "blocked");
-  assert.equal(s.label, "short blocked");
+  assert.equal(s.tier, "nolocate");
+  assert.equal(s.label, "No locate");
 });
 
 test("shortThesisAlignment negates the put-spread edge", () => {
   const rich = VrpUi.shortThesisAlignment(20);
-  assert.equal(rich.alignmentPp, -20);
-  assert.equal(rich.direction, "headwind");
+  assert.equal(rich.label, "hurts");
   const cheap = VrpUi.shortThesisAlignment(-15);
-  assert.equal(cheap.alignmentPp, 15);
-  assert.equal(cheap.direction, "tailwind");
+  assert.equal(cheap.label, "helps");
   assert.equal(VrpUi.shortThesisAlignment(null).direction, "unknown");
+});
+
+test("hedgeRichnessFor uses plain words", () => {
+  assert.equal(VrpUi.hedgeRichnessFor(15).label, "rich");
+  assert.equal(VrpUi.hedgeRichnessFor(-15).label, "cheap");
+});
+
+test("freshLabel uses yes and stale", () => {
+  assert.equal(VrpUi.freshLabel({ quote_sync: { sync_ok: true } }).label, "yes");
+  assert.equal(VrpUi.freshLabel({ quote_sync: { sync_ok: false } }).label, "stale");
 });
 
 test("syncBadge surfaces server quote_sync verdict", () => {
