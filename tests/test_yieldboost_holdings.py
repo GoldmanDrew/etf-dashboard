@@ -1417,17 +1417,16 @@ def test_short_thesis_alignment_negates_spread_edge():
 
 
 def test_compute_short_signal_tiers_and_p05_guard():
-    """STRONG SHORT needs p50>=15% AND a positive p05 lower band."""
-    assert compute_short_signal(0.20, 0.05)["tier"] == "strong"
-    # Same median but downside tail dips negative -> demote from strong to short.
-    assert compute_short_signal(0.20, -0.01)["tier"] == "short"
-    assert compute_short_signal(0.07, 0.0)["tier"] == "short"
-    assert compute_short_signal(0.01)["tier"] == "lean"
-    assert compute_short_signal(-0.05)["tier"] == "avoid"
+    """Top needs p50>=15% AND a positive p05 lower band."""
+    assert compute_short_signal(0.20, 0.05)["tier"] == "top"
+    assert compute_short_signal(0.20, -0.01)["tier"] == "good"
+    assert compute_short_signal(0.07, 0.0)["tier"] == "good"
+    assert compute_short_signal(0.01)["tier"] == "thin"
+    assert compute_short_signal(-0.05)["tier"] == "skip"
     assert compute_short_signal(None)["tier"] == "none"
-    # Not borrowable -> label capped, but numeric rank preserved for sorting.
     blocked = compute_short_signal(0.30, 0.10, shortable=False)
-    assert blocked["tier"] == "blocked"
+    assert blocked["tier"] == "nolocate"
+    assert blocked["label"] == "No locate"
     assert blocked["rank"] == 0.30
 
 
@@ -1534,7 +1533,7 @@ def test_enrich_vrp_rows_with_short_edge_non_destructive():
     assert row["spread_mid_market"] == 0.5
     # Structural fields joined.
     assert row["net_edge_p50_annual"] == 0.75
-    assert row["short_signal"]["tier"] == "strong"
+    assert row["short_signal"]["tier"] == "top"
     # Sign-corrected overlay: rich spread -> headwind.
     assert row["short_thesis_alignment"]["alignment_pp"] == -12.0
     assert row["short_thesis_alignment"]["direction"] == "headwind"

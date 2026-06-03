@@ -62,6 +62,10 @@ SHORT_EDGE_SCREENER_COLUMNS = (
     "expected_gross_decay_p50_annual",
     "expected_gross_decay_annual",
     "borrow_fee_annual",
+    "borrow_current",
+    "borrow_for_net_annual",
+    "borrow_avg_annual",
+    "borrow_median_60d",
     "income_distributions_annual",
     "edge_sign_convention",
 )
@@ -2166,11 +2170,11 @@ def compute_short_thesis_alignment(edge_pp_of_max_loss: float | None) -> dict[st
         return {"alignment_pp": None, "direction": "unknown", "label": "—"}
     alignment = -e
     if alignment > 1.0:
-        direction, label = "tailwind", "cheap hedge (+ for short)"
+        direction, label = "tailwind", "helps"
     elif alignment < -1.0:
-        direction, label = "headwind", "rich hedge (− for short)"
+        direction, label = "headwind", "hurts"
     else:
-        direction, label = "neutral", "fairly-priced hedge"
+        direction, label = "neutral", "neutral"
     return {"alignment_pp": round(alignment, 2), "direction": direction, "label": label}
 
 
@@ -2191,16 +2195,15 @@ def compute_short_signal(
     if p50 is None:
         return {"label": "no edge data", "tier": "none", "rank": -1e9}
     if not shortable:
-        # Keep the numeric rank so it still sorts, but cap the headline.
-        return {"label": "short blocked (borrow)", "tier": "blocked", "rank": p50}
+        return {"label": "No locate", "tier": "nolocate", "rank": p50}
     if p50 >= SHORT_SIGNAL_STRONG and (p05 is None or p05 > 0):
-        tier, label = "strong", "STRONG SHORT"
+        tier, label = "top", "Top"
     elif p50 >= SHORT_SIGNAL_SELL:
-        tier, label = "short", "short"
+        tier, label = "good", "Good"
     elif p50 > 0:
-        tier, label = "lean", "lean short"
+        tier, label = "thin", "Thin"
     else:
-        tier, label = "avoid", "avoid"
+        tier, label = "skip", "Skip"
     return {"label": label, "tier": tier, "rank": p50}
 
 
@@ -2288,6 +2291,42 @@ def evaluate_quote_sync(
     }
 
 
+def borrow_carry_display_meta(row: dict[str, Any]) -> dict[str, Any]:
+    """Live borrow when locate exists; else historical avg / 60d med (~hist)."""
+    current = _parse_float(row.get("borrow_fee_annual"))
+    if current is None:
+        current = _parse_float(row.get("borrow_current"))
+    avg = _parse_float(row.get("borrow_avg_annual"))
+    med60 = _parse_float(row.get("borrow_median_60d"))
+    for_net = _parse_float(row.get("borrow_for_net_annual"))
+    if current is not None:
+        display, source, label = current, "live", "live"
+    elif avg is not None:
+        display, source, label = avg, "hist_avg", "~hist avg"
+    elif med60 is not None:
+        display, source, label = med60, "hist_med60", "~hist 60d"
+    else:
+        display, source, label = None, "none", "—"
+    parts = []
+    if current is not None:
+        parts.append(f"live borrow {current * 100:.1f}% ann")
+    else:
+        parts.append("live borrow: none")
+    if avg is not None:
+        parts.append(f"hist avg {avg * 100:.1f}%")
+    if med60 is not None:
+        parts.append(f"60d med {med60 * 100:.1f}%")
+    if for_net is not None:
+        parts.append(f"net-edge model used {for_net * 100:.1f}% borrow")
+    return {
+        "display_annual": round(display, 6) if display is not None else None,
+        "source": source,
+        "source_label": label,
+        "for_net_annual": round(for_net, 6) if for_net is not None else None,
+        "tooltip": "; ".join(parts),
+    }
+
+
 def _short_edge_why_sentence(row: dict[str, Any]) -> str:
     """One-line, auditable rationale for a row's rank (the 'why here?' popover)."""
     def _pct(v: object) -> str:
@@ -2306,7 +2345,7 @@ def _short_edge_why_sentence(row: dict[str, Any]) -> str:
     if align and align != "—":
         parts.append(f"hedge: {align}")
     if not row.get("short_directly_shortable", True):
-        parts.append("no clean borrow (purgatory/no-shares)")
+        parts.append("no locate")
     if not (row.get("quote_sync") or {}).get("sync_ok", True):
         parts.append("NOT SYNCED")
     return "; ".join(parts) + "."
@@ -2350,6 +2389,7 @@ def enrich_vrp_rows_with_short_edge(
             shortable=bool(shortable) if shortable is not None else True,
         )
         row["quote_sync"] = evaluate_quote_sync(row, screener_asof=screener_asof)
+        row["borrow_carry"] = borrow_carry_display_meta(row)
         row["short_edge_why"] = _short_edge_why_sentence(row)
     payload["short_edge_screener_asof"] = screener_asof
     payload["short_edge_join_count"] = sum(

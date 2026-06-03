@@ -8794,7 +8794,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
   // and ③ (vol overlay) collapse to keep the unbiased ranking leading while
   // every field stays one click away.
   const [collapseCarry, setCollapseCarry] = useState(false);
-  const [collapseOverlay, setCollapseOverlay] = useState(false);
+  const [collapseOverlay, setCollapseOverlay] = useState(true);
   const fieldHint = (key) => VrpUi.hintFor(key, vrpFieldDict);
 
   useEffect(() => {
@@ -8924,7 +8924,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
       case 'short_signal_rank': {
         const sig = VrpUi.shortSignalFor(r.net_edge_p50_annual, r.net_edge_p05_annual,
           { shortable: r.short_directly_shortable !== false });
-        const order = { strong: 4, short: 3, lean: 2, avoid: 1, blocked: 0, none: -1 };
+        const order = { top: 5, good: 4, thin: 3, nolocate: 2, skip: 1, none: -1 };
         return (order[sig.tier] ?? -1) * 1000 + (Number(r.net_edge_p50_annual) || 0);
       }
       case 'net_edge_band':
@@ -8960,46 +8960,6 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
     out.sort(cmp);
     return out;
   }, [filtered, sortKey, sortDesc]);
-
-  const stats = useMemo(() => {
-    const withEdge = enriched.filter((r) => r.edge_pp_of_max_loss != null);
-    const positiveEdge = withEdge.filter((r) => r.edge_pp_of_max_loss > 0);
-    const strongSell = withEdge.filter((r) => r.edge_pp_of_max_loss >= 30);
-    const fade = withEdge.filter((r) => r.edge_pp_of_max_loss <= -10);
-    const eventInWindow = enriched.filter((r) => r.event_in_held_window);
-    const gradeCounts = enriched.reduce((acc, r) => {
-      const g = String(r.data_grade || '').toUpperCase() || '?';
-      acc[g] = (acc[g] || 0) + 1;
-      return acc;
-    }, {});
-    const tradeable = (gradeCounts.A || 0) + (gradeCounts.B || 0);
-    // Structural short-the-ETF lens (primary).
-    const withNet = enriched.filter((r) => r.net_edge_p50_annual != null);
-    const strongShort = withNet.filter((r) => {
-      const sig = VrpUi.shortSignalFor(r.net_edge_p50_annual, r.net_edge_p05_annual,
-        { shortable: r.short_directly_shortable !== false });
-      return sig.tier === 'strong';
-    });
-    const shortCandidates = withNet.filter((r) => Number(r.net_edge_p50_annual) >= VrpUi.SHORT_SIGNAL.SHORT
-      && r.short_directly_shortable !== false);
-    const notShortable = enriched.filter((r) => r.short_directly_shortable === false);
-    const notSynced = enriched.filter((r) => r.quote_sync && r.quote_sync.sync_ok === false);
-    return {
-      total: enriched.length,
-      with_edge: withEdge.length,
-      positive_edge: positiveEdge.length,
-      strong_sell: strongSell.length,
-      fade: fade.length,
-      events_in_window: eventInWindow.length,
-      grade_counts: gradeCounts,
-      tradeable,
-      with_net: withNet.length,
-      strong_short: strongShort.length,
-      short_candidates: shortCandidates.length,
-      not_shortable: notShortable.length,
-      not_synced: notSynced.length,
-    };
-  }, [enriched]);
 
   const skewColor = (skew) => {
     const v = Number(skew);
@@ -9077,124 +9037,42 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
         <button onClick={onBack} className="topbar-btn">← Back</button>
         <h1 style={{ margin: 0, fontSize: 20 }}>YieldBOOST · Most attractive shorts</h1>
       </div>
-      <div className="scenario-sub" style={{ marginBottom: 16, lineHeight: 1.5 }}>
-        Ranked by the <strong>structural edge of shorting the YB ETF</strong> — the screener's
-        annualized <strong>net edge (p50)</strong> (decay net of borrow/carry;
-        <em> short_favorable_positive</em>, so higher = better short, and comparable across names).
-        Tier ② shows the <strong>carry decomposition</strong> behind it. Tier ③ keeps the full
-        <strong> put-spread vol overlay</strong> — the kernel-aware price-space edge
-        (<em>edge_pp_of_max_loss</em>, % of the front spread's one-week max-loss) and all greeks.
-        That overlay is a <em>second-order</em> read on the fund's hedge, sign-corrected here: a
-        <strong> rich</strong> hedge is a mild <em>headwind</em> to shorting (the fund is well-paid),
-        a <strong>cheap</strong> hedge a mild tailwind — never the headline. Rows are gated by the
-        server-side <strong>data grade</strong> (A/B/C/D) and a cross-dataset <strong>sync</strong>
-        check (sleeve quote vs underlying quote vs holdings vs screener); unsynced or
-        not-cleanly-borrowable names are flagged, not deleted.
-      </div>
-
-      {/* Headline strip — primary = short-the-ETF lens, then vol overlay */}
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-        <SummaryCard
-          label="STRONG SHORT"
-          value={fmtNum(stats.strong_short)}
-          color="var(--positive)"
-          sub="net edge ≥ +15% & p05 > 0"
-        />
-        <SummaryCard
-          label="Short candidates"
-          value={fmtNum(stats.short_candidates)}
-          color="var(--positive)"
-          sub="net edge ≥ +5%, borrowable"
-        />
-        <SummaryCard
-          label="Not cleanly shortable"
-          value={fmtNum(stats.not_shortable)}
-          color="var(--warning)"
-          sub="purgatory / no shares"
-        />
-        <SummaryCard
-          label="Not synced"
-          value={fmtNum(stats.not_synced)}
-          color={stats.not_synced > 0 ? 'var(--negative)' : 'var(--text-muted)'}
-          sub="quote/underlying time gap"
-        />
-        <SummaryCard
-          label="Tradeable today (A+B)"
-          value={fmtNum(stats.tradeable)}
-          sub={`of ${stats.total} sleeves`}
-          color="var(--positive)"
-        />
-        <SummaryCard
-          label="STRONG SELL (vol overlay)"
-          value={fmtNum(stats.strong_sell)}
-          color="var(--positive)"
-          sub="spread edge ≥ +30pp"
-        />
-        <SummaryCard
-          label="Positive overlay edge"
-          value={fmtNum(stats.positive_edge)}
-          color="var(--positive)"
-          sub="rich front spread"
-        />
-        <SummaryCard
-          label="Fade / avoid (overlay)"
-          value={fmtNum(stats.fade)}
-          color="var(--negative)"
-          sub="spread edge ≤ −10pp"
-        />
-        <SummaryCard
-          label="Earnings in held window"
-          value={fmtNum(stats.events_in_window)}
-          color="var(--warning)"
-          sub="size with caution"
-        />
-        {vrpHealth && Number.isFinite(Number(vrpHealth.iv_coverage_front_pct)) && (
-          <SummaryCard
-            label="IV coverage"
-            value={`${Math.round(Number(vrpHealth.iv_coverage_front_pct) * 100)}%`}
-            color={Number(vrpHealth.iv_coverage_front_pct) >= 0.8 ? 'var(--positive)'
-              : (Number(vrpHealth.iv_coverage_front_pct) >= 0.5 ? 'var(--warning)' : 'var(--negative)')}
-            sub={`${(vrpHealth.stale_sleeves || []).length} missing`}
-          />
-        )}
-        <SummaryCard
-          label="Data grades"
-          value={`A:${stats.grade_counts.A || 0} B:${stats.grade_counts.B || 0} C:${stats.grade_counts.C || 0} D:${stats.grade_counts.D || 0}`}
-          sub="A/B tradeable · C monitor · D blocked"
-        />
+      <div className="scenario-sub" style={{ marginBottom: 12, lineHeight: 1.45, maxWidth: 920 }}>
+        Sort by <strong>Short edge %/yr</strong> — annualized edge of shorting the fund (comparable across names).
+        <strong> Locate only</strong> for actionable names. Expand <strong>Fund hedge</strong> for Granite&apos;s put-spread context only.
       </div>
 
       {/* Filters */}
       <div style={{ display: 'flex', gap: 14, alignItems: 'center', marginBottom: 12, fontSize: 13 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
           <input type="checkbox" checked={includeGradeC} onChange={(e) => setIncludeGradeC(e.target.checked)} />
-          Include grade C (monitor)
+          Show C (watch)
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
           <input type="checkbox" checked={includeGradeD} onChange={(e) => setIncludeGradeD(e.target.checked)} />
-          Include grade D (display only)
+          Show D (stale)
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
           <input type="checkbox" checked={filterEarningsOnly} onChange={(e) => setFilterEarningsOnly(e.target.checked)} />
-          Earnings in held window only
+          Earnings in window
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
           <input type="checkbox" checked={shortableOnly} onChange={(e) => setShortableOnly(e.target.checked)} />
-          Cleanly shortable only
+          Locate only
         </label>
         <span style={{ color: 'var(--text-muted)' }}>·</span>
         <button
           className="topbar-btn"
           style={{ fontSize: 12, padding: '2px 8px' }}
           onClick={() => setCollapseCarry((c) => !c)}
-          title="Show/hide the carry decomposition (gross decay · borrow · distribution)"
-        >{collapseCarry ? '▸' : '▾'} Carry</button>
+          title="Decay · borrow · dividends"
+        >{collapseCarry ? '▸' : '▾'} Economics</button>
         <button
           className="topbar-btn"
           style={{ fontSize: 12, padding: '2px 8px' }}
           onClick={() => setCollapseOverlay((c) => !c)}
-          title="Show/hide the full put-spread vol overlay (greeks, IV, fair/mid). Collapsed = compact vol chip only."
-        >{collapseOverlay ? '▸' : '▾'} Vol overlay</button>
+          title="Granite front put spread — context only"
+        >{collapseOverlay ? '▸' : '▾'} Fund hedge</button>
         <div style={{ color: 'var(--text-muted)', marginLeft: 'auto' }}>
           Showing {sorted.length} of {enriched.length} sleeves · click column headers to sort
         </div>
@@ -9204,48 +9082,44 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
         <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, fontSize: 12 }}>
           <thead>
             <tr>
-              <GroupTh span={8} label="① Short thesis (primary)" bg="rgba(16,185,129,0.12)" />
+              <GroupTh span={8} label="① Which funds to short" bg="rgba(16,185,129,0.12)" />
               {!collapseCarry && (
-                <GroupTh span={3} label="② Carry decomposition" bg="rgba(96,165,250,0.10)" />
+                <GroupTh span={3} label="② Economics" bg="rgba(96,165,250,0.10)" />
               )}
               <GroupTh
-                span={collapseOverlay ? 1 : 13}
-                label={collapseOverlay ? '③ Vol overlay (collapsed)' : '③ Vol overlay (front put spread · 2nd-order)'}
+                span={collapseOverlay ? 1 : 9}
+                label="③ Fund hedge"
                 bg="rgba(148,163,184,0.10)"
               />
             </tr>
             <tr>
               {/* ① Short thesis */}
-              <Th k="data_grade" label="Grade" align="center" hint={fieldHint('data_grade')} />
-              <Th k="short_signal_rank" label="Short signal" align="left" hint="Headline derived from net_edge_p50_annual (short_favorable_positive). STRONG SHORT needs p05>0." />
-              <Th k="yb_etf" label="YB" align="left" hint={fieldHint('yb_etf')} />
-              <Th k="underlying" label="Und." align="left" hint={fieldHint('underlying')} />
-              <Th k="net_edge_p50_annual" label="Net edge (ann)" hint="Screener median annual edge of SHORTING this ETF, net of borrow/carry. Higher = better short. Comparable across names." />
-              <Th k="net_edge_band" label="p05…p95" align="center" hint="Confidence band of the net annual short edge (5th–95th pct). Dim if p05<0 (edge not robust)." />
-              <Th k="sync_rank" label="Sync" align="center" hint="Cross-dataset timestamp sync: sleeve quote vs underlying quote vs holdings vs screener. NOT SYNCED = inputs describe different moments." />
-              <Th k="short_directly_shortable" label="Short?" align="center" hint="Cleanly borrowable now? False = purgatory / no shares / borrow spike / blacklisted (Bucket-2 may still locate)." />
-              {/* ② Carry decomposition */}
-              {!collapseCarry && <Th k="expected_gross_decay_p50_annual" label="Gross decay" hint="Median annualized structural NAV decay (the short's fuel). From the screener decay distribution." />}
-              {!collapseCarry && <Th k="borrow_fee_annual" label="Borrow" hint="Annualized borrow fee — the carry cost of the short. Blank = no borrowable shares (see Short?)." />}
-              {!collapseCarry && <Th k="income_distributions_annual" label="Distrib." hint="Annualized distribution you pay away to the lender as a short. Blank if not reported for this name." />}
+              <Th k="data_grade" label="Data" align="center" hint={fieldHint('data_grade')} />
+              <Th k="short_signal_rank" label="Conviction" align="left" hint="Top / Good / Thin / Skip; No locate when no IBKR shares." />
+              <Th k="yb_etf" label="Fund" align="left" hint={fieldHint('yb_etf')} />
+              <Th k="underlying" label="U" align="left" hint={fieldHint('underlying')} />
+              <Th k="net_edge_p50_annual" label="Short edge %/yr" hint="Median annual edge of shorting this ETF." />
+              <Th k="net_edge_band" label="Edge range" align="center" hint="p05–p95; red when low end &lt; 0." />
+              <Th k="sync_rank" label="Fresh" align="center" hint="yes = aligned timestamps; stale = mixed." />
+              <Th k="short_directly_shortable" label="Locate" align="center" hint="yes = borrowable now; no = purgatory / no shares." />
+              {/* ② Economics */}
+              {!collapseCarry && <Th k="expected_gross_decay_p50_annual" label="Decay" hint="Structural NAV erosion." />}
+              {!collapseCarry && <Th k="borrow_fee_annual" label="Borrow" hint="Live fee or ~hist avg. Tooltip: borrow used in net-edge model." />}
+              {!collapseCarry && <Th k="income_distributions_annual" label="Divs" hint="Distributions paid as a short." />}
               {/* ③ Vol overlay */}
               {collapseOverlay ? (
-                <Th k="edge_pp_of_max_loss" label="Vol" align="left" hint="Compact vol overlay: spread vol signal + sign-corrected hedge richness. Expand for full greeks/IV." />
+                <Th k="edge_pp_of_max_loss" label="Hedge" align="left" hint="vs model + rich/fair/cheap — expand for detail." />
               ) : (
                 <React.Fragment>
-                  <Th k="signal" label="Spread vol signal" align="left" hint="Sell/fade signal for trading the FRONT PUT SPREAD itself (not the short-the-ETF thesis)." />
-                  <Th k="edge_pp_of_max_loss" label="Edge (pp)" hint={fieldHint('edge_pp_of_max_loss')} />
-                  <Th k="short_align_rank" label="Align" align="left" hint="Sign-corrected hedge richness for the SHORT thesis = −edge. Rich hedge = headwind; cheap = tailwind." />
-                  <Th k="model_name" label="Model" align="left" hint={fieldHint('model_name')} />
-                  <Th k="az_cone_residual_iv" label="AZ cone" hint={fieldHint('az_cone_residual_iv')} />
-                  <Th k="model_fair" label="Fair" hint={fieldHint('model_fair')} />
-                  <Th k="spread_mid_market" label="Mid" hint={fieldHint('spread_mid_market')} />
+                  <Th k="signal" label="Hedge" align="left" hint="rich / fair / cheap vs model." />
+                  <Th k="edge_pp_of_max_loss" label="vs model" align="left" hint="Edge pp and tilt (helps / hurts / neutral) for your short." />
+                  <Th k="spread_mid_market" label="F/M" align="right" hint="Fair / mid." />
                   <Th k="iv_full_proxy" label="IV" hint={fieldHint('iv_full_proxy')} />
-                  <Th k="dollar_gamma_per_1pct_underlying" label="$-γ /1%U" hint={fieldHint('dollar_gamma_per_1pct_underlying')} />
-                  <Th k="theta_per_day" label="θ/day" hint={fieldHint('theta_per_day')} />
-                  <Th k="expected_weekly_carry_usd" label="Carry/wk" hint={fieldHint('expected_weekly_carry_usd')} />
+                  <Th k="dollar_gamma_per_1pct_underlying" label="$-γ" hint={fieldHint('dollar_gamma_per_1pct_underlying')} />
+                  <Th k="theta_per_day" label="θ" hint={fieldHint('theta_per_day')} />
+                  <Th k="expected_weekly_carry_usd" label="$/wk" hint={fieldHint('expected_weekly_carry_usd')} />
                   <Th k="days_to_exp" label="DTE" hint={fieldHint('days_to_exp')} />
-                  <Th k="days_to_earnings" label="Event" hint={fieldHint('days_to_earnings')} />
+                  <Th k="days_to_earnings" label="Evt" hint={fieldHint('days_to_earnings')} />
                 </React.Fragment>
               )}
             </tr>
@@ -9253,8 +9127,8 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
           <tbody>
             {sorted.map((r) => {
               const fr = r._freshness || VrpUi.rowFreshness(r);
-              const sig = VrpUi.signalFor(r.edge_pp_of_max_loss, { blockSignal: fr.blockSignal });
               const edgePp = r.edge_pp_of_max_loss;
+              const hedgeRich = VrpUi.hedgeRichnessFor(edgePp, { blockSignal: fr.blockSignal });
               const fairs = [
                 ['AZ', r.az_put_spread_fair],
                 ['Heston', r.heston_put_spread_fair],
@@ -9277,13 +9151,16 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
               const shortSig = VrpUi.shortSignalFor(r.net_edge_p50_annual, r.net_edge_p05_annual,
                 { shortable: r.short_directly_shortable !== false });
               const align = r.short_thesis_alignment || VrpUi.shortThesisAlignment(edgePp);
-              const sb = VrpUi.syncBadge(r);
+              const fresh = VrpUi.freshLabel(r);
               const p50 = r.net_edge_p50_annual;
               const p05 = r.net_edge_p05_annual;
               const p95 = r.net_edge_p95_annual;
               const bandDim = (p05 != null && Number(p05) < 0);
               const why = r.short_edge_why || '';
               const shortable = r.short_directly_shortable;
+              const borrowDisp = VrpUi.formatBorrowCarry(r);
+              const vsModelTitle = `${fieldHint('edge_pp_of_max_loss') || ''} · ${r.model_name || '—'} kernel · ${align.direction || ''}`;
+              const fmTitle = `${fairHover} · mid ${r.spread_mid_market != null ? Number(r.spread_mid_market).toFixed(3) : '—'}`;
               const pill = (s, title) => (
                 <span style={{
                   display: 'inline-block', padding: '2px 8px', borderRadius: 12, fontSize: 10,
@@ -9296,7 +9173,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
                   <td style={{ padding: '5px 8px', textAlign: 'center' }}>
                     <VrpFreshnessBar mode="row" row={r} compact />
                   </td>
-                  <td style={{ padding: '5px 8px' }}>{pill(shortSig, why)}</td>
+                  <td style={{ padding: '5px 8px' }}>{pill(shortSig, shortSig.title || why)}</td>
                   <td style={{ padding: '5px 8px', fontWeight: 600 }}>
                     <a
                       href={`#/chart/${encodeURIComponent(r.yb_etf)}/vrp`}
@@ -9322,21 +9199,14 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
                       ? `${VrpUi.fmtPctAnnual(p05, 0)}…${VrpUi.fmtPctAnnual(p95, 0)}`
                       : '—'}
                   </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'center' }}>
-                    {sb.label === '—' ? <span style={{ color: 'var(--text-muted)' }}>—</span> : (
-                      <span style={{
-                        display: 'inline-block', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 700,
-                        color: sb.color, background: sb.bg || 'transparent', whiteSpace: 'nowrap',
-                      }} title={sb.detail}>{sb.label}</span>
-                    )}
+                  <td style={{ padding: '5px 8px', textAlign: 'center', color: fresh.color, fontWeight: 600 }}
+                      title={fresh.title}>
+                    {fresh.label}
                   </td>
-                  <td style={{ padding: '5px 8px', textAlign: 'center' }}
-                      title={shortable === false
-                        ? 'Not cleanly shortable: purgatory / no borrowable shares / borrow spike / blacklisted.'
-                        : (shortable === true ? 'Borrowable per screener exclusion flags.' : 'Shortability unknown (no screener row).')}>
-                    {shortable === true ? <span style={{ color: '#10b981' }}>✓</span>
-                      : shortable === false ? <span style={{ color: '#ef4444' }}>✗</span>
-                      : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                  <td style={{ padding: '5px 8px', textAlign: 'center', fontWeight: 600,
+                      color: shortable === true ? '#10b981' : (shortable === false ? '#ef4444' : 'var(--text-muted)') }}
+                      title={shortable === false ? 'No IBKR locate (purgatory / no shares).' : (shortable === true ? 'Locate available.' : '')}>
+                    {shortable === true ? 'yes' : (shortable === false ? 'no' : '—')}
                   </td>
                   {/* ② Carry decomposition */}
                   {!collapseCarry && (
@@ -9346,9 +9216,12 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
                     </td>
                   )}
                   {!collapseCarry && (
-                    <td style={{ padding: '5px 8px', textAlign: 'right', color: r.borrow_fee_annual != null ? '#ef4444' : 'var(--text-muted)' }}
-                        title="Annualized borrow fee (carry cost of the short).">
-                      {r.borrow_fee_annual != null ? VrpUi.fmtPctAnnual(r.borrow_fee_annual) : '—'}
+                    <td style={{
+                      padding: '5px 8px', textAlign: 'right',
+                      color: borrowDisp.color,
+                      fontStyle: borrowDisp.isHistorical ? 'italic' : 'normal',
+                    }} title={borrowDisp.title}>
+                      {borrowDisp.text}
                     </td>
                   )}
                   {!collapseCarry && (
@@ -9357,56 +9230,33 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
                       {r.income_distributions_annual != null ? VrpUi.fmtPctAnnual(r.income_distributions_annual) : '—'}
                     </td>
                   )}
-                  {/* ③ Vol overlay */}
+                  {/* ③ Fund hedge */}
                   {collapseOverlay ? (
-                    <td style={{ padding: '5px 8px', whiteSpace: 'nowrap' }}
-                        title={`Spread vol edge ${VrpUi.fmtEdgePp(edgePp)} via ${r.model_name || 'no model'} · hedge ${align.label}`}>
-                      {pill(sig, '')}
-                      <span style={{ marginLeft: 6, color: VrpUi.edgeColor(edgePp), fontWeight: 600 }}>{VrpUi.fmtEdgePp(edgePp)}</span>
-                      <span style={{ marginLeft: 6, color: align.color, fontSize: 10 }}>{align.label}</span>
+                    <td style={{ padding: '5px 8px', whiteSpace: 'nowrap' }} title={vsModelTitle}>
+                      <span style={{ color: hedgeRich.color, fontWeight: 600 }}>{hedgeRich.label}</span>
+                      <span style={{ marginLeft: 8, color: VrpUi.edgeColor(edgePp), fontWeight: 600 }}>
+                        {VrpUi.fmtEdgePp(edgePp)} · {align.label}
+                      </span>
                     </td>
                   ) : (
                     <React.Fragment>
-                      <td style={{ padding: '5px 8px' }}>
-                        {pill(sig, fr.blockSignal
-                          ? `Grade ${fr.grade}: ${r.data_grade_reason || 'stale or imputed inputs'}. SELL (spread) hard-blocked.`
-                          : `Put-spread vol edge ${VrpUi.fmtEdgePp(edgePp)} via ${r.model_name || 'no model'} — signal for trading the SPREAD, not shorting the ETF.`)}
+                      <td style={{ padding: '5px 8px', color: hedgeRich.color, fontWeight: 600 }}
+                          title={fr.blockSignal ? (r.data_grade_reason || 'stale inputs') : 'Fund put spread vs model'}>
+                        {hedgeRich.label}
                       </td>
                       <td style={{
-                        padding: '5px 8px', textAlign: 'right', fontWeight: 600,
+                        padding: '5px 8px', whiteSpace: 'nowrap',
                         color: edgePp == null ? 'var(--text-muted)' : VrpUi.edgeColor(edgePp),
-                      }} title={fieldHint('edge_pp_of_max_loss')}>
+                        fontWeight: 600,
+                      }} title={vsModelTitle}>
                         {VrpUi.fmtEdgePp(edgePp)}
+                        {align.label !== '—' ? <span style={{ marginLeft: 6, color: align.color, fontWeight: 500 }}>· {align.label}</span> : null}
                       </td>
-                      <td style={{ padding: '5px 8px', color: align.color, fontSize: 11, whiteSpace: 'nowrap' }}
-                          title={`Sign-corrected for the SHORT thesis = −(spread edge). ${align.direction === 'headwind'
-                            ? 'Rich hedge: fund well-paid for vol → mild headwind to shorting.'
-                            : align.direction === 'tailwind'
-                            ? 'Cheap hedge: fund underpaid → mild tailwind to shorting.'
-                            : 'Fairly-priced hedge → negligible effect on the short.'}`}>
-                        {align.label}
-                      </td>
-                      <td style={{ padding: '5px 8px', color: 'var(--text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.3 }}
-                          title={`Pricing kernel chosen for this row. Bates > Heston > AZ in priority. Disagreement across kernels: ${
-                            r.model_disagreement_pp_of_max_loss != null
-                              ? VrpUi.fmtEdgePp(r.model_disagreement_pp_of_max_loss)
-                              : 'single model only'
-                          }`}>
-                        {r.model_name || '—'}
-                      </td>
-                      <td style={{
-                        padding: '5px 8px', textAlign: 'right',
-                        color: r.az_cone_residual_iv == null ? 'var(--text-muted)'
-                          : (Number(r.az_cone_residual_iv) > 0.05 ? '#10b981'
-                            : (Number(r.az_cone_residual_iv) < -0.05 ? '#ef4444' : 'var(--text-muted)')),
-                      }} title={fieldHint('az_cone_residual_iv')}>
-                        {r.az_cone_residual_iv != null ? VrpUi.fmtIvPp(r.az_cone_residual_iv) : '—'}
-                      </td>
-                      <td style={{ padding: '5px 8px', textAlign: 'right' }} title={fairHover}>
+                      <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontSize: 11 }}
+                          title={fmTitle}>
                         {r.model_fair != null ? Number(r.model_fair).toFixed(3) : '—'}
-                      </td>
-                      <td style={{ padding: '5px 8px', textAlign: 'right' }}>
-                        {r.spread_mid_market != null ? `${Number(r.spread_mid_market).toFixed(2)}` : '—'}
+                        {' / '}
+                        {r.spread_mid_market != null ? Number(r.spread_mid_market).toFixed(3) : '—'}
                       </td>
                       <td style={{ padding: '5px 8px', textAlign: 'right' }}
                           title={`Long leg IV ${r.iv_put_long != null ? (Number(r.iv_put_long) * 100).toFixed(1) + '%' : '—'} · Short leg IV ${r.iv_put_short != null ? (Number(r.iv_put_short) * 100).toFixed(1) + '%' : '—'} · Source ${r.iv_source || '—'} · Skew ${r.iv_expiry_skew_days != null ? r.iv_expiry_skew_days + 'd' : '?'}`
@@ -9464,7 +9314,7 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
               );
             })}
             {sorted.length === 0 && (
-              <tr><td colSpan={8 + (collapseCarry ? 0 : 3) + (collapseOverlay ? 1 : 13)} style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>
+              <tr><td colSpan={8 + (collapseCarry ? 0 : 3) + (collapseOverlay ? 1 : 9)} style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>
                 No rows match current filters.
               </td></tr>
             )}
@@ -9472,20 +9322,11 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
         </table>
       </div>
 
-      <div style={{ marginTop: 14, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-        <strong>How to read (top-down = best shorts):</strong> <em>① Short thesis</em> is the primary, unbiased ranking —
-        <em> Net edge (ann)</em> is the screener's median annualized edge of <strong>shorting the YB ETF</strong> net of
-        borrow/carry (<em>short_favorable_positive</em>; higher = better, comparable across names). The <em>p05…p95</em> band
-        is its confidence (red when p05 &lt; 0 = not robust). <em>Sync</em> flags whether the sleeve quote, underlying quote,
-        holdings and screener describe the same moment; <em>Short?</em> flags clean borrowability (✗ = purgatory / no shares).
-        <em> ② Carry decomposition</em> shows the gross decay (the short's fuel) minus borrow and distribution that the net edge
-        already accounts for. <em>③ Vol overlay</em> is the kernel-aware put-spread edge (<em>edge_pp_of_max_loss</em>, % of the
-        front spread's one-week max-loss) and its greeks — a <strong>second-order</strong> read on the fund's hedge, not the
-        short thesis. The <em>Align</em> chip sign-corrects it: a <strong>rich</strong> hedge is a headwind to shorting (the
-        fund is well-paid), a <strong>cheap</strong> hedge a tailwind. Collapse ② / ③ to focus on the ranking; nothing is
-        removed. Black-Scholes is not used for the overlay (it can't price LETF vol drag, skew, or jumps). <em>Grade</em> is the
-        server-side data quality (A full size, B half size, C monitor, D blocked).
-      </div>
+      <ul style={{ marginTop: 12, paddingLeft: 18, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.55, maxWidth: 720 }}>
+        <li>Sort by <strong>Short edge %/yr</strong> — best shorts of the fund (annual, comparable).</li>
+        <li><strong>Locate = no</strong> → <em>No locate</em>; edge can assume 0% borrow (see Borrow tooltip).</li>
+        <li><strong>Fund hedge</strong> — rich / fair / cheap; <em>hurts</em> / <em>helps</em> = tilt on your short (context only).</li>
+      </ul>
     </div>
   );
 }
