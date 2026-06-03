@@ -1482,6 +1482,15 @@ const fmtSharesTradedStat = (raw) => {
   return Math.round(n).toLocaleString('en-US');
 };
 const fmtUsd = v => (v == null || !Number.isFinite(Number(v))) ? '—' : `$${Number(v).toFixed(2)}`;
+/** Premium/discount of market close vs issuer NAV (bps when |prem| is small). */
+const fmtPremDisc = (nav, close) => {
+  const n = Number(nav);
+  const c = Number(close);
+  if (!Number.isFinite(n) || n <= 0 || !Number.isFinite(c)) return '—';
+  const pct = ((c - n) / n) * 100;
+  if (Math.abs(pct) < 0.05) return `${pct >= 0 ? '+' : ''}${(pct * 100).toFixed(0)} bp`;
+  return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+};
 const fmtSpreadMid = (mid, spot) => {
   if (mid == null) return '—';
   const usd = fmtUsd(mid);
@@ -5696,6 +5705,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     return buildTotalReturnMetricsSeries(raw, etfDistributionsSeries);
   }, [etfMetricsMap, etfSym, etfDistributionsSeries]);
+  const etfMetricsChartSeries = useMemo(() => (
+    etfMetricsSeries.map((m) => {
+      const nav = Number(m.nav);
+      const close = Number(m.close_price);
+      const prem_disc_pct = (Number.isFinite(nav) && nav > 0 && Number.isFinite(close))
+        ? ((close - nav) / nav) * 100
+        : null;
+      return { ...m, prem_disc_pct };
+    })
+  ), [etfMetricsSeries]);
   // Pair Backtest: joint days (ETF px + underlying_adj_close) from etf_metrics_daily.
   // When Yahoo listing predates issuer rows, CI prepends yahoo_bootstrap rows via
   // scripts/bootstrap_metrics_yahoo_history.py so inception can align with listing.
@@ -6957,15 +6976,29 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               </div>
               <div className="metrics-stack">
                 <SimpleSeriesPlot
-                  series={etfMetricsSeries}
+                  series={etfMetricsChartSeries}
                   valueKey="nav"
                   color="rgba(59,130,246,0.95)"
-                  label={`${etfSym} NAV vs. Close (premium/discount visible as gap)`}
+                  label={`${etfSym} NAV vs. market close (issuer NAV, not AUM/shares implied)`}
                   formatValue={(v) => fmtUsd(v)}
                   zeroLabel="$0"
                   overlayValueKey="close_price"
                   overlayColor="rgba(234,179,8,0.95)"
-                  overlayLabel="Market Close"
+                  overlayLabel="Market close"
+                />
+                <SimpleSeriesPlot
+                  series={etfMetricsChartSeries}
+                  valueKey="prem_disc_pct"
+                  color="rgba(244,114,182,0.95)"
+                  label={`${etfSym} premium / discount (close vs NAV)`}
+                  formatValue={(v) => {
+                    const pct = Number(v);
+                    if (!Number.isFinite(pct)) return '—';
+                    if (Math.abs(pct) < 0.05) return `${pct >= 0 ? '+' : ''}${(pct * 100).toFixed(0)} bp`;
+                    return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+                  }}
+                  zeroLabel="0%"
+                  includeZero={true}
                 />
                 <SimpleSeriesPlot
                   series={etfMetricsSeries}
@@ -7026,7 +7059,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <th>Close</th>
                       <th>Prem/Disc</th>
                       <th>TR NAV</th>
-                      <th title="Yahoo Finance dividend/split-adjusted underlying close (total-return level).">{undAdjCloseLabel}</th>
+                      <th title="Underlying total-return adj. close (Yahoo) — not ETF market close or prem/disc.">{undAdjCloseLabel}</th>
                       <th>AUM / TNA</th>
                       <th>Shares Outstanding</th>
                       <th title="Yahoo Finance daily Volume field; interpreted as ETF shares traded that session.">Shares Traded</th>
@@ -7034,18 +7067,15 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     </tr>
                   </thead>
                   <tbody>
-                    {[...etfMetricsSeries].slice(-15).reverse().map((m, idx) => {
+                    {[...etfMetricsChartSeries].slice(-15).reverse().map((m, idx) => {
                       const nav = Number(m.nav);
                       const close = Number(m.close_price);
-                      const premPct = (Number.isFinite(nav) && nav > 0 && Number.isFinite(close))
-                        ? ((close - nav) / nav) * 100
-                        : null;
                       return (
                         <tr key={`${m.date}-${idx}`}>
                           <td>{m.date || '—'}</td>
-                          <td>{fmtUsd(nav)}</td>
-                          <td>{Number.isFinite(close) ? fmtUsd(close) : '—'}</td>
-                          <td>{premPct == null ? '—' : `${premPct >= 0 ? '+' : ''}${premPct.toFixed(2)}%`}</td>
+                          <td title="Issuer-published NAV (REX/Roundhill/etc.), not AUM÷shares unless NAV absent">{fmtUsd(nav)}</td>
+                          <td title="Exchange close (issuer closing price when available, else Yahoo)">{Number.isFinite(close) ? fmtUsd(close) : '—'}</td>
+                          <td title="(close − NAV) / NAV">{fmtPremDisc(nav, close)}</td>
                           <td>{toFiniteNum(m.nav_total_return) != null ? fmtUsd(toFiniteNum(m.nav_total_return)) : '—'}</td>
                           <td>{toFiniteNum(m.underlying_adj_close) != null ? fmtUsd(toFiniteNum(m.underlying_adj_close)) : '—'}</td>
                           <td>{fmtMoney(Number(m.aum))}</td>

@@ -155,7 +155,11 @@ def _records_to_df(records: list[ProviderResult], ingested_at: datetime) -> pd.D
             "aum": r.aum,
             "shares_outstanding": r.shares_outstanding,
             "shares_traded": None,
-            "close_price": None,
+            "close_price": (
+                float(r.market_close)
+                if r.market_close is not None and not pd.isna(r.market_close) and float(r.market_close) > 0
+                else None
+            ),
             "etf_adj_close": None,
             "underlying_adj_close": None,
             "stale": bool(r.stale),
@@ -293,6 +297,66 @@ def prune_expired_carry_forward_rows(
     out.loc[expired, "source_provider"] = None
     out.loc[expired, "source_url"] = None
     return out, n
+
+
+def compute_prem_disc_health(
+    latest: pd.DataFrame,
+    *,
+    lockstep_bps: float = 1.0,
+    rex_nav_div_bps: float = 5.0,
+) -> dict:
+    """Prem/disc coverage and lockstep NAV≈close diagnostics for health artifacts."""
+    if latest.empty:
+        return {
+            "rows_with_close": 0,
+            "rows_with_nav_and_close": 0,
+            "median_prem_disc_bps": None,
+            "lockstep_nav_close_count": 0,
+            "lockstep_nav_close_pct": 0.0,
+            "rex_nav_vs_implied_div_bps_gt5": 0,
+            "by_provider": {},
+        }
+    nav = pd.to_numeric(latest.get("nav"), errors="coerce")
+    close = pd.to_numeric(latest.get("close_price"), errors="coerce")
+    prov = latest.get("source_provider", pd.Series(dtype=str)).astype(str).str.lower()
+    ok = nav.notna() & (nav > 0) & close.notna() & (close > 0)
+    prem_bps = pd.Series(np.nan, index=latest.index, dtype=float)
+    if ok.any():
+        prem_bps.loc[ok] = (close[ok] - nav[ok]) / nav[ok] * 10000.0
+    lock = ok & prem_bps.abs().lt(float(lockstep_bps))
+    lock_n = int(lock.sum())
+    ok_n = int(ok.sum())
+    rex_mask = prov.str.contains("rex", na=False) & ok
+    rex_div = 0
+    if rex_mask.any():
+        implied = pd.to_numeric(latest.loc[rex_mask, "aum"], errors="coerce") / pd.to_numeric(
+            latest.loc[rex_mask, "shares_outstanding"], errors="coerce"
+        )
+        n0 = nav[rex_mask]
+        div_bps = ((n0 - implied) / n0 * 10000.0).abs()
+        rex_div = int((div_bps > float(rex_nav_div_bps)).sum())
+
+    by_provider: dict[str, dict[str, float | int]] = {}
+    for p in prov[ok].unique():
+        if not p or p == "nan":
+            continue
+        m = ok & (prov == p)
+        sub = prem_bps.loc[m] if m.any() else pd.Series(dtype=float)
+        by_provider[p] = {
+            "rows": int(m.sum()),
+            "median_prem_disc_bps": float(sub.median()) if not sub.empty else None,
+            "lockstep_count": int((sub.abs() < lockstep_bps).sum()) if not sub.empty else 0,
+        }
+
+    return {
+        "rows_with_close": int(close.notna().sum()),
+        "rows_with_nav_and_close": ok_n,
+        "median_prem_disc_bps": float(prem_bps.median()) if not prem_bps.empty else None,
+        "lockstep_nav_close_count": lock_n,
+        "lockstep_nav_close_pct": round(100.0 * lock_n / ok_n, 2) if ok_n else 0.0,
+        "rex_nav_vs_implied_div_bps_gt5": rex_div,
+        "by_provider": by_provider,
+    }
 
 
 def load_executed_delisted_off_universe(
@@ -1253,9 +1317,9 @@ def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame
         merged["close_price"] = None
     if "shares_traded" not in merged.columns:
         merged["shares_traded"] = None
-    # Prefer the freshly fetched value; keep the existing one when yfinance is silent.
-    merged["close_price"] = pd.to_numeric(merged["_close_new"], errors="coerce").combine_first(
-        pd.to_numeric(merged["close_price"], errors="coerce")
+    # Prefer issuer/session close already on the row; Yahoo fills gaps only.
+    merged["close_price"] = pd.to_numeric(merged["close_price"], errors="coerce").combine_first(
+        pd.to_numeric(merged["_close_new"], errors="coerce")
     )
     merged["shares_traded"] = pd.to_numeric(merged["_shares_traded_new"], errors="coerce").combine_first(
         pd.to_numeric(merged["shares_traded"], errors="coerce")
@@ -1677,9 +1741,12 @@ def save_outputs(df: pd.DataFrame) -> None:
         latest.loc[latest_status == "partial", "ticker"].astype(str).tolist()
     ) if not latest.empty else []
 
+    prem_disc = compute_prem_disc_health(latest_rows_json)
+
     health_payload = {
         "build_time": datetime.now(UTC).isoformat(),
         "latest_date": latest_date.isoformat() if latest_date is not None else None,
+        "prem_disc": prem_disc,
         "latest_total": int(len(latest)),
         "latest_ok": int((latest_status == "ok").sum()) if not latest.empty else 0,
         "latest_partial": int((latest_status == "partial").sum()) if not latest.empty else 0,

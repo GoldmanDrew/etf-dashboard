@@ -210,6 +210,25 @@ def _check_metrics(health: dict) -> tuple[dict, list[str]]:
     violations: list[str] = []
     latest_stale = int(health.get("latest_stale_ok") or 0)
     latest_ok = int(health.get("latest_ok") or 0)
+    prem = health.get("prem_disc") if isinstance(health.get("prem_disc"), dict) else {}
+    lock_pct = float(prem.get("lockstep_nav_close_pct") or 0.0)
+    rex_div = int(prem.get("rex_nav_vs_implied_div_bps_gt5") or 0)
+    by_rex = (prem.get("by_provider") or {}).get("rex_shares") or {}
+    rex_lock = int(by_rex.get("lockstep_count") or 0)
+    rex_rows = int(by_rex.get("rows") or 0)
+    if rex_rows >= 5 and rex_lock >= max(3, int(rex_rows * 0.8)):
+        violations.append(
+            f"metrics: rex_shares lockstep nav≈close on {rex_lock}/{rex_rows} rows "
+            "(check issuer NAV vs Closing Price ingest)",
+        )
+    if lock_pct >= 35.0 and int(prem.get("rows_with_nav_and_close") or 0) >= 20:
+        violations.append(
+            f"metrics: {lock_pct:.1f}% of latest rows have nav≈close (>{lock_pct:.0f}% lockstep)",
+        )
+    if rex_div >= 3:
+        violations.append(
+            f"metrics: {rex_div} rex row(s) with published NAV vs AUM/shares divergence >5bp",
+        )
     return {
         "latest_date": health.get("latest_date"),
         "latest_ok": latest_ok,
@@ -217,6 +236,7 @@ def _check_metrics(health: dict) -> tuple[dict, list[str]]:
         "latest_missing": health.get("latest_missing"),
         "latest_stale_by_kind": health.get("latest_stale_by_kind") or {},
         "flow_blockers_prior_stale": health.get("flow_blockers_prior_stale"),
+        "prem_disc": prem,
     }, violations
 
 

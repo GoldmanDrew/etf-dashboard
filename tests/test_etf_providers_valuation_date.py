@@ -126,6 +126,7 @@ def rex_provider():
 
 def test_rex_fetch_uses_html_as_of_session_date(monkeypatch, rex_provider):
     html = """
+    <div class="t-col t-label">NAV</div><div class="t-col t-data">$33.55</div>
     <div class="t-col t-label">Fund Assets</div><div class="t-col t-data">$8,205,092.64</div>
     <div class="t-col t-label">Shares Outstanding</div><div class="t-col t-data">244,782</div>
     <div class="t-col t-label">Closing Price</div><div class="t-col t-data">$33.52</div>
@@ -142,6 +143,8 @@ def test_rex_fetch_uses_html_as_of_session_date(monkeypatch, rex_provider):
     assert r.date == date(2026, 4, 28)
     assert r.source_provider == "rex_shares"
     assert r.stale is True
+    assert r.market_close is not None and abs(r.market_close - 33.52) < 0.02
+    assert r.nav is not None and r.nav > 33.52
 
 
 @pytest.fixture

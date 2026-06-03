@@ -15,7 +15,8 @@ Layered fetch strategy (per ticker, tried in order):
   10) PolygonProvider (last-resort close + meta)
 
 Each provider returns a ProviderResult with:
-  nav, aum, shares_outstanding, source_provider, source_url, status, stale, stale_age_bdays, stale_kind
+  nav, aum, shares_outstanding, optional market_close (exchange close for prem/disc),
+  source_provider, source_url, status, stale, stale_age_bdays, stale_kind
 
 Statuses:
   - 'ok'      : all three of (nav, aum, shares) present and positive
@@ -59,6 +60,44 @@ class ProviderResult:
     stale: bool = False
     stale_age_bdays: Optional[int] = None
     stale_kind: Optional[str] = None
+    market_close: Optional[float] = None
+    issuer_prem_disc_pct: Optional[float] = None
+
+
+def _parse_percent_label(s: str | None) -> float | None:
+    if not s:
+        return None
+    t = str(s).strip().replace("%", "").replace(",", "")
+    try:
+        return float(t)
+    except (TypeError, ValueError):
+        return None
+
+
+def _prem_disc_pct(nav: float | None, market_close: float | None) -> float | None:
+    n = _positive_float(nav)
+    c = _positive_float(market_close)
+    if n is None or c is None:
+        return None
+    return float((c - n) / n * 100.0)
+
+
+def resolve_issuer_nav(
+    *,
+    published_nav: float | None,
+    aum: float | None,
+    shares: float | None,
+    market_close: float | None = None,
+) -> float | None:
+    """Prefer issuer-published NAV; fall back to AUM/shares or closing price."""
+    pn = _positive_float(published_nav)
+    if pn is not None:
+        return pn
+    a = _positive_float(aum)
+    s = _positive_float(shares)
+    if a is not None and s is not None and s > 0:
+        return float(a / s)
+    return _positive_float(market_close)
 
 
 def _classify_status(nav, aum, shares) -> str:
@@ -275,6 +314,7 @@ def merge_provider_attempts(
     aum: float | None = None
     shares: float | None = None
     nav_valuation_date = end_date
+    issuer_row: ProviderResult | None = None
 
     def _apply_triple(
         n: float | None,
@@ -282,12 +322,14 @@ def merge_provider_attempts(
         s: float | None,
         src: ProviderResult,
     ) -> bool:
-        nonlocal nav, aum, shares, nav_valuation_date
+        nonlocal nav, aum, shares, nav_valuation_date, issuer_row
         nc, ac, sc = _coherent_triple(n, a, s)
         if nc is None:
             return False
         nav, aum, shares = nc, ac, sc
         nav_valuation_date = src.date
+        if src.source_provider in _ISSUER_MERGE_PROVIDERS:
+            issuer_row = src
         return True
 
     # 1) Issuer row with a coherent ok triple (Granite, REX, …).
@@ -375,6 +417,20 @@ def merge_provider_attempts(
 
     valuation_date = nav_valuation_date
 
+    market_close: float | None = None
+    issuer_prem_disc_pct: float | None = None
+    if issuer_row is not None:
+        market_close = _positive_float(issuer_row.market_close)
+        issuer_prem_disc_pct = issuer_row.issuer_prem_disc_pct
+    if market_close is None:
+        for r in attempts_sorted:
+            mc = _positive_float(r.market_close)
+            if mc is not None:
+                market_close = mc
+                break
+    if issuer_prem_disc_pct is None and nav and market_close:
+        issuer_prem_disc_pct = _prem_disc_pct(nav, market_close)
+
     return ProviderResult(
         date=valuation_date,
         ticker=ticker.upper(),
@@ -387,6 +443,8 @@ def merge_provider_attempts(
         stale=stale,
         stale_age_bdays=stale_age,
         stale_kind=stale_kind,
+        market_close=market_close,
+        issuer_prem_disc_pct=issuer_prem_disc_pct,
     )
 
 
@@ -807,6 +865,9 @@ class RoundhillProvider:
         nav_f = float(nav) if pd.notna(nav) and nav > 0 else None
         aum_f = float(aum) if pd.notna(aum) and aum > 0 else None
         sh_f = float(shares) if pd.notna(shares) and shares > 0 else None
+        mp = pd.to_numeric(row.get("Market Price"), errors="coerce")
+        market_close = float(mp) if pd.notna(mp) and float(mp) > 0 else None
+        prem_pct = _prem_disc_pct(nav_f, market_close)
 
         rd = pd.to_datetime(row_date, errors="coerce").date() if row_date is not None and not isinstance(row_date, date) else row_date
         if not isinstance(rd, date):
@@ -820,6 +881,8 @@ class RoundhillProvider:
             source_provider=self.name,
             source_url=self.URL + f"#ticker={t}&date={row_date}",
             status=status, stale=stale, stale_age_bdays=age_b, stale_kind=stale_kind,
+            market_close=market_close,
+            issuer_prem_disc_pct=prem_pct,
         )
 
 
@@ -925,15 +988,23 @@ class YieldMaxProvider:
             nav = self._parse_currency(nav_str)
             aum = self._parse_currency(aum_str)
             shares = self._parse_int(shares_str)
+            close_str = (
+                (m.group(1) if (m := row_re("Closing Price")) else None)
+                or (m.group(1) if (m := row_re("Market Price")) else None)
+            )
+            market_close = self._parse_currency(close_str)
             row_date = self._parse_date(as_of_str)
             valuation_date = row_date if row_date is not None else as_of
 
             stale, age_b, stale_kind = issuer_valuation_stale_flags(row_date, as_of)
             status = _classify_status(nav, aum, shares)
+            prem_pct = _prem_disc_pct(nav, market_close)
             res = ProviderResult(
                 date=valuation_date, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
                 source_provider=self.name, source_url=url + f"#as_of={row_date}",
                 status=status, stale=stale, stale_age_bdays=age_b, stale_kind=stale_kind,
+                market_close=market_close,
+                issuer_prem_disc_pct=prem_pct,
             )
             self._cache[ck] = res
             return res
@@ -961,11 +1032,13 @@ class REXSharesProvider:
         <div class="t-col t-label">Closing Price</div>
         <div class="t-col t-data">$8.41</div>
 
-    NAV is not a distinct field on most REX pages; we compute nav = aum / shares.
+    Published **NAV**, **Closing Price**, and **Discount/Premium** are distinct on fund pages.
+    NAV prefers the issuer NAV row (not AUM/shares implied), which aligns prem/disc with
+    the issuer's own discount/premium line.
 
     The HTML **As of** date is the valuation session: ``ProviderResult.date`` uses that
     (not the ingest calendar day) so ``merge_close_prices`` aligns Yahoo close on the
-    same row as NAV.
+    same row as NAV when issuer close is absent.
     """
 
     name = "rex_shares"
@@ -1034,13 +1107,19 @@ class REXSharesProvider:
             shares_str = self._row_match(html, "Shares Outstanding")
             shares = self._to_float(shares_str)
             close = self._to_float(self._row_match(html, "Closing Price"))
+            published_nav = self._to_float(self._row_match(html, "NAV"))
+            prem_raw = self._row_match(html, "Discount/Premium")
             as_of_str = self._row_match(html, "As of")
 
-            nav = None
-            if aum and shares and shares > 0:
-                nav = aum / shares
-            elif close:
-                nav = close
+            nav = resolve_issuer_nav(
+                published_nav=published_nav,
+                aum=aum,
+                shares=shares,
+                market_close=close,
+            )
+            prem_pct = _parse_percent_label(prem_raw)
+            if prem_pct is None:
+                prem_pct = _prem_disc_pct(nav, close)
 
             row_date = None
             if as_of_str:
@@ -1059,6 +1138,8 @@ class REXSharesProvider:
                 date=valuation_date, ticker=t, nav=nav, aum=aum, shares_outstanding=shares,
                 source_provider=self.name, source_url=url + f"#as_of={row_date}",
                 status=status, stale=stale, stale_age_bdays=age_b, stale_kind=stale_kind,
+                market_close=close,
+                issuer_prem_disc_pct=prem_pct,
             )
             self._cache[ck] = res
             return res
@@ -1301,18 +1382,26 @@ class GraniteSharesProvider:
                 self._cache[ck] = res
                 return res
 
-            nav = pd.to_numeric(payload.get("Nav"), errors="coerce")
+            nav_raw = pd.to_numeric(payload.get("Nav"), errors="coerce")
             close_px = pd.to_numeric(payload.get("ClosingPrice"), errors="coerce")
-            if pd.isna(nav) or float(nav) <= 0:
-                nav = close_px
             aum = pd.to_numeric(payload.get("AUM"), errors="coerce")
 
-            nav_f = float(nav) if pd.notna(nav) and float(nav) > 0 else None
+            published_nav = float(nav_raw) if pd.notna(nav_raw) and float(nav_raw) > 0 else None
+            market_close = float(close_px) if pd.notna(close_px) and float(close_px) > 0 else None
             aum_f = float(aum) if pd.notna(aum) and float(aum) > 0 else None
 
             shares_f: float | None = None
-            if nav_f and aum_f and nav_f > 0:
+            if published_nav and aum_f and published_nav > 0:
+                shares_f = float(aum_f / published_nav)
+            nav_f = resolve_issuer_nav(
+                published_nav=published_nav,
+                aum=aum_f,
+                shares=shares_f,
+                market_close=market_close,
+            )
+            if nav_f and aum_f and nav_f > 0 and shares_f is None:
                 shares_f = float(aum_f / nav_f)
+            prem_pct = _prem_disc_pct(nav_f, market_close)
 
             nav_date = self._parse_nav_date(payload.get("NavDate"))
             valuation_date = nav_date if nav_date is not None else as_of
@@ -1325,6 +1414,8 @@ class GraniteSharesProvider:
                 source_provider=self.name,
                 source_url=api_url + f"#nav_date={nav_date}",
                 status=status, stale=stale, stale_age_bdays=age_b, stale_kind=stale_kind,
+                market_close=market_close,
+                issuer_prem_disc_pct=prem_pct,
             )
             self._cache[ck] = res
             return res

@@ -84,6 +84,10 @@ jobs:
       - name: Ingest ETF metrics
         run: python scripts/ingest_etf_metrics.py --lookback-days 10 --polygon-lookback-days 5
 
+      - name: Repair REX issuer NAV vs market close (tail)
+        continue-on-error: true
+        run: python scripts/repair_rex_session_nav_close.py --lookback-days 45 --apply
+
       - name: Backfill underlying adj. close gaps
         continue-on-error: true
         run: python scripts/backfill_underlying_adj_close.py

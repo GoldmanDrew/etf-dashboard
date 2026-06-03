@@ -191,5 +191,18 @@ def test_merge_close_prices_attaches_yahoo_volume_as_shares_traded():
     ])
     out = iem.merge_close_prices(base, close_df)
     got = out.iloc[0]
-    assert float(got["close_price"]) == 10.05
+    # Issuer close is kept; Yahoo only supplies volume when close already set.
+    assert float(got["close_price"]) == 9.9
     assert int(got["shares_traded"]) == 123456
+
+
+def test_merge_close_prices_yahoo_fills_missing_close():
+    base = pd.DataFrame([
+        _row("2026-04-01", nav=10.0, sh=1e6, close=None, aum=10e6, ticker="VOL"),
+    ])
+    base["date"] = pd.to_datetime(base["date"]).dt.date
+    close_df = pd.DataFrame([
+        {"date": date(2026, 4, 1), "ticker": "VOL", "close_price": 10.05, "shares_traded": 99},
+    ])
+    out = iem.merge_close_prices(base, close_df)
+    assert float(out.iloc[0]["close_price"]) == 10.05
