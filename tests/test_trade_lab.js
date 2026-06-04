@@ -200,3 +200,68 @@ test("ttx sensitivity returns requested tenors", () => {
   assert.deepEqual(arr.map((x) => x.ttxDays), [1, 7, 30]);
 });
 
+test("scenario grid scales with option contracts when premium equals auto mark", () => {
+  const spot = 47.88;
+  const strike = 32;
+  const iv = 0.8;
+  const ttxDays = 600;
+  const rate = 0.04;
+  const autoPremium = bsPrice({ spot, strike, vol: iv, ttmYears: ttxDays / 365, rate, type: "put" });
+  const base = {
+    baseLegs: [
+      { symbol: "APLD", side: "long", quantity: 10000, entry: spot },
+      { symbol: "APLZ", side: "short", quantity: 1000000, entry: 5.66 },
+      { symbol: "APLX", side: "short", quantity: 100000, entry: 14.7 },
+    ],
+    optionLegs: [{ symbol: "APLD", type: "put", side: "buy", strike, premium: autoPremium, iv }],
+    underlyingSymbol: "APLD",
+    etfSymbol: "APLX",
+    spotBySymbol: { APLD: spot, APLX: 14.7, APLZ: 5.66 },
+    leverageBySymbol: { APLX: 1.995, APLZ: -1.9876 },
+    spotUnderlying: spot,
+    spotEtf: 14.7,
+    leverage: 1.995,
+    horizonYears: 0.5,
+    baseVolAnnual: 0.8,
+    shockRows: [{ sigmaMultiple: 0, underlyingReturn: 0 }],
+    volColumns: [{ sigmaAnnual: 0.8 }],
+    ttxDays,
+    rate,
+    defaultBorrowAnnual: 0.05,
+    shortProceedsRateAnnual: 0.01,
+  };
+  const pnl1 = buildTradeScenarioGrid({ ...base, optionLegs: [{ ...base.optionLegs[0], contracts: 1 }] }).rows[0].cells[0].pnl;
+  const pnl1000 = buildTradeScenarioGrid({ ...base, optionLegs: [{ ...base.optionLegs[0], contracts: 1000 }] }).rows[0].cells[0].pnl;
+  assert.notEqual(pnl1, pnl1000);
+  assert.ok(Math.abs(pnl1000 - pnl1) > 1000);
+});
+
+test("scenario grid option pnl responds to underlying shock", () => {
+  const spot = 100;
+  const strike = 95;
+  const iv = 0.5;
+  const premium = bsPrice({ spot, strike, vol: iv, ttmYears: 30 / 365, rate: 0, type: "put" });
+  const base = {
+    baseLegs: [],
+    optionLegs: [{ symbol: "UND", type: "put", side: "buy", strike, contracts: 100, premium, iv }],
+    underlyingSymbol: "UND",
+    etfSymbol: "ETF",
+    spotUnderlying: spot,
+    spotEtf: 100,
+    leverage: 1,
+    horizonYears: 0.5,
+    baseVolAnnual: 0.7,
+    volColumns: [{ sigmaAnnual: 0.7 }],
+    ttxDays: 30,
+    rate: 0,
+  };
+  const up = buildTradeScenarioGrid({
+    ...base,
+    shockRows: [{ sigmaMultiple: 3, underlyingReturn: 0.5 }],
+  }).rows[0].cells[0].pnl;
+  const down = buildTradeScenarioGrid({
+    ...base,
+    shockRows: [{ sigmaMultiple: -3, underlyingReturn: -0.5 }],
+  }).rows[0].cells[0].pnl;
+  assert.ok(up < down, "long put should gain more when underlying falls");
+});

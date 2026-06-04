@@ -74,17 +74,27 @@
     return q * (f - e);
   }
 
-  function optionLegPnl(leg, spotNow, spotFinal, ttxDays, volFallback, rate) {
+  function remainingTtxDays(ttxDaysStart, elapsedYears) {
+    const start = Math.max(0, toNum(ttxDaysStart));
+    const elapsedDays = Math.max(0, toNum(elapsedYears)) * 365;
+    return Math.max(0, start - elapsedDays);
+  }
+
+  function optionLegPnl(leg, spotNow, spotFinal, ttxDaysRemaining, volFallback, rate) {
     const contracts = Math.max(0, toNum(leg && leg.contracts));
     const multiplier = Math.max(1, toNum((leg && leg.multiplier) ?? 100));
     const strike = toNum(leg && leg.strike);
     const premium = Number.isFinite(toNum(leg && leg.premium)) ? toNum(leg.premium) : 0;
     const iv = Number.isFinite(toNum(leg && leg.iv)) ? toNum(leg.iv) : volFallback;
     if (!Number.isFinite(strike) || !Number.isFinite(contracts) || contracts <= 0) return { pnl: 0, mark: 0, payoff: 0 };
-    const tYears = Math.max(0, toNum(ttxDays)) / 365;
+    const scenarioSpot = Number.isFinite(spotFinal) && spotFinal > 0
+      ? spotFinal
+      : (Number.isFinite(spotNow) && spotNow > 0 ? spotNow : NaN);
+    if (!Number.isFinite(scenarioSpot) || scenarioSpot <= 0) return { pnl: 0, mark: 0, payoff: 0 };
+    const tYears = Math.max(0, toNum(ttxDaysRemaining)) / 365;
     const type = String((leg && leg.type) || "call").toLowerCase();
-    const mark = bsPrice({ spot: spotNow, strike, vol: Math.max(0.01, iv), ttmYears: tYears, rate, type });
-    const payoff = optionPayoffAtExpiry({ spot: spotFinal, strike, type });
+    const mark = bsPrice({ spot: scenarioSpot, strike, vol: Math.max(0.01, iv), ttmYears: tYears, rate, type });
+    const payoff = optionPayoffAtExpiry({ spot: scenarioSpot, strike, type });
     const side = String((leg && leg.side) || "buy").toLowerCase();
     const dir = side === "sell" ? -1 : 1;
     const markOrPayoff = tYears > 0 ? mark : payoff;
@@ -97,10 +107,13 @@
     const optionLegs = Array.isArray(params && params.optionLegs) ? params.optionLegs : [];
     const priceNow = (params && params.priceNow) || {};
     const priceFinal = (params && params.priceFinal) || {};
-    const ttxDays = Number.isFinite(toNum(params && params.ttxDays)) ? toNum(params.ttxDays) : 0;
+    const ttxDaysStart = Number.isFinite(toNum(params && params.ttxDays)) ? toNum(params.ttxDays) : 0;
     const volMap = (params && params.volMap) || {};
     const rate = Number.isFinite(toNum(params && params.rate)) ? toNum(params.rate) : 0;
     const elapsedYears = Number.isFinite(toNum(params && params.elapsedYears)) ? Math.max(0, toNum(params.elapsedYears)) : 0;
+    const ttxDaysRemaining = params && params.ttxDaysIsRemaining === true
+      ? Math.max(0, ttxDaysStart)
+      : remainingTtxDays(ttxDaysStart, elapsedYears);
     const annualBorrowBySymbol = (params && params.annualBorrowBySymbol) || {};
     const defaultBorrowAnnual = Number.isFinite(toNum(params && params.defaultBorrowAnnual)) ? Math.max(0, toNum(params.defaultBorrowAnnual)) : 0;
     const shortProceedsRateAnnual = Number.isFinite(toNum(params && params.shortProceedsRateAnnual)) ? toNum(params.shortProceedsRateAnnual) : 0;
@@ -132,7 +145,7 @@
       const spotNow = toNum(priceNow[sym]);
       const spotFinal = toNum(priceFinal[sym]);
       const volFallback = Number.isFinite(toNum(volMap[sym])) ? toNum(volMap[sym]) : 0.6;
-      const out = optionLegPnl(leg, spotNow, spotFinal, ttxDays, volFallback, rate);
+      const out = optionLegPnl(leg, spotNow, spotFinal, ttxDaysRemaining, volFallback, rate);
       total += out.pnl;
       legRows.push({ kind: "option", symbol: sym, pnl: out.pnl });
     }
@@ -375,6 +388,7 @@
           priceFinal,
           ttxDays: ttxRemain,
           elapsedYears: (t / steps) * horizonYears,
+          ttxDaysIsRemaining: true,
           annualBorrowBySymbol,
           defaultBorrowAnnual,
           shortProceedsRateAnnual,
