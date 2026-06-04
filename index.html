@@ -1439,10 +1439,11 @@
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
 <script src="assets/chart_returns.js?v=cr-v2"></script>
+<script src="assets/price_basis.js?v=pb-v1"></script>
 <script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v2"></script>
-<script src="assets/pair_backtest.js?v=pb-v7"></script>
-<script src="assets/realized_decay.js?v=rd-v5"></script>
+<script src="assets/pair_backtest.js?v=pb-v8"></script>
+<script src="assets/realized_decay.js?v=rd-v6"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
@@ -6199,6 +6200,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       avgBorrowAnnual: Number.isFinite(bAnn) ? bAnn : 0,
       borrowHistory: etfBorrowSeries,
       distributions: etfDistributionsSeries,
+      splitEvents: decaySplitEvents,
     });
   })();
   const pairRiskSeries = (() => {
@@ -7947,7 +7949,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             (ETF: Yahoo adj close / NAV TR; underlying: split-adj close).{' '}
             <code>gross = β·log(U<sub>end</sub>/U<sub>start</sub>) − log(L<sub>end</sub>/L<sub>start</sub>)</code>,{' '}
             <code>net = gross − borrow<sub>avg</sub> × (N/252)</code>.
-            Reverse splits: scale only when raw close jumps at the event; distributions via NAV TR reinvestment when splits apply, else Yahoo adj close.
+            Split-aware TR from <code>price_basis.js</code> (same rules as chart windows): scale pre-split issuer closes only when raw price jumps; Yahoo-continuous series use adj close; distributions via NAV TR when scaling applies.
           </div>
 
           {etfMetricsLoading ? (

@@ -87,11 +87,17 @@
 
   /**
    * Short ETF daily PnL on one leg.
-   * Primary: -MV × (adjClose_t/adjClose_{t-1} - 1) when both Yahoo adj closes exist (dividends embedded).
-   * Fallback: -q×ΔrawPrice minus q×distribution on ex-date — never both adj return and explicit div.
+   * Primary: -MV × (TR_t/TR_{t-1} - 1) on split-aware TR prices when available.
+   * Else Yahoo adj close (dividends embedded). Fallback: raw close + explicit div — never both.
    */
   function computeEtfShortDayPnl(qE, prev, cur, distByDate) {
     const prevMv = qE * prev.pl;
+    const prevTr = prev.trPx;
+    const curTr = cur.trPx;
+    if (Number.isFinite(prevTr) && prevTr > 0 && Number.isFinite(curTr) && curTr > 0) {
+      const trRet = curTr / prevTr - 1;
+      return { pnl: -prevMv * trRet, divDebit: 0, mode: cur.trMode || "tr_price" };
+    }
     const prevAdj = prev.pa;
     const curAdj = cur.pa;
     if (Number.isFinite(prevAdj) && prevAdj > 0 && Number.isFinite(curAdj) && curAdj > 0) {
@@ -405,6 +411,17 @@
         .sort((a, b) => a.d.localeCompare(b.d))
       : [];
     const distByDate = buildDistributionByDate(opts && opts.distributions);
+    const PB = globalObj.PriceBasis;
+    const splitEvents = Array.isArray(opts && opts.splitEvents) ? opts.splitEvents : [];
+    let trByDate = null;
+    if (
+      splitEvents.length > 0
+      && PB
+      && typeof PB.buildTrSeriesFromMetrics === "function"
+    ) {
+      const trRows = PB.buildTrSeriesFromMetrics(rows, splitEvents);
+      if (trRows.length) trByDate = new Map(trRows.map((r) => [r.date, r]));
+    }
 
     if (!Array.isArray(rows) || rows.length < 2 || !Number.isFinite(gross) || gross <= 0) {
       return { ok: false, error: "Invalid rows or gross capital.", daily: [], rebalanceMarks: [], summary: {} };
@@ -417,7 +434,16 @@
       const ps = toNum(row && row.underlying_adj_close);
       const ds = String((row && row.date) || "").trim();
       if (!ds || !Number.isFinite(pl) || pl <= 0 || !Number.isFinite(ps) || ps <= 0) continue;
-      pts.push({ date: ds, pl, pa: Number.isFinite(pa) && pa > 0 ? pa : NaN, ps });
+      const tr = trByDate ? trByDate.get(ds) : null;
+      const trPx = tr && Number.isFinite(tr.trEtfPx) && tr.trEtfPx > 0 ? tr.trEtfPx : NaN;
+      pts.push({
+        date: ds,
+        pl,
+        pa: trPx > 0 ? NaN : (Number.isFinite(pa) && pa > 0 ? pa : NaN),
+        trPx,
+        trMode: tr ? tr.trMode : null,
+        ps,
+      });
     }
     if (pts.length < 3) {
       return {
@@ -504,7 +530,8 @@
       const dEtf = etfDay.pnl;
       cumEtf += dEtf;
       cumDistributions += etfDay.divDebit;
-      if (etfDay.mode === "adj_close") nDaysAdjClose += 1;
+      if (etfDay.mode === "adj_close" || etfDay.mode === "tr_price" || String(etfDay.mode || "").startsWith("pre_split")
+        || etfDay.mode === "post_split" || etfDay.mode === "continuous_adj") nDaysAdjClose += 1;
       else nDaysPriceFallback += 1;
       const dUnd = shortEtfLongUnd ? qU * dps : -qU * dps;
       cumUnd += dUnd;

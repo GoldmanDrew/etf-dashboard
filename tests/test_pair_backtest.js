@@ -1,6 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
+require("../assets/price_basis.js");
+
 const {
   runPairBacktest,
   exposureRatio,
@@ -551,4 +553,33 @@ test("computeEtfShortDayPnl unit: adj close beats price+div when both present", 
   const priceOnly = computeEtfShortDayPnl(1000, { pl: 100, pa: NaN }, cur, dist);
   assert.equal(priceOnly.mode, "price_plus_div");
   assert.ok(priceOnly.divDebit > 0);
+});
+
+test("simulateInversePairBacktest uses split-aware TR across reverse split", () => {
+  const rows = [
+    { date: "2026-05-26", close_price: 4.2, underlying_adj_close: 155 },
+    { date: "2026-05-27", close_price: 4.1, underlying_adj_close: 154 },
+    { date: "2026-05-28", close_price: 4.0, underlying_adj_close: 151.64 },
+    { date: "2026-06-01", close_price: 23.604, etf_adj_close: 23.604, underlying_adj_close: 136.08 },
+    { date: "2026-06-02", close_price: 22.99, etf_adj_close: 22.99, underlying_adj_close: 136.08 },
+  ];
+  const splitEvents = [{ date: "2026-06-02", mult: 6 }];
+  const out = simulateInversePairBacktest(rows, {
+    gross: 100000,
+    hedgeRatio: 1,
+    beta: 0.5,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0.05,
+    splitEvents,
+  });
+  assert.equal(out.ok, true);
+  const splitDay = out.daily.find((d) => d.date === "2026-06-01");
+  assert.ok(splitDay, "missing split transition day");
+  const prev = out.daily.find((d) => d.date === "2026-05-28");
+  if (prev && splitDay) {
+    const dayPnl = splitDay.longPnl - prev.longPnl;
+    assert.ok(dayPnl > -50000 && dayPnl < 50000, `absurd split-day ETF PnL ${dayPnl}`);
+  }
 });
