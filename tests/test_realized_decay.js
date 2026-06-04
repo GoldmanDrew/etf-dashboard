@@ -3,6 +3,9 @@ const assert = require("node:assert/strict");
 
 require("../assets/price_basis.js");
 
+require("../assets/realized_decay.js");
+const RD = require("../assets/realized_decay.js");
+
 const {
   buildDailyLogDragSeries,
   computeHorizonPeriodReturns,
@@ -13,7 +16,8 @@ const {
   etfTrPrice,
   cumSplitFactor,
   filterSplitsNeedingCloseBasisFix,
-} = require("../assets/realized_decay.js");
+  summarizeTrCoverage,
+} = RD;
 
 function makeFlatSeries(n, etfDrift = 0, undDrift = 0) {
   const rows = [];
@@ -150,7 +154,7 @@ test("distribution reinvestment scales with verified split", () => {
   const may28 = tr.find((x) => x.date === "2026-05-28");
   assert.ok(may15.trEtfPx > 24 && may15.trEtfPx < 28, `May15 TR px ${may15.trEtfPx}`);
   assert.ok(may28.trEtfPx > 23 && may28.trEtfPx < 27, `May28 TR px ${may28.trEtfPx}`);
-  assert.ok(Math.abs(may15.trEtfPx - 4.55 * 6) < 0.5);
+  assert.ok(Math.abs(may15.trEtfPx - 4.33 * 6) < 0.5);
 });
 
 test("no double-scale when navTr already inflated vs close", () => {
@@ -161,4 +165,32 @@ test("no double-scale when navTr already inflated vs close", () => {
   const tr = prepareDecayTrRows(rows, [{ date: "2026-06-02", mult: 6 }]);
   const pre = tr.find((x) => x.date === "2026-05-20");
   assert.ok(pre.trEtfPx < 30, `double-scale leak ${pre.trEtfPx}`);
+});
+
+test("pre-split adj mapped consistently across close threshold", () => {
+  const rows = [
+    { date: "2025-11-14", close_price: 12.65, etf_adj_close: 7.05, underlying_adj_close: 200 },
+    { date: "2025-11-17", close_price: 12.01, etf_adj_close: 6.69, underlying_adj_close: 195 },
+    { date: "2026-06-01", close_price: 3.934, etf_adj_close: 3.934, underlying_adj_close: 150 },
+    { date: "2026-06-02", close_price: 22.99, etf_adj_close: 22.99, underlying_adj_close: 136 },
+  ];
+  const tr = prepareDecayTrRows(rows, [{ date: "2026-06-02", mult: 6 }]);
+  const nov14 = tr.find((x) => x.date === "2025-11-14");
+  const nov17 = tr.find((x) => x.date === "2025-11-17");
+  assert.ok(Math.abs(nov14.trEtfPx - 7.05 * 6) < 0.05);
+  assert.ok(Math.abs(nov17.trEtfPx - 6.69 * 6) < 0.05);
+  const novRet = Math.log(nov17.trEtfPx / nov14.trEtfPx);
+  assert.ok(Math.abs(novRet) < 0.15, `Nov cliff ${novRet}`);
+});
+
+test("summarizeTrCoverage reports split mode and joint days", () => {
+  const rows = [
+    { date: "2026-05-28", close_price: 4.0, etf_adj_close: 3.94, underlying_adj_close: 150 },
+    { date: "2026-06-02", close_price: 22.99, etf_adj_close: 22.99, underlying_adj_close: 136 },
+  ];
+  const cov = summarizeTrCoverage(rows, [{ date: "2026-06-02", mult: 6 }]);
+  assert.ok(cov);
+  assert.equal(cov.trJointDays, 2);
+  assert.equal(cov.splitMode, "discrete_split");
+  assert.ok(cov.primaryEtfBasis.includes("yahoo") || cov.primaryEtfBasis === "split_adjusted");
 });

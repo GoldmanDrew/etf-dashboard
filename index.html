@@ -461,8 +461,17 @@
   .decay-horizon-pill.active {
     background: var(--accent-blue); border-color: var(--accent-blue); color: #fff;
   }
+  .tr-coverage-badge {
+    margin: 10px 0 14px; padding: 10px 12px; border-radius: 8px; font-size: 12px;
+    border: 1px solid var(--border); background: rgba(59, 130, 246, 0.06);
+    display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline;
+  }
+  .tr-coverage-badge.degraded { border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.08); }
+  .tr-coverage-badge.poor { border-color: rgba(239, 68, 68, 0.45); background: rgba(239, 68, 68, 0.08); }
+  .tr-coverage-badge .tcb-title { font-weight: 700; color: var(--text-primary); margin-right: 4px; }
+  .tr-coverage-badge .tcb-item { color: var(--text-secondary); white-space: nowrap; }
+  .tr-coverage-badge .tcb-warn { flex-basis: 100%; color: var(--negative); font-size: 11px; margin-top: 2px; }
 
-  /* ── Info Page ────────────── */
   .info-page { padding: 24px; max-width: 860px; }
   .info-row {
     display: flex; justify-content: space-between; padding: 10px 0;
@@ -1439,11 +1448,11 @@
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
 <script src="assets/chart_returns.js?v=cr-v2"></script>
-<script src="assets/price_basis.js?v=pb-v1"></script>
+<script src="assets/price_basis.js?v=pb-v2"></script>
 <script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v2"></script>
 <script src="assets/pair_backtest.js?v=pb-v8"></script>
-<script src="assets/realized_decay.js?v=rd-v6"></script>
+<script src="assets/realized_decay.js?v=rd-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
@@ -3531,6 +3540,38 @@ function fmtPxRange(start, end) {
   const b = Number(end);
   if (!Number.isFinite(a) || !Number.isFinite(b)) return '—';
   return `${fmtUsd(a)} → ${fmtUsd(b)}`;
+}
+
+/** TR data-quality badge for Decay / Backtest (split-aware coverage from price_basis.js). */
+function TrCoverageBadge({ coverage, etfLabel }) {
+  if (!coverage || !Number.isFinite(Number(coverage.trJointDays))) return null;
+  const q = String(coverage.quality || 'good');
+  const pct = (x) => (Number.isFinite(Number(x)) ? `${Math.round(Number(x) * 100)}%` : '—');
+  const splitLabel = coverage.splitMode === 'discrete_split'
+    ? `split ${coverage.splitMult || '?'}× @ ${coverage.splitBoundary || '?'}`
+    : 'Yahoo continuous (no close jump)';
+  const etfBasisLabels = {
+    yahoo_adj: 'Yahoo adj close',
+    yahoo_adj_mapped: 'Yahoo adj (pre-split mapped)',
+    nav_tr: 'NAV TR fallback',
+    close_scaled: 'Close scaled',
+    split_adjusted: 'Split-adjusted',
+    mixed: 'Mixed basis',
+  };
+  const etfBasis = etfBasisLabels[coverage.primaryEtfBasis] || coverage.primaryEtfBasis || '—';
+  return (
+    <div className={cls('tr-coverage-badge', q === 'degraded' && 'degraded', q === 'poor' && 'poor')}>
+      <span className="tcb-title">TR coverage ({etfLabel || 'ETF'})</span>
+      <span className="tcb-item">{coverage.trJointDays} joint days</span>
+      <span className="tcb-item">ETF adj {pct(coverage.etfAdjCoveragePct)}</span>
+      <span className="tcb-item">Und adj {pct(coverage.undAdjCoveragePct)}</span>
+      <span className="tcb-item">Basis: {etfBasis} / Yahoo und adj</span>
+      <span className="tcb-item">{splitLabel}</span>
+      {(coverage.warnings || []).map((w, i) => (
+        <div key={`tcb-w-${i}`} className="tcb-warn">{w}</div>
+      ))}
+    </div>
+  );
 }
 
 /** Grouped bars: period gross vs net (simple return over trailing N sessions). */
@@ -5924,6 +5965,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       ? RealizedDecayFns.prepareDecayTrRows(withNavTr, decaySplitEvents)
       : [];
   }, [etfMetricsMap, etfSym, etfDistributionsSeries, decaySplitEvents]);
+  const decayTrCoverage = useMemo(() => {
+    const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
+    const withNavTr = buildTotalReturnBacktestSeries(raw, etfDistributionsSeries);
+    return typeof RealizedDecayFns.summarizeTrCoverage === 'function'
+      ? RealizedDecayFns.summarizeTrCoverage(withNavTr, decaySplitEvents)
+      : null;
+  }, [etfMetricsMap, etfSym, etfDistributionsSeries, decaySplitEvents]);
   const realizedDailyDragSeries = useMemo(() => (
     typeof RealizedDecayFns.buildDailyLogDragSeries === 'function'
       ? RealizedDecayFns.buildDailyLogDragSeries(decayTrInputRows, decayBeta)
@@ -7958,6 +8006,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="scenario-warning">{etfMetricsError}</div>
           ) : (
             <>
+              <TrCoverageBadge coverage={decayTrCoverage} etfLabel={etfSym} />
+
               <RealizedDecayHorizonsBarChart
                 horizons={realizedDecayHorizons.horizons}
                 beta={decayBeta}
@@ -8093,6 +8143,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           )}
           {!etfMetricsLoading && !etfMetricsError && pairBacktestResult?.ok && (
             <>
+              <TrCoverageBadge coverage={decayTrCoverage} etfLabel={etfSym} />
               {pairBacktestCoverageHint ? (
                 <div className="scenario-warning" style={{ marginTop: 10 }}>
                   <strong>Data range note:</strong> ETF prices exist from <code>{pairBacktestCoverageHint.firstEtf}</code>, but <code>underlying_adj_close</code> is missing before <code>{pairBacktestCoverageHint.firstJoint}</code>, so the replay starts on the first <strong>joint</strong> day.
