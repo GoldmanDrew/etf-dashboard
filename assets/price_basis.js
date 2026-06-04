@@ -1,6 +1,6 @@
 /**
  * Canonical split-aware total-return price series for ETF metrics rows.
- * Mirrors scripts/split_adjustments.py + build_data window logic.
+ * Mirrors scripts/price_basis.py + build_data window logic.
  */
 (function initPriceBasis(globalObj) {
   const INTEGER_SPLIT_FACTORS = [2, 3, 4, 5, 6, 10, 15, 20, 25, 50];
@@ -119,15 +119,8 @@
     return Number.isFinite(mult) && mult > 0 ? mult : 1;
   }
 
-  function medianPositive(vals) {
-    const clean = (vals || []).map(toNum).filter((x) => x > 0).sort((a, b) => a - b);
-    if (!clean.length) return NaN;
-    const mid = Math.floor(clean.length / 2);
-    return clean.length % 2 ? clean[mid] : 0.5 * (clean[mid - 1] + clean[mid]);
-  }
-
   /**
-   * Resolve split context: only activate discrete scaling when close actually jumps.
+   * Resolve split context: discrete scaling only when raw close jumps at the event.
    */
   function resolveSplitContext(closePoints, splitEvents) {
     const events = Array.isArray(splitEvents) ? splitEvents : [];
@@ -137,7 +130,6 @@
         boundary: null,
         mult: null,
         filtered: [],
-        postRefClose: medianPositive(closePoints.map((p) => p.close)),
       };
     }
     const filtered = filterSplitsNeedingCloseBasisFix(closePoints, events);
@@ -146,6 +138,7 @@
     if (filtered.length) {
       mult = filtered[0].mult;
       boundary = detectSplitBoundary(closePoints, mult);
+      if (!boundary) boundary = filtered[0].date;
     }
     if (!boundary) {
       for (const ev of events) {
@@ -159,60 +152,62 @@
         }
       }
     }
-    const postRefClose = boundary
-      ? medianPositive(closePoints.filter((p) => parseDate(p.date) >= boundary).map((p) => p.close))
-      : medianPositive(closePoints.map((p) => p.close));
     const mode = boundary && mult > 0 ? "discrete_split" : "continuous";
-    return { mode, boundary, mult, filtered, postRefClose };
+    return { mode, boundary, mult, filtered };
+  }
+
+  function isPreSplitDate(dateStr, ctx) {
+    const ds = parseDate(dateStr);
+    const boundary = parseDate(ctx?.boundary);
+    const mult = toNum(ctx?.mult);
+    return ctx?.mode === "discrete_split" && boundary && mult > 0 && ds && ds < boundary;
   }
 
   /**
-   * Whether pre-boundary row needs mechanical scaling (guards double-scale).
-   * Returns 'scale_close' | 'scale_nav_tr' | false
+   * ETF TR price on a common post-split (latest) basis when a discrete split applies.
+   * When Yahoo adj is present it is authoritative; pre-split adj is mapped with mult.
    */
-  function preSplitScaleMode(point, ctx) {
-    const { boundary, mult, postRefClose } = ctx;
-    if (!boundary || !(mult > 0)) return false;
-    const ds = parseDate(point.date);
-    if (!ds || ds >= boundary) return false;
-    const close = toNum(point.close);
-    const adj = toNum(point.adj);
-    const navTr = toNum(point.navTr);
-    const ref = toNum(postRefClose);
-    const isReverse = mult > 1.05;
-    const isForward = mult < 0.95;
-    if (ref > 0 && isReverse) {
-      if (close >= ref * 0.55) return false;
-      if (adj > 0 && adj >= ref * 0.55) return false;
-    } else if (ref > 0 && isForward) {
-      if (close <= ref * 1.25) return false;
-      if (adj > 0 && adj <= ref * 1.25) return false;
-    }
-    if (close > 0 && navTr > 0) {
-      const ratio = navTr / close;
-      if (ratio >= mult * 0.85 && isReverse) {
-        if (ref > 0 && close < ref * 0.55) return "scale_close";
-        return false;
-      }
-      if (ratio > 2.5 && isReverse) return "scale_close";
-    }
-    if (adj > 0 && close > 0 && isReverse && adj / close > mult * 0.85) return false;
-    if (ref > 0 && isForward && close > ref * 1.25) return "scale_close";
-    if (ref > 0 && isReverse && close < ref * 0.55) return navTr > 0 ? "scale_nav_tr" : "scale_close";
-    return navTr > 0 ? "scale_nav_tr" : "scale_close";
-  }
-
   function etfTrPriceForPoint(point, ctx) {
     const close = toNum(point.close);
     if (!(close > 0)) return NaN;
     const adj = toNum(point.adj);
     const navTr = toNum(point.navTr);
-    const scaleMode = preSplitScaleMode(point, ctx);
-    if (scaleMode === "scale_close") return close * ctx.mult;
-    if (scaleMode === "scale_nav_tr") return navTr * ctx.mult;
+    const preSplit = isPreSplitDate(point.date, ctx);
+    const mult = toNum(ctx?.mult);
+
+    if (preSplit && mult > 0) {
+      if (adj > 0) return adj * mult;
+      if (navTr > 0 && close > 0 && mult > 1.05) {
+        if (navTr / close >= mult * 0.85 || navTr / close > 2.5) return close * mult;
+        return navTr * mult;
+      }
+      if (navTr > 0) return navTr * mult;
+      return close * mult;
+    }
     if (adj > 0) return adj;
     if (navTr > 0) return navTr;
     return close;
+  }
+
+  function trModeForPoint(point, ctx) {
+    const close = toNum(point.close);
+    const adj = toNum(point.adj);
+    const navTr = toNum(point.navTr);
+    const preSplit = isPreSplitDate(point.date, ctx);
+    const mult = toNum(ctx?.mult);
+
+    if (preSplit && mult > 0) {
+      if (adj > 0) return "pre_split_adj_mapped";
+      if (navTr > 0 && close > 0 && mult > 1.05
+        && (navTr / close >= mult * 0.85 || navTr / close > 2.5)) {
+        return "pre_split_close_scaled";
+      }
+      if (navTr > 0) return "pre_split_nav_tr_scaled";
+      return "pre_split_close_scaled";
+    }
+    if (adj > 0) return ctx?.mode === "discrete_split" ? "post_split_adj" : "continuous_adj";
+    if (navTr > 0) return "nav_tr_fallback";
+    return "close_fallback";
   }
 
   function metricsRowToPoint(row) {
@@ -238,26 +233,119 @@
     const closePoints = points.map((p) => ({ date: p.date, close: p.close }));
     const ctx = resolveSplitContext(closePoints, splitEvents || []);
     return points.map((p) => {
-      const ds = p.date;
-      const scaleMode = preSplitScaleMode(p, ctx);
-      let trMode = "continuous_adj";
-      if (ctx.mode === "discrete_split") {
-        if (ds >= ctx.boundary) trMode = "post_split";
-        else if (scaleMode === "scale_nav_tr") trMode = "pre_split_nav_tr_scaled";
-        else if (scaleMode === "scale_close") trMode = "pre_split_close_scaled";
-        else trMode = "pre_split_unscaled";
-      }
       const trEtfPx = etfTrPriceForPoint(p, ctx);
       const trUndPx = toNum(p.row && p.row.underlying_adj_close);
       return {
-        date: ds,
+        date: p.date,
         trEtfPx,
         trUndPx,
         tradeClose: p.close,
-        trMode,
+        trMode: trModeForPoint(p, ctx),
         row: p.row,
       };
     }).filter((x) => x.date && x.trEtfPx > 0 && x.trUndPx > 0);
+  }
+
+  function maxAbsLogReturn(series, valueKey) {
+    let maxJump = 0;
+    let at = null;
+    for (let i = 1; i < series.length; i += 1) {
+      const a = toNum(series[i - 1][valueKey]);
+      const b = toNum(series[i][valueKey]);
+      if (!(a > 0 && b > 0)) continue;
+      const lr = Math.abs(Math.log(b / a));
+      if (lr > maxJump) {
+        maxJump = lr;
+        at = series[i].date;
+      }
+    }
+    return { maxAbsLogReturn: maxJump, maxJumpDate: at };
+  }
+
+  /**
+   * Coverage summary for Decay / Backtest TR badges.
+   */
+  function summarizeTrCoverage(rows, splitEvents) {
+    const sorted = (Array.isArray(rows) ? rows : [])
+      .filter((row) => parseDate(row && row.date));
+    const rawInputDays = sorted.length;
+    const etfAdjDays = sorted.filter((r) => toNum(r.etf_adj_close) > 0).length;
+    const undAdjDays = sorted.filter((r) => toNum(r.underlying_adj_close) > 0).length;
+    const bothLegDays = sorted.filter((r) => {
+      const pl = toNum(r.close_price) || toNum(r.nav);
+      const ps = toNum(r.underlying_adj_close);
+      return pl > 0 && ps > 0;
+    }).length;
+
+    const closePoints = sorted
+      .map(metricsRowToPoint)
+      .filter((p) => p.date && p.close > 0)
+      .map((p) => ({ date: p.date, close: p.close }));
+    const ctx = resolveSplitContext(closePoints, splitEvents || []);
+    const trSeries = buildTrSeriesFromMetrics(rows, splitEvents);
+    const trJointDays = trSeries.length;
+    const droppedDays = Math.max(0, bothLegDays - trJointDays);
+
+    const etfTrModes = {};
+    for (const row of trSeries) {
+      const m = row.trMode || "unknown";
+      etfTrModes[m] = (etfTrModes[m] || 0) + 1;
+    }
+
+    const etfJump = maxAbsLogReturn(trSeries, "trEtfPx");
+    const undJump = maxAbsLogReturn(trSeries, "trUndPx");
+
+    const warnings = [];
+    if (droppedDays > 0) {
+      warnings.push(`${droppedDays} day(s) dropped (missing ETF or underlying TR price).`);
+    }
+    if (etfAdjDays < rawInputDays * 0.85) {
+      warnings.push(`ETF Yahoo adj close missing on ${rawInputDays - etfAdjDays} of ${rawInputDays} rows.`);
+    }
+    if (undAdjDays < rawInputDays * 0.85) {
+      warnings.push(`Underlying adj close missing on ${rawInputDays - undAdjDays} of ${rawInputDays} rows.`);
+    }
+    if (etfJump.maxAbsLogReturn > 0.35) {
+      warnings.push(`Large ETF TR daily move (${(Math.expm1(etfJump.maxAbsLogReturn) * 100).toFixed(0)}%) on ${etfJump.maxJumpDate || "?"}.`);
+    }
+
+    let quality = "good";
+    if (etfJump.maxAbsLogReturn > 0.35 || droppedDays > bothLegDays * 0.1) quality = "degraded";
+    if (trJointDays < 20 || etfJump.maxAbsLogReturn > 0.75) quality = "poor";
+
+    const primaryEtfBasis = (() => {
+      if (ctx.mode === "discrete_split") {
+        const mapped = (etfTrModes.pre_split_adj_mapped || 0) + (etfTrModes.post_split_adj || 0);
+        if (mapped >= trJointDays * 0.5) return "yahoo_adj_mapped";
+        if ((etfTrModes.pre_split_close_scaled || 0) > 0) return "close_scaled";
+        return "split_adjusted";
+      }
+      if ((etfTrModes.continuous_adj || 0) >= trJointDays * 0.5) return "yahoo_adj";
+      if ((etfTrModes.nav_tr_fallback || 0) > 0) return "nav_tr";
+      return "mixed";
+    })();
+
+    return {
+      rawInputDays,
+      bothLegDays,
+      trJointDays,
+      droppedDays,
+      etfAdjDays,
+      undAdjDays,
+      etfAdjCoveragePct: rawInputDays ? etfAdjDays / rawInputDays : 0,
+      undAdjCoveragePct: rawInputDays ? undAdjDays / rawInputDays : 0,
+      jointCoveragePct: rawInputDays ? trJointDays / rawInputDays : 0,
+      splitMode: ctx.mode,
+      splitBoundary: ctx.boundary,
+      splitMult: ctx.mult,
+      etfTrModes,
+      primaryEtfBasis,
+      undBasis: "yahoo_adj",
+      maxEtfDailyLogReturn: etfJump.maxAbsLogReturn,
+      maxUndDailyLogReturn: undJump.maxAbsLogReturn,
+      quality,
+      warnings,
+    };
   }
 
   const exported = {
@@ -269,9 +357,11 @@
     parseSplitEventsFromCorp,
     cumSplitFactor,
     resolveSplitContext,
-    preSplitScaleMode,
+    isPreSplitDate,
     etfTrPriceForPoint,
+    trModeForPoint,
     buildTrSeriesFromMetrics,
+    summarizeTrCoverage,
     metricsRowToPoint,
   };
 

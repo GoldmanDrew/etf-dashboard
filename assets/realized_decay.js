@@ -35,9 +35,17 @@
         date: r.date,
         trEtfPx: r.trEtfPx,
         trUndPx: r.trUndPx,
+        trMode: r.trMode,
       }));
     }
     return [];
+  }
+
+  function summarizeTrCoverage(rows, splitEvents) {
+    if (PB && typeof PB.summarizeTrCoverage === "function") {
+      return PB.summarizeTrCoverage(rows, splitEvents);
+    }
+    return null;
   }
 
   function parseSplitEventsFromCorp(corpPayload, ticker) {
@@ -194,6 +202,7 @@
     DEFAULT_HORIZONS,
     parseSplitEventsFromCorp,
     prepareDecayTrRows,
+    summarizeTrCoverage,
     buildDailyLogDragSeries,
     computeHorizonPeriodReturns,
     buildRollingPeriodReturnSeries,
