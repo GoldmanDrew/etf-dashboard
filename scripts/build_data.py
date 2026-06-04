@@ -5048,6 +5048,43 @@ def build():
             + (f", {_yb_skipped_no_diag} YB skipped re-blend (no screener diag)" if _yb_skipped_no_diag else "")
         )
 
+    # 5d. YieldBOOST fund-of-funds (YBTY/YBST) — dashboard-only synthetic rows.
+    try:
+        from yieldboost_fof_holdings import (
+            build_fof_holdings_payload,
+            ensure_fof_holdings_in_store,
+            write_fof_holdings_artifacts,
+        )
+        from yieldboost_fof_pair_pnl import build_all_fof_dashboard_records
+
+        hdf_fof = ensure_fof_holdings_in_store(
+            csv_path=ETF_HOLDINGS_LATEST_FILE,
+            parquet_path=OUTPUT_DIR / "etf_holdings_daily.parquet",
+        )
+        fof_payload = build_fof_holdings_payload(hdf_fof)
+        write_fof_holdings_artifacts(fof_payload)
+        child_by_sym = {
+            norm_sym(r.get("symbol") or ""): r
+            for r in records
+            if r.get("is_yieldboost") and not r.get("is_dashboard_synthetic")
+        }
+        fof_records = build_all_fof_dashboard_records(
+            holdings_df=hdf_fof,
+            child_records_by_sym=child_by_sym,
+            ibkr_borrow=ibkr,
+            metrics_path=ETF_METRICS_DAILY_FILE,
+        )
+        if fof_records:
+            records.extend(fof_records)
+            print(
+                f"  FoF dashboard rows: {len(fof_records)} "
+                f"({', '.join(r.get('symbol', '?') for r in fof_records)})"
+            )
+        else:
+            print("  FoF dashboard rows: 0 (holdings or metrics not ready for YBTY/YBST)")
+    except Exception as exc:
+        print(f"  Warning: FoF dashboard build failed: {exc}")
+
     # 6. Compute summary
     summary = _calc_summary(records)
 
@@ -5104,6 +5141,13 @@ def build():
         "tradier_api_configured": bool(TRADIER_TOKEN),
         "options_cache_file": "data/options_cache.json",
         "yieldboost_put_spreads_file": "data/yieldboost_put_spreads_latest.json",
+        "yieldboost_fof_holdings_file": "data/yieldboost_fof_holdings_latest.json",
+        "fof_dashboard_meta": {
+            "symbols": ["YBTY", "YBST"],
+            "version": 1,
+            "method": "holdings_rollup_weighted_children",
+            "scope": "dashboard_only",
+        },
         "vrp_live_file": "data/vrp_live.json",
         "summary": summary,
         "records": records,

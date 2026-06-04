@@ -119,7 +119,13 @@ def load_universe_tickers(path: Path = UNIVERSE_CSV) -> list[str]:
     df = pd.read_csv(path)
     if "ETF" not in df.columns:
         raise ValueError(f"Universe CSV missing ETF column: {path}")
-    return sorted({_normalize_symbol(x) for x in df["ETF"].dropna().tolist()})
+    tickers = sorted({_normalize_symbol(x) for x in df["ETF"].dropna().tolist()})
+    try:
+        from yieldboost_fof_constants import YIELDBOOST_FOF_SYMBOLS
+        tickers = sorted(set(tickers) | set(YIELDBOOST_FOF_SYMBOLS))
+    except ImportError:
+        pass
+    return tickers
 
 
 def load_universe_underlying_map(path: Path = UNIVERSE_CSV) -> dict[str, str]:

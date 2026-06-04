@@ -1450,7 +1450,8 @@
 <script src="assets/chart_returns.js?v=cr-v2"></script>
 <script src="assets/price_basis.js?v=pb-v2"></script>
 <script src="assets/income_scenario.js?v=ic-v1"></script>
-<script src="assets/trade_lab.js?v=tl-v2"></script>
+<script src="assets/trade_lab_spots.js?v=tl-spots-v1"></script>
+<script src="assets/trade_lab.js?v=tl-v3"></script>
 <script src="assets/pair_backtest.js?v=pb-v8"></script>
 <script src="assets/realized_decay.js?v=rd-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
@@ -1468,6 +1469,8 @@ const AUTH_SESSION_MS = 7 * 86400000;
 const BORROW_HISTORY_URL = "data/borrow_history.json";
 const BORROW_SPIKE_RISK_URL = "data/borrow_spike_risk.json";
 const OPTIONS_CACHE_URL = "data/options_cache.json";
+const INTRADAY_SPOT_URL = "data/underlying_intraday_spot.json";
+const OPTIONS_POLL_MS = 10 * 60 * 1000;
 const ETF_METRICS_DAILY_URL = "data/etf_metrics_daily.json";
 const LETF_REBALANCE_FLOWS_DAILY_URL = "data/letf_rebalance_flows_daily.json";
 const LETF_REBALANCE_FLOWS_LATEST_URL = "data/letf_rebalance_flows_latest.json";
@@ -2500,7 +2503,53 @@ const YIELDBOOST_INCOME_PAIRS = new Set([
   'TMYY|TSM', 'TQQY|QQQ', 'TSYY|TSLA', 'XBTY|IBIT', 'YSPY|SPY',
 ]);
 const VOLATILITY_ETP_SYMBOLS = new Set(['UVIX', 'SVIX', 'UVXY', 'SVXY', 'VXX', 'VIXY', 'VIXM', 'VIX', 'VIX1D', 'VIX3M']);
+const YIELDBOOST_FOF_SYMBOLS = new Set(['YBTY', 'YBST']);
+const isYieldBoostFoF = r => (
+  r?.product_class === 'income_yieldboost_fof'
+  || r?.scenario_style === 'income_style_fof'
+  || YIELDBOOST_FOF_SYMBOLS.has(String(r?.symbol || '').toUpperCase())
+);
+function fofUnderlyingWeights(r) {
+  const raw = r?.fof_basket?.underlying_weights;
+  if (!raw || typeof raw !== 'object') {
+    const listed = Array.isArray(r?.fof_underlyings) ? r.fof_underlyings : [];
+    return listed
+      .map((x) => ({
+        underlying: String(x?.underlying || '').toUpperCase(),
+        weight: Number(x?.weight),
+      }))
+      .filter((x) => x.underlying && Number.isFinite(x.weight) && x.weight > 0)
+      .sort((a, b) => b.weight - a.weight);
+  }
+  return Object.entries(raw)
+    .map(([underlying, weight]) => ({
+      underlying: String(underlying || '').toUpperCase(),
+      weight: Number(weight),
+    }))
+    .filter((x) => x.underlying && Number.isFinite(x.weight) && x.weight > 0)
+    .sort((a, b) => b.weight - a.weight);
+}
+function fofUnderlyingDisplayLabel(r) {
+  const ws = fofUnderlyingWeights(r);
+  if (!ws.length) return String(r?.underlying || 'BASKET').toUpperCase();
+  if (ws.length === 1) return ws[0].underlying;
+  return 'BASKET';
+}
+function fofUnderlyingTooltip(r) {
+  const ws = fofUnderlyingWeights(r);
+  if (!ws.length) return 'FoF weighted underlying basket (short FoF vs proportional longs)';
+  return ws.map((x) => `${x.underlying} ${(x.weight * 100).toFixed(1)}%`).join(' · ');
+}
+function fofPrimaryChartCompareSymbol(r) {
+  const ws = fofUnderlyingWeights(r);
+  return ws.length ? ws[0].underlying : 'SPY';
+}
+function fofWeightsStaleDays(r) {
+  const d = Number(r?.fof_basket?.weights_stale_days);
+  return Number.isFinite(d) ? d : null;
+}
 const isYieldBoostIncomeStrategy = r => {
+  if (isYieldBoostFoF(r)) return false;
   if (r?.is_yieldboost === true || r?.scenario_style === 'income_style') return true;
   const sym = String(r?.symbol || '').toUpperCase();
   const und = String(r?.underlying || '').toUpperCase();
@@ -2722,6 +2771,25 @@ function decayDistTooltip(r, chartVolLookbackRange) {
   if (!expectedDecayAvailableForRow(r)) {
     return PASSIVE_LOW_BETA_POLICY_TOOLTIP;
   }
+  if (isYieldBoostFoF(r)) {
+    const pair = expectedPairPnlDistribution(r);
+    const lines = [
+      'Exp. edge (fwd) — weighted child YieldBOOST forward pair P&L (dashboard v1).',
+      'Realized gross: short FoF vs proportional underlying long basket from Granite holdings.',
+      'Sign: short-favorable positive (+ = profit). Net edge ≈ weighted child net − FoF borrow.',
+    ];
+    if (pair?.p50 != null) {
+      lines.push(`Weighted child p50: ${fmtLogYr(pair.p50)} log/yr (${fmtPct(logToSimpleAnnual(pair.p50))} simple)`);
+      if (pair.p10 != null && pair.p90 != null) {
+        lines.push(`Band (p10 / p90): ${fmtLogYr(pair.p10)} / ${fmtLogYr(pair.p90)} log/yr`);
+      }
+    }
+    const stale = fofWeightsStaleDays(r);
+    if (stale != null) lines.push(`Holdings as-of stale: ${stale} calendar days`);
+    const asOf = r?.fof_basket?.as_of;
+    if (asOf) lines.push(`Basket as-of: ${asOf}`);
+    return lines.join('\n');
+  }
   // YieldBOOST — put-spread structural gross (mirrors screener Exp. decay).
   if (isYieldBoostIncomeStrategy(r)) {
     const pair = expectedPairPnlDistribution(r);
@@ -2816,6 +2884,7 @@ function decayDistTooltip(r, chartVolLookbackRange) {
 
 function expectedDecayDisplayLabel(r) {
   if (!expectedDecayAvailableForRow(r)) return 'Edge (N/A)';
+  if (isYieldBoostFoF(r)) return 'Edge (child-wt fwd)';
   if (isYieldBoostIncomeStrategy(r)) return 'Edge (struct · 1Y)';
   if (expectedPairPnlDistribution(r) || expectedDecayDistribution(r)) return 'Edge (median)';
   return isVolatilityEtp(r) ? 'Edge (vol-adj)' : 'Edge (Ito)';
@@ -3168,6 +3237,20 @@ const SCENARIO_HORIZONS = [
   { key: '6M', label: '6M' },
   { key: '1Y', label: '1Y' },
 ];
+const TRADE_VALUATION_HORIZONS = [
+  { key: '30D', label: '30d' },
+  { key: '90D', label: '90d' },
+  ...SCENARIO_HORIZONS,
+];
+const tradeSpotCellLabel = (meta) => {
+  if (!meta) return '—';
+  const spot = Number(meta.spot);
+  if (!Number.isFinite(spot)) return meta.stale || meta.missing ? '— · stale' : '—';
+  const spotTxt = spot.toFixed(2);
+  if (meta.ok) return spotTxt;
+  const age = meta.ageLabel ? ` · ${meta.ageLabel} stale` : ' · stale';
+  return `${spotTxt}${age}`;
+};
 const MC_PATH_OPTIONS = [100, 500, 1000, 5000];
 const MC_DEFAULT_UPSIDE_THRESHOLDS = '50,100,500';
 
@@ -5400,6 +5483,123 @@ function VrpFreshnessBar({ mode, data, vrpHealth, freshnessSummary, row, compact
   return null;
 }
 
+function FoFBasketPanel({ r, allRecords = [], onNavigateToChart = null }) {
+  if (!isYieldBoostFoF(r)) return null;
+  const basket = r?.fof_basket;
+  if (!basket) {
+    return <div className="scenario-warning">FoF holdings not loaded — run <code>scripts/build_data.py</code> with Granite XLS for YBTY/YBST.</div>;
+  }
+  const stale = fofWeightsStaleDays(r);
+  const children = Array.isArray(basket.children) ? basket.children : [];
+  const undWeights = fofUnderlyingWeights(r);
+  const cashPct = Number(basket.cash_pct);
+  const otherPct = Number(basket.other_pct);
+  const childLookup = (sym) => (Array.isArray(allRecords) ? allRecords : [])
+    .find((x) => String(x?.symbol || '').toUpperCase() === String(sym || '').toUpperCase());
+  return (
+    <div className="chart-section">
+      <div className="scenario-card" style={{ marginTop: 0 }}>
+        <div className="scenario-head">
+          <div>
+            <div className="scenario-title">FoF basket — child YieldBOOST ETFs</div>
+            <div className="scenario-sub">
+              Holdings as-of <strong>{basket.as_of || '—'}</strong>
+              {basket.weights_source ? <> · source {basket.weights_source}</> : null}
+              {Number.isFinite(Number(basket.history_points)) ? <> · {basket.history_points} history snap(s)</> : null}
+            </div>
+          </div>
+          {stale != null ? (
+            <span
+              className={cls('chart-bucket-badge', stale > 14 ? 'b3' : stale > 7 ? 'b2' : 'b1')}
+              title="Calendar days since Granite holdings as-of date"
+            >
+              {stale === 0 ? 'fresh' : `${stale}d stale`}
+            </span>
+          ) : null}
+        </div>
+        {(Number.isFinite(cashPct) && cashPct > 0) || (Number.isFinite(otherPct) && otherPct > 0) ? (
+          <div className="scenario-sub" style={{ marginBottom: 10 }}>
+            {Number.isFinite(cashPct) && cashPct > 0 ? <>Cash {cashPct.toFixed(2)}%</> : null}
+            {Number.isFinite(cashPct) && cashPct > 0 && Number.isFinite(otherPct) && otherPct > 0 ? ' · ' : null}
+            {Number.isFinite(otherPct) && otherPct > 0 ? <>Other {otherPct.toFixed(2)}%</> : null}
+            {' '}— excluded from underlying weight normalization.
+          </div>
+        ) : null}
+        <div className="scenario-table-wrap">
+          <table className="scenario-table">
+            <thead>
+              <tr>
+                <th>Child ETF</th>
+                <th>Underlying</th>
+                <th>Weight</th>
+                <th>Child gross</th>
+                <th>Child Exp. edge</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {children.map((c) => {
+                const yb = String(c?.yb_etf || '').toUpperCase();
+                const und = String(c?.underlying || '').toUpperCase();
+                const w = Number(c?.weight_pct);
+                const childRec = childLookup(yb);
+                return (
+                  <tr key={`${yb}-${und}-${w}`}>
+                    <td><strong>{yb || '—'}</strong></td>
+                    <td>{und || '—'}</td>
+                    <td>{Number.isFinite(w) ? `${w.toFixed(2)}%` : '—'}</td>
+                    <td>{childRec?.gross_decay_annual != null ? fmt(childRec.gross_decay_annual) : '—'}</td>
+                    <td>{childRec?.expected_pair_pnl_p50_annual != null ? fmtLogYr(childRec.expected_pair_pnl_p50_annual) : '—'}</td>
+                    <td>
+                      {onNavigateToChart && yb ? (
+                        <button type="button" className="sym-link-btn" onClick={() => { window.location.hash = `/chart/${encodeURIComponent(yb)}`; }}>chart</button>
+                      ) : null}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="scenario-card">
+        <div className="scenario-head">
+          <div>
+            <div className="scenario-title">Underlying rollup (synthetic pair hedge)</div>
+            <div className="scenario-sub">
+              Short <strong>{r.symbol}</strong> vs proportional long basket — weights normalized ex-cash.
+              Effective β (weighted child): {Number.isFinite(Number(basket.effective_beta ?? r?.delta)) ? Number(basket.effective_beta ?? r?.delta).toFixed(3) : '—'}.
+            </div>
+          </div>
+        </div>
+        <div className="scenario-table-wrap">
+          <table className="scenario-table">
+            <thead>
+              <tr>
+                <th>Underlying</th>
+                <th>Norm. weight</th>
+              </tr>
+            </thead>
+            <tbody>
+              {undWeights.map((x) => (
+                <tr key={x.underlying}>
+                  <td><strong>{x.underlying}</strong></td>
+                  <td>{(x.weight * 100).toFixed(1)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="chart-note" style={{ marginTop: 10 }}>
+          Realized gross on the main grid and Decay tab uses daily basket log-return minus FoF log-return from <code>fof_realized_pair</code> (build-time).
+          Forward Exp. edge blends child screener pair P&amp;L by child weights (v1 — not a full FoF NAV model).
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackRange, defaultPanel = 'chart', dashboardBuildTime = null, intradayFlows = null, intradayFlowsError = null, allRecords = [], onNavigateToChart = null, vrpFieldDict = null }) {
   const activeTf = useMemo(
     () => TIMEFRAMES.find(t => t.range === chartVolLookbackRange) || TIMEFRAMES[2],
@@ -5410,7 +5610,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       : defaultPanel === 'flow' ? 'flow'
         : defaultPanel === 'trade' ? 'trade'
           : defaultPanel === 'decay' ? 'decay'
-            : 'chart',
+            : defaultPanel === 'basket' ? 'basket'
+              : 'chart',
   );
   const [decayRollWindow, setDecayRollWindow] = useState(60);
   const [corpActionsPayload, setCorpActionsPayload] = useState(null);
@@ -5428,6 +5629,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [borrowSpikeRiskError, setBorrowSpikeRiskError] = useState(null);
   const [optionsCache, setOptionsCache] = useState(null);
   const [optionsCacheError, setOptionsCacheError] = useState(null);
+  const [intradaySpotPayload, setIntradaySpotPayload] = useState(null);
+  const [intradaySpotError, setIntradaySpotError] = useState(null);
   const [vrpLive, setVrpLive] = useState(null);
   const [vrpLiveError, setVrpLiveError] = useState(null);
   const [ybSpreads, setYbSpreads] = useState(null);
@@ -5444,11 +5647,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [navForecastMetrics, setNavForecastMetrics] = useState(null);
   const [navForecastHistory, setNavForecastHistory] = useState(null);
   const [tradeUseScenarioAssumptions, setTradeUseScenarioAssumptions] = useState(true);
+  const [tradeValuationHorizon, setTradeValuationHorizon] = useState('1M');
   const [tradeBaseLegs, setTradeBaseLegs] = useState([]);
   const [tradeOptionLegs, setTradeOptionLegs] = useState([]);
-  const [tradeTtxDays, setTradeTtxDays] = useState(30);
+  const [tradeOptionDteDays, setTradeOptionDteDays] = useState(30);
+  const [tradeOptionDteManual, setTradeOptionDteManual] = useState(false);
   const [tradeRatePct, setTradeRatePct] = useState(4.0);
   const [tradeShortProceedsPct, setTradeShortProceedsPct] = useState(1.0);
+  const tradeLabPairRef = useRef('');
+  const tradeLabRestoredRef = useRef(false);
+  const tradeSpotFns = window.TradeLabSpots || {};
   const [btGross, setBtGross] = useState(100000);
   const [btEveryN, setBtEveryN] = useState(5);
   const [btSlippageBps, setBtSlippageBps] = useState(27);
@@ -5462,10 +5670,41 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
   const r = record;
   const etfSym = r.symbol;
+  const isFoF = isYieldBoostFoF(r);
+  const fofRealizedPair = r?.fof_realized_pair || null;
   const undSym = r.underlying;
+  const chartCompareSym = isFoF ? fofPrimaryChartCompareSymbol(r) : undSym;
+  const chartUndLabel = isFoF ? fofUnderlyingDisplayLabel(r) : undSym;
   /** β ≥ 0: short ETF + long und; β < 0: short both (matches `simulateInversePairBacktest`). */
   const pairBtShortEtfLongUnd = !(Number.isFinite(Number(r?.delta)) && Number(r?.delta) < 0);
   const tradeFns = window.TradeLab || {};
+
+  const navigateChartPanel = useCallback((panel) => {
+    setActivePanel(panel);
+    const sym = String(etfSym || '').toUpperCase();
+    if (!sym) return;
+    const suffix = panel === 'chart' ? '' : `/${panel}`;
+    const nextHash = `#/chart/${encodeURIComponent(sym)}${suffix}`;
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${nextHash}`);
+    }
+  }, [etfSym]);
+
+  const mapDefaultPanel = (panel) => (
+    panel === 'backtest' ? 'backtest'
+      : panel === 'flow' ? 'flow'
+        : panel === 'trade' ? 'trade'
+          : panel === 'decay' ? 'decay'
+            : panel === 'basket' ? 'basket'
+              : panel === 'vrp' ? 'vrp'
+                : panel === 'borrow' ? 'borrow'
+                  : panel === 'stats' ? 'stats'
+                    : panel === 'scenarios' ? 'scenarios'
+                      : 'chart'
+  );
+  useEffect(() => {
+    setActivePanel(mapDefaultPanel(defaultPanel));
+  }, [defaultPanel]);
 
   const isIncomeStrategyScenario = isYieldBoostIncomeStrategy(r);
   const hideScenarios = suppressScenarioForRow(r);
@@ -5565,7 +5804,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       occFilled: Number(occ.yieldboost_occ_quotes_filled) || 0,
     };
   }, [vrpHealth]);
-  const showBacktestPanel = Boolean(String(undSym || '').trim());
+  const showBacktestPanel = !isFoF && Boolean(String(undSym || '').trim()) && String(undSym).toUpperCase() !== 'BASKET';
+  const showFoFDecayPanel = isFoF && Boolean(fofRealizedPair?.ok);
+  const showDecayPanel = showBacktestPanel || showFoFDecayPanel;
+  const showBasketPanel = isFoF;
   useEffect(() => {
     if (hideScenarios && activePanel === 'scenarios') setActivePanel('chart');
   }, [hideScenarios, activePanel]);
@@ -5579,8 +5821,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (!showBacktestPanel && activePanel === 'flow') setActivePanel('chart');
   }, [showBacktestPanel, activePanel]);
   useEffect(() => {
-    if (!showBacktestPanel && activePanel === 'decay') setActivePanel('chart');
-  }, [showBacktestPanel, activePanel]);
+    if (!showDecayPanel && activePanel === 'decay') setActivePanel('chart');
+  }, [showDecayPanel, activePanel]);
+  useEffect(() => {
+    if (!showBasketPanel && activePanel === 'basket') setActivePanel('chart');
+  }, [showBasketPanel, activePanel]);
 
   const bucketLabel = r.bucket === 'bucket_1_high_beta' ? 'Bucket 1 — High β'
     : r.bucket === 'bucket_2_low_beta' ? 'Bucket 2 — Low β'
@@ -5592,6 +5837,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     letf: 'LETF',
     inverse: 'Inverse',
     income_yieldboost: 'YieldBOOST (income)',
+    income_yieldboost_fof: 'YieldBOOST FoF',
     income_put_spread: 'Income (put-spread)',
     passive_low_beta: 'Passive low-β',
     volatility_etp: 'Volatility ETP',
@@ -5605,7 +5851,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     ? PASSIVE_LOW_BETA_POLICY_TOOLTIP
     : productClassRaw === 'income_yieldboost'
       ? 'YieldBOOST income: weekly 95/88 put sleeve — see Scenarios for NAV + cash.'
-      : productClassRaw === 'volatility_etp'
+      : productClassRaw === 'income_yieldboost_fof'
+        ? 'YieldBOOST fund-of-funds: holds child YB ETFs; synthetic short FoF vs weighted underlying basket.'
+        : productClassRaw === 'volatility_etp'
         ? 'Vol ETP: Itô core + roll/tracking bump (VIX-type products).'
         : productClassRaw === 'income_put_spread'
           ? 'Income put-spread sleeve — same 95/88 weekly NAV engine in Scenarios.'
@@ -5695,7 +5943,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   }, []);
   useEffect(() => {
     let cancelled = false;
-    const run = async () => {
+    const loadOptions = async () => {
       setOptionsCacheError(null);
       try {
         const cacheBust = `?t=${Math.floor(Date.now() / 1800)}`;
@@ -5707,8 +5955,25 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         if (!cancelled) setOptionsCacheError(e?.message || 'options cache unavailable');
       }
     };
-    run();
-    return () => { cancelled = true; };
+    const loadIntradaySpots = async () => {
+      setIntradaySpotError(null);
+      try {
+        const cacheBust = `?t=${Math.floor(Date.now() / 300)}`;
+        const res = await fetch(`${INTRADAY_SPOT_URL}${cacheBust}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`intraday spot HTTP ${res.status}`);
+        const payload = await res.json();
+        if (!cancelled) setIntradaySpotPayload(payload);
+      } catch (e) {
+        if (!cancelled) setIntradaySpotError(e?.message || 'intraday spot unavailable');
+      }
+    };
+    loadOptions();
+    loadIntradaySpots();
+    const handle = setInterval(() => {
+      loadOptions();
+      loadIntradaySpots();
+    }, OPTIONS_POLL_MS);
+    return () => { cancelled = true; clearInterval(handle); };
   }, []);
   useEffect(() => {
     if (!isYieldBoostIncomeStrategy(r)) return undefined;
@@ -5994,6 +6259,28 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       )
       : { horizons: [], nDays: 0, endDate: null }
   ), [realizedDailyDragSeries, decayBorrowAnnual]);
+  const fofDecayHorizons = useMemo(() => {
+    if (!isFoF || !fofRealizedPair?.ok) return null;
+    const horizons = (fofRealizedPair.horizons || []).map((h) => ({
+      horizonDays: h.horizonDays || h.days,
+      grossSimple: h.grossSimple,
+      netSimple: h.netSimple,
+      borrowLog: h.borrowLog,
+      sufficient: h.sufficient !== false,
+      startDate: fofRealizedPair.start_date,
+      endDate: fofRealizedPair.end_date,
+      etfStartPx: null,
+      etfEndPx: null,
+      undStartPx: null,
+      undEndPx: null,
+    }));
+    return {
+      horizons,
+      nDays: fofRealizedPair.n_days || 0,
+      endDate: fofRealizedPair.end_date || null,
+    };
+  }, [isFoF, fofRealizedPair]);
+  const decayHorizonsDisplay = fofDecayHorizons || realizedDecayHorizons;
   const realizedDecayRollingSeries = useMemo(() => (
     typeof RealizedDecayFns.buildRollingPeriodReturnSeries === 'function'
       ? RealizedDecayFns.buildRollingPeriodReturnSeries(
@@ -6260,8 +6547,43 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return fn(pairBacktestResult.rows, Number(btGross) || 0);
   })();
   const tradeUnderlyingGroup = useMemo(() => {
+    if (isYieldBoostFoF(r)) {
+      const undEntries = fofUnderlyingWeights(r);
+      const undSymbols = undEntries.map((x) => x.underlying);
+      const childEtfs = (Array.isArray(r?.fof_basket?.children) ? r.fof_basket.children : [])
+        .map((c) => String(c?.yb_etf || '').toUpperCase())
+        .filter(Boolean);
+      const peerMap = new Map();
+      for (const u of undSymbols) {
+        for (const x of (Array.isArray(allRecords) ? allRecords : [])) {
+          const sym = String(x?.symbol || '').toUpperCase();
+          if (String(x?.underlying || '').toUpperCase() === u && sym) {
+            peerMap.set(sym, x);
+          }
+        }
+      }
+      for (const c of childEtfs) {
+        const rec = (Array.isArray(allRecords) ? allRecords : [])
+          .find((x) => String(x?.symbol || '').toUpperCase() === c);
+        if (rec) peerMap.set(c, rec);
+      }
+      const peers = Array.from(peerMap.values()).sort((a, b) => {
+        const db = Number(b?.delta);
+        const da = Number(a?.delta);
+        if (Number.isFinite(db) && Number.isFinite(da) && db !== da) return db - da;
+        return String(a?.symbol || '').localeCompare(String(b?.symbol || ''));
+      });
+      const symbols = Array.from(new Set([etfSym, ...undSymbols, ...peers.map((p) => p.symbol)]));
+      return {
+        underlying: undSymbols.length === 1 ? undSymbols[0] : 'BASKET',
+        undWeights: Object.fromEntries(undEntries.map((x) => [x.underlying, x.weight])),
+        isFoF: true,
+        peers,
+        symbols,
+      };
+    }
     const und = String(undSym || '').toUpperCase();
-    if (!und) return { underlying: '', peers: [], symbols: [] };
+    if (!und) return { underlying: '', peers: [], symbols: [], isFoF: false };
     const peers = (Array.isArray(allRecords) ? allRecords : [])
       .filter((x) => String(x?.underlying || '').toUpperCase() === und)
       .sort((a, b) => {
@@ -6271,8 +6593,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         return String(a?.symbol || '').localeCompare(String(b?.symbol || ''));
       });
     const symbols = Array.from(new Set([und, ...peers.map((p) => p.symbol)]));
-    return { underlying: und, peers, symbols };
-  }, [allRecords, undSym]);
+    return { underlying: und, peers, symbols, isFoF: false };
+  }, [allRecords, undSym, r, etfSym]);
 
   const tradeSpotBySymbol = useMemo(() => {
     const out = {};
@@ -6292,17 +6614,21 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     }
     return out;
   }, [tradeUnderlyingGroup.peers, undSym]);
-  const tradeSpotUnderlying = Number(tradeSpotBySymbol[undSym] ?? 100);
-  const tradeSpotEtf = Number(tradeSpotBySymbol[etfSym] ?? 100);
+  const tradeSpotUnderlying = Number(tradeSpotBySymbol[undSym]);
+  const tradeSpotEtf = Number(tradeSpotBySymbol[etfSym]);
   const tradeSpotForSymbol = useCallback((sym) => {
     const s = String(sym || '').toUpperCase();
     const spot = Number(tradeSpotBySymbol[s]);
-    return Number.isFinite(spot) ? spot : 100;
+    return Number.isFinite(spot) ? spot : NaN;
   }, [tradeSpotBySymbol]);
-  const hasCachedSpotForSymbol = useCallback((sym) => {
+  const tradeSpotMetaForSymbol = useCallback((sym) => {
     const s = String(sym || '').toUpperCase();
-    return Number.isFinite(Number(optionsCache?.symbols?.[s]?.spot));
-  }, [optionsCache]);
+    return tradeSpotMetaBySymbol[s] || null;
+  }, [tradeSpotMetaBySymbol]);
+  const hasFreshSpotForSymbol = useCallback((sym) => {
+    const meta = tradeSpotMetaForSymbol(sym);
+    return !!(meta && meta.ok && Number.isFinite(Number(meta.spot)));
+  }, [tradeSpotMetaForSymbol]);
 
   const tradeBorrowBySymbol = useMemo(() => {
     const out = {};
@@ -6352,7 +6678,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const spotNow = tradeSpotForSymbol(leg?.symbol);
     const strike = Number(leg?.strike);
     const iv = resolveLegIv(leg, contract);
-    const tYears = Math.max(0, Number(tradeTtxDays)) / 365;
+    const tYears = Math.max(0, Number(tradeOptionDteDays)) / 365;
     const rate = Number(tradeRatePct) / 100;
     const type = String((leg?.type) || 'call').toLowerCase();
     if (typeof tradeFns.bsPrice === 'function' && Number.isFinite(spotNow) && Number.isFinite(strike) && Number.isFinite(iv)) {
@@ -6360,7 +6686,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       if (Number.isFinite(theo) && theo > 0) return theo;
     }
     return 0;
-  }, [tradeFns, tradeSpotForSymbol, tradeTtxDays, tradeRatePct, resolveLegIv]);
+  }, [tradeFns, tradeSpotForSymbol, tradeOptionDteDays, tradeRatePct, resolveLegIv]);
   const minObsForScenario = 10;
   const undObs = Number(volPoint?.n_returns_underlying) || 0;
   const forecastVol = forecastVolForScenario(r, activeTf.range);
@@ -6558,13 +6884,126 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const etfDivLift = (Number.isFinite(etfAdjRetDisplay) && Number.isFinite(etfLivePriceRet)) ? (etfAdjRetDisplay - etfLivePriceRet) : null;
   const undDivLift = (Number.isFinite(undAdjRetDisplay) && Number.isFinite(undLivePriceRet)) ? (undAdjRetDisplay - undLivePriceRet) : null;
 
-  useEffect(() => {
-    setTradeBaseLegs([
+  const buildDefaultTradeLegs = useCallback(() => {
+    if (isYieldBoostFoF(r)) {
+      const weights = tradeUnderlyingGroup.undWeights || {};
+      const entries = Object.entries(weights).filter(([, w]) => Number(w) > 0);
+      const wsum = entries.reduce((s, [, w]) => s + Number(w), 0) || 1;
+      const baseQty = 100;
+      const legs = [
+        { id: 1, symbol: etfSym, side: 'short', quantity: baseQty, entry: tradeSpotForSymbol(etfSym) },
+      ];
+      let id = 2;
+      for (const [und, w] of entries) {
+        legs.push({
+          id: id++,
+          symbol: und,
+          side: 'long',
+          quantity: Math.max(1, Math.round(baseQty * (Number(w) / wsum))),
+          entry: tradeSpotForSymbol(und),
+        });
+      }
+      return legs;
+    }
+    return [
       { id: 1, symbol: undSym, side: 'short', quantity: 100, entry: tradeSpotForSymbol(undSym) },
       { id: 2, symbol: etfSym, side: 'long', quantity: 100, entry: tradeSpotForSymbol(etfSym) },
-    ]);
+    ];
+  }, [r, undSym, etfSym, tradeSpotForSymbol, tradeUnderlyingGroup.undWeights]);
+
+  const resetTradeLabToDefaults = useCallback(() => {
+    setTradeBaseLegs(buildDefaultTradeLegs());
     setTradeOptionLegs([]);
-  }, [undSym, etfSym, tradeSpotForSymbol]);
+    setTradeOptionDteManual(false);
+  }, [buildDefaultTradeLegs]);
+
+  useEffect(() => {
+    if (tradeUseScenarioAssumptions) setTradeValuationHorizon(scenarioHorizon);
+  }, [tradeUseScenarioAssumptions, scenarioHorizon]);
+
+  useEffect(() => {
+    const pairKey = `${undSym}|${etfSym}`;
+    if (tradeLabPairRef.current === pairKey && tradeLabRestoredRef.current) return;
+    tradeLabPairRef.current = pairKey;
+    tradeLabRestoredRef.current = false;
+    const storageKey = typeof tradeFns.tradeLabStorageKey === 'function'
+      ? tradeFns.tradeLabStorageKey(undSym, etfSym)
+      : null;
+    let restored = false;
+    if (storageKey) {
+      try {
+        const raw = sessionStorage.getItem(storageKey);
+        if (raw) {
+          const draft = JSON.parse(raw);
+          if (Array.isArray(draft.baseLegs) && draft.baseLegs.length) {
+            setTradeBaseLegs(draft.baseLegs);
+            setTradeOptionLegs(Array.isArray(draft.optionLegs) ? draft.optionLegs : []);
+            if (draft.valuationHorizon) setTradeValuationHorizon(String(draft.valuationHorizon));
+            if (Number.isFinite(Number(draft.optionDteDays))) {
+              setTradeOptionDteDays(Number(draft.optionDteDays));
+              setTradeOptionDteManual(!!draft.optionDteManual);
+            }
+            if (Number.isFinite(Number(draft.ratePct))) setTradeRatePct(Number(draft.ratePct));
+            if (Number.isFinite(Number(draft.shortProceedsPct))) setTradeShortProceedsPct(Number(draft.shortProceedsPct));
+            if (typeof draft.useScenarioAssumptions === 'boolean') setTradeUseScenarioAssumptions(draft.useScenarioAssumptions);
+            restored = true;
+          }
+        }
+      } catch (_) { /* ignore corrupt draft */ }
+    }
+    if (!restored) resetTradeLabToDefaults();
+    tradeLabRestoredRef.current = true;
+  }, [undSym, etfSym, tradeFns, resetTradeLabToDefaults]);
+
+  useEffect(() => {
+    const storageKey = typeof tradeFns.tradeLabStorageKey === 'function'
+      ? tradeFns.tradeLabStorageKey(undSym, etfSym)
+      : null;
+    if (!storageKey || !tradeLabRestoredRef.current) return;
+    try {
+      sessionStorage.setItem(storageKey, JSON.stringify({
+        baseLegs: tradeBaseLegs,
+        optionLegs: tradeOptionLegs,
+        valuationHorizon: tradeValuationHorizon,
+        optionDteDays: tradeOptionDteDays,
+        optionDteManual: tradeOptionDteManual,
+        ratePct: tradeRatePct,
+        shortProceedsPct: tradeShortProceedsPct,
+        useScenarioAssumptions: tradeUseScenarioAssumptions,
+      }));
+    } catch (_) { /* ignore quota */ }
+  }, [tradeBaseLegs, tradeOptionLegs, tradeValuationHorizon, tradeOptionDteDays, tradeOptionDteManual, tradeRatePct, tradeShortProceedsPct, tradeUseScenarioAssumptions, undSym, etfSym, tradeFns]);
+
+  useEffect(() => {
+    if (tradeOptionDteManual) return;
+    const auto = typeof tradeFns.minOptionDteFromLegs === 'function'
+      ? tradeFns.minOptionDteFromLegs(tradeOptionLegs)
+      : NaN;
+    if (Number.isFinite(auto)) setTradeOptionDteDays(auto);
+  }, [tradeOptionLegs, tradeOptionDteManual, tradeFns]);
+
+  const effectiveTradeValuationHorizon = tradeUseScenarioAssumptions ? scenarioHorizon : tradeValuationHorizon;
+  const tradeValuationYears = typeof tradeFns.valuationHorizonToYears === 'function'
+    ? tradeFns.valuationHorizonToYears(effectiveTradeValuationHorizon)
+    : horizonYears;
+  const tradeValuationDays = Number.isFinite(tradeValuationYears) ? Math.round(tradeValuationYears * 365) : NaN;
+  const tradeRemainingOptionDte = typeof tradeFns.remainingOptionDte === 'function'
+    ? tradeFns.remainingOptionDte(tradeOptionDteDays, tradeValuationDays)
+    : Math.max(0, Number(tradeOptionDteDays) - Number(tradeValuationDays));
+  const tradeHasOptionLegs = tradeOptionLegs.length > 0;
+  const tradeFlatDecayHint = useMemo(() => {
+    const lev = Number(tradeLeverageBySymbol[etfSym] ?? r.delta);
+    const sigma = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
+    if (typeof tradeFns.etfReturnFromUnderlying !== 'function') return null;
+    if (!Number.isFinite(lev) || !Number.isFinite(sigma) || !Number.isFinite(tradeValuationYears)) return null;
+    const ret = tradeFns.etfReturnFromUnderlying({
+      leverage: lev,
+      underlyingReturn: 0,
+      sigmaAnnual: sigma,
+      horizonYears: tradeValuationYears,
+    });
+    return Number.isFinite(ret) ? ret : null;
+  }, [tradeFns, tradeLeverageBySymbol, etfSym, r.delta, tradeUseScenarioAssumptions, scenarioSigmaBest, realizedUnd, tradeValuationYears]);
 
   const symbolChoices = tradeUnderlyingGroup.symbols;
   const optionsForSymbol = useCallback((sym) => {
@@ -6624,9 +7063,31 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     };
   }, [tradeBaseLegs, tradeOptionLegs, findContract, resolveLegPremium]);
 
+  const tradeScenarioInputGrid = useMemo(() => {
+    if (typeof scenarioFns.buildScenarioGrid !== 'function') return { ok: false, error: 'Scenario utility unavailable.' };
+    const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
+    const tradeLev = tradeUseScenarioAssumptions ? scenarioLeverage : (Number.isFinite(Number(r.delta)) ? Number(r.delta) : scenarioLeverage);
+    if (!Number.isFinite(Number(tradeSigmaAnnual)) || Number(tradeSigmaAnnual) <= 0) {
+      return { ok: false, error: 'Missing valid forecast volatility.' };
+    }
+    if (!Number.isFinite(tradeValuationYears) || tradeValuationYears <= 0) {
+      return { ok: false, error: 'Invalid trade valuation horizon.' };
+    }
+    return scenarioFns.buildScenarioGrid({
+      leverage: tradeLev,
+      bestVolAnnual: Number(tradeSigmaAnnual),
+      horizonYears: tradeValuationYears,
+      annualCarryDrag: 0,
+      volMultipliers: SCENARIO_VOL_MULTIPLIERS,
+      shockMultipliers: SCENARIO_SHOCK_MULTIPLIERS,
+      minReturn: -0.9999,
+    });
+  }, [scenarioFns, tradeUseScenarioAssumptions, scenarioSigmaBest, realizedUnd, scenarioLeverage, r.delta, tradeValuationYears]);
+
   const tradeScenarioGrid = useMemo(() => {
     if (typeof tradeFns.buildTradeScenarioGrid !== 'function') return { ok: false, error: 'Trade Lab utility unavailable.' };
-    if (!scenarioGrid?.ok) return { ok: false, error: 'Scenario inputs unavailable.' };
+    if (tradeSpotsBlocked) return { ok: false, error: 'Stale or missing spot for one or more leg symbols — wait for refresh or check intraday spot.' };
+    if (!tradeScenarioInputGrid?.ok) return { ok: false, error: tradeScenarioInputGrid.error || 'Scenario inputs unavailable.' };
     const optionLegs = tradeOptionLegs.map((leg) => {
       const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
       return {
@@ -6636,7 +7097,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       };
     });
     const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
-    const tradeHYears = tradeUseScenarioAssumptions ? horizonYears : 1;
     const tradeLev = tradeUseScenarioAssumptions ? scenarioLeverage : (Number.isFinite(Number(r.delta)) ? Number(r.delta) : scenarioLeverage);
     return tradeFns.buildTradeScenarioGrid({
       baseLegs: tradeBaseLegs,
@@ -6648,29 +7108,29 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       spotBySymbol: tradeSpotBySymbol,
       leverageBySymbol: tradeLeverageBySymbol,
       leverage: tradeLev,
-      horizonYears: tradeHYears,
+      horizonYears: tradeValuationYears,
       baseVolAnnual: tradeSigmaAnnual,
-      shockRows: scenarioGrid.rows.map((x) => ({ sigmaMultiple: x.sigmaMultiple, underlyingReturn: x.underlyingReturn })),
-      volColumns: scenarioGrid.volColumns.map((x) => ({ sigmaAnnual: x.sigmaAnnual })),
-      ttxDays: tradeTtxDays,
+      shockRows: tradeScenarioInputGrid.rows.map((x) => ({ sigmaMultiple: x.sigmaMultiple, underlyingReturn: x.underlyingReturn })),
+      volColumns: tradeScenarioInputGrid.volColumns.map((x) => ({ sigmaAnnual: x.sigmaAnnual })),
+      ttxDays: tradeOptionDteDays,
       rate: Number(tradeRatePct) / 100,
       annualBorrowBySymbol: tradeBorrowBySymbol,
       defaultBorrowAnnual: annualCarryDrag,
       shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
     });
-  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeSpotBySymbol, tradeLeverageBySymbol, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.delta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, tradeScenarioInputGrid, tradeSpotsBlocked, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeSpotBySymbol, tradeLeverageBySymbol, scenarioLeverage, tradeValuationYears, scenarioSigmaBest, tradeOptionDteDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.delta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   const tradeMonteCarlo = useMemo(() => {
     if (typeof tradeFns.evaluateTradeMonteCarlo !== 'function') return { ok: false, error: 'Trade Lab utility unavailable.' };
+    if (tradeSpotsBlocked) return { ok: false, error: 'Stale or missing spot for one or more leg symbols.' };
     if (!monteCarloResult?.ok) return { ok: false, error: 'Monte Carlo unavailable.' };
     if (typeof scenarioFns.simulateMonteCarloPaths !== 'function') return { ok: false, error: 'Monte Carlo engine unavailable.' };
     const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
-    const tradeHYears = tradeUseScenarioAssumptions ? horizonYears : 1;
     const underlyingMc = scenarioFns.simulateMonteCarloPaths({
       pathCount: Number(mcPathCount),
       sigmaAnnual: tradeSigmaAnnual,
       leverage: 1,
-      horizonYears: tradeHYears,
+      horizonYears: tradeValuationYears,
       annualCarryDrag: 0,
       seed: Number(mcSeed),
       ruinThreshold: -0.99,
@@ -6694,8 +7154,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       spotEtf: tradeSpotEtf,
       spotBySymbol: tradeSpotBySymbol,
       leverageBySymbol: tradeLeverageBySymbol,
-      ttxDaysStart: tradeTtxDays,
-      horizonYears: tradeHYears,
+      ttxDaysStart: tradeOptionDteDays,
+      horizonYears: tradeValuationYears,
       volAnnual: tradeSigmaAnnual,
       rate: Number(tradeRatePct) / 100,
       annualBorrowBySymbol: tradeBorrowBySymbol,
@@ -6704,11 +7164,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       etfPaths: monteCarloResult.paths,
       underlyingPaths: underlyingMc.paths,
     });
-  }, [tradeFns, monteCarloResult, scenarioFns, mcPathCount, scenarioSigmaBest, horizonYears, mcSeed, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeSpotBySymbol, tradeLeverageBySymbol, tradeTtxDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, monteCarloResult, scenarioFns, mcPathCount, scenarioSigmaBest, tradeValuationYears, mcSeed, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeSpotBySymbol, tradeLeverageBySymbol, tradeOptionDteDays, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct, tradeSpotsBlocked]);
 
   const tradeTtxSeries = useMemo(() => {
     if (typeof tradeFns.buildTtxSensitivity !== 'function') return [];
-    if (!scenarioGrid?.ok) return [];
+    if (tradeSpotsBlocked || !tradeScenarioInputGrid?.ok) return [];
     const optionLegs = tradeOptionLegs.map((leg) => {
       const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
       return {
@@ -6718,8 +7178,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       };
     });
     const tradeSigmaAnnual = tradeUseScenarioAssumptions ? scenarioSigmaBest : (Number.isFinite(Number(realizedUnd)) ? Number(realizedUnd) : scenarioSigmaBest);
-    const tradeHYears = tradeUseScenarioAssumptions ? horizonYears : 1;
     const tradeLev = tradeUseScenarioAssumptions ? scenarioLeverage : (Number.isFinite(Number(r.delta)) ? Number(r.delta) : scenarioLeverage);
+    const ttxList = [7, 14, 30, 60, 90, 120, 180].filter((d) => d >= tradeValuationDays || !tradeHasOptionLegs);
+    if (tradeHasOptionLegs && !ttxList.includes(tradeOptionDteDays)) ttxList.push(tradeOptionDteDays);
+    ttxList.sort((a, b) => a - b);
     return tradeFns.buildTtxSensitivity({
       baseLegs: tradeBaseLegs,
       optionLegs,
@@ -6730,17 +7192,17 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       spotBySymbol: tradeSpotBySymbol,
       leverageBySymbol: tradeLeverageBySymbol,
       leverage: tradeLev,
-      horizonYears: tradeHYears,
+      horizonYears: tradeValuationYears,
       baseVolAnnual: tradeSigmaAnnual,
-      shockRows: scenarioGrid.rows.map((x) => ({ sigmaMultiple: x.sigmaMultiple, underlyingReturn: x.underlyingReturn })),
-      volColumns: scenarioGrid.volColumns.map((x) => ({ sigmaAnnual: x.sigmaAnnual })),
-      ttxList: [1, 7, 14, 30, 60, 90],
+      shockRows: tradeScenarioInputGrid.rows.map((x) => ({ sigmaMultiple: x.sigmaMultiple, underlyingReturn: x.underlyingReturn })),
+      volColumns: tradeScenarioInputGrid.volColumns.map((x) => ({ sigmaAnnual: x.sigmaAnnual })),
+      ttxList,
       rate: Number(tradeRatePct) / 100,
       annualBorrowBySymbol: tradeBorrowBySymbol,
       defaultBorrowAnnual: annualCarryDrag,
       shortProceedsRateAnnual: Number(tradeShortProceedsPct) / 100,
     });
-  }, [tradeFns, scenarioGrid, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeSpotBySymbol, tradeLeverageBySymbol, scenarioLeverage, horizonYears, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.delta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
+  }, [tradeFns, tradeScenarioInputGrid, tradeSpotsBlocked, tradeOptionLegs, tradeBaseLegs, findContract, resolveLegIv, resolveLegPremium, undSym, etfSym, tradeSpotUnderlying, tradeSpotEtf, tradeSpotBySymbol, tradeLeverageBySymbol, scenarioLeverage, tradeValuationYears, tradeValuationDays, tradeOptionDteDays, tradeHasOptionLegs, scenarioSigmaBest, tradeRatePct, tradeUseScenarioAssumptions, realizedUnd, r.delta, tradeBorrowBySymbol, annualCarryDrag, tradeShortProceedsPct]);
 
   return (
     <div className="chart-page">
@@ -6772,24 +7234,24 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           </span>
         )}
         <div className="chart-view-switch">
-          <button className={cls('chart-view-btn', activePanel === 'chart' && 'active')} onClick={() => setActivePanel('chart')}>Chart</button>
-          <button className={cls('chart-view-btn', activePanel === 'stats' && 'active')} onClick={() => setActivePanel('stats')}>Stats</button>
+          <button className={cls('chart-view-btn', activePanel === 'chart' && 'active')} onClick={() => navigateChartPanel('chart')}>Chart</button>
+          <button className={cls('chart-view-btn', activePanel === 'stats' && 'active')} onClick={() => navigateChartPanel('stats')}>Stats</button>
           {!hideScenarios && (
-            <button className={cls('chart-view-btn', activePanel === 'scenarios' && 'active')} onClick={() => setActivePanel('scenarios')}>Scenarios</button>
+            <button className={cls('chart-view-btn', activePanel === 'scenarios' && 'active')} onClick={() => navigateChartPanel('scenarios')}>Scenarios</button>
           )}
-          <button className={cls('chart-view-btn', activePanel === 'trade' && 'active')} onClick={() => setActivePanel('trade')}>Trade Lab</button>
+          <button className={cls('chart-view-btn', activePanel === 'trade' && 'active')} onClick={() => navigateChartPanel('trade')}>Trade Lab</button>
           {showVrpPanel && (
-            <button className={cls('chart-view-btn', activePanel === 'vrp' && 'active')} onClick={() => setActivePanel('vrp')}>Vol / VRP</button>
+            <button className={cls('chart-view-btn', activePanel === 'vrp' && 'active')} onClick={() => navigateChartPanel('vrp')}>Vol / VRP</button>
           )}
-          <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => setActivePanel('borrow')}>Borrow</button>
+          <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => navigateChartPanel('borrow')}>Borrow</button>
           {showBacktestPanel && (
-            <button className={cls('chart-view-btn', activePanel === 'decay' && 'active')} onClick={() => setActivePanel('decay')}>Decay</button>
-          )}
-          {showBacktestPanel && (
-            <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => setActivePanel('backtest')}>Backtest</button>
+            <button className={cls('chart-view-btn', activePanel === 'decay' && 'active')} onClick={() => navigateChartPanel('decay')}>Decay</button>
           )}
           {showBacktestPanel && (
-            <button className={cls('chart-view-btn', activePanel === 'flow' && 'active')} onClick={() => setActivePanel('flow')}>Flow</button>
+            <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => navigateChartPanel('backtest')}>Backtest</button>
+          )}
+          {showBacktestPanel && (
+            <button className={cls('chart-view-btn', activePanel === 'flow' && 'active')} onClick={() => navigateChartPanel('flow')}>Flow</button>
           )}
         </div>
 
@@ -6827,7 +7289,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           </div>
 
           <div className="chart-note">
-            Chart shows % change comparison with {etfSym} (blue) vs {undSym || 'underlying'} (orange).
+            Chart shows % change comparison with {etfSym} (blue) vs {isFoF ? (
+              <>{chartCompareSym} (largest basket weight; full rollup on Basket tab)</>
+            ) : (
+              <>{undSym || 'underlying'} (orange)</>
+            )}.
             TradingView may not expose formal total-return series for every symbol.
             Use the dividend adjustment panel below for explicit period dividend impact.
           </div>
@@ -6892,7 +7358,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="chart-stat" title={decayDistTooltip(r, chartVolLookbackRange)}>
               <div className="cs-label">Exp. edge (fwd)</div>
               <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>
-                {isYieldBoostIncomeStrategy(r) ? 'struct gross · 1Y · band' : 'pair P&L · 1Y · band'}
+                {isYieldBoostIncomeStrategy(r) ? 'struct gross · 1Y · band' : isFoF ? 'child-wt fwd · band' : 'pair P&L · 1Y · band'}
               </div>
               {(() => {
                 if (!expectedDecayAvailableForRow(r)) {
@@ -7681,11 +8147,21 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div>
                 <div className="scenario-title">Trade Lab</div>
                 <div className="scenario-sub">
-                  Build trades across <strong>all funds on {String(undSym || '').toUpperCase()}</strong>
-                  {tradeUnderlyingGroup.peers.length > 1
-                    ? <> ({tradeUnderlyingGroup.peers.map((p) => p.symbol).join(', ')})</>
-                    : null}
-                  {' '}— stack equity + listed options; scenarios/MC price each ETF leg with its own β when “Lock to Scenarios” is on.
+                  {isFoF ? (
+                    <>
+                      FoF synthetic pair: short <strong>{etfSym}</strong> + weighted long underlyings
+                      ({fofUnderlyingTooltip(r)}). Child YB ETFs and peers listed below for hedging.
+                      Base legs prefilled from basket weights.
+                    </>
+                  ) : (
+                    <>
+                      Build trades across <strong>all funds on {String(undSym || '').toUpperCase()}</strong>
+                      {tradeUnderlyingGroup.peers.length > 1
+                        ? <> ({tradeUnderlyingGroup.peers.map((p) => p.symbol).join(', ')})</>
+                        : null}
+                      {' '}— stack equity + listed options; scenarios/MC price each ETF leg with its own β when “Lock to Scenarios” is on.
+                    </>
+                  )}
                 </div>
               </div>
               <div className="trade-actions">
@@ -7693,14 +8169,28 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   <input type="checkbox" checked={tradeUseScenarioAssumptions} onChange={(e) => setTradeUseScenarioAssumptions(e.target.checked)} />
                   Lock to Scenarios σ &amp; horizon
                 </label>
+                <button type="button" onClick={resetTradeLabToDefaults}>Reset legs</button>
               </div>
             </div>
+
+            {tradeSpotsBlocked && (
+              <div className="trade-warning">
+                Stale or missing spot for: {symbolChoices.filter((s) => !hasFreshSpotForSymbol(s)).join(', ') || 'one or more symbols'}.
+                {intradaySpotError ? ` Intraday: ${intradaySpotError}.` : ''}
+              </div>
+            )}
 
             {tradeUnderlyingGroup.symbols.length > 0 && (
               <div className="trade-card" style={{ marginBottom: 10 }}>
                 <div className="trade-head">
-                  <div className="scenario-title">{String(undSym || '').toUpperCase()} — underlying group</div>
-                  <div className="scenario-sub">All ETFs + underlying available as leg symbols (e.g. APLX ↔ APLZ on APLD).</div>
+                  <div className="scenario-title">
+                    {isFoF ? `${etfSym} — FoF basket symbols` : `${String(undSym || '').toUpperCase()} — underlying group`}
+                  </div>
+                  <div className="scenario-sub">
+                    {isFoF
+                      ? 'Underlyings from holdings rollup + child YB ETFs on the same names.'
+                      : 'All ETFs + underlying available as leg symbols (e.g. APLX ↔ APLZ on APLD).'}
+                  </div>
                 </div>
                 <div className="scenario-table-wrap" style={{ maxHeight: 280, overflow: 'auto' }}>
                   <table className="scenario-table">
@@ -7708,7 +8198,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <tr>
                         <th>Symbol</th>
                         <th>Role</th>
-                        <th>β</th>
+                        <th>β / Wt</th>
                         <th>Bucket</th>
                         <th>Spot</th>
                         <th>Borrow</th>
@@ -7717,12 +8207,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       </tr>
                     </thead>
                     <tbody>
+                      {!isFoF ? (
                       <tr className={String(undSym).toUpperCase() === String(etfSym).toUpperCase() ? '' : undefined}>
                         <td><strong>{String(undSym || '').toUpperCase()}</strong></td>
                         <td>Underlying</td>
                         <td>1.00</td>
                         <td>—</td>
-                        <td>{hasCachedSpotForSymbol(undSym) ? tradeSpotForSymbol(undSym).toFixed(2) : '—'}</td>
+                        <td className={!hasFreshSpotForSymbol(undSym) ? 'val-negative' : undefined}>{tradeSpotCellLabel(tradeSpotMetaForSymbol(undSym))}</td>
                         <td>—</td>
                         <td>{optionsForSymbol(undSym).length ? `${optionsForSymbol(undSym).length} rows` : (optionsErrUnd || '—')}</td>
                         <td>
@@ -7737,6 +8228,28 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           }}>+ short</button>
                         </td>
                       </tr>
+                      ) : fofUnderlyingWeights(r).map((uw) => (
+                        <tr key={`fof-und-${uw.underlying}`}>
+                          <td><strong>{uw.underlying}</strong></td>
+                          <td>Underlying</td>
+                          <td>{(uw.weight * 100).toFixed(1)}%</td>
+                          <td>—</td>
+                          <td className={!hasFreshSpotForSymbol(uw.underlying) ? 'val-negative' : undefined}>{tradeSpotCellLabel(tradeSpotMetaForSymbol(uw.underlying))}</td>
+                          <td>—</td>
+                          <td>{optionsForSymbol(uw.underlying).length ? `${optionsForSymbol(uw.underlying).length} rows` : '—'}</td>
+                          <td>
+                            <button type="button" onClick={() => {
+                              if (tradeBaseLegs.length >= 8) return;
+                              setTradeBaseLegs((arr) => [...arr, { id: Date.now(), symbol: uw.underlying, side: 'long', quantity: 100, entry: tradeSpotForSymbol(uw.underlying) }]);
+                            }}>+ long</button>
+                            {' '}
+                            <button type="button" onClick={() => {
+                              if (tradeBaseLegs.length >= 8) return;
+                              setTradeBaseLegs((arr) => [...arr, { id: Date.now(), symbol: uw.underlying, side: 'short', quantity: 100, entry: tradeSpotForSymbol(uw.underlying) }]);
+                            }}>+ short</button>
+                          </td>
+                        </tr>
+                      ))}
                       {tradeUnderlyingGroup.peers.map((peer) => {
                         const sym = peer.symbol;
                         const isActive = sym === etfSym;
@@ -7753,7 +8266,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                             <td>ETF</td>
                             <td>{Number.isFinite(Number(peer.delta)) ? Number(peer.delta).toFixed(3) : '—'}</td>
                             <td>{recordBucketShortLabel(peer.bucket)}</td>
-                            <td>{hasCachedSpotForSymbol(sym) ? tradeSpotForSymbol(sym).toFixed(2) : '—'}</td>
+                            <td className={!hasFreshSpotForSymbol(sym) ? 'val-negative' : undefined}>{tradeSpotCellLabel(tradeSpotMetaForSymbol(sym))}</td>
                             <td>{fmt(annualBorrowForRecord(peer))}</td>
                             <td>{chainN ? `${chainN} rows` : (chainErr || '—')}</td>
                             <td>
@@ -7802,9 +8315,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <input type="number" value={leg.quantity} onChange={(e) => setTradeBaseLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, quantity: Number(e.target.value || 0) } : x))} placeholder="Qty" />
                       <input type="number" value={leg.entry} onChange={(e) => setTradeBaseLegs((arr) => arr.map((x) => x.id === leg.id ? { ...x, entry: Number(e.target.value || 0) } : x))} placeholder="Entry" />
                       <div className="scenario-sub">
-                        {hasCachedSpotForSymbol(leg.symbol)
+                        {hasFreshSpotForSymbol(leg.symbol)
                           ? `spot ${tradeSpotForSymbol(leg.symbol).toFixed(2)}`
-                          : 'spot n/a (fallback 100)'}
+                          : tradeSpotCellLabel(tradeSpotMetaForSymbol(leg.symbol))}
                       </div>
                       <button onClick={() => setTradeBaseLegs((arr) => arr.filter((x) => x.id !== leg.id))}>×</button>
                     </div>
@@ -7861,9 +8374,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     {optionsCacheError ? `${optionsCacheError} ` : ''}Missing POLYGON key or cache — strikes/premiums may be thin.
                   </div>
                 )}
-                {symbolChoices.some((s) => !hasCachedSpotForSymbol(s)) && (
+                {symbolChoices.some((s) => !hasFreshSpotForSymbol(s)) && (
                   <div className="trade-warning">
-                    Spot missing for {symbolChoices.filter((s) => !hasCachedSpotForSymbol(s)).join(', ')} — using placeholder 100 until cache fills.
+                    Spot stale/missing for {symbolChoices.filter((s) => !hasFreshSpotForSymbol(s)).join(', ')} — scenario/MC blocked until fresh.
                   </div>
                 )}
                 {symbolChoices.some((s) => s !== undSym && !optionsForSymbol(s).length && optionsCache?.errors_by_symbol?.[s]) && (
@@ -7890,13 +8403,44 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="trade-head">
                   <div className="scenario-title">Scenario Payout</div>
                   <div className="trade-actions">
-                    <label className="scenario-sub">TTX days</label>
-                    <input type="number" value={tradeTtxDays} onChange={(e) => setTradeTtxDays(Number(e.target.value || 0))} style={{ width: 92 }} />
+                    <label className="scenario-sub">Valuation</label>
+                    <div className="tf-group" style={{ marginLeft: 0 }}>
+                      {TRADE_VALUATION_HORIZONS.map((h) => (
+                        <button
+                          key={`tl-val-${h.key}`}
+                          type="button"
+                          className={cls('tf-btn', effectiveTradeValuationHorizon === h.key && 'tf-active', tradeUseScenarioAssumptions && 'disabled')}
+                          disabled={tradeUseScenarioAssumptions}
+                          onClick={() => setTradeValuationHorizon(h.key)}
+                        >
+                          {h.label}
+                        </button>
+                      ))}
+                    </div>
+                    {tradeHasOptionLegs && (
+                      <>
+                        <label className="scenario-sub">Option DTE</label>
+                        <input
+                          type="number"
+                          value={tradeOptionDteDays}
+                          onChange={(e) => {
+                            setTradeOptionDteManual(true);
+                            setTradeOptionDteDays(Number(e.target.value || 0));
+                          }}
+                          style={{ width: 92 }}
+                        />
+                      </>
+                    )}
                     <label className="scenario-sub">Rate %</label>
                     <input type="number" value={tradeRatePct} onChange={(e) => setTradeRatePct(Number(e.target.value || 0))} style={{ width: 84 }} />
                     <label className="scenario-sub">Short Proceeds %</label>
                     <input type="number" value={tradeShortProceedsPct} onChange={(e) => setTradeShortProceedsPct(Number(e.target.value || 0))} style={{ width: 96 }} />
                   </div>
+                </div>
+                <div className="scenario-sub" style={{ marginBottom: 8 }}>
+                  Valuation: <strong>{effectiveTradeValuationHorizon}</strong> ({tradeValuationDays}d)
+                  {tradeFlatDecayHint != null ? <> · {etfSym} @ flat U (modeled σ-drag): <strong>{fmt(tradeFlatDecayHint)}</strong></> : null}
+                  {tradeHasOptionLegs ? <> · Option DTE remaining at valuation: <strong>{tradeRemainingOptionDte}d</strong>{tradeRemainingOptionDte <= 0 ? ' (intrinsic marks)' : ''}</> : null}
                 </div>
                 {!tradeScenarioGrid.ok ? (
                   <div className="scenario-warning">{tradeScenarioGrid.error || 'Trade scenario unavailable.'}</div>
@@ -7906,7 +8450,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <thead>
                         <tr>
                           <th>Underlying Shock</th>
-                          {scenarioGrid.volColumns.map((col, idx) => (
+                          {tradeScenarioInputGrid.volColumns.map((col, idx) => (
                             <th key={`tl-v-${idx}`}>{fmt(col.sigmaAnnual)}</th>
                           ))}
                         </tr>
@@ -7966,11 +8510,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
             <div className="trade-card" style={{ marginTop: 10 }}>
               <div className="trade-head">
-                <div className="scenario-title">TTX Sensitivity</div>
-                <div className="scenario-sub">PnL vs days-to-expiry (center shock / vol column).</div>
+                <div className="scenario-title">Option DTE Sensitivity</div>
+                <div className="scenario-sub">
+                  PnL vs option DTE at entry (valuation fixed at {effectiveTradeValuationHorizon} / {tradeValuationDays}d; center shock / vol column).
+                </div>
               </div>
               <table className="ttx-table">
-                <thead><tr><th>TTX (days)</th><th>PnL</th></tr></thead>
+                <thead><tr><th>Option DTE (days)</th><th>PnL</th></tr></thead>
                 <tbody>
                   {tradeTtxSeries.map((x) => (
                     <tr key={`ttx-${x.ttxDays}`}><td>{x.ttxDays}</td><td>{fmtNum(Math.round(x.pnl))}</td></tr>
@@ -7980,7 +8526,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             </div>
 
             <div className="trade-note">
-              <strong>Marks:</strong> BS while TTX &gt; 0, intrinsic at expiry. <strong>Scenarios/MC:</strong> reuse active σ, horizon, β→<em>L</em> when “Lock to Scenarios” is on.
+              <strong>Valuation horizon</strong> drives decay (σ-drag), borrow accrual, and underlying shocks. <strong>Option DTE</strong> controls BS marks; remaining DTE = max(0, DTE − valuation days).
+            </div>
+            <div className="trade-note">
+              <strong>Lock to Scenarios</strong> syncs σ and valuation horizon with the Scenarios tab. Spots: fresh options cache, else intraday underlying spot; stale symbols block payout grids.
             </div>
             <div className="trade-note">
               <strong>Carry:</strong> short equity PnL += notional×(short-proceeds rate − borrow)×years on short legs; ETF borrow pulls from Borrow tab (avg or spot).
@@ -7989,7 +8538,138 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         </div>
       )}
 
-      {activePanel === 'decay' && showBacktestPanel && (
+      {activePanel === 'basket' && showBasketPanel && (
+        <FoFBasketPanel r={r} allRecords={allRecords} onNavigateToChart={onNavigateToChart} />
+      )}
+
+      {activePanel === 'decay' && showDecayPanel && (
+        <div className="chart-section">
+          <div className="scenario-title">Realized pair return — gross &amp; net by horizon</div>
+          <div className="scenario-sub" style={{ marginBottom: 10 }}>
+            {isFoF ? (
+              <>
+                FoF synthetic pair: short <strong>{etfSym}</strong> vs proportional underlying long basket
+                (weights from Granite holdings, piecewise-constant through history).{' '}
+                <code>gross = log(basket<sub>end</sub>/basket<sub>start</sub>) − log(FoF<sub>end</sub>/FoF<sub>start</sub>)</code>,{' '}
+                <code>net = gross − borrow × (N/252)</code>. Period returns are simple (<code>expm1</code> of log sums).
+                {fofRealizedPair?.start_date && fofRealizedPair?.end_date ? (
+                  <> Window: {fofRealizedPair.start_date} → {fofRealizedPair.end_date} ({fofRealizedPair.n_days || 0} aligned days).</>
+                ) : null}
+              </>
+            ) : (
+              <>
+                Period return over the trailing window (not annualized) on <strong>total-return</strong> prices
+                (ETF: Yahoo adj close / NAV TR; underlying: split-adj close).{' '}
+                <code>gross = β·log(U<sub>end</sub>/U<sub>start</sub>) − log(L<sub>end</sub>/L<sub>start</sub>)</code>,{' '}
+                <code>net = gross − borrow<sub>avg</sub> × (N/252)</code>.
+                Split-aware TR from <code>price_basis.js</code> (same rules as chart windows): scale pre-split issuer closes only when raw price jumps; Yahoo-continuous series use adj close; distributions via NAV TR when scaling applies.
+              </>
+            )}
+          </div>
+
+          {isFoF && !fofRealizedPair?.ok ? (
+            <div className="scenario-warning">{fofRealizedPair?.error || 'FoF realized pair metrics not ready — run build_data.py with holdings + metrics.'}</div>
+          ) : !isFoF && etfMetricsLoading ? (
+            <div className="scenario-warning">Loading ETF metrics…</div>
+          ) : !isFoF && etfMetricsError ? (
+            <div className="scenario-warning">{etfMetricsError}</div>
+          ) : (
+            <>
+              {!isFoF ? <TrCoverageBadge coverage={decayTrCoverage} etfLabel={etfSym} /> : null}
+
+              <RealizedDecayHorizonsBarChart
+                horizons={decayHorizonsDisplay.horizons}
+                beta={decayBeta}
+                borrowAnnual={decayBorrowAnnual}
+                etfLabel={etfSym}
+                undLabel={isFoF ? 'Basket' : (undSym || 'Underlying')}
+              />
+
+              <table className="decay-horizon-table">
+                <thead>
+                  <tr>
+                    <th>Horizon</th>
+                    <th>Gross</th>
+                    <th>Net</th>
+                    <th>Borrow drag</th>
+                    <th>Window</th>
+                    {!isFoF ? <th>{etfSym} px</th> : null}
+                    {!isFoF ? <th>{undSym || 'Und'} px</th> : null}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(decayHorizonsDisplay.horizons || []).map((h) => (
+                    <tr key={`decay-h-${h.horizonDays}`}>
+                      <td>{h.horizonDays} trading days</td>
+                      <td style={{ color: h.grossSimple >= 0 ? 'var(--positive)' : 'var(--negative)', fontFamily: 'JetBrains Mono, monospace' }}>
+                        {h.grossSimple != null && Number.isFinite(h.grossSimple) ? fmt(h.grossSimple) : '—'}
+                      </td>
+                      <td style={{ color: h.netSimple >= 0 ? 'var(--positive)' : 'var(--negative)', fontFamily: 'JetBrains Mono, monospace' }}>
+                        {h.netSimple != null && Number.isFinite(h.netSimple) ? fmt(h.netSimple) : '—'}
+                      </td>
+                      <td style={{ fontFamily: 'JetBrains Mono, monospace', color: 'var(--text-muted)' }}>
+                        {h.borrowLog != null && Number.isFinite(h.borrowLog) ? fmt(h.borrowLog) : '—'}
+                      </td>
+                      <td style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                        {h.startDate && h.endDate ? `${h.startDate} → ${h.endDate}` : '—'}
+                        {!h.sufficient ? ' · partial' : ''}
+                      </td>
+                      {!isFoF ? (
+                        <td style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, whiteSpace: 'nowrap' }}>
+                          {fmtPxRange(h.etfStartPx, h.etfEndPx)}
+                        </td>
+                      ) : null}
+                      {!isFoF ? (
+                        <td style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, whiteSpace: 'nowrap' }}>
+                          {fmtPxRange(h.undStartPx, h.undEndPx)}
+                        </td>
+                      ) : null}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {!isFoF ? (
+                <>
+                  <div className="scenario-sub" style={{ marginTop: 16 }}>
+                    Rolling {decayRollWindow}d period return ({decayHorizonsDisplay.nDays || 0} daily obs through{' '}
+                    {decayHorizonsDisplay.endDate || '—'})
+                  </div>
+                  <div className="decay-horizon-pills">
+                    {REALIZED_DECAY_HORIZONS.map((w) => (
+                      <button
+                        key={`decay-roll-${w}`}
+                        type="button"
+                        className={cls('decay-horizon-pill', decayRollWindow === w && 'active')}
+                        onClick={() => setDecayRollWindow(w)}
+                      >
+                        {w}d
+                      </button>
+                    ))}
+                  </div>
+                  <SimpleSeriesPlot
+                    series={realizedDecayRollingSeries}
+                    valueKey="gross_period"
+                    color="rgba(59,130,246,0.95)"
+                    label={`Rolling ${decayRollWindow}d gross period return`}
+                    formatValue={(v) => fmt(v)}
+                    zeroLabel="0%"
+                    overlayValueKey="net_period"
+                    overlayColor="rgba(6,182,212,0.95)"
+                    overlayLabel="Net"
+                  />
+                </>
+              ) : (
+                <div className="chart-note" style={{ marginTop: 12 }}>
+                  Rolling daily series is not computed client-side for FoF baskets; use Backtest on child ETFs or export from build.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {activePanel === 'decay' && showBacktestPanel && false && (
         <div className="chart-section">
           <div className="scenario-title">Realized pair return — gross &amp; net by horizon</div>
           <div className="scenario-sub" style={{ marginBottom: 10 }}>
@@ -10958,7 +11638,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       {/* ── Chart Page ──────── */}
       {chartRecord ? (
         <ChartPage
-          key={`${chartRecord.symbol}-${chartDefaultPanel}`}
+          key={chartRecord.symbol}
           record={chartRecord}
           allRecords={records}
           onNavigateToChart={navigateToChart}
@@ -11218,7 +11898,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                             ) : null}
                           </span>
                         </td>
-                        <td className="underlying-cell">{r.underlying}</td>
+                        <td className="underlying-cell" title={isYieldBoostFoF(r) ? fofUnderlyingTooltip(r) : undefined}>
+                          {isYieldBoostFoF(r) ? fofUnderlyingDisplayLabel(r) : r.underlying}
+                        </td>
                         <td>{r.delta?.toFixed(2) ?? '—'}</td>
                         <td className={borrowCls(getBorrowRate(r))} title={borrowSourceHint(borrowDisplay(r, borrowHistoryMap?.[r.symbol], { dashboardBuildTime: data.build_time }))}>
                           {fmt(getBorrowRate(r))} {borrowBadge(getBorrowRate(r))}

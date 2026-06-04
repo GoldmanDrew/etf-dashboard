@@ -775,13 +775,28 @@ def granite_xls_rows_to_holdings(
             })
         else:
             pos_ticker = cusip if cusip and len(cusip) <= 8 and cusip.isalpha() else None
+            sec_type = "OTHER"
+            try:
+                from yieldboost_fof_constants import YIELDBOOST_CHILD_TICKERS
+                from yieldboost_fof_holdings import infer_yb_child_ticker
+
+                yb_child = infer_yb_child_ticker(
+                    position_ticker=pos_ticker,
+                    security_name=desc,
+                    cusip=cusip,
+                )
+                if yb_child or (pos_ticker and pos_ticker.upper() in YIELDBOOST_CHILD_TICKERS):
+                    sec_type = "ETF"
+                    pos_ticker = yb_child or pos_ticker
+            except ImportError:
+                pass
             rows.append({
                 "as_of_date": row_date,
                 "etf_ticker": etf,
                 "position_ticker": pos_ticker,
                 "security_name": desc,
                 "cusip": cusip,
-                "security_type": "OTHER",
+                "security_type": sec_type,
                 "shares": shares,
                 "price": (mv / shares) if shares and mv is not None and shares != 0 else None,
                 "market_value": mv,
