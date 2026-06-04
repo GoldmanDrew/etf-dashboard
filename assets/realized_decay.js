@@ -26,6 +26,78 @@
   }
 
   /** Parse corporate_actions.json events for one ticker → sorted [{date, mult}]. */
+  const INTEGER_SPLIT_FACTORS = [2, 3, 4, 5, 6, 10, 15, 20, 25, 50];
+  const SPLIT_RATIOS = Array.from(
+    new Set(INTEGER_SPLIT_FACTORS.concat(INTEGER_SPLIT_FACTORS.map((f) => 1 / f))),
+  ).sort((a, b) => b - a);
+
+  function nearestSplitRatio(observed, relTol = 0.075) {
+    const x = toNum(observed);
+    if (!Number.isFinite(x) || x <= 0) return null;
+    let bestR = null;
+    let bestErr = 1e9;
+    for (const r of SPLIT_RATIOS) {
+      const err = Math.abs(x / r - 1);
+      if (err < bestErr) {
+        bestErr = err;
+        bestR = r;
+      }
+    }
+    if (bestR == null || bestErr > relTol) return null;
+    return bestR;
+  }
+
+  /** close_after / close_before at the first bar on/after effective (matches Python). */
+  function splitCloseJumpRatio(points, effectiveDate) {
+    const eff = parseDate(effectiveDate);
+    if (!eff || !Array.isArray(points) || !points.length) return null;
+    const before = points.filter((p) => parseDate(p.date) < eff);
+    const onAfter = points.filter((p) => parseDate(p.date) >= eff);
+    if (!before.length || !onAfter.length) return null;
+    const cBefore = toNum(before[before.length - 1].close);
+    const cAfter = toNum(onAfter[0].close);
+    if (!(cBefore > 0 && cAfter > 0)) return null;
+    return cAfter / cBefore;
+  }
+
+  /**
+   * Keep splits only when raw close jumps at the event (Yahoo already continuous → skip).
+   * Mirrors scripts/split_adjustments.filter_splits_needing_close_basis_fix.
+   */
+  function filterSplitsNeedingCloseBasisFix(points, events, relTol = 0.15) {
+    if (!Array.isArray(events) || !events.length) return [];
+    const out = [];
+    for (const ev of events) {
+      const jump = splitCloseJumpRatio(points, ev.date);
+      if (jump == null) continue;
+      const expected = nearestSplitRatio(jump, relTol);
+      const mult = toNum(ev.mult);
+      if (expected != null && Number.isFinite(mult)
+        && Math.abs(expected - mult) <= Math.max(1e-6, relTol * Math.abs(mult))) {
+        out.push({ date: parseDate(ev.date), mult });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * First bar date where raw close jumps by a whitelisted split ratio (actual ex-bar).
+   */
+  function detectSplitBoundary(points, splitMult, relTol = 0.15) {
+    const target = toNum(splitMult);
+    if (!Number.isFinite(target) || !Array.isArray(points) || points.length < 2) return null;
+    for (let i = 1; i < points.length; i += 1) {
+      const prev = toNum(points[i - 1].close);
+      const cur = toNum(points[i].close);
+      if (!(prev > 0 && cur > 0)) continue;
+      const expected = nearestSplitRatio(cur / prev, relTol);
+      if (expected != null && Math.abs(expected - target) <= Math.max(1e-6, relTol * Math.abs(target))) {
+        return parseDate(points[i].date);
+      }
+    }
+    return null;
+  }
+
   function parseSplitEventsFromCorp(corpPayload, ticker) {
     const sym = String(ticker || "").trim().toUpperCase();
     if (!sym || !corpPayload) return [];
@@ -64,19 +136,69 @@
   }
 
   /**
-   * ETF total-return price: Yahoo adj close (splits + divs), else NAV TR, else split-scaled close.
+   * ETF total-return price on the series latest-date basis.
+   * When verified splits exist: NAV TR (distribution reinvestment) or raw close, scaled —
+   * do not use stale pre-split etf_adj_close on a post-split end basis.
+   * When Yahoo is continuous through the split: adj close (splits + divs), else NAV TR, else close.
    */
-  function etfTrPrice(row, splitEvents, latestDate) {
-    const adj = toNum(row && row.etf_adj_close);
+  function resolveSplitBoundary(closePoints, splitEvents) {
+    const events = Array.isArray(splitEvents) ? splitEvents : [];
+    if (!events.length || !closePoints.length) {
+      return { boundary: null, mult: null, filtered: [] };
+    }
+    for (const ev of events) {
+      const mult = toNum(ev.mult);
+      if (!(mult > 0)) continue;
+      const boundary = detectSplitBoundary(closePoints, mult);
+      if (boundary) return { boundary, mult, filtered: [{ date: parseDate(ev.date), mult }] };
+    }
+    const filtered = filterSplitsNeedingCloseBasisFix(closePoints, events);
+    if (filtered.length) {
+      const boundary = detectSplitBoundary(closePoints, filtered[0].mult);
+      if (boundary) return { boundary, mult: filtered[0].mult, filtered };
+    }
+    return { boundary: null, mult: null, filtered: [] };
+  }
+
+  function decayEtfTrPrice(point, activeSplitMult, splitBoundary) {
+    const ds = parseDate(point && point.date);
+    const close = toNum(point && point.close);
+    const adj = toNum(point && point.adj);
+    const navTr = toNum(point && point.navTr);
+    if (!ds || !(close > 0)) return NaN;
+    const boundary = parseDate(splitBoundary);
+    const mult = toNum(activeSplitMult);
+    if (boundary && mult > 0 && ds < boundary) {
+      const pxBase = navTr > 0 ? navTr : close;
+      return pxBase * mult;
+    }
     if (adj > 0) return adj;
-    const tr = toNum(row && row.nav_total_return);
-    if (tr > 0) return tr;
-    const raw = toNum(row && row.close_price) || toNum(row && row.nav);
-    if (!(raw > 0)) return NaN;
-    const ds = parseDate(row && row.date);
-    const latest = parseDate(latestDate);
-    if (!ds || !latest) return raw;
-    return raw * cumSplitFactor(ds, latest, splitEvents);
+    if (navTr > 0) return navTr;
+    return close;
+  }
+
+  /** @deprecated prefer prepareDecayTrRows — kept for unit tests */
+  function etfTrPrice(row, splitEvents, latestDate) {
+    const close = toNum(row && row.close_price) || toNum(row && row.nav);
+    const point = {
+      date: parseDate(row && row.date),
+      close,
+      adj: toNum(row && row.etf_adj_close),
+      navTr: toNum(row && row.nav_total_return),
+    };
+    const points = close > 0 && point.date ? [{ date: point.date, close }] : [];
+    const { boundary, mult } = resolveSplitBoundary(points, splitEvents || []);
+    if (boundary && point.date < boundary) {
+      return decayEtfTrPrice(point, mult, boundary);
+    }
+    if (points.length === 1 && Array.isArray(splitEvents) && splitEvents.length) {
+      let scale = 1;
+      for (const ev of splitEvents) {
+        if (point.date < parseDate(ev.date)) scale *= toNum(ev.mult) || 1;
+      }
+      if (scale !== 1) return decayEtfTrPrice({ ...point, navTr: 0, adj: 0 }, scale, parseDate(splitEvents[0].date));
+    }
+    return decayEtfTrPrice(point, null, null);
   }
 
   function undTrPrice(row) {
@@ -91,13 +213,26 @@
       .filter((row) => parseDate(row && row.date))
       .sort((a, b) => parseDate(a.date).localeCompare(parseDate(b.date)));
     if (!sorted.length) return [];
-    const latestDate = parseDate(sorted[sorted.length - 1].date);
-    const events = Array.isArray(splitEvents) ? splitEvents : [];
-    return sorted
+    const points = sorted
       .map((row) => ({
         date: parseDate(row.date),
-        trEtfPx: etfTrPrice(row, events, latestDate),
-        trUndPx: undTrPrice(row),
+        close: toNum(row.close_price) || toNum(row.nav),
+        adj: toNum(row.etf_adj_close),
+        navTr: toNum(row.nav_total_return),
+        row,
+      }))
+      .filter((p) => p.date && p.close > 0);
+    if (!points.length) return [];
+    const closePoints = points.map((p) => ({ date: p.date, close: p.close }));
+    const { boundary: splitBoundary, mult: activeSplitMult } = resolveSplitBoundary(
+      closePoints,
+      splitEvents || [],
+    );
+    return points
+      .map((p) => ({
+        date: p.date,
+        trEtfPx: decayEtfTrPrice(p, activeSplitMult, splitBoundary),
+        trUndPx: undTrPrice(p.row),
       }))
       .filter((x) => x.date && x.trEtfPx > 0 && x.trUndPx > 0);
   }
@@ -236,12 +371,18 @@
     DEFAULT_HORIZONS,
     parseSplitEventsFromCorp,
     cumSplitFactor,
+    nearestSplitRatio,
+    splitCloseJumpRatio,
+    filterSplitsNeedingCloseBasisFix,
+    detectSplitBoundary,
+    resolveSplitBoundary,
     prepareDecayTrRows,
     buildDailyLogDragSeries,
     computeHorizonPeriodReturns,
     buildRollingPeriodReturnSeries,
     logToSimplePeriod,
     periodBorrowLog,
+    decayEtfTrPrice,
     etfTrPrice,
     undTrPrice,
   };

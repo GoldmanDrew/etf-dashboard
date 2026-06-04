@@ -10,6 +10,7 @@ const {
   prepareDecayTrRows,
   etfTrPrice,
   cumSplitFactor,
+  filterSplitsNeedingCloseBasisFix,
 } = require("../assets/realized_decay.js");
 
 function makeFlatSeries(n, etfDrift = 0, undDrift = 0) {
@@ -91,6 +92,60 @@ test("prefers etf_adj_close over raw close for TR drag", () => {
 test("cumSplitFactor scales pre-split close to latest basis", () => {
   const events = [{ date: "2024-01-02", mult: 6 }];
   assert.ok(Math.abs(cumSplitFactor("2024-01-01", "2024-01-02", events) - 6) < 1e-9);
-  const px = etfTrPrice({ date: "2024-01-01", close_price: 4, underlying_adj_close: 1 }, events, "2024-01-02");
-  assert.ok(Math.abs(px - 24) < 1e-9);
+  const tr = prepareDecayTrRows([
+    { date: "2024-01-01", close_price: 4, underlying_adj_close: 1 },
+    { date: "2024-01-02", close_price: 24, underlying_adj_close: 1 },
+  ], events);
+  assert.ok(Math.abs(tr[0].trEtfPx - 24) < 1e-9);
+});
+
+test("filter skips continuous Yahoo MTYY reverse split", () => {
+  const points = [
+    { date: "2026-05-28", close: 24.0 },
+    { date: "2026-06-01", close: 23.604 },
+    { date: "2026-06-02", close: 22.99 },
+  ];
+  const events = [{ date: "2026-06-02", mult: 6 }];
+  assert.deepEqual(filterSplitsNeedingCloseBasisFix(points, events), []);
+});
+
+test("MTYY issuer pre-split to post-split: decay gross not ~-80%", () => {
+  const rows = [];
+  for (let i = 0; i < 55; i += 1) {
+    const day = String(10 + (i % 20)).padStart(2, "0");
+    rows.push({
+      date: `2026-04-${day}`,
+      close_price: 4.3 - i * 0.002,
+      etf_adj_close: 4.2 - i * 0.002,
+      nav_total_return: 4.35 - i * 0.002,
+      underlying_adj_close: 170 - i * 0.1,
+    });
+  }
+  rows.push(
+    { date: "2026-05-28", close_price: 4.0, etf_adj_close: null, nav_total_return: 4.12, underlying_adj_close: 151.64 },
+    { date: "2026-06-01", close_price: 23.604, etf_adj_close: 23.604, nav_total_return: 23.65, underlying_adj_close: 136.08 },
+    { date: "2026-06-02", close_price: 22.99, etf_adj_close: 22.99, nav_total_return: 23.02, underlying_adj_close: 136.08 },
+  );
+  const events = [{ date: "2026-06-02", mult: 6 }];
+  const tr = prepareDecayTrRows(rows, events);
+  const daily = buildDailyLogDragSeries(tr, 0.5);
+  const h = computeHorizonPeriodReturns(daily, [20, 60], 0.09);
+  const row20 = h.horizons.find((x) => x.horizonDays === 20);
+  assert.ok(row20.grossSimple > -0.35, `20d gross too negative: ${row20.grossSimple}`);
+  assert.ok(row20.etfEndPx / row20.etfStartPx > 0.75 && row20.etfEndPx / row20.etfStartPx < 1.25,
+    `etf px ratio ${row20.etfStartPx} -> ${row20.etfEndPx}`);
+});
+
+test("distribution reinvestment scales with verified split", () => {
+  const rows = [
+    { date: "2026-05-15", close_price: 4.4, etf_adj_close: 4.33, nav_total_return: 4.55, underlying_adj_close: 177.0 },
+    { date: "2026-05-28", close_price: 4.0, etf_adj_close: null, nav_total_return: 4.12, underlying_adj_close: 151.64 },
+    { date: "2026-06-02", close_price: 22.99, etf_adj_close: 22.99, nav_total_return: 23.02, underlying_adj_close: 136.08 },
+  ];
+  const tr = prepareDecayTrRows(rows, [{ date: "2026-06-02", mult: 6 }]);
+  const may15 = tr.find((x) => x.date === "2026-05-15");
+  const may28 = tr.find((x) => x.date === "2026-05-28");
+  assert.ok(may15.trEtfPx > 24 && may15.trEtfPx < 28, `May15 TR px ${may15.trEtfPx}`);
+  assert.ok(may28.trEtfPx > 23 && may28.trEtfPx < 27, `May28 TR px ${may28.trEtfPx}`);
+  assert.ok(Math.abs(may15.trEtfPx - 4.55 * 6) < 0.5);
 });
