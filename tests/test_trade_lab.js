@@ -9,6 +9,11 @@ const {
   buildTradeScenarioGrid,
   evaluateTradeMonteCarlo,
   buildTtxSensitivity,
+  valuationHorizonToYears,
+  valuationHorizonToDays,
+  remainingOptionDte,
+  calendarDteFromExpiry,
+  tradeLabStorageKey,
 } = require("../assets/trade_lab.js");
 
 test("equity leg pnl long/short sign", () => {
@@ -264,4 +269,62 @@ test("scenario grid option pnl responds to underlying shock", () => {
     shockRows: [{ sigmaMultiple: -3, underlyingReturn: -0.5 }],
   }).rows[0].cells[0].pnl;
   assert.ok(up < down, "long put should gain more when underlying falls");
+});
+
+test("valuation horizon helpers", () => {
+  assert.ok(Math.abs(valuationHorizonToYears("1M") - 1 / 12) < 1e-9);
+  assert.equal(valuationHorizonToDays("30D"), 30);
+  assert.equal(remainingOptionDte(90, 30), 60);
+  assert.equal(remainingOptionDte(30, 90), 0);
+});
+
+test("equity-only pnl changes with valuation horizon at flat underlying", () => {
+  const base = {
+    baseLegs: [
+      { symbol: "APLD", side: "short", quantity: 100, entry: 47 },
+      { symbol: "APLZ", side: "long", quantity: 15000, entry: 5.66 },
+    ],
+    optionLegs: [],
+    underlyingSymbol: "APLD",
+    etfSymbol: "APLX",
+    spotBySymbol: { APLD: 47, APLX: 14.7, APLZ: 5.66 },
+    leverageBySymbol: { APLX: 2, APLZ: -1.9876 },
+    spotUnderlying: 47,
+    spotEtf: 14.7,
+    leverage: 2,
+    baseVolAnnual: 0.8,
+    shockRows: [{ sigmaMultiple: 0, underlyingReturn: 0 }],
+    volColumns: [{ sigmaAnnual: 0.8 }],
+    ttxDays: 30,
+  };
+  const pnl1m = buildTradeScenarioGrid({ ...base, horizonYears: 1 / 12 }).rows[0].cells[0].pnl;
+  const pnl3m = buildTradeScenarioGrid({ ...base, horizonYears: 3 / 12 }).rows[0].cells[0].pnl;
+  assert.notEqual(pnl1m, pnl3m);
+});
+
+test("equity-only pnl unchanged when only option DTE changes", () => {
+  const base = {
+    baseLegs: [{ symbol: "APLD", side: "long", quantity: 100, entry: 47 }],
+    optionLegs: [],
+    underlyingSymbol: "APLD",
+    etfSymbol: "APLX",
+    spotBySymbol: { APLD: 47, APLX: 14.7 },
+    leverageBySymbol: { APLX: 2 },
+    spotUnderlying: 47,
+    spotEtf: 14.7,
+    leverage: 2,
+    horizonYears: 1 / 12,
+    baseVolAnnual: 0.8,
+    shockRows: [{ sigmaMultiple: 0, underlyingReturn: 0 }],
+    volColumns: [{ sigmaAnnual: 0.8 }],
+  };
+  const pnl30 = buildTradeScenarioGrid({ ...base, ttxDays: 30 }).rows[0].cells[0].pnl;
+  const pnl90 = buildTradeScenarioGrid({ ...base, ttxDays: 90 }).rows[0].cells[0].pnl;
+  assert.equal(pnl30, pnl90);
+});
+
+test("calendar DTE from expiry is non-negative", () => {
+  const dte = calendarDteFromExpiry("2099-12-31", new Date("2026-01-01T12:00:00Z"));
+  assert.ok(dte > 0);
+  assert.equal(tradeLabStorageKey("apld", "aplx"), "tradeLab:APLD:APLX");
 });

@@ -74,10 +74,59 @@
     return q * (f - e);
   }
 
+  function valuationHorizonToYears(horizonKey) {
+    const k = String(horizonKey || "").toUpperCase();
+    if (k === "30D") return 30 / 365;
+    if (k === "90D") return 90 / 365;
+    if (k === "1M") return 1 / 12;
+    if (k === "3M") return 3 / 12;
+    if (k === "6M") return 6 / 12;
+    if (k === "1Y") return 1;
+    return NaN;
+  }
+
+  function valuationHorizonToDays(horizonKey) {
+    const years = valuationHorizonToYears(horizonKey);
+    return Number.isFinite(years) ? Math.round(years * 365) : NaN;
+  }
+
+  function remainingOptionDte(optionDteAtEntry, valuationDays) {
+    const start = Math.max(0, toNum(optionDteAtEntry));
+    const elapsedDays = Math.max(0, toNum(valuationDays));
+    return Math.max(0, start - elapsedDays);
+  }
+
   function remainingTtxDays(ttxDaysStart, elapsedYears) {
     const start = Math.max(0, toNum(ttxDaysStart));
     const elapsedDays = Math.max(0, toNum(elapsedYears)) * 365;
-    return Math.max(0, start - elapsedDays);
+    return remainingOptionDte(start, elapsedDays);
+  }
+
+  function calendarDteFromExpiry(expiryDate, asOfDate) {
+    const expRaw = String(expiryDate || "").trim();
+    if (!expRaw) return NaN;
+    const asOf = asOfDate instanceof Date ? asOfDate : new Date();
+    const exp = new Date(`${expRaw}T16:00:00`);
+    if (Number.isNaN(exp.getTime())) return NaN;
+    const ms = exp.getTime() - asOf.getTime();
+    return Math.max(0, Math.ceil(ms / 86400000));
+  }
+
+  function minOptionDteFromLegs(optionLegs, asOfDate) {
+    const legs = Array.isArray(optionLegs) ? optionLegs : [];
+    let minDte = NaN;
+    for (const leg of legs) {
+      const dte = calendarDteFromExpiry(leg && leg.expiry, asOfDate);
+      if (!Number.isFinite(dte)) continue;
+      minDte = Number.isFinite(minDte) ? Math.min(minDte, dte) : dte;
+    }
+    return minDte;
+  }
+
+  function tradeLabStorageKey(underlyingSymbol, etfSymbol) {
+    const und = String(underlyingSymbol || "").toUpperCase();
+    const etf = String(etfSymbol || "").toUpperCase();
+    return `tradeLab:${und}:${etf}`;
   }
 
   function optionLegPnl(leg, spotNow, spotFinal, ttxDaysRemaining, volFallback, rate) {
@@ -360,7 +409,7 @@
 
     const n = underlyingPaths.length;
     const steps = Math.max(1, underlyingPaths[0].length - 1);
-    const horizonDays = Math.round(horizonYears * 252);
+    const horizonDays = Math.round(horizonYears * 365);
 
     const terminal = [];
     const mdds = [];
@@ -450,6 +499,13 @@
     buildTradeScenarioGrid,
     evaluateTradeMonteCarlo,
     buildTtxSensitivity,
+    valuationHorizonToYears,
+    valuationHorizonToDays,
+    remainingOptionDte,
+    remainingTtxDays,
+    calendarDteFromExpiry,
+    minOptionDteFromLegs,
+    tradeLabStorageKey,
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = exported;
