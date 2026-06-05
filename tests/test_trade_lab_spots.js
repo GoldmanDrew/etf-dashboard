@@ -27,7 +27,23 @@ test("underlying uses fresh intraday when options cache stale", () => {
   assert.equal(out.source, "tradier_spot");
 });
 
-test("etf symbol with stale cache only is not ok", () => {
+test("etf symbol uses intraday by_symbol when options cache stale", () => {
+  const out = resolveSymbolSpot({
+    symbol: "APLX",
+    underlyingSymbol: "APLD",
+    optionsCache: { symbols: { APLX: { spot: 14.7, stale: true, cache_age_seconds: 86400 } } },
+    intradaySpot: {
+      by_underlying: { APLD: { last: 44.58, stale: false, source: "tradier_spot" } },
+      by_symbol: { APLX: { last: 14.78, stale: false, source: "tradier_spot" } },
+    },
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.stale, false);
+  assert.equal(out.spot, 14.78);
+  assert.equal(out.source, "tradier_spot");
+});
+
+test("etf symbol with stale cache only is not ok when intraday missing", () => {
   const out = resolveSymbolSpot({
     symbol: "APLX",
     underlyingSymbol: "APLD",

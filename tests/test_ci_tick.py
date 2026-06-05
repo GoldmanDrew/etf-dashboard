@@ -63,12 +63,14 @@ def test_pick_auto_off_hours_skips_fresh_borrow(cfg):
 
 
 def test_pick_auto_rth_intraday_fast_lane(cfg):
-    """During RTH, stale intraday runs alone; rotation is deferred to a later tick."""
+    """During RTH, stale intraday runs first; rotation waits unless very overdue."""
     now = datetime(2026, 5, 22, 15, 0, tzinfo=UTC)  # slot 0 -> borrow in rotation
     state = {
-        "last_borrow_utc": "2026-05-22T10:00:00Z",
+        "last_borrow_utc": "2026-05-22T14:58:00Z",
         "last_nav_utc": "2026-05-22T14:58:00Z",  # 2m ago -> fresh
         "last_intraday_utc": "2026-05-22T14:00:00Z",  # 60m ago -> stale at 5m RTH cadence
+        "last_options_utc": "2026-05-22T14:58:00Z",  # fresh -> do not bundle rotation
+        "last_yieldboost_utc": "2026-05-22T14:58:00Z",
     }
     tasks = ct.pick_auto_tasks(state, cfg, now)
     assert tasks == ["intraday"]
@@ -78,11 +80,28 @@ def test_pick_auto_rth_nav_before_intraday_when_both_stale(cfg):
     """NAV must run before intraday so the flow builder blends fresh forecasts."""
     now = datetime(2026, 5, 22, 15, 0, tzinfo=UTC)
     state = {
-        "last_borrow_utc": "2026-05-22T10:00:00Z",
+        "last_borrow_utc": "2026-05-22T14:58:00Z",
         "last_intraday_utc": "2026-05-22T14:00:00Z",
+        "last_options_utc": "2026-05-22T14:58:00Z",
+        "last_yieldboost_utc": "2026-05-22T14:58:00Z",
     }
     tasks = ct.pick_auto_tasks(state, cfg, now)
     assert tasks == ["nav", "intraday"]
+
+
+def test_pick_auto_rth_appends_overdue_options_with_intraday(cfg):
+    """Stale intraday should not starve options when options is 2x+ cadence overdue."""
+    now = datetime(2026, 5, 22, 15, 0, tzinfo=UTC)
+    state = {
+        "last_borrow_utc": "2026-05-22T10:00:00Z",
+        "last_nav_utc": "2026-05-22T14:58:00Z",
+        "last_intraday_utc": "2026-05-22T14:00:00Z",
+        "last_options_utc": "2026-05-22T10:00:00Z",  # 5h ago -> overdue
+        "last_yieldboost_utc": "2026-05-22T14:58:00Z",
+    }
+    tasks = ct.pick_auto_tasks(state, cfg, now)
+    assert tasks[0] == "intraday"
+    assert "options" in tasks
 
 
 def test_nav_rth_cadence(cfg):

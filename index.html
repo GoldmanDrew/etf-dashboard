@@ -8677,7 +8677,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <strong>Valuation horizon</strong> drives decay (σ-drag), borrow accrual, and underlying shocks. <strong>Option DTE</strong> controls BS marks; remaining DTE = max(0, DTE − valuation days).
             </div>
             <div className="trade-note">
-              <strong>Lock to Scenarios</strong> syncs σ and valuation horizon with the Scenarios tab. Spots: fresh options cache, else intraday underlying spot; stale symbols block payout grids.
+              <strong>Lock to Scenarios</strong> syncs σ and valuation horizon with the Scenarios tab. Spots: fresh options cache, else intraday Tradier spot (all symbols); stale symbols block payout grids.
             </div>
             <div className="trade-note">
               <strong>Carry:</strong> short equity PnL += notional×(short-proceeds rate − borrow)×years on short legs; ETF borrow pulls from Borrow tab (avg or spot).

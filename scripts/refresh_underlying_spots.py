@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Pull intraday underlying spot + prior close for the LETF universe.
+"""Pull intraday spot + prior close for the full ETF dashboard universe.
 
 The output (``data/underlying_intraday_spot.json``) feeds
-``scripts/build_letf_intraday_flows.py``, which estimates today's pending
-LETF close rebalance ahead of the print.
+``scripts/build_letf_intraday_flows.py`` (underlying rebalance estimates) and
+Trade Lab (``by_symbol`` live ETF/underlying spots via ``trade_lab_spots.js``).
 
 Source priority (graceful fallback):
 
@@ -16,9 +16,10 @@ Source priority (graceful fallback):
 4. **``yfinance.Ticker.fast_info``** -- per-symbol fallback; capped via
    ``--max-yfinance``.
 
-Prior-close comes from ``etf_metrics_daily.underlying_adj_close`` (issuer
-close, the EOD pipeline's ground truth). Polygon ``prevDay`` is not used
-because the batch snapshot endpoint is not entitled on our plan.
+Prior-close comes from ``etf_metrics_daily``: ``underlying_adj_close`` for
+underlyings and ``etf_adj_close`` / ``close_price`` for fund tickers. Polygon
+``prevDay`` is not used because the batch snapshot endpoint is not entitled on
+our plan.
 
 Usage::
 
@@ -103,21 +104,29 @@ def _chunked(items: list[str], size: int) -> list[list[str]]:
 # ?? Universe / priors ?????????????????????????????????????????????????????
 
 
-def load_universe_underlyings(path: Path = UNIVERSE_CSV) -> tuple[list[str], dict[str, str]]:
-    """Return (sorted unique underlyings, ticker->underlying map)."""
+def load_universe_underlyings(path: Path = UNIVERSE_CSV) -> tuple[list[str], list[str], dict[str, str]]:
+    """Return (sorted underlyings, sorted ETF tickers, ticker->underlying map)."""
     if not path.exists():
         LOGGER.warning("Universe CSV missing: %s", path)
-        return [], {}
+        return [], [], {}
     df = pd.read_csv(path)
     if "Underlying" not in df.columns or "ETF" not in df.columns:
-        return [], {}
+        return [], [], {}
     df = df[["ETF", "Underlying"]].dropna()
     df["ETF"] = df["ETF"].map(_norm_sym)
     df["Underlying"] = df["Underlying"].map(_norm_sym)
     df = df[df["ETF"].astype(bool) & df["Underlying"].astype(bool)]
     ticker_to_und = dict(zip(df["ETF"], df["Underlying"]))
     underlyings = sorted(set(df["Underlying"].tolist()))
-    return underlyings, ticker_to_und
+    etf_tickers = sorted(set(df["ETF"].tolist()))
+    return underlyings, etf_tickers, ticker_to_und
+
+
+def load_universe_all_symbols(path: Path = UNIVERSE_CSV) -> tuple[list[str], list[str], list[str], dict[str, str]]:
+    """Return (all symbols, underlyings, ETF tickers, ticker->underlying map)."""
+    underlyings, etf_tickers, ticker_to_und = load_universe_underlyings(path)
+    all_symbols = sorted(set(underlyings) | set(etf_tickers))
+    return all_symbols, underlyings, etf_tickers, ticker_to_und
 
 
 def load_prior_closes_from_metrics(
@@ -155,6 +164,60 @@ def load_prior_closes_from_metrics(
     for _, r in df.iterrows():
         out[str(r["underlying"])] = {
             "prior_close": _f(r["underlying_adj_close"]),
+            "prior_close_date": r["date"].strftime("%Y-%m-%d") if pd.notna(r["date"]) else None,
+        }
+    return out
+
+
+def load_etf_prior_closes_from_metrics(
+    path: Path = METRICS_PARQUET,
+    *,
+    etf_tickers: list[str] | set[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Most-recent ETF close per fund ticker from the metrics panel."""
+    if not path.exists() or not etf_tickers:
+        return {}
+    wanted = {_norm_sym(t) for t in etf_tickers if str(t).strip()}
+    if not wanted:
+        return {}
+    try:
+        df = pd.read_parquet(path, columns=["ticker", "date", "close_price", "etf_adj_close"])
+    except Exception as exc:  # pragma: no cover - parquet engine fallback
+        LOGGER.debug("parquet column subset failed (%s); reading full panel", exc)
+        try:
+            df = pd.read_parquet(path)
+        except Exception as exc2:
+            LOGGER.warning("failed to read %s: %s", path, exc2)
+            return {}
+
+    if df.empty:
+        return {}
+    df["ticker"] = df["ticker"].map(_norm_sym)
+    df = df[df["ticker"].isin(wanted)]
+    if df.empty:
+        return {}
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+    if df.empty:
+        return {}
+    if "etf_adj_close" in df.columns:
+        df["prior_close"] = pd.to_numeric(df["etf_adj_close"], errors="coerce")
+    else:
+        df["prior_close"] = pd.NA
+    if "close_price" in df.columns:
+        close_px = pd.to_numeric(df["close_price"], errors="coerce")
+        df["prior_close"] = df["prior_close"].fillna(close_px)
+    df = df.dropna(subset=["prior_close"])
+    if df.empty:
+        return {}
+    df = df.sort_values(["ticker", "date"]).drop_duplicates(["ticker"], keep="last")
+    out: dict[str, dict[str, Any]] = {}
+    for _, r in df.iterrows():
+        prior = _f(r["prior_close"])
+        if prior is None or prior <= 0:
+            continue
+        out[str(r["ticker"])] = {
+            "prior_close": prior,
             "prior_close_date": r["date"].strftime("%Y-%m-%d") if pd.notna(r["date"]) else None,
         }
     return out
@@ -450,15 +513,12 @@ def merge_sources(
     return out
 
 
-def build_payload(
-    underlyings: list[str],
-    by_und: dict[str, dict[str, Any]],
-) -> dict[str, Any]:
+def _summarize_spot_rows(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
     counts = {k: 0 for k in SOURCE_KEYS}
     stale = 0
     with_return = 0
     with_volume = 0
-    for v in by_und.values():
+    for v in rows.values():
         s = v.get("source")
         if s in counts:
             counts[s] += 1
@@ -469,14 +529,38 @@ def build_payload(
         if v.get("volume_so_far") is not None:
             with_volume += 1
     return {
-        "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "n_underlyings_universe": len(underlyings),
-        "n_underlyings_priced": len(by_und),
+        "n_priced": len(rows),
         "n_with_return": with_return,
         "n_with_volume": with_volume,
         "n_stale": stale,
         "sources": counts,
+    }
+
+
+def build_payload(
+    underlyings: list[str],
+    by_und: dict[str, dict[str, Any]],
+    *,
+    all_symbols: list[str] | None = None,
+    by_symbol: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    symbol_rows = by_symbol if by_symbol is not None else by_und
+    symbol_universe = all_symbols if all_symbols is not None else underlyings
+    und_summary = _summarize_spot_rows(by_und)
+    sym_summary = _summarize_spot_rows(symbol_rows)
+    return {
+        "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "n_underlyings_universe": len(underlyings),
+        "n_underlyings_priced": und_summary["n_priced"],
+        "n_symbols_universe": len(symbol_universe),
+        "n_symbols_priced": sym_summary["n_priced"],
+        "n_with_return": und_summary["n_with_return"],
+        "n_with_volume": und_summary["n_with_volume"],
+        "n_stale": und_summary["n_stale"],
+        "sources": und_summary["sources"],
+        "symbol_sources": sym_summary["sources"],
         "by_underlying": {k: by_und[k] for k in sorted(by_und.keys())},
+        "by_symbol": {k: symbol_rows[k] for k in sorted(symbol_rows.keys())},
     }
 
 
@@ -518,23 +602,34 @@ def main() -> int:
         format="%(levelname)s:%(name)s:%(message)s",
     )
 
-    underlyings, ticker_to_und = load_universe_underlyings(args.universe)
-    if not underlyings:
-        LOGGER.error("No underlyings loaded from %s", args.universe)
+    all_symbols, underlyings, etf_tickers, ticker_to_und = load_universe_all_symbols(args.universe)
+    if not all_symbols:
+        LOGGER.error("No symbols loaded from %s", args.universe)
         return 1
-    LOGGER.info("Universe: %d underlyings (from %d funds)", len(underlyings), len(ticker_to_und))
+    LOGGER.info(
+        "Universe: %d symbols (%d underlyings + %d ETFs)",
+        len(all_symbols),
+        len(underlyings),
+        len(etf_tickers),
+    )
 
-    metrics_priors = load_prior_closes_from_metrics(args.metrics_parquet, ticker_to_und=ticker_to_und)
-    LOGGER.info("Prior closes from metrics for %d underlyings", len(metrics_priors))
+    und_priors = load_prior_closes_from_metrics(args.metrics_parquet, ticker_to_und=ticker_to_und)
+    etf_priors = load_etf_prior_closes_from_metrics(args.metrics_parquet, etf_tickers=etf_tickers)
+    metrics_priors = {**und_priors, **etf_priors}
+    LOGGER.info(
+        "Prior closes from metrics for %d underlyings + %d ETFs",
+        len(und_priors),
+        len(etf_priors),
+    )
 
     options_spots = load_options_cache_spots(args.options_cache)
-    LOGGER.info("Fresh options-cache spots for %d underlyings", len(options_spots))
+    LOGGER.info("Fresh options-cache spots for %d symbols", len(options_spots))
 
     tradier_data: dict[str, dict[str, Any]] = {}
     if not args.skip_tradier:
         if TRADIER_TOKEN:
-            tradier_data = fetch_tradier_spots(underlyings)
-            LOGGER.info("Tradier spots for %d/%d underlyings", len(tradier_data), len(underlyings))
+            tradier_data = fetch_tradier_spots(all_symbols)
+            LOGGER.info("Tradier spots for %d/%d symbols", len(tradier_data), len(all_symbols))
         else:
             LOGGER.warning("TRADIER_TOKEN missing; relying on polygon + options_cache + yfinance")
 
@@ -542,37 +637,38 @@ def main() -> int:
     if not args.skip_polygon:
         api_key = POLYGON_API_KEY
         if api_key:
-            missing_for_polygon = [s for s in underlyings if s not in tradier_data]
+            missing_for_polygon = [s for s in all_symbols if s not in tradier_data]
             if missing_for_polygon:
                 polygon_data = fetch_polygon_last_spots(missing_for_polygon, api_key)
             LOGGER.info(
-                "Polygon last/trade for %d/%d underlyings (%d after Tradier)",
+                "Polygon last/trade for %d/%d symbols (%d after Tradier)",
                 len(polygon_data),
-                len(underlyings),
+                len(all_symbols),
                 len(tradier_data),
             )
         else:
             LOGGER.warning("POLYGON_API_KEY missing; relying on tradier + options_cache + yfinance")
 
-    by_und = merge_sources(
-        underlyings,
+    by_symbol = merge_sources(
+        all_symbols,
         tradier=tradier_data,
         polygon=polygon_data,
         options_cache=options_spots,
         metrics_priors=metrics_priors,
     )
+    by_und = {sym: by_symbol[sym] for sym in underlyings if sym in by_symbol}
 
     if args.max_yfinance > 0:
-        missing = [s for s in underlyings if s not in by_und]
+        missing = [s for s in all_symbols if s not in by_symbol]
         if missing:
             sample = missing[: int(args.max_yfinance)]
-            LOGGER.info("yfinance fast_info fallback for %d/%d missing underlyings", len(sample), len(missing))
+            LOGGER.info("yfinance fast_info fallback for %d/%d missing symbols", len(sample), len(missing))
             yf_data = fetch_yfinance_fast_info(sample)
             for sym, row in yf_data.items():
                 last = row.get("last")
                 prior = row.get("prior_close") or metrics_priors.get(sym, {}).get("prior_close")
                 ret = (last / prior - 1.0) if last and prior and prior > 0 else None
-                by_und[sym] = {
+                spot_row = {
                     "last": last,
                     "prior_close": prior,
                     "prior_close_date": metrics_priors.get(sym, {}).get("prior_close_date"),
@@ -582,15 +678,26 @@ def main() -> int:
                     "source": row.get("source") or "yfinance_fast_info",
                     "stale": bool(row.get("stale")),
                 }
+                by_symbol[sym] = spot_row
+                if sym in underlyings:
+                    by_und[sym] = spot_row
 
-    payload = build_payload(underlyings, by_und)
+    payload = build_payload(
+        underlyings,
+        by_und,
+        all_symbols=all_symbols,
+        by_symbol=by_symbol,
+    )
     write_payload(args.output, payload)
     LOGGER.info(
-        "wrote %s priced=%d/%d sources=%s with_return=%d with_volume=%d",
+        "wrote %s underlying=%d/%d symbols=%d/%d sources=%s symbol_sources=%s with_return=%d with_volume=%d",
         args.output,
         payload["n_underlyings_priced"],
         payload["n_underlyings_universe"],
+        payload["n_symbols_priced"],
+        payload["n_symbols_universe"],
         payload["sources"],
+        payload["symbol_sources"],
         payload["n_with_return"],
         payload["n_with_volume"],
     )

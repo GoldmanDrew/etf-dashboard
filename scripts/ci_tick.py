@@ -218,6 +218,29 @@ def _pick_rotation_secondary(state: dict, config: dict, now: datetime) -> str | 
     return scored[0][2]
 
 
+def _append_overdue_rotation_task(
+    tasks: list[str],
+    state: dict,
+    config: dict,
+    now: datetime,
+    *,
+    overdue_multiplier: float = 2.0,
+) -> list[str]:
+    """Add one rotation task when it is multiples of its cadence overdue.
+
+    Intraday runs every 5 minutes during RTH; without this, options/yieldboost
+    could sit idle for days while the fast lane always wins.
+    """
+    secondary = _pick_rotation_secondary(state, config, now)
+    if not secondary or secondary in tasks:
+        return tasks
+    cadence = max(_cadence_minutes(secondary, config), 1.0)
+    since = minutes_since(state, secondary, now)
+    if since >= overdue_multiplier * cadence:
+        tasks.append(secondary)
+    return tasks
+
+
 def pick_auto_tasks(state: dict, config: dict, now: datetime) -> list[str]:
     """Return ordered task list for this tick (NAV + intraday fast-lanes first during RTH)."""
     if is_rth(now, config):
@@ -227,10 +250,8 @@ def pick_auto_tasks(state: dict, config: dict, now: datetime) -> list[str]:
             tasks.append("nav")
         if is_stale("intraday", state, config, now, rth=True):
             tasks.append("intraday")
-        # Do not bundle borrow/options/yieldboost with fast-lane work: those tasks can
-        # exceed the workflow timeout and cancel before nav/intraday artifacts commit.
         if tasks:
-            return tasks
+            return _append_overdue_rotation_task(tasks, state, config, now)
         secondary = _pick_rotation_secondary(state, config, now)
         return [secondary] if secondary else []
 

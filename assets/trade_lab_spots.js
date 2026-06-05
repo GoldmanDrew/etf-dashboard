@@ -36,6 +36,21 @@
     return Number.isFinite(last) && last > 0;
   }
 
+  function resolveIntradayRow(symbol, underlying, intradaySpot) {
+    if (!intradaySpot) return null;
+    const bySymbol = intradaySpot.by_symbol || null;
+    if (bySymbol && isFreshIntradayRow(bySymbol[symbol])) {
+      return bySymbol[symbol];
+    }
+    if (symbol === underlying) {
+      const byUnderlying = intradaySpot.by_underlying || null;
+      if (byUnderlying && isFreshIntradayRow(byUnderlying[symbol])) {
+        return byUnderlying[symbol];
+      }
+    }
+    return null;
+  }
+
   function resolveSymbolSpot(params) {
     const symbol = String((params && params.symbol) || "").toUpperCase();
     const underlying = String((params && params.underlyingSymbol) || "").toUpperCase();
@@ -57,8 +72,7 @@
       };
     }
 
-    const undKey = symbol === underlying ? symbol : null;
-    const intradayRow = undKey ? intradaySpot?.by_underlying?.[undKey] : null;
+    const intradayRow = resolveIntradayRow(symbol, underlying, intradaySpot);
     if (isFreshIntradayRow(intradayRow)) {
       return {
         symbol,
@@ -127,6 +141,7 @@
     formatAgeLabel,
     isFreshOptionsRow,
     isFreshIntradayRow,
+    resolveIntradayRow,
     resolveSymbolSpot,
     resolveTradeSpots,
   };

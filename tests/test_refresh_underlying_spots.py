@@ -89,14 +89,28 @@ def test_build_payload_counts_sources():
         "AAPL": {"source": "polygon_last_trade", "stale": False, "return_d1_so_far": 0.02, "volume_so_far": None},
         "BRK-B": {"source": "yfinance_fast_info", "stale": False, "return_d1_so_far": 0.0, "volume_so_far": None},
     }
-    payload = refresh.build_payload(["SPY", "AAPL", "BRK-B", "FOO"], by_und)
+    by_symbol = {
+        **by_und,
+        "TQQQ": {"source": "tradier_spot", "stale": False, "return_d1_so_far": 0.03, "volume_so_far": None},
+    }
+    payload = refresh.build_payload(
+        ["SPY", "AAPL", "BRK-B", "FOO"],
+        by_und,
+        all_symbols=["SPY", "AAPL", "BRK-B", "FOO", "TQQQ"],
+        by_symbol=by_symbol,
+    )
     assert payload["n_underlyings_universe"] == 4
     assert payload["n_underlyings_priced"] == 3
+    assert payload["n_symbols_universe"] == 5
+    assert payload["n_symbols_priced"] == 4
     assert payload["sources"]["tradier_spot"] == 1
     assert payload["sources"]["polygon_last_trade"] == 1
     assert payload["sources"]["yfinance_fast_info"] == 1
+    assert payload["symbol_sources"]["tradier_spot"] == 2
     assert payload["n_with_return"] == 3
     assert payload["n_stale"] == 0
+    assert "TQQQ" in payload["by_symbol"]
+    assert "SPY" in payload["by_underlying"]
 
 
 def test_fetch_tradier_spots_parses_batch_response():
@@ -136,6 +150,19 @@ def test_fetch_polygon_last_spots_parses_trade():
     assert out["SMU"]["source"] == "polygon_last_trade"
 
 
+def test_load_universe_all_symbols_dedupes_underlyings_and_etfs(tmp_path: Path):
+    universe = tmp_path / "universe.csv"
+    universe.write_text(
+        "ETF,Underlying\nAPLX,APLD\nAPLZ,APLD\nSPY,SPY\n",
+        encoding="utf-8",
+    )
+    all_symbols, underlyings, etfs, ticker_to_und = refresh.load_universe_all_symbols(universe)
+    assert underlyings == ["APLD", "SPY"]
+    assert etfs == ["APLX", "APLZ", "SPY"]
+    assert all_symbols == ["APLD", "APLX", "APLZ", "SPY"]
+    assert ticker_to_und["APLX"] == "APLD"
+
+
 def test_load_options_cache_skips_stale_rows(tmp_path: Path):
     cache_path = tmp_path / "options_cache.json"
     cache_path.write_text(
@@ -157,6 +184,7 @@ def test_min_with_return_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "load_prior_closes_from_metrics",
         lambda *a, **k: {"SPY": {"prior_close": 700.0, "prior_close_date": "2026-05-19"}},
     )
+    monkeypatch.setattr(refresh, "load_etf_prior_closes_from_metrics", lambda *a, **k: {})
     monkeypatch.setattr(refresh, "load_options_cache_spots", lambda *a, **k: {})
     monkeypatch.setattr(refresh, "fetch_tradier_spots", lambda tickers, **k: {})
     monkeypatch.setattr(refresh, "fetch_polygon_last_spots", lambda tickers, key, **k: {})
