@@ -52,6 +52,7 @@ from split_adjustments import (
     cum_split_factor_to_latest,
     dedupe_split_events,
     etf_adj_close_needs_split_scaling,
+    load_split_execution_events_for_ticker,
     load_split_hints_from_corporate_actions,
 )
 
@@ -1211,7 +1212,7 @@ def backfill_split_adjusted_etf_adj_close(
     out["ticker"] = out["ticker"].astype(str).str.upper()
     n_scaled = 0
     for ticker in out["ticker"].unique():
-        events = load_split_events_for_ticker(ticker, corporate_actions_path)
+        events = load_split_execution_events_for_ticker(ticker, corporate_actions_path)
         if not events:
             continue
         m = out["ticker"] == ticker

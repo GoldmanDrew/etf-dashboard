@@ -126,6 +126,46 @@ def load_split_events_for_ticker(
     return dedupe_split_events(sorted((d, float(m)) for d, m in hints.items() if m > 0))
 
 
+def load_split_execution_events_for_ticker(
+    ticker: str,
+    path: Path | None = None,
+) -> list[tuple[dt.date, float]]:
+    """Declared ``execution_date`` split events only (no ±1 day hint padding).
+
+    Used when scaling pre-split ``etf_adj_close`` onto the latest basis: hint
+    clusters prefer the *latest* bar date for close-basis repair, which would
+    incorrectly scale rows on the split session if reused for cum factors.
+    """
+    sym = str(ticker or "").strip().upper()
+    if not sym:
+        return []
+    p = path or DEFAULT_CORPORATE_ACTIONS_PATH
+    if not p.exists():
+        return []
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    events: list[tuple[dt.date, float]] = []
+    for ev in payload.get("events") or []:
+        if str(ev.get("type") or "") not in {"reverse_split", "forward_split"}:
+            continue
+        if str(ev.get("ticker") or "").strip().upper() != sym:
+            continue
+        ed = ev.get("execution_date")
+        rf, rt = ev.get("ratio_from"), ev.get("ratio_to")
+        if not ed or rf is None or rt is None:
+            continue
+        try:
+            d0 = dt.date.fromisoformat(str(ed)[:10])
+            mult = float(rf) / float(rt)
+        except (ValueError, TypeError, ZeroDivisionError):
+            continue
+        if mult > 0:
+            events.append((d0, mult))
+    return dedupe_split_events(sorted(events))
+
+
 def merge_split_events(
     *sources: list[tuple[dt.date, float]] | None,
     hints: dict[dt.date, float] | None = None,

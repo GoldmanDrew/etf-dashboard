@@ -176,6 +176,48 @@ def test_no_repair_on_normal_drift():
     assert float(out.iloc[1]["close_price"]) == 10.05
 
 
+def test_backfill_split_adjusted_etf_adj_close_import_and_scales_pre_split(tmp_path: Path):
+    """Regression: ``load_split_events_for_ticker`` must be imported (CI NameError)."""
+    ca = tmp_path / "ca.json"
+    ca.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "type": "reverse_split",
+                        "ticker": "BAIG",
+                        "execution_date": "2026-05-05",
+                        "ratio_from": 10.0,
+                        "ratio_to": 1.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    df = pd.DataFrame(
+        [
+            {
+                "date": "2026-05-01",
+                "ticker": "BAIG",
+                "close_price": 3.72,
+                "etf_adj_close": 3.72,
+            },
+            {
+                "date": "2026-05-05",
+                "ticker": "BAIG",
+                "close_price": 37.51,
+                "etf_adj_close": 37.51,
+            },
+        ]
+    )
+    out = iem.backfill_split_adjusted_etf_adj_close(df, corporate_actions_path=ca)
+    pre = float(out.loc[out["date"] == date(2026, 5, 1), "etf_adj_close"].iloc[0])
+    post = float(out.loc[out["date"] == date(2026, 5, 5), "etf_adj_close"].iloc[0])
+    assert abs(pre - 37.2) < 0.01
+    assert abs(post - 37.51) < 0.01
+
+
 def test_merge_close_prices_attaches_yahoo_volume_as_shares_traded():
     base = pd.DataFrame([
         _row("2026-04-01", nav=10.0, sh=1e6, close=9.9, aum=10e6, ticker="VOL"),
