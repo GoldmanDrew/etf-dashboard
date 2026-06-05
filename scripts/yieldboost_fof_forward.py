@@ -151,6 +151,14 @@ def weighted_child_nav_decay_forward(
         else:
             out[key] = None
     out["effective_beta"] = round(acc["effective_beta"], 6) if got["effective_beta"] else None
+    p10 = out.get("expected_gross_decay_p10_annual")
+    p90 = out.get("expected_gross_decay_p90_annual")
+    p50 = out.get("expected_gross_decay_p50_annual")
+    collapsed = (
+        p10 is not None and p90 is not None and p50 is not None
+        and abs(float(p90) - float(p10)) < 1e-9
+    )
+    out["forward_band_collapsed"] = collapsed or not (got["expected_gross_decay_p10_annual"] and got["expected_gross_decay_p90_annual"])
     return out
 
 

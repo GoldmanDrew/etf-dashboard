@@ -1456,6 +1456,7 @@
 <script src="assets/realized_decay.js?v=rd-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
+<script src="assets/fof_chart.js?v=fof-v1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
 <script type="text/babel">
@@ -2944,6 +2945,14 @@ function renderExpectedDecayCell(r, chartVolLookbackRange) {
  * remain as fallbacks for one release (their semantics were also rewritten
  * to NAV-normalized run-rate by `build_legacy_yield_fields`).
  */
+const MAX_INCOME_YIELD_ANNUAL = 1.5;
+
+function incomeYieldAnnualUsable(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_INCOME_YIELD_ANNUAL) return null;
+  return n;
+}
+
 function incomeAnnualYieldForScenario(r, chartVolLookbackRange, scenarioSigma) {
   const IS = typeof window !== 'undefined' ? window.IncomeScenario : null;
   const sigmaScenario = Number(scenarioSigma);
@@ -2953,15 +2962,16 @@ function incomeAnnualYieldForScenario(r, chartVolLookbackRange, scenarioSigma) {
       sigmaAnnual: sigmaScenario,
       calibration,
       crossFundRatio: IS.DEFAULT_CROSS_FUND_RATIO,
+      legacyAnnualYield: incomeYieldAnnualUsable(r?.income_yield_trailing_annual),
     });
     if (calib && Number.isFinite(Number(calib.annualizedDistribution))) {
       return Number(calib.annualizedDistribution);
     }
   }
-  const trailing = Number(r?.income_yield_trailing_annual);
-  if (Number.isFinite(trailing) && trailing > 0) return trailing;
-  const recent = Number(r?.income_yield_recent_annual);
-  if (Number.isFinite(recent) && recent > 0) return recent;
+  const trailing = incomeYieldAnnualUsable(r?.income_yield_trailing_annual);
+  if (trailing != null) return trailing;
+  const recent = incomeYieldAnnualUsable(r?.income_yield_recent_annual);
+  if (recent != null) return recent;
   if (!isYieldBoostIncomeStrategy(r)) return null;
   const raw = chartVolLookbackRange != null && String(chartVolLookbackRange).trim() !== ''
     ? String(chartVolLookbackRange)
@@ -5498,6 +5508,199 @@ function VrpFreshnessBar({ mode, data, vrpHealth, freshnessSummary, row, compact
   return null;
 }
 
+function fofChartPayload(r) {
+  const chart = r?.fof_chart;
+  return chart && chart.ok ? chart : null;
+}
+
+function fofDataStatusTone(r) {
+  const st = String(r?.fof_data_status || '').toLowerCase();
+  if (st === 'ok') return 'ok';
+  if (st === 'partial') return 'warn';
+  return 'bad';
+}
+
+function FoFDataStatusBanner({ r }) {
+  if (!isYieldBoostFoF(r)) return null;
+  const tone = fofDataStatusTone(r);
+  const nMetrics = Number(r?.fof_metrics_days);
+  const rp = r?.fof_realized_pair || {};
+  const stale = fofWeightsStaleDays(r);
+  const cashPct = Number(r?.fof_basket?.cash_pct);
+  const bg = tone === 'ok' ? 'rgba(34,197,94,0.12)' : tone === 'warn' ? 'rgba(234,179,8,0.12)' : 'rgba(239,68,68,0.12)';
+  const border = tone === 'ok' ? 'rgba(34,197,94,0.45)' : tone === 'warn' ? 'rgba(234,179,8,0.45)' : 'rgba(239,68,68,0.45)';
+  return (
+    <div style={{
+      marginBottom: 12,
+      padding: '10px 14px',
+      borderRadius: 10,
+      border: `1px solid ${border}`,
+      background: bg,
+      fontSize: 12,
+      lineHeight: 1.5,
+    }}>
+      <strong>FoF data:</strong>{' '}
+      {Number.isFinite(nMetrics) ? `${nMetrics} metrics day(s)` : 'metrics unknown'}
+      {' · '}
+      realized pair: {rp.ok ? `${rp.n_days || 0} aligned days` : (rp.error || 'not ready')}
+      {Number.isFinite(cashPct) && cashPct > 0 ? <> · cash {cashPct.toFixed(1)}%</> : null}
+      {stale != null ? <> · holdings {stale === 0 ? 'fresh' : `${stale}d stale`}</> : null}
+      {tone !== 'ok' ? (
+        <> — run <code>python scripts/backfill_fof_metrics.py</code> then <code>scripts/build_data.py</code>.</>
+      ) : null}
+    </div>
+  );
+}
+
+function FoFCompareChart({ r, etfSym }) {
+  const ref = useRef(null);
+  const payload = useMemo(() => fofChartPayload(r), [r]);
+  useEffect(() => {
+    const el = ref.current;
+    const fn = typeof window !== 'undefined' && window.FoFChart?.renderFoFCompareChart;
+    if (!el || typeof fn !== 'function') return;
+    fn(el, payload, { fofLabel: etfSym });
+  }, [payload, etfSym]);
+  return (
+    <div className="scenario-card" style={{ marginTop: 0, marginBottom: 12 }}>
+      <div className="scenario-head">
+        <div>
+          <div className="scenario-title">{etfSym} vs weighted basket index</div>
+          <div className="scenario-sub">Native chart: orange = basket TR, blue = FoF, green dashed = spread (basket − FoF). Built from holdings weights + metrics store.</div>
+        </div>
+      </div>
+      <div ref={ref} style={{ minHeight: 320 }} />
+    </div>
+  );
+}
+
+function FoFSparkline({ values, color = '#f97316' }) {
+  const pts = (Array.isArray(values) ? values : []).filter((x) => Number.isFinite(Number(x)));
+  if (pts.length < 2) return <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>;
+  const w = 120;
+  const h = 28;
+  const min = Math.min(...pts);
+  const max = Math.max(...pts);
+  const span = max - min || 1;
+  const path = pts.map((v, i) => {
+    const x = (i / (pts.length - 1)) * w;
+    const y = h - ((v - min) / span) * h;
+    return `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true">
+      <path d={path} fill="none" stroke={color} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function FoFStatsPanel({ r, borrowDisp, chartVolLookbackRange }) {
+  const pair = expectedPairPnlDistribution(r);
+  const meta = r?.fof_forward_meta || {};
+  const basket = r?.fof_basket || {};
+  const bandCollapsed = meta.forward_band_collapsed === true;
+  return (
+    <>
+      <FoFDataStatusBanner r={r} />
+      <div className="chart-stats" style={{ marginTop: 0 }}>
+        <div className="chart-stat">
+          <div className="cs-label">Gross (realiz.)</div>
+          <div className="cs-value">{r.gross_decay_annual != null ? fmtLogYr(r.gross_decay_annual) : '—'}</div>
+          <div className="cs-sub">short FoF vs basket</div>
+        </div>
+        <div className="chart-stat" title={decayDistTooltip(r, chartVolLookbackRange)}>
+          <div className="cs-label">Exp. edge (fwd)</div>
+          <div className="cs-value">{pair?.p50 != null ? fmtLogYr(pair.p50) : '—'}</div>
+          <div className="cs-sub">{bandCollapsed ? 'point est. · band N/A' : `${pair?.p10 != null ? fmtLogYr(pair.p10) : '—'} / ${pair?.p90 != null ? fmtLogYr(pair.p90) : '—'}`}</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Net edge p50</div>
+          <div className="cs-value">{r.net_edge_p50_annual != null ? fmtLogYr(r.net_edge_p50_annual) : '—'}</div>
+          <div className="cs-sub">{r.net_edge_p05_annual != null && r.net_edge_p95_annual != null ? `${fmtLogYr(r.net_edge_p05_annual)} / ${fmtLogYr(r.net_edge_p95_annual)}` : 'bootstrap pending'}</div>
+        </div>
+        <div className="chart-stat" title={borrowSourceHint(borrowDisp)}>
+          <div className="cs-label">FoF borrow</div>
+          <div className={cls('cs-value', borrowCls(borrowDisp.spot))}>{borrowDisp.spot != null ? fmt(borrowDisp.spot) : '—'}</div>
+          <div className="cs-sub">FoF ticker only (not child borrow)</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Effective β</div>
+          <div className="cs-value">{Number.isFinite(Number(r.delta)) ? Number(r.delta).toFixed(3) : '—'}</div>
+          <div className="cs-sub">weighted child basket</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Cash / invested</div>
+          <div className="cs-value">{Number.isFinite(Number(basket.cash_pct)) ? `${Number(basket.cash_pct).toFixed(1)}%` : '—'}</div>
+          <div className="cs-sub">{Number.isFinite(Number(basket.effective_invested_pct)) ? `${Number(basket.effective_invested_pct).toFixed(1)}% invested` : '—'}</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Basket σ (60d)</div>
+          <div className="cs-value">{r.fof_basket_vol_annual != null ? fmt(r.fof_basket_vol_annual) : '—'}</div>
+          <div className="cs-sub">{r.fof_basket_vol?.n_obs != null ? `${r.fof_basket_vol.n_obs} obs` : 'synthetic basket'}</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Metrics days</div>
+          <div className="cs-value">{r.fof_metrics_days != null ? fmtNum(r.fof_metrics_days) : '—'}</div>
+          <div className="cs-sub">FoF NAV store</div>
+        </div>
+        <div className="chart-stat">
+          <div className="cs-label">Shares Avail</div>
+          <div className="cs-value">{fmtNum(r.shares_available)}</div>
+          <div className="cs-sub">{r.borrow_source === 'ibkr_ftp' ? 'IBKR Live' : 'CSV'}</div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function FoFStaticScenarioGrid({ r }) {
+  const grid = r?.fof_scenario_grid;
+  if (!grid?.ok || !Array.isArray(grid.rows)) {
+    return (
+      <div className="scenario-card">
+        <div className="scenario-title">Basket shock scenarios</div>
+        <div className="scenario-warning">Static scenario grid unavailable — rebuild dashboard.</div>
+      </div>
+    );
+  }
+  const horizons = grid.rows[0]?.cells?.map((c) => c.horizon) || ['1M', '3M', '6M'];
+  return (
+    <div className="scenario-card">
+      <div className="scenario-head">
+        <div>
+          <div className="scenario-title">Basket shock scenarios (static)</div>
+          <div className="scenario-sub">
+            Short-favorable gross/net vs proportional basket · σ={fmt(grid.sigma_annual)} · β={Number(grid.effective_beta).toFixed(2)} · simplified (no MC).
+          </div>
+        </div>
+      </div>
+      <div className="scenario-table-wrap">
+        <table className="scenario-table">
+          <thead>
+            <tr>
+              <th>Basket shock (σ)</th>
+              {horizons.map((h) => <th key={h} colSpan={2}>{h} gross / net</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {grid.rows.map((row) => (
+              <tr key={`fof-shock-${row.shock_sigma}`}>
+                <td>{fmtSigmaMultiple(row.shock_sigma)}</td>
+                {row.cells.map((cell) => (
+                  <React.Fragment key={`${row.shock_sigma}-${cell.horizon}`}>
+                    <td>{cell.gross_simple != null ? fmt(cell.gross_simple) : '—'}</td>
+                    <td>{cell.net_simple != null ? fmt(cell.net_simple) : '—'}</td>
+                  </React.Fragment>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function FoFScenarioPanel({ r }) {
   if (!isYieldBoostFoF(r)) return null;
   const pair = expectedPairPnlDistribution(r);
@@ -5506,8 +5709,10 @@ function FoFScenarioPanel({ r }) {
   const stale = fofWeightsStaleDays(r);
   const cashPct = Number(r?.fof_basket?.cash_pct);
   const horizons = Array.isArray(rp?.horizons) ? rp.horizons : [];
+  const bandCollapsed = meta.forward_band_collapsed === true;
   return (
     <>
+      <FoFDataStatusBanner r={r} />
       <div className="scenario-card" style={{ marginTop: 0, marginBottom: 14 }}>
         <div className="scenario-head">
           <div>
@@ -5530,13 +5735,13 @@ function FoFScenarioPanel({ r }) {
           fontVariantNumeric: 'tabular-nums',
         }}>
           <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Exp. edge p50</div><strong>{pair?.p50 != null ? fmtLogYr(pair.p50) : '—'}</strong></div>
-          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>p10 / p90</div><strong>{pair?.p10 != null && pair?.p90 != null ? `${fmtLogYr(pair.p10)} / ${fmtLogYr(pair.p90)}` : '—'}</strong></div>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>p10 / p90</div><strong>{bandCollapsed ? 'band N/A' : (pair?.p10 != null && pair?.p90 != null ? `${fmtLogYr(pair.p10)} / ${fmtLogYr(pair.p90)}` : '—')}</strong></div>
           <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Realized gross</div><strong>{r?.gross_decay_annual != null ? fmtLogYr(r.gross_decay_annual) : '—'}</strong></div>
           <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Net edge p50</div><strong>{r?.net_edge_p50_annual != null ? fmtLogYr(r.net_edge_p50_annual) : '—'}</strong></div>
           <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Net p05 / p95</div><strong>{r?.net_edge_p05_annual != null && r?.net_edge_p95_annual != null ? `${fmtLogYr(r.net_edge_p05_annual)} / ${fmtLogYr(r.net_edge_p95_annual)}` : '—'}</strong></div>
           {meta.child_pair_p50_blend != null ? (
-            <div title="Legacy v1 diagnostic — child short-YB pair blend, not FoF economics">
-              <div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Child pair blend</div>
+            <div title="Legacy v1 diagnostic — child short-YB pair blend, not FoF economics" style={{ opacity: 0.75 }}>
+              <div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Child pair (diag)</div>
               <strong>{fmtLogYr(meta.child_pair_p50_blend)}</strong>
             </div>
           ) : null}
@@ -5578,6 +5783,7 @@ function FoFScenarioPanel({ r }) {
       {(Number(rp?.n_days) > 0 && Number(rp?.n_days) < 40) ? (
         <div className="scenario-warning">Only {rp.n_days} aligned pair days — treat realized gross as indicative until ≥40 days.</div>
       ) : null}
+      <FoFStaticScenarioGrid r={r} />
     </>
   );
 }
@@ -5595,8 +5801,33 @@ function FoFBasketPanel({ r, allRecords = [], onNavigateToChart = null }) {
   const otherPct = Number(basket.other_pct);
   const childLookup = (sym) => (Array.isArray(allRecords) ? allRecords : [])
     .find((x) => String(x?.symbol || '').toUpperCase() === String(sym || '').toUpperCase());
+  const pair = expectedPairPnlDistribution(r);
+  const maxUndWeight = undWeights.length ? Math.max(...undWeights.map((x) => x.weight)) : 0;
   return (
     <div className="chart-section">
+      <FoFDataStatusBanner r={r} />
+      <div className="scenario-card" style={{ marginTop: 0 }}>
+        <div className="scenario-head">
+          <div>
+            <div className="scenario-title">FoF summary</div>
+            <div className="scenario-sub">Holdings as-of <strong>{basket.as_of || '—'}</strong></div>
+          </div>
+        </div>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+          gap: 10,
+          fontSize: 12,
+          marginBottom: 10,
+        }}>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Gross realiz.</div><strong>{r.gross_decay_annual != null ? fmtLogYr(r.gross_decay_annual) : '—'}</strong></div>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Fwd p50</div><strong>{pair?.p50 != null ? fmtLogYr(pair.p50) : '—'}</strong></div>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Net p50</div><strong>{r.net_edge_p50_annual != null ? fmtLogYr(r.net_edge_p50_annual) : '—'}</strong></div>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Cash</div><strong>{Number.isFinite(cashPct) ? `${cashPct.toFixed(1)}%` : '—'}</strong></div>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Basket σ</div><strong>{r.fof_basket_vol_annual != null ? fmt(r.fof_basket_vol_annual) : '—'}</strong></div>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>60d basket</div><FoFSparkline values={r.fof_basket_sparkline} /></div>
+        </div>
+      </div>
       <div className="scenario-card" style={{ marginTop: 0 }}>
         <div className="scenario-head">
           <div>
@@ -5632,7 +5863,8 @@ function FoFBasketPanel({ r, allRecords = [], onNavigateToChart = null }) {
                 <th>Underlying</th>
                 <th>Weight</th>
                 <th>Child gross</th>
-                <th>Child Exp. edge</th>
+                <th>Child NAV fwd</th>
+                <th>Child pair (diag)</th>
                 <th></th>
               </tr>
             </thead>
@@ -5648,7 +5880,8 @@ function FoFBasketPanel({ r, allRecords = [], onNavigateToChart = null }) {
                     <td>{und || '—'}</td>
                     <td>{Number.isFinite(w) ? `${w.toFixed(2)}%` : '—'}</td>
                     <td>{childRec?.gross_decay_annual != null ? fmt(childRec.gross_decay_annual) : '—'}</td>
-                    <td>{childRec?.expected_pair_pnl_p50_annual != null ? fmtLogYr(childRec.expected_pair_pnl_p50_annual) : '—'}</td>
+                    <td>{childRec?.expected_gross_decay_p50_annual != null ? fmtLogYr(childRec.expected_gross_decay_p50_annual) : (childRec?.expected_pair_pnl_p50_annual != null ? fmtLogYr(childRec.expected_pair_pnl_p50_annual) : '—')}</td>
+                    <td style={{ color: 'var(--text-muted)' }}>{childRec?.expected_pair_pnl_p50_annual != null ? fmtLogYr(childRec.expected_pair_pnl_p50_annual) : '—'}</td>
                     <td>
                       {onNavigateToChart && yb ? (
                         <button type="button" className="sym-link-btn" onClick={() => { window.location.hash = `/chart/${encodeURIComponent(yb)}`; }}>chart</button>
@@ -5678,6 +5911,7 @@ function FoFBasketPanel({ r, allRecords = [], onNavigateToChart = null }) {
               <tr>
                 <th>Underlying</th>
                 <th>Norm. weight</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -5685,6 +5919,20 @@ function FoFBasketPanel({ r, allRecords = [], onNavigateToChart = null }) {
                 <tr key={x.underlying}>
                   <td><strong>{x.underlying}</strong></td>
                   <td>{(x.weight * 100).toFixed(1)}%</td>
+                  <td style={{ width: '45%' }}>
+                    <div style={{
+                      height: 8,
+                      borderRadius: 4,
+                      background: 'rgba(120,130,160,0.2)',
+                      overflow: 'hidden',
+                    }}>
+                      <div style={{
+                        width: `${maxUndWeight > 0 ? (x.weight / maxUndWeight) * 100 : 0}%`,
+                        height: '100%',
+                        background: 'rgba(249,115,22,0.75)',
+                      }} />
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -5904,7 +6152,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     };
   }, [vrpHealth]);
   const showBacktestPanel = !isFoF && Boolean(String(undSym || '').trim()) && String(undSym).toUpperCase() !== 'BASKET';
-  const showFoFDecayPanel = isFoF && Boolean(fofRealizedPair?.ok);
+  const showFoFDecayPanel = isFoF;
   const showDecayPanel = showBacktestPanel || showFoFDecayPanel;
   const showBasketPanel = isFoF;
   useEffect(() => {
@@ -7025,7 +7273,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const buildDefaultTradeLegs = useCallback(() => {
     if (isYieldBoostFoF(r)) {
       const weights = tradeUnderlyingGroup.undWeights || {};
-      const entries = Object.entries(weights).filter(([, w]) => Number(w) > 0);
+      let entries = Object.entries(weights).filter(([, w]) => Number(w) > 0);
+      const nChild = (Array.isArray(r?.fof_basket?.children) ? r.fof_basket.children : []).length;
+      if (entries.length > 8) {
+        entries = entries
+          .sort((a, b) => Number(b[1]) - Number(a[1]))
+          .slice(0, 5);
+      }
       const wsum = entries.reduce((s, [, w]) => s + Number(w), 0) || 1;
       const baseQty = 100;
       const legs = [
@@ -7410,8 +7664,17 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
       {activePanel === 'chart' && (
         <div className="chart-section">
-          {/* TradingView chart in sandboxed iframe via srcdoc */}
-          <div className="chart-container">
+          {isFoF ? (
+            <>
+              <FoFDataStatusBanner r={r} />
+              <FoFCompareChart r={r} etfSym={etfSym} />
+              <div className="chart-note" style={{ marginBottom: 10 }}>
+                TradingView below compares {etfSym} to <strong>{chartCompareSym}</strong> (largest basket weight — proxy only).
+                Use the native basket chart above for the full weighted underlying index.
+              </div>
+            </>
+          ) : null}
+          <div className="chart-container" style={isFoF ? { maxHeight: 360 } : undefined}>
             {!iframeLoaded && (
               <div className="chart-loading">
                 <div className="spinner" style={{ marginRight: 8 }} />
@@ -7429,17 +7692,44 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             />
           </div>
 
-          <div className="chart-note">
-            Chart shows % change comparison with {etfSym} (blue) vs {isFoF ? (
-              <>{chartCompareSym} (largest basket weight — proxy; see Basket tab for full weights)</>
-            ) : (
-              <>{undSym || 'underlying'} (orange)</>
-            )}.
-            TradingView may not expose formal total-return series for every symbol.
-            Use the dividend adjustment panel below for explicit period dividend impact.
-            {isFoF ? ' FoF vs weighted basket TR is computed at build time for realized gross / Decay.' : null}
-          </div>
+          {!isFoF ? (
+            <div className="chart-note">
+              Chart shows % change comparison with {etfSym} (blue) vs {undSym || 'underlying'} (orange).
+              TradingView may not expose formal total-return series for every symbol.
+            </div>
+          ) : null}
 
+          {isFoF ? (
+            <div className="chart-stats">
+              {(() => {
+                const cp = fofChartPayload(r);
+                return (
+                  <>
+                    <div className="chart-stat">
+                      <div className="cs-label">{etfSym} ({activeTf.label})</div>
+                      <div className="cs-value">{cp?.fof_end_pct != null ? `${cp.fof_end_pct >= 0 ? '+' : ''}${Number(cp.fof_end_pct).toFixed(2)}%` : '—'}</div>
+                      <div className="cs-sub">vs basket start · native chart</div>
+                    </div>
+                    <div className="chart-stat">
+                      <div className="cs-label">Basket index ({activeTf.label})</div>
+                      <div className="cs-value">{cp?.basket_end_pct != null ? `${cp.basket_end_pct >= 0 ? '+' : ''}${Number(cp.basket_end_pct).toFixed(2)}%` : '—'}</div>
+                      <div className="cs-sub">weighted underlying TR</div>
+                    </div>
+                    <div className="chart-stat">
+                      <div className="cs-label">Pair spread</div>
+                      <div className="cs-value">{cp?.spread_end_pct != null ? `${cp.spread_end_pct >= 0 ? '+' : ''}${Number(cp.spread_end_pct).toFixed(2)}%` : '—'}</div>
+                      <div className="cs-sub">basket − FoF (short-favorable +)</div>
+                    </div>
+                    <div className="chart-stat">
+                      <div className="cs-label">Realized gross</div>
+                      <div className="cs-value">{r.gross_decay_annual != null ? fmtLogYr(r.gross_decay_annual) : '—'}</div>
+                      <div className="cs-sub">{r.fof_realized_pair?.n_days != null ? `${r.fof_realized_pair.n_days} aligned days` : 'pending metrics'}</div>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          ) : (
           <div className="chart-stats">
             <div className="chart-stat">
               <div className="cs-label">{etfSym} Dividends ({activeTf.label})</div>
@@ -7462,11 +7752,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-sub">live spot vs window end (split-adj) • dividend lift: {undDivLift == null ? '—' : fmt(undDivLift)}</div>
             </div>
           </div>
+          )}
         </div>
       )}
 
       {activePanel === 'stats' && (
         <div className="chart-section">
+          {isFoF ? (
+            <FoFStatsPanel r={r} borrowDisp={borrowDisp} chartVolLookbackRange={chartVolLookbackRange} />
+          ) : (
+          <>
           {/* Stats Grid — vol / decay / edge aligned with main table (COLS) */}
           <div className="chart-stats" style={{ marginTop: 0 }}>
             <div className="chart-stat">
@@ -7990,6 +8285,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           {!etfMetricsLoading && !etfMetricsError && etfMetricsSeries.length === 0 && (
             <div className="scenario-warning">No ETF metrics history available yet for {etfSym}.</div>
           )}
+          </>
+          )}
         </div>
       )}
 
@@ -7998,7 +8295,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           {isYieldBoostFoF(r) ? (
             <>
               <FoFScenarioPanel r={r} />
-              <FoFBasketPanel r={r} allRecords={allRecords} onNavigateToChart={onNavigateToChart} />
+              <div className="chart-note">Full holdings breakdown on the <button type="button" className="sym-link-btn" onClick={() => navigateChartPanel('basket')}>Basket</button> tab.</div>
             </>
           ) : null}
           {isYieldBoostIncomeStrategy(r) ? (
@@ -8299,7 +8596,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     <>
                       FoF synthetic pair: short <strong>{etfSym}</strong> + weighted long underlyings
                       ({fofUnderlyingTooltip(r)}). Child YB ETFs and peers listed below for hedging.
-                      Base legs prefilled from basket weights.
+                      Base legs prefilled from basket weights
+                      {(Array.isArray(r?.fof_basket?.children) ? r.fof_basket.children.length : 0) > 8
+                        ? ' (top-5 underlyings for YBST; full basket on Basket tab).'
+                        : '.'}
                     </>
                   ) : (
                     <>
@@ -8717,19 +9017,20 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
           {isFoF && !fofRealizedPair?.ok ? (
             <div className="scenario-warning">{fofRealizedPair?.error || 'FoF realized pair metrics not ready — run backfill_fof_metrics.py + build_data.py.'}</div>
-          ) : isFoF && Number(fofRealizedPair?.n_days) > 0 && Number(fofRealizedPair?.n_days) < 40 ? (
+          ) : null}
+          {isFoF && fofRealizedPair?.ok && Number(fofRealizedPair?.n_days) > 0 && Number(fofRealizedPair?.n_days) < 40 ? (
             <div className="scenario-warning">FoF realized pair: only {fofRealizedPair.n_days} aligned days — horizons may be partial until ≥40 days.</div>
           ) : null}
           {isFoF && fofWeightsStaleDays(r) != null && fofWeightsStaleDays(r) > 14 ? (
             <div className="scenario-warning">Granite holdings weights are {fofWeightsStaleDays(r)} calendar days stale — rebalance drift may affect realized pair.</div>
           ) : null}
 
-          {isFoF && !fofRealizedPair?.ok ? (
-            null
-          ) : !isFoF && etfMetricsLoading ? (
+          {!isFoF && etfMetricsLoading ? (
             <div className="scenario-warning">Loading ETF metrics…</div>
           ) : !isFoF && etfMetricsError ? (
             <div className="scenario-warning">{etfMetricsError}</div>
+          ) : (isFoF && !fofRealizedPair?.ok) ? (
+            <div className="chart-note">Decay horizons will populate once FoF NAV history reaches ≥5 aligned basket days.</div>
           ) : (
             <>
               {!isFoF ? <TrCoverageBadge coverage={decayTrCoverage} etfLabel={etfSym} /> : null}

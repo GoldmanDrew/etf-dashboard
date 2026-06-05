@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -39,6 +40,8 @@ from ingest_etf_metrics import (  # noqa: E402
     validate_df,
 )
 from yieldboost_fof_constants import YIELDBOOST_FOF_SYMBOLS
+from yieldboost_fof_basket_series import build_synthetic_fof_nav_series
+from yieldboost_fof_holdings import build_fof_holdings_history, load_holdings_frame
 
 LOGGER = logging.getLogger("backfill_fof_metrics")
 FOF_LISTING_FALLBACK = date(2025, 1, 2)
@@ -189,6 +192,51 @@ def build_fof_metrics_frame(
     return out.loc[keep].reset_index(drop=True)
 
 
+def build_child_synthetic_fof_metrics_frame(
+    sym_u: str,
+    history_snaps: list[dict],
+    metrics: pd.DataFrame,
+) -> pd.DataFrame:
+    """When Yahoo/Granite FoF history is thin, infer NAV from weighted child ETF adj closes."""
+    synth = build_synthetic_fof_nav_series(history_snaps, metrics)
+    if synth.empty or len(synth) < 5:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+    ingested = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for d, nav in synth.items():
+        try:
+            nav_f = float(nav)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(nav_f) or nav_f <= 0:
+            continue
+        rows.append({
+            "date": pd.to_datetime(str(d)[:10]).date(),
+            "ticker": sym_u,
+            "nav": round(nav_f, 6),
+            "aum": None,
+            "shares_outstanding": None,
+            "shares_traded": None,
+            "close_price": round(nav_f, 6),
+            "etf_adj_close": round(nav_f, 6),
+            "underlying_adj_close": None,
+            "stale": False,
+            "stale_age_bdays": None,
+            "stale_kind": None,
+            "source_provider": "fof_child_synthetic",
+            "source_url": None,
+            "ingested_at_utc": ingested,
+            "status": "partial",
+        })
+    if not rows:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+    out = pd.DataFrame(rows)
+    for c in REQUIRED_COLUMNS:
+        if c not in out.columns:
+            out[c] = None
+    return out.reset_index(drop=True)
+
+
 def merge_fof_metrics_into_store(
     existing: pd.DataFrame,
     *,
@@ -206,6 +254,8 @@ def merge_fof_metrics_into_store(
 
     added: dict[str, int] = {}
     merged = base
+    holdings_df = load_holdings_frame()
+    history_by_sym = build_fof_holdings_history(holdings_df)
     for sym in YIELDBOOST_FOF_SYMBOLS:
         sym_u = sym.upper()
         sub = merged[merged["ticker"] == sym_u] if not merged.empty else pd.DataFrame()
@@ -223,6 +273,13 @@ def merge_fof_metrics_into_store(
                 start = min_d
 
         frame = build_fof_metrics_frame(sym_u, start, end)
+        snaps = history_by_sym.get(sym_u) or []
+        if len(frame) < min_rows and snaps:
+            synth = build_child_synthetic_fof_metrics_frame(sym_u, snaps, merged if not merged.empty else metrics_from_store(existing))
+            if not synth.empty:
+                frame = upsert(frame, synth) if not frame.empty else synth
+                LOGGER.info("%s: child-synthetic supplement → %d row(s)", sym_u, len(frame))
+
         if frame.empty:
             LOGGER.warning("%s: no bootstrap rows built", sym_u)
             added[sym_u] = 0
@@ -234,6 +291,12 @@ def merge_fof_metrics_into_store(
         LOGGER.info("%s: upserted %d row(s), total now %d", sym_u, added[sym_u], len(merged[merged["ticker"] == sym_u]))
 
     return merged, added
+
+
+def metrics_from_store(existing: pd.DataFrame) -> pd.DataFrame:
+    if existing is None or existing.empty:
+        return pd.DataFrame()
+    return existing.copy()
 
 
 def bootstrap_fof_nav_history(

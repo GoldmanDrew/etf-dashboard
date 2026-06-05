@@ -17,6 +17,10 @@ from yieldboost_fof_forward import (
     weighted_child_nav_decay_forward,
     weighted_child_pair_pnl_blend,
 )
+from yieldboost_fof_basket_series import (
+    build_synthetic_fof_nav_series,
+    enrich_fof_dashboard_extras,
+)
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _TRADING_DAYS = 252
@@ -126,6 +130,10 @@ def compute_fof_realized_pair_metrics(
 ) -> dict[str, Any]:
     """Short FoF vs weighted underlying long basket — log-drag series."""
     fof_px = _fof_nav_series(metrics, fof_symbol)
+    if len(fof_px) < 5 and history_snaps:
+        synth = build_synthetic_fof_nav_series(history_snaps, metrics)
+        if len(synth) >= 5:
+            fof_px = synth
     if fof_px.empty or len(fof_px) < 5:
         return {"ok": False, "error": "insufficient FoF price history"}
 
@@ -251,6 +259,11 @@ def build_fof_dashboard_record(
 
     fwd = weighted_child_nav_decay_forward(basket, child_records)
     child_diag = weighted_child_pair_pnl_blend(basket, child_records)
+    fof_px = _fof_nav_series(metrics, sym)
+    if len(fof_px) < 5 and history_snaps:
+        synth = build_synthetic_fof_nav_series(history_snaps, metrics)
+        if len(synth) >= len(fof_px):
+            fof_px = synth
     realized = compute_fof_realized_pair_metrics(
         sym,
         history_snaps,
@@ -344,9 +357,22 @@ def build_fof_dashboard_record(
             "child_pair_p90_blend": child_diag.get("child_pair_p90_annual"),
             "expense_ratio_annual": fwd.get("expense_ratio_annual"),
             "cash_drag_annual": fwd.get("cash_drag_annual"),
+            "forward_band_collapsed": fwd.get("forward_band_collapsed"),
         },
         "fof_realized_pair": realized if realized.get("ok") else {"ok": False, "error": realized.get("error")},
     }
+    extras = enrich_fof_dashboard_extras(
+        sym,
+        history_snaps=history_snaps,
+        metrics=metrics,
+        fof_px=fof_px,
+        forward_p50=exp_p50,
+        effective_beta=fwd.get("effective_beta"),
+        borrow_annual=borrow_current,
+    )
+    rec.update(extras)
+    if extras.get("fof_basket_vol", {}).get("vol_annual") is not None:
+        rec["fof_basket_vol_annual"] = extras["fof_basket_vol"]["vol_annual"]
     if und_list:
         rec["fof_underlyings"] = [
             {"underlying": u, "weight": und_weights[u]} for u in und_list
