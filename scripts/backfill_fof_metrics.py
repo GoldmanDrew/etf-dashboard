@@ -165,6 +165,21 @@ def build_fof_metrics_frame(
         provider = gran["source_provider"] if gran else "yahoo_fof_bootstrap"
         source_url = gran["source_url"] if gran else None
 
+        # Reject Granite spot rows that disagree with Yahoo close scale (prevents chart spikes).
+        if nav is not None and close is not None and close > 0:
+            ratio = float(nav) / float(close)
+            if ratio < 0.5 or ratio > 2.0:
+                LOGGER.warning(
+                    "%s %s: Granite NAV %.4f vs Yahoo close %.4f — skip issuer overlay",
+                    sym_u,
+                    d,
+                    nav,
+                    close,
+                )
+                nav = None
+                status = "missing"
+                provider = "yahoo_fof_bootstrap"
+
         rows.append({
             "date": d,
             "ticker": sym_u,
@@ -237,13 +252,51 @@ def build_child_synthetic_fof_metrics_frame(
     return out.reset_index(drop=True)
 
 
+def _purge_fof_scale_anomalies(df: pd.DataFrame, sym_u: str) -> pd.DataFrame:
+    """Drop FoF rows with impossible one-day level jumps (mixed synthetic + issuer spot)."""
+    if df is None or df.empty:
+        return df
+    sub = df[df["ticker"] == sym_u].sort_values("date").copy()
+    if len(sub) < 2:
+        return df
+    keep_dates: set[date] = set()
+    prev_nav: float | None = None
+    for _, row in sub.iterrows():
+        nav = pd.to_numeric(row.get("nav"), errors="coerce")
+        if nav is None or not math.isfinite(float(nav)) or float(nav) <= 0:
+            continue
+        nav_f = float(nav)
+        if prev_nav is not None:
+            ratio = nav_f / prev_nav
+            if ratio > 1.0 + _MAX_DAILY_RETURN or ratio < 1.0 - _MAX_DAILY_RETURN:
+                LOGGER.warning(
+                    "%s %s: drop anomalous FoF NAV %.4f (prev %.4f, ratio %.3f)",
+                    sym_u,
+                    row["date"],
+                    nav_f,
+                    prev_nav,
+                    ratio,
+                )
+                continue
+        keep_dates.add(row["date"])
+        prev_nav = nav_f
+    if not keep_dates:
+        return df
+    drop_mask = (df["ticker"] == sym_u) & (~df["date"].isin(keep_dates))
+    return df.loc[~drop_mask].reset_index(drop=True)
+
+
+_MAX_DAILY_RETURN = 0.35
+
+
 def merge_fof_metrics_into_store(
     existing: pd.DataFrame,
     *,
     end: date | None = None,
     min_rows: int = MIN_ROWS_TARGET,
-) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Upsert FoF history; return merged frame and per-symbol row counts added."""
+    refresh_synthetic: bool = True,
+) -> tuple[pd.DataFrame, dict[str, int], bool]:
+    """Upsert FoF history; return merged frame, per-symbol row deltas, and whether store changed."""
     end = end or date.today()
     if existing is None or existing.empty:
         base = pd.DataFrame(columns=REQUIRED_COLUMNS)
@@ -253,6 +306,7 @@ def merge_fof_metrics_into_store(
         base["ticker"] = base["ticker"].astype(str).str.upper()
 
     added: dict[str, int] = {}
+    changed = False
     merged = base
     holdings_df = load_holdings_frame()
     history_by_sym = build_fof_holdings_history(holdings_df)
@@ -260,7 +314,33 @@ def merge_fof_metrics_into_store(
         sym_u = sym.upper()
         sub = merged[merged["ticker"] == sym_u] if not merged.empty else pd.DataFrame()
         existing_n = len(sub)
+        snaps = history_by_sym.get(sym_u) or []
+
+        if refresh_synthetic and snaps:
+            synth = build_child_synthetic_fof_metrics_frame(
+                sym_u,
+                snaps,
+                merged if not merged.empty else metrics_from_store(existing),
+            )
+            if not synth.empty:
+                if not sub.empty:
+                    merged = merged[
+                        ~((merged["ticker"] == sym_u) & (merged["source_provider"] == "fof_child_synthetic"))
+                    ].reset_index(drop=True)
+                merged = upsert(merged, synth)
+                merged = _purge_fof_scale_anomalies(merged, sym_u)
+                added[sym_u] = len(merged[merged["ticker"] == sym_u]) - existing_n
+                changed = True
+                LOGGER.info(
+                    "%s: refreshed child-synthetic NAV → %d row(s) (%+d)",
+                    sym_u,
+                    len(merged[merged["ticker"] == sym_u]),
+                    added[sym_u],
+                )
+                continue
+
         if existing_n >= min_rows:
+            merged = _purge_fof_scale_anomalies(merged, sym_u)
             LOGGER.info("%s already has %d rows — skip", sym_u, existing_n)
             added[sym_u] = 0
             continue
@@ -273,7 +353,6 @@ def merge_fof_metrics_into_store(
                 start = min_d
 
         frame = build_fof_metrics_frame(sym_u, start, end)
-        snaps = history_by_sym.get(sym_u) or []
         if len(frame) < min_rows and snaps:
             synth = build_child_synthetic_fof_metrics_frame(sym_u, snaps, merged if not merged.empty else metrics_from_store(existing))
             if not synth.empty:
@@ -287,10 +366,13 @@ def merge_fof_metrics_into_store(
 
         before = len(merged)
         merged = upsert(merged, frame)
+        merged = _purge_fof_scale_anomalies(merged, sym_u)
         added[sym_u] = len(merged) - before
+        if added[sym_u] != 0:
+            changed = True
         LOGGER.info("%s: upserted %d row(s), total now %d", sym_u, added[sym_u], len(merged[merged["ticker"] == sym_u]))
 
-    return merged, added
+    return merged, added, changed
 
 
 def metrics_from_store(existing: pd.DataFrame) -> pd.DataFrame:
@@ -306,8 +388,8 @@ def bootstrap_fof_nav_history(
 ) -> pd.DataFrame:
     """Called from ingest/build pipelines to ensure FoF metrics exist."""
     existing = existing if existing is not None else load_existing()
-    merged, added = merge_fof_metrics_into_store(existing)
-    if save and any(v > 0 for v in added.values()):
+    merged, added, changed = merge_fof_metrics_into_store(existing)
+    if save and changed:
         merged, _ = collapse_redundant_consecutive_rows(merged)
         merged = enforce_status_consistency(merged)
         validate_df(merged)
@@ -323,7 +405,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     existing = load_existing()
-    merged, added = merge_fof_metrics_into_store(existing, min_rows=args.min_rows)
+    merged, added, changed = merge_fof_metrics_into_store(existing, min_rows=args.min_rows)
     LOGGER.info("Added rows: %s", added)
 
     if args.dry_run:
@@ -332,7 +414,7 @@ def main() -> None:
             LOGGER.info("Would have %d rows for %s", n, sym)
         return
 
-    if not any(v > 0 for v in added.values()):
+    if not changed:
         if not merged.empty and all(
             len(merged[merged["ticker"] == s.upper()]) >= args.min_rows
             for s in YIELDBOOST_FOF_SYMBOLS

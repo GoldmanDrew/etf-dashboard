@@ -1456,7 +1456,7 @@
 <script src="assets/realized_decay.js?v=rd-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
-<script src="assets/fof_chart.js?v=fof-v1"></script>
+<script src="assets/fof_chart.js?v=fof-v3"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
 <script type="text/babel">
@@ -5508,9 +5508,14 @@ function VrpFreshnessBar({ mode, data, vrpHealth, freshnessSummary, row, compact
   return null;
 }
 
-function fofChartPayload(r) {
+function fofChartPayload(r, rangeKey) {
   const chart = r?.fof_chart;
-  return chart && chart.ok ? chart : null;
+  if (!chart || !chart.ok) return null;
+  const fn = typeof window !== 'undefined' && window.FoFChart?.sliceFoFChartPayload;
+  if (typeof fn === 'function' && rangeKey) {
+    return fn(chart, rangeKey);
+  }
+  return chart;
 }
 
 function fofDataStatusTone(r) {
@@ -5552,21 +5557,21 @@ function FoFDataStatusBanner({ r }) {
   );
 }
 
-function FoFCompareChart({ r, etfSym }) {
+function FoFCompareChart({ r, etfSym, rangeKey }) {
   const ref = useRef(null);
-  const payload = useMemo(() => fofChartPayload(r), [r]);
+  const payload = useMemo(() => fofChartPayload(r, rangeKey), [r, rangeKey]);
   useEffect(() => {
     const el = ref.current;
     const fn = typeof window !== 'undefined' && window.FoFChart?.renderFoFCompareChart;
     if (!el || typeof fn !== 'function') return;
-    fn(el, payload, { fofLabel: etfSym });
-  }, [payload, etfSym]);
+    fn(el, r?.fof_chart, { fofLabel: etfSym, range: rangeKey });
+  }, [r?.fof_chart, etfSym, rangeKey]);
   return (
     <div className="scenario-card" style={{ marginTop: 0, marginBottom: 12 }}>
       <div className="scenario-head">
         <div>
           <div className="scenario-title">{etfSym} vs weighted basket index</div>
-          <div className="scenario-sub">Native chart: orange = basket TR, blue = FoF, green dashed = spread (basket − FoF). Built from holdings weights + metrics store.</div>
+          <div className="scenario-sub">Native chart: orange = basket TR, blue = FoF, green dashed = spread (basket − FoF). Compounded daily returns from child NAV + underlying panel; timeframe buttons slice the window.</div>
         </div>
       </div>
       <div ref={ref} style={{ minHeight: 320 }} />
@@ -7667,14 +7672,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           {isFoF ? (
             <>
               <FoFDataStatusBanner r={r} />
-              <FoFCompareChart r={r} etfSym={etfSym} />
-              <div className="chart-note" style={{ marginBottom: 10 }}>
-                TradingView below compares {etfSym} to <strong>{chartCompareSym}</strong> (largest basket weight — proxy only).
-                Use the native basket chart above for the full weighted underlying index.
-              </div>
+              <FoFCompareChart r={r} etfSym={etfSym} rangeKey={activeTf.range} />
             </>
           ) : null}
-          <div className="chart-container" style={isFoF ? { maxHeight: 360 } : undefined}>
+          {!isFoF ? (
+          <div className="chart-container">
             {!iframeLoaded && (
               <div className="chart-loading">
                 <div className="spinner" style={{ marginRight: 8 }} />
@@ -7691,24 +7693,29 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               loading="eager"
             />
           </div>
+          ) : null}
 
           {!isFoF ? (
             <div className="chart-note">
               Chart shows % change comparison with {etfSym} (blue) vs {undSym || 'underlying'} (orange).
               TradingView may not expose formal total-return series for every symbol.
             </div>
-          ) : null}
+          ) : (
+            <div className="chart-note">
+              Native basket chart: orange = weighted underlying TR, blue = FoF (compounded child NAV), green dashed = spread (basket − FoF, short-favorable +).
+            </div>
+          )}
 
           {isFoF ? (
             <div className="chart-stats">
               {(() => {
-                const cp = fofChartPayload(r);
+                const cp = fofChartPayload(r, activeTf.range);
                 return (
                   <>
                     <div className="chart-stat">
                       <div className="cs-label">{etfSym} ({activeTf.label})</div>
                       <div className="cs-value">{cp?.fof_end_pct != null ? `${cp.fof_end_pct >= 0 ? '+' : ''}${Number(cp.fof_end_pct).toFixed(2)}%` : '—'}</div>
-                      <div className="cs-sub">vs basket start · native chart</div>
+                      <div className="cs-sub">vs window start · compounded TR</div>
                     </div>
                     <div className="chart-stat">
                       <div className="cs-label">Basket index ({activeTf.label})</div>

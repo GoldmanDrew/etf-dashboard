@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,14 @@ _SCENARIO_HORIZONS = (
     ("6M", 126 / _TRADING_DAYS),
 )
 _SCENARIO_SHOCKS = (-1.0, -0.5, 0.0, 0.5, 1.0)
+_MAX_DAILY_RETURN = 0.35
+_FOF_CHART_RANGE_DAYS: dict[str, int] = {
+    "1M": 21,
+    "3M": 63,
+    "6M": 126,
+    "12M": 252,
+    "ALL": 0,
+}
 
 
 def _norm_sym(s: object) -> str:
@@ -31,7 +39,14 @@ def _tickers_for_underlying(underlying: str) -> list[str]:
     return [_norm_sym(t) for t in tickers]
 
 
-def _child_adj_series(metrics: pd.DataFrame, yb_etf: str) -> pd.Series:
+def _price_col(sub: pd.DataFrame, col: str) -> pd.Series:
+    if col not in sub.columns:
+        return pd.Series(index=sub.index, dtype=float)
+    return pd.to_numeric(sub[col], errors="coerce")
+
+
+def _child_price_series(metrics: pd.DataFrame, yb_etf: str) -> pd.Series:
+    """Child ETF price path for FoF rollup — issuer NAV first, then adj close."""
     sym = _norm_sym(yb_etf)
     if metrics.empty:
         return pd.Series(dtype=float)
@@ -39,11 +54,10 @@ def _child_adj_series(metrics: pd.DataFrame, yb_etf: str) -> pd.Series:
     if sub.empty:
         return pd.Series(dtype=float)
     sub = sub.sort_values("date")
-    px = pd.to_numeric(sub.get("etf_adj_close"), errors="coerce")
-    if px.notna().sum() < 3:
-        px = pd.to_numeric(sub.get("nav"), errors="coerce")
-    if px.notna().sum() < 3:
-        px = pd.to_numeric(sub.get("close_price"), errors="coerce")
+    nav_s = _price_col(sub, "nav")
+    adj_s = _price_col(sub, "etf_adj_close")
+    close_s = _price_col(sub, "close_price")
+    px = nav_s.fillna(adj_s).fillna(close_s)
     out = pd.Series(px.values, index=sub["date"].astype(str))
     return out.dropna()
 
@@ -84,11 +98,76 @@ def _child_weights_for_date(history_snaps: list[dict[str, Any]], d: str) -> dict
     return out
 
 
+def _compound_weighted_index(
+    dates: list[str],
+    weight_fn: Callable[[str], dict[str, float]],
+    price_maps: dict[str, pd.Series],
+) -> pd.Series:
+    """Total-return index (base=100) via compounded daily weighted log returns."""
+    if not dates:
+        return pd.Series(dtype=float)
+
+    index_vals: list[float] = []
+    valid_dates: list[str] = []
+    level = 100.0
+    prev_prices: dict[str, float] = {}
+
+    for d in dates:
+        wmap = weight_fn(d)
+        if not wmap:
+            continue
+        prices: dict[str, float] = {}
+        for sym, w in wmap.items():
+            if w <= 0:
+                continue
+            s = price_maps.get(sym)
+            if s is None or d not in s.index:
+                continue
+            try:
+                px = float(s.loc[d])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(px) and px > 0:
+                prices[sym] = px
+        if not prices:
+            continue
+        if not prev_prices:
+            prev_prices = prices
+            valid_dates.append(d)
+            index_vals.append(level)
+            continue
+
+        log_ret = 0.0
+        wsum = 0.0
+        for sym, w in wmap.items():
+            if sym not in prices or sym not in prev_prices:
+                continue
+            try:
+                r = math.log(prices[sym] / prev_prices[sym])
+            except (ValueError, ZeroDivisionError):
+                continue
+            if not math.isfinite(r) or abs(r) > _MAX_DAILY_RETURN:
+                continue
+            log_ret += w * r
+            wsum += w
+        if wsum <= 0:
+            continue
+        log_ret /= wsum
+        level *= math.exp(log_ret)
+        prev_prices = prices
+        valid_dates.append(d)
+        index_vals.append(level)
+
+    if not valid_dates:
+        return pd.Series(dtype=float)
+    return pd.Series(index_vals, index=valid_dates)
+
+
 def build_synthetic_fof_nav_series(
     history_snaps: list[dict[str, Any]],
     metrics: pd.DataFrame,
 ) -> pd.Series:
-    """Implied FoF level from weighted child ETF adj closes (rebased to 100)."""
+    """Implied FoF TR index from weighted child ETF NAVs (compounded daily returns)."""
     if not history_snaps:
         return pd.Series(dtype=float)
     child_maps: dict[str, pd.Series] = {}
@@ -98,54 +177,25 @@ def build_synthetic_fof_nav_series(
             yb = _norm_sym(c.get("yb_etf"))
             if not yb or yb in child_maps:
                 continue
-            s = _child_adj_series(metrics, yb)
+            s = _child_price_series(metrics, yb)
             if not s.empty:
                 child_maps[yb] = s
                 all_dates.update(s.index.tolist())
     if not child_maps:
         return pd.Series(dtype=float)
-
     dates = sorted(all_dates)
-    nav_vals: list[float] = []
-    valid_dates: list[str] = []
-    base_level: float | None = None
-    for d in dates:
-        wmap = _child_weights_for_date(history_snaps, d)
-        if not wmap:
-            continue
-        level = 0.0
-        wsum = 0.0
-        for yb, w in wmap.items():
-            s = child_maps.get(yb)
-            if s is None or d not in s.index:
-                continue
-            try:
-                px = float(s.loc[d])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if not math.isfinite(px) or px <= 0:
-                continue
-            level += w * px
-            wsum += w
-        if wsum <= 0:
-            continue
-        level /= wsum
-        if base_level is None:
-            base_level = level
-        if base_level <= 0:
-            continue
-        nav_vals.append(100.0 * level / base_level)
-        valid_dates.append(d)
-    if not valid_dates:
-        return pd.Series(dtype=float)
-    return pd.Series(nav_vals, index=valid_dates)
+    return _compound_weighted_index(
+        dates,
+        lambda d: _child_weights_for_date(history_snaps, d),
+        child_maps,
+    )
 
 
 def build_basket_tr_series(
     history_snaps: list[dict[str, Any]],
     metrics: pd.DataFrame,
 ) -> pd.Series:
-    """Weighted underlying total-return index (rebased to 100)."""
+    """Weighted underlying total-return index (compounded daily returns, base=100)."""
     if not history_snaps:
         return pd.Series(dtype=float)
     und_maps: dict[str, pd.Series] = {}
@@ -158,41 +208,56 @@ def build_basket_tr_series(
             all_dates.update(s.index.tolist())
     if not und_maps:
         return pd.Series(dtype=float)
-
     dates = sorted(all_dates)
-    idx_vals: list[float] = []
-    valid_dates: list[str] = []
-    base_level: float | None = None
-    for d in dates:
-        wmap = _weights_for_date(history_snaps, d)
-        if not wmap:
-            continue
-        level = 0.0
-        wsum = 0.0
-        for und, w in wmap.items():
-            s = und_maps.get(_norm_sym(und))
-            if s is None or d not in s.index:
-                continue
-            try:
-                px = float(s.loc[d])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if not math.isfinite(px) or px <= 0:
-                continue
-            level += w * px
-            wsum += w
-        if wsum <= 0:
-            continue
-        level /= wsum
-        if base_level is None:
-            base_level = level
-        if base_level <= 0:
-            continue
-        idx_vals.append(100.0 * level / base_level)
-        valid_dates.append(d)
-    if not valid_dates:
-        return pd.Series(dtype=float)
-    return pd.Series(idx_vals, index=valid_dates)
+    return _compound_weighted_index(
+        dates,
+        lambda d: { _norm_sym(k): v for k, v in _weights_for_date(history_snaps, d).items() },
+        und_maps,
+    )
+
+
+def series_has_price_anomaly(series: pd.Series, *, max_daily_return: float = _MAX_DAILY_RETURN) -> bool:
+    """True when level series has impossible one-day jumps (scale mismatch / bad overlay)."""
+    if series is None or len(series) < 2:
+        return False
+    rets = series.astype(float).pct_change().dropna()
+    if rets.empty:
+        return False
+    return bool((rets.abs() > max_daily_return).any())
+
+
+def resolve_fof_price_series(
+    fof_symbol: str,
+    history_snaps: list[dict[str, Any]],
+    metrics: pd.DataFrame,
+) -> pd.Series:
+    """FoF price path for pair/chart — compounded child NAV preferred over poisoned store rows."""
+    sym = _norm_sym(fof_symbol)
+    compounded = build_synthetic_fof_nav_series(history_snaps, metrics) if history_snaps else pd.Series(dtype=float)
+
+    if metrics.empty:
+        return compounded
+
+    sub = metrics[metrics["ticker"].astype(str).str.upper() == sym].copy()
+    if sub.empty:
+        return compounded
+    sub = sub.sort_values("date")
+    px = pd.to_numeric(sub.get("nav"), errors="coerce")
+    if px.notna().sum() < 3 and "etf_adj_close" in sub.columns:
+        px = pd.to_numeric(sub["etf_adj_close"], errors="coerce")
+    if px.notna().sum() < 3:
+        px = pd.to_numeric(sub.get("close_price"), errors="coerce")
+    stored = pd.Series(px.values, index=sub["date"].astype(str)).dropna()
+
+    if stored.empty:
+        return compounded
+    if compounded.empty:
+        return stored
+    if series_has_price_anomaly(stored):
+        return compounded
+    if len(compounded) >= max(5, int(len(stored) * 0.8)):
+        return compounded
+    return stored
 
 
 def _pct_change_from_base(series: pd.Series, start_date: str | None = None) -> pd.Series:
@@ -222,6 +287,18 @@ def _downsample_series(dates: list[str], *series: list[float]) -> tuple[list[str
     return out_dates, out_series
 
 
+def chart_window_days_for_range(range_key: str | None, *, n_available: int) -> int:
+    key = str(range_key or "6M").upper()
+    if key == "ALL":
+        return 0
+    if key == "YTD":
+        return 0
+    days = _FOF_CHART_RANGE_DAYS.get(key, 126)
+    if days <= 0:
+        return 0
+    return min(days, n_available) if n_available > 0 else days
+
+
 def build_fof_chart_payload(
     fof_px: pd.Series,
     basket_px: pd.Series,
@@ -238,24 +315,28 @@ def build_fof_chart_payload(
     if window_days > 0 and len(common) > window_days:
         common = common[-window_days:]
 
-    fof_pct = _pct_change_from_base(fof_px.reindex(common).dropna(), common[0] if common else None)
-    basket_pct = _pct_change_from_base(basket_px.reindex(common).dropna(), common[0] if common else None)
-    aligned_dates = sorted(set(fof_pct.index) & set(basket_pct.index))
+    if not common:
+        return {"ok": False, "error": "no aligned dates"}
+
+    start = common[0]
+    fof_win = fof_px.reindex(common).ffill().dropna()
+    basket_win = basket_px.reindex(common).ffill().dropna()
+    aligned_dates = sorted(set(fof_win.index) & set(basket_win.index))
     if not aligned_dates:
-        aligned_dates = common
+        return {"ok": False, "error": "no aligned price days"}
 
-    fof_aligned = fof_pct.reindex(aligned_dates).ffill()
-    basket_aligned = basket_pct.reindex(aligned_dates).ffill()
-    spread = basket_aligned - fof_aligned
+    fof_pct = _pct_change_from_base(fof_win.reindex(aligned_dates), start)
+    basket_pct = _pct_change_from_base(basket_win.reindex(aligned_dates), start)
+    spread = basket_pct - fof_pct
 
-    fof_list = [round(float(x), 4) if math.isfinite(float(x)) else None for x in fof_aligned.tolist()]
-    basket_list = [round(float(x), 4) if math.isfinite(float(x)) else None for x in basket_aligned.tolist()]
+    fof_list = [round(float(x), 4) if math.isfinite(float(x)) else None for x in fof_pct.tolist()]
+    basket_list = [round(float(x), 4) if math.isfinite(float(x)) else None for x in basket_pct.tolist()]
     spread_list = [round(float(x), 4) if math.isfinite(float(x)) else None for x in spread.tolist()]
     dates, series = _downsample_series(aligned_dates, fof_list, basket_list, spread_list)
 
     fof_end = fof_list[-1] if fof_list else None
     basket_end = basket_list[-1] if basket_list else None
-    spread_end = spread_list[-1] if spread_list else None
+    spread_end = (basket_end - fof_end) if basket_end is not None and fof_end is not None else None
 
     return {
         "ok": True,
@@ -270,6 +351,9 @@ def build_fof_chart_payload(
         "window_days": window_days,
         "start_date": aligned_dates[0] if aligned_dates else None,
         "end_date": aligned_dates[-1] if aligned_dates else None,
+        "fof_index": [round(float(x), 6) for x in fof_win.reindex(aligned_dates).tolist()],
+        "basket_index": [round(float(x), 6) for x in basket_win.reindex(aligned_dates).tolist()],
+        "all_dates": aligned_dates,
     }
 
 
@@ -341,22 +425,11 @@ def enrich_fof_dashboard_extras(
     """Build chart, vol, scenario, and data-status payloads for a FoF row."""
     sym = _norm_sym(fof_symbol)
     if fof_px is None or fof_px.empty:
-        sub = metrics[metrics["ticker"].astype(str).str.upper() == sym] if not metrics.empty else pd.DataFrame()
-        n_metrics = len(sub)
-        fof_px = pd.Series(dtype=float)
-        if n_metrics >= 3:
-            from yieldboost_fof_pair_pnl import _fof_nav_series  # noqa: WPS433
-
-            fof_px = _fof_nav_series(metrics, sym)
-        if len(fof_px) < 5:
-            synth = build_synthetic_fof_nav_series(history_snaps, metrics)
-            if len(synth) >= len(fof_px):
-                fof_px = synth
-    else:
-        n_metrics = int((metrics["ticker"].astype(str).str.upper() == sym).sum()) if not metrics.empty else 0
+        fof_px = resolve_fof_price_series(sym, history_snaps, metrics)
+    n_metrics = int((metrics["ticker"].astype(str).str.upper() == sym).sum()) if not metrics.empty else 0
 
     basket_px = build_basket_tr_series(history_snaps, metrics)
-    chart = build_fof_chart_payload(fof_px, basket_px)
+    chart = build_fof_chart_payload(fof_px, basket_px, window_days=0)
     vol = compute_basket_realized_vol(basket_px)
     scenario = build_fof_static_scenario_grid(
         forward_p50=forward_p50,

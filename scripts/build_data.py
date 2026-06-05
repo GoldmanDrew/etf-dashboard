@@ -5144,8 +5144,8 @@ def build():
         "yieldboost_fof_holdings_file": "data/yieldboost_fof_holdings_latest.json",
         "fof_dashboard_meta": {
             "symbols": ["YBTY", "YBST"],
-            "version": 2,
-            "method": "holdings_rollup_weighted_children",
+            "version": 3,
+            "method": "compounded_child_nav_vs_basket_tr",
             "scope": "dashboard_only",
             "chart_engine": "native_basket_index",
         },
