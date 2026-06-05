@@ -47,7 +47,13 @@ import numpy as np
 import pandas as pd
 
 # Split price multipliers for ``repair_close_price_split_basis_mismatch``.
-from split_adjustments import SPLIT_RATIOS as _SPLIT_RATIOS, load_split_hints_from_corporate_actions
+from split_adjustments import (
+    SPLIT_RATIOS as _SPLIT_RATIOS,
+    cum_split_factor_to_latest,
+    dedupe_split_events,
+    etf_adj_close_needs_split_scaling,
+    load_split_hints_from_corporate_actions,
+)
 
 from etf_providers import (
     ProviderResult,
@@ -1192,6 +1198,42 @@ def backfill_etf_adj_close_gaps(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def backfill_split_adjusted_etf_adj_close(
+    df: pd.DataFrame,
+    *,
+    corporate_actions_path: Path | None = None,
+) -> pd.DataFrame:
+    """Scale pre-split ``etf_adj_close`` when Yahoo leaves it identical to raw ``close_price``."""
+    if df.empty or "etf_adj_close" not in df.columns or "close_price" not in df.columns:
+        return df
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    n_scaled = 0
+    for ticker in out["ticker"].unique():
+        events = load_split_events_for_ticker(ticker, corporate_actions_path)
+        if not events:
+            continue
+        m = out["ticker"] == ticker
+        g = out.loc[m].sort_values("date")
+        for ix, row in g.iterrows():
+            d_curr = row["date"]
+            close = pd.to_numeric(row.get("close_price"), errors="coerce")
+            adj = pd.to_numeric(row.get("etf_adj_close"), errors="coerce")
+            if not (math.isfinite(float(close)) and math.isfinite(float(adj)) and close > 0):
+                continue
+            if not etf_adj_close_needs_split_scaling(float(close), float(adj)):
+                continue
+            factor = cum_split_factor_to_latest(d_curr, events)
+            if abs(factor - 1.0) <= 1e-9:
+                continue
+            out.loc[ix, "etf_adj_close"] = float(adj) * factor
+            n_scaled += 1
+    if n_scaled > 0:
+        LOGGER.info("backfill split-adjusted etf_adj_close on %d pre-split row(s)", n_scaled)
+    return out
+
+
 def yahoo_join_dates_series(dates: pd.Series, urls: pd.Series | None) -> pd.Series:
     """Yahoo session date for (ETF close, underlying close) joins vs issuer ``#as_of=`` / carry-forward.
 
@@ -2169,6 +2211,7 @@ def main() -> None:
     # so an earlier backfill never saw legacy null rows in the parquet store.
     merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
     merged = backfill_etf_adj_close_gaps(merged)
+    merged = backfill_split_adjusted_etf_adj_close(merged)
     merged, n_vol_bf = backfill_shares_traded_gaps(merged)
     if n_vol_bf:
         LOGGER.info("Backfilled Yahoo shares_traded on %d historical row(s)", n_vol_bf)

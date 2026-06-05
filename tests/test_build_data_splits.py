@@ -155,6 +155,21 @@ def test_filter_keeps_smup_style_reverse_split():
     assert filter_splits_needing_close_basis_fix(points, events) == events
 
 
+def test_filter_keeps_aplz_style_reverse_split_declared_five():
+    points = [
+        (dt.date(2026, 6, 2), 2.66, 2.66),
+        (dt.date(2026, 6, 3), 15.0, 15.0),
+    ]
+    events = [(dt.date(2026, 6, 3), 5.0)]
+    assert filter_splits_needing_close_basis_fix(points, events) == events
+
+
+def test_match_split_to_price_jump_aplz():
+    from split_adjustments import match_split_to_price_jump
+
+    assert match_split_to_price_jump(15.0 / 2.66, 5.0) == pytest.approx(5.0)
+
+
 def test_filter_skips_continuous_yahoo_mtyy():
     """Yahoo close is flat through MTYY 1-for-6 — do not apply mechanical ×6."""
     points = [

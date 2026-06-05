@@ -6191,10 +6191,26 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const etfDistributionsSeries = useMemo(() => (
     Array.isArray(etfDistributionsMap?.[etfSym]) ? etfDistributionsMap[etfSym] : []
   ), [etfDistributionsMap, etfSym]);
+  const etfSplitEvents = useMemo(() => (
+    typeof RealizedDecayFns.parseSplitEventsFromCorp === 'function'
+      ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, etfSym)
+      : []
+  ), [corpActionsPayload, etfSym]);
   const etfMetricsSeries = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
-    return buildTotalReturnMetricsSeries(raw, etfDistributionsSeries);
-  }, [etfMetricsMap, etfSym, etfDistributionsSeries]);
+    const withNavTr = buildTotalReturnMetricsSeries(raw, etfDistributionsSeries);
+    const PB = window.PriceBasis;
+    if (PB && typeof PB.buildTrSeriesFromMetrics === 'function') {
+      const tr = PB.buildTrSeriesFromMetrics(withNavTr, etfSplitEvents);
+      const trByDate = new Map(tr.map((row) => [String(row.date || '').slice(0, 10), row.trEtfPx]));
+      return withNavTr.map((row) => {
+        const ds = String(row?.date || '').slice(0, 10);
+        const px = trByDate.get(ds);
+        return Number.isFinite(px) && px > 0 ? { ...row, nav_total_return: px } : row;
+      });
+    }
+    return withNavTr;
+  }, [etfMetricsMap, etfSym, etfDistributionsSeries, etfSplitEvents]);
   const etfMetricsChartSeries = useMemo(() => (
     etfMetricsSeries.map((m) => {
       const nav = Number(m.nav);
@@ -6218,11 +6234,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const b = Number(r?.beta);
     return Number.isFinite(b) ? b : NaN;
   }, [r]);
-  const decaySplitEvents = useMemo(() => (
-    typeof RealizedDecayFns.parseSplitEventsFromCorp === 'function'
-      ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, etfSym)
-      : []
-  ), [corpActionsPayload, etfSym]);
+  const decaySplitEvents = etfSplitEvents;
   const decayTrInputRows = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     const withNavTr = buildTotalReturnBacktestSeries(raw, etfDistributionsSeries);

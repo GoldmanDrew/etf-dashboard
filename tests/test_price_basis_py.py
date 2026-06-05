@@ -16,7 +16,10 @@ from price_basis import (  # noqa: E402
     max_abs_log_return,
     resolve_split_context,
 )
-from split_adjustments import filter_splits_needing_close_basis_fix as sa_filter
+from split_adjustments import (
+    filter_splits_needing_close_basis_fix as sa_filter,
+    match_split_to_price_jump,
+)
 
 
 def test_filter_skips_continuous_yahoo_mtyy():
@@ -86,6 +89,60 @@ def test_forward_split_zero_price_return_when_normalized():
     ]
     tr = build_tr_series_from_metrics(rows, [(dt.date(2026, 4, 2), 1 / 3)])
     assert abs(tr[0]["tr_etf_px"] - tr[1]["tr_etf_px"]) < 0.02
+
+
+def test_aplz_reverse_split_declared_five_accepted():
+    rows = [
+        {
+            "date": "2026-05-27",
+            "close_price": 2.565,
+            "etf_adj_close": 2.565,
+            "nav": 2.5625,
+            "shares_outstanding": 2405000,
+            "underlying_adj_close": 10,
+        },
+        {
+            "date": "2026-06-01",
+            "close_price": 2.66,
+            "etf_adj_close": 2.66,
+            "nav": 2.6527,
+            "shares_outstanding": 2420000,
+            "underlying_adj_close": 10.1,
+        },
+        {
+            "date": "2026-06-02",
+            "close_price": 2.66,
+            "etf_adj_close": 2.66,
+            "nav": 2.6616,
+            "shares_outstanding": 484000,
+            "underlying_adj_close": 10.2,
+        },
+        {
+            "date": "2026-06-03",
+            "close_price": 15.0,
+            "etf_adj_close": 15.0,
+            "nav": 15.0602,
+            "shares_outstanding": 484000,
+            "underlying_adj_close": 11,
+        },
+    ]
+    events = [(dt.date(2026, 6, 3), 5.0)]
+    ctx = resolve_split_context(
+        [(dt.date(2026, 5, 27), 2.565), (dt.date(2026, 6, 1), 2.66), (dt.date(2026, 6, 2), 2.66), (dt.date(2026, 6, 3), 15.0)],
+        events,
+        metric_rows=rows,
+    )
+    assert ctx["mode"] == "discrete_split"
+    assert ctx["mult"] == pytest.approx(5.0)
+    tr = build_tr_series_from_metrics(rows, events)
+    max_jump, _ = max_abs_log_return(tr, "tr_etf_px")
+    assert max_jump < 0.35
+    pre = next(r for r in tr if r["date"] == "2026-05-27")
+    assert 12 < pre["tr_etf_px"] < 14
+
+
+def test_match_split_to_price_jump_trusts_declared_mult():
+    assert match_split_to_price_jump(5.64, 5.0) == pytest.approx(5.0)
 
 
 def test_mtyy_real_metrics_no_nov_cliff():

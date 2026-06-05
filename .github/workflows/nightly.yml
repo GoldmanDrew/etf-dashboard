@@ -179,6 +179,11 @@ jobs:
           python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero || true
           python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads || true
 
+      - name: Split TR quality audit
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/audit_split_tr_quality.py
+
       - name: Commit nightly artifacts
         if: steps.build_data.outcome == 'success'
         id: commit

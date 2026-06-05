@@ -1172,6 +1172,16 @@ This repo lives on a Windows machine. Many of the obvious one-liners (heredocs, 
 
 There is no build step. Editing `index.html` is editing production. Validate locally with `python -m http.server 8000` and open the browser dev console — Babel will surface JSX errors at parse time.
 
+### 13.13 Reverse / forward split TR invariants
+
+Split-aware TR must stay in sync across **`scripts/split_adjustments.py`**, **`assets/price_basis.js`**, and **`scripts/price_basis.py`**.
+
+- **`corporate_actions.json` is authoritative** for the declared ratio (`ratio_from / ratio_to`). When the observed close jump is within ~18% of that mult, accept the event even if a different whitelist ratio is nearer (APLZ 5.64× jump with declared 5×).
+- **Mechanical pre-split scaling applies only when raw close jumps** at the event. Continuous Yahoo close through the split (MTYY) must remain `splitMode=continuous` — never double-scale.
+- **`etf_adj_close == close_price` on recent listings is not back-adjusted.** Ingest/backfill scales pre-split `etf_adj_close` via `backfill_split_adjusted_etf_adj_close`; Decay / Backtest / Stats route through `PriceBasis.buildTrSeriesFromMetrics`.
+- **Issuer confirmation** (`shares_outstanding`, NAV step) is a fallback when price bars do not span the split session.
+- **Regression gate:** `scripts/audit_split_tr_quality.py` (nightly, `continue-on-error`) flags `maxAbsLogReturn > 35%` within ±7 days of corp splits and `splitMode=continuous` when adj≡close.
+
 ---
 
 ## 14. Recent changes & invariants you must preserve

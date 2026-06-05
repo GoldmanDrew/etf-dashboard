@@ -7,7 +7,7 @@ from typing import Any
 
 from split_adjustments import (
     filter_splits_needing_close_basis_fix,
-    nearest_split_ratio,
+    match_split_to_price_jump,
 )
 
 
@@ -59,8 +59,8 @@ def detect_split_boundary(points: list[tuple[dt.date, float]], split_mult: float
         prev, cur = points[i - 1][1], points[i][1]
         if prev <= 0 or cur <= 0:
             continue
-        expected = nearest_split_ratio(cur / prev)
-        if expected is not None and abs(expected - split_mult) <= max(1e-6, 0.15 * abs(split_mult)):
+        matched = match_split_to_price_jump(cur / prev, split_mult)
+        if matched is not None and abs(matched - split_mult) <= max(1e-6, 0.15 * abs(split_mult)):
             return points[i][0]
     return None
 
@@ -68,13 +68,20 @@ def detect_split_boundary(points: list[tuple[dt.date, float]], split_mult: float
 def resolve_split_context(
     close_points: list[tuple[dt.date, float]],
     split_events: list[tuple[dt.date, float]],
+    metric_rows: list[dict[str, Any]] | None = None,
+    adj_by_date: dict[dt.date, float] | None = None,
 ) -> dict[str, Any]:
     if not close_points or not split_events:
         return {"mode": "continuous", "boundary": None, "mult": None, "filtered": []}
     dated = [(d, c) for d, c in close_points]
+    adj_map = adj_by_date or {}
     filtered = filter_splits_needing_close_basis_fix(
-        [(d, c, c) for d, c in dated],
+        [
+            (d, c, float(adj_map.get(d, c)))
+            for d, c in dated
+        ],
         split_events,
+        metric_rows=metric_rows,
     )
     mult = None
     boundary = None
@@ -154,7 +161,22 @@ def build_tr_series_from_metrics(
         key=lambda r: str(r.get("date") or ""),
     )
     close_pts = _close_points(sorted_rows)
-    ctx = resolve_split_context(close_pts, split_events)
+    adj_by_date: dict[dt.date, float] = {}
+    for row in sorted_rows:
+        ds = str(row.get("date") or "")[:10]
+        if len(ds) != 10:
+            continue
+        try:
+            d0 = dt.date.fromisoformat(ds)
+            adj = row.get("etf_adj_close")
+            close = row.get("close_price") or row.get("nav")
+            if adj is not None:
+                adj_by_date[d0] = float(adj)
+            elif close is not None:
+                adj_by_date[d0] = float(close)
+        except (ValueError, TypeError):
+            continue
+    ctx = resolve_split_context(close_pts, split_events, metric_rows=sorted_rows, adj_by_date=adj_by_date)
     out: list[dict[str, Any]] = []
     for row in sorted_rows:
         tr_etf = etf_tr_price_for_row(row, ctx)

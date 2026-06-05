@@ -25,6 +25,7 @@ if str(_SCRIPTS) not in sys.path:
 from ingest_etf_metrics import (  # noqa: E402
     PARQUET_PATH,
     backfill_etf_adj_close_gaps,
+    backfill_split_adjusted_etf_adj_close,
     load_existing,
     save_outputs,
     validate_df,
@@ -58,6 +59,7 @@ def main() -> None:
 
     before = int(pd.to_numeric(df["etf_adj_close"], errors="coerce").notna().sum())
     updated = backfill_etf_adj_close_gaps(df)
+    updated = backfill_split_adjusted_etf_adj_close(updated)
     after = int(pd.to_numeric(updated["etf_adj_close"], errors="coerce").notna().sum())
     LOGGER.info("etf_adj_close non-null: %d -> %d (+%d)", before, after, after - before)
 

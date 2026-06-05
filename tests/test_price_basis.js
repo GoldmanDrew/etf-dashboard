@@ -70,6 +70,34 @@ test("forward split window: start scaled to end basis", () => {
   assert.ok(Math.abs(tr[0].trEtfPx - tr[1].trEtfPx) < 0.02);
 });
 
+test("APLZ 1-for-5 reverse split: declared 5x accepted when jump is 5.64x", () => {
+  const rows = [
+    { date: "2026-05-27", close_price: 2.565, etf_adj_close: 2.565, nav: 2.5625, shares_outstanding: 2405000, underlying_adj_close: 10 },
+    { date: "2026-06-01", close_price: 2.66, etf_adj_close: 2.66, nav: 2.6527, shares_outstanding: 2420000, underlying_adj_close: 10.1 },
+    { date: "2026-06-02", close_price: 2.66, etf_adj_close: 2.66, nav: 2.6616, shares_outstanding: 484000, underlying_adj_close: 10.2 },
+    { date: "2026-06-03", close_price: 15.0, etf_adj_close: 15.0, nav: 15.0602, shares_outstanding: 484000, underlying_adj_close: 11 },
+  ];
+  const events = [{ date: "2026-06-03", mult: 5 }];
+  const ctx = PB.resolveSplitContext(
+    rows.map((r) => ({ date: r.date, close: r.close_price, adj: r.etf_adj_close })),
+    events,
+    rows,
+  );
+  assert.equal(ctx.mode, "discrete_split");
+  assert.equal(ctx.mult, 5);
+  const tr = PB.buildTrSeriesFromMetrics(rows, events);
+  const cov = PB.summarizeTrCoverage(rows, events);
+  assert.ok(cov.maxEtfDailyLogReturn < 0.35, `max jump ${cov.maxEtfDailyLogReturn}`);
+  assert.equal(cov.splitMode, "discrete_split");
+  const pre = tr.find((x) => x.date === "2026-05-27");
+  assert.ok(pre.trEtfPx > 12 && pre.trEtfPx < 14, `pre-split TR ${pre.trEtfPx}`);
+});
+
+test("matchSplitToPriceJump trusts declared mult within 18%", () => {
+  assert.equal(PB.matchSplitToPriceJump(5.64, 5), 5);
+  assert.equal(PB.nearestSplitRatio(5.64), 6);
+});
+
 test("realized_decay re-exports filter from price_basis", () => {
   const points = [
     { date: "2026-01-23", close: 421.25 },

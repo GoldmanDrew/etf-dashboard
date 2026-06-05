@@ -40,6 +40,49 @@
     return bestR;
   }
 
+  function matchSplitToPriceJump(jump, declaredMult, jumpTol = 0.18, relTol = 0.075) {
+    const j = toNum(jump);
+    const dm = toNum(declaredMult);
+    if (!Number.isFinite(j) || j <= 0) return null;
+    if (Number.isFinite(dm) && dm > 0 && Math.abs(j / dm - 1) <= jumpTol) return dm;
+    return nearestSplitRatio(j, relTol);
+  }
+
+  function confirmSplitFromSharesOrNav(prev, curr, declaredMult, relTol = 0.15) {
+    const dm = toNum(declaredMult);
+    const candidates = [];
+    const shP = toNum(prev && prev.shares_outstanding);
+    const shC = toNum(curr && curr.shares_outstanding);
+    if (shP > 0 && shC > 0) candidates.push(shP / shC);
+    const navP = toNum(prev && prev.nav);
+    const navC = toNum(curr && curr.nav);
+    if (navP > 0 && navC > 0) candidates.push(navC / navP);
+    for (const obs of candidates) {
+      const matched = matchSplitToPriceJump(obs, dm, relTol, relTol);
+      if (matched == null) continue;
+      if (!Number.isFinite(dm) || Math.abs(matched - dm) <= Math.max(1e-6, relTol * Math.abs(dm))) {
+        return Number.isFinite(dm) ? dm : matched;
+      }
+    }
+    return null;
+  }
+
+  function yahooAdjLooksBackAdjusted(points, effectiveDate, mult, relTol = 0.15) {
+    const eff = parseDate(effectiveDate);
+    const m = toNum(mult);
+    if (!eff || !(m > 0) || !Array.isArray(points) || !points.length) return false;
+    const before = points.filter((p) => parseDate(p.date) < eff);
+    const onAfter = points.filter((p) => parseDate(p.date) >= eff);
+    if (!before.length || !onAfter.length) return false;
+    const closeBefore = toNum(before[before.length - 1].close);
+    const closeAfter = toNum(onAfter[0].close);
+    const adjBefore = toNum(before[before.length - 1].adj);
+    const adjAfter = toNum(onAfter[0].adj);
+    if (!(closeBefore > 0 && closeAfter > 0 && adjBefore > 0 && adjAfter > 0)) return false;
+    if (Math.abs(closeAfter / closeBefore - 1) > 0.08) return false;
+    return Math.abs((adjBefore * m) / adjAfter - 1) <= relTol;
+  }
+
   function splitCloseJumpRatio(points, effectiveDate) {
     const eff = parseDate(effectiveDate);
     if (!eff || !Array.isArray(points) || !points.length) return null;
@@ -52,18 +95,46 @@
     return cAfter / cBefore;
   }
 
-  function filterSplitsNeedingCloseBasisFix(points, events, relTol = 0.15) {
+  function filterSplitsNeedingCloseBasisFix(points, events, relTol = 0.15, metricRows = null) {
     if (!Array.isArray(events) || !events.length) return [];
     const out = [];
+    const jumpTol = 0.18;
     for (const ev of events) {
-      const jump = splitCloseJumpRatio(points, ev.date);
-      if (jump == null) continue;
-      const expected = nearestSplitRatio(jump, relTol);
       const mult = toNum(ev.mult);
-      if (expected != null && Number.isFinite(mult)
-        && Math.abs(expected - mult) <= Math.max(1e-6, relTol * Math.abs(mult))) {
-        out.push({ date: parseDate(ev.date), mult });
+      if (!(mult > 0)) continue;
+      const jump = splitCloseJumpRatio(points, ev.date);
+      if (jump != null && Math.abs(jump - 1) <= 0.08) continue;
+
+      let accepted = false;
+      if (jump != null) {
+        const matched = matchSplitToPriceJump(jump, mult, jumpTol, relTol);
+        if (
+          matched != null
+          && Math.abs(matched - mult) <= Math.max(1e-6, relTol * Math.abs(mult))
+          && !yahooAdjLooksBackAdjusted(points, ev.date, mult, relTol)
+        ) {
+          accepted = true;
+        }
       }
+
+      if (!accepted && jump == null && Array.isArray(metricRows) && metricRows.length) {
+        const eff = parseDate(ev.date);
+        const dated = metricRows
+          .map((r) => ({ date: parseDate(r.date), row: r }))
+          .filter((x) => x.date)
+          .sort((a, b) => a.date.localeCompare(b.date));
+        let prev = null;
+        let curr = null;
+        for (const item of dated) {
+          if (item.date < eff) prev = item.row;
+          else if (!curr) { curr = item.row; break; }
+        }
+        if (prev && curr && confirmSplitFromSharesOrNav(prev, curr, mult, relTol) != null) {
+          accepted = true;
+        }
+      }
+
+      if (accepted) out.push({ date: parseDate(ev.date), mult });
     }
     return out;
   }
@@ -75,8 +146,8 @@
       const prev = toNum(points[i - 1].close);
       const cur = toNum(points[i].close);
       if (!(prev > 0 && cur > 0)) continue;
-      const expected = nearestSplitRatio(cur / prev, relTol);
-      if (expected != null && Math.abs(expected - target) <= Math.max(1e-6, relTol * Math.abs(target))) {
+      const matched = matchSplitToPriceJump(cur / prev, target, 0.18, relTol);
+      if (matched != null && Math.abs(matched - target) <= Math.max(1e-6, relTol * Math.abs(target))) {
         return parseDate(points[i].date);
       }
     }
@@ -122,7 +193,7 @@
   /**
    * Resolve split context: discrete scaling only when raw close jumps at the event.
    */
-  function resolveSplitContext(closePoints, splitEvents) {
+  function resolveSplitContext(closePoints, splitEvents, metricRows = null) {
     const events = Array.isArray(splitEvents) ? splitEvents : [];
     if (!events.length || !closePoints.length) {
       return {
@@ -132,7 +203,7 @@
         filtered: [],
       };
     }
-    const filtered = filterSplitsNeedingCloseBasisFix(closePoints, events);
+    const filtered = filterSplitsNeedingCloseBasisFix(closePoints, events, 0.15, metricRows);
     let mult = null;
     let boundary = null;
     if (filtered.length) {
@@ -230,8 +301,8 @@
       .sort((a, b) => parseDate(a.date).localeCompare(parseDate(b.date)));
     const points = sorted.map(metricsRowToPoint).filter((p) => p.date && p.close > 0);
     if (!points.length) return [];
-    const closePoints = points.map((p) => ({ date: p.date, close: p.close }));
-    const ctx = resolveSplitContext(closePoints, splitEvents || []);
+    const closePoints = points.map((p) => ({ date: p.date, close: p.close, adj: p.adj }));
+    const ctx = resolveSplitContext(closePoints, splitEvents || [], sorted);
     return points.map((p) => {
       const trEtfPx = etfTrPriceForPoint(p, ctx);
       const trUndPx = toNum(p.row && p.row.underlying_adj_close);
@@ -280,8 +351,8 @@
     const closePoints = sorted
       .map(metricsRowToPoint)
       .filter((p) => p.date && p.close > 0)
-      .map((p) => ({ date: p.date, close: p.close }));
-    const ctx = resolveSplitContext(closePoints, splitEvents || []);
+      .map((p) => ({ date: p.date, close: p.close, adj: p.adj }));
+    const ctx = resolveSplitContext(closePoints, splitEvents || [], sorted);
     const trSeries = buildTrSeriesFromMetrics(rows, splitEvents);
     const trJointDays = trSeries.length;
     const droppedDays = Math.max(0, bothLegDays - trJointDays);
@@ -351,6 +422,9 @@
   const exported = {
     SPLIT_RATIOS,
     nearestSplitRatio,
+    matchSplitToPriceJump,
+    confirmSplitFromSharesOrNav,
+    yahooAdjLooksBackAdjusted,
     splitCloseJumpRatio,
     filterSplitsNeedingCloseBasisFix,
     detectSplitBoundary,

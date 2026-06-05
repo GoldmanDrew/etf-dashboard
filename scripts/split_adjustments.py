@@ -114,6 +114,18 @@ def dedupe_split_events(
     return sorted(out)
 
 
+def load_split_events_for_ticker(
+    ticker: str,
+    path: Path | None = None,
+) -> list[tuple[dt.date, float]]:
+    """Deduped split events for one symbol from ``corporate_actions.json``."""
+    sym = str(ticker or "").strip().upper()
+    hints = load_split_hints_from_corporate_actions(path).get(sym) or {}
+    if not hints:
+        return []
+    return dedupe_split_events(sorted((d, float(m)) for d, m in hints.items() if m > 0))
+
+
 def merge_split_events(
     *sources: list[tuple[dt.date, float]] | None,
     hints: dict[dt.date, float] | None = None,
@@ -151,11 +163,123 @@ def split_close_jump_ratio(
     return c_after / c_before
 
 
+def match_split_to_price_jump(
+    jump: float,
+    declared_mult: float | None = None,
+    *,
+    jump_tol: float = 0.18,
+    rel_tol: float = 0.075,
+) -> float | None:
+    """Trust ``declared_mult`` when the observed jump is within tolerance; else whitelist."""
+    if not math.isfinite(jump) or jump <= 0:
+        return None
+    if declared_mult is not None and math.isfinite(declared_mult) and declared_mult > 0:
+        if abs(jump / float(declared_mult) - 1.0) <= jump_tol:
+            return float(declared_mult)
+    return nearest_split_ratio(jump, rel_tol=rel_tol)
+
+
+def confirm_split_from_shares_or_nav(
+    *,
+    shares_prev: float | None = None,
+    shares_curr: float | None = None,
+    nav_prev: float | None = None,
+    nav_curr: float | None = None,
+    declared_mult: float | None = None,
+    rel_tol: float = 0.15,
+) -> float | None:
+    """Secondary issuer confirmation when the raw close jump is missing or ambiguous."""
+    candidates: list[float] = []
+    try:
+        sh_p = float(shares_prev) if shares_prev is not None else float("nan")
+        sh_c = float(shares_curr) if shares_curr is not None else float("nan")
+        if math.isfinite(sh_p) and math.isfinite(sh_c) and sh_p > 0 and sh_c > 0:
+            candidates.append(sh_p / sh_c)
+    except (TypeError, ValueError):
+        pass
+    try:
+        nav_p = float(nav_prev) if nav_prev is not None else float("nan")
+        nav_c = float(nav_curr) if nav_curr is not None else float("nan")
+        if math.isfinite(nav_p) and math.isfinite(nav_c) and nav_p > 0 and nav_c > 0:
+            candidates.append(nav_c / nav_p)
+    except (TypeError, ValueError):
+        pass
+    for obs in candidates:
+        matched = match_split_to_price_jump(
+            obs,
+            declared_mult,
+            jump_tol=rel_tol,
+            rel_tol=rel_tol,
+        )
+        if matched is not None:
+            if declared_mult is None or abs(matched - float(declared_mult)) <= max(
+                1e-6, rel_tol * abs(float(declared_mult))
+            ):
+                return float(declared_mult) if declared_mult is not None else matched
+    return None
+
+
+def yahoo_adj_looks_back_adjusted(
+    points: list[tuple[dt.date, float, float]],
+    effective: dt.date,
+    mult: float,
+    *,
+    rel_tol: float = 0.15,
+) -> bool:
+    """True when Yahoo adj is back-adjusted through a *continuous* raw close series."""
+    if not points or mult <= 0:
+        return False
+    before = [p for p in points if p[0] < effective]
+    on_after = [p for p in points if p[0] >= effective]
+    if not before or not on_after:
+        return False
+    close_before = float(before[-1][1])
+    close_after = float(on_after[0][1])
+    adj_before = float(before[-1][2])
+    adj_after = float(on_after[0][2])
+    if not all(
+        math.isfinite(x) and x > 0
+        for x in (close_before, close_after, adj_before, adj_after)
+    ):
+        return False
+    # Raw close jumped at the split → adj≡close listings are unadjusted, not back-adjusted.
+    if abs(close_after / close_before - 1.0) > 0.08:
+        return False
+    return abs(adj_before * mult / adj_after - 1.0) <= rel_tol
+
+
+def _metric_row_at_date(
+    metric_rows: list[dict] | None,
+    effective: dt.date,
+) -> tuple[dict | None, dict | None]:
+    if not metric_rows:
+        return None, None
+    dated = sorted(
+        (
+            (dt.date.fromisoformat(str(r.get("date") or "")[:10]), r)
+            for r in metric_rows
+            if str(r.get("date") or "")[:10]
+        ),
+        key=lambda x: x[0],
+    )
+    prev_row = None
+    curr_row = None
+    for d0, row in dated:
+        if d0 < effective:
+            prev_row = row
+        elif d0 >= effective and curr_row is None:
+            curr_row = row
+            break
+    return prev_row, curr_row
+
+
 def filter_splits_needing_close_basis_fix(
     points: list[tuple[dt.date, float, float]],
     events: list[tuple[dt.date, float]],
     *,
     rel_tol: float = 0.15,
+    jump_tol: float = 0.18,
+    metric_rows: list[dict] | None = None,
 ) -> list[tuple[dt.date, float]]:
     """
     Keep only splits where Yahoo *close* jumps at the event (not already back-adjusted).
@@ -163,16 +287,51 @@ def filter_splits_needing_close_basis_fix(
     When Yahoo's close series is continuous through a reverse split (common for recent
     listings), applying a mechanical factor would inflate pre-split closes ~6× and
     produce nonsense returns (e.g. MTYY −99%).
+
+    When ``corporate_actions.json`` supplies a declared ratio, trust it when the observed
+    jump is within ``jump_tol`` of that mult — even if a different whitelist ratio is
+    nearer (e.g. APLZ 5.64× jump with declared 5×).
     """
     if not events:
         return []
     out: list[tuple[dt.date, float]] = []
     for eff, mult in events:
         jump = split_close_jump_ratio(points, eff)
-        if jump is None:
+
+        # Continuous Yahoo close through the split (e.g. MTYY): never mechanical-scale.
+        if jump is not None and abs(jump - 1.0) <= 0.08:
             continue
-        expected = nearest_split_ratio(jump, rel_tol=rel_tol)
-        if expected is not None and abs(expected - float(mult)) <= max(1e-6, rel_tol * abs(mult)):
+
+        accepted = False
+        if jump is not None:
+            matched = match_split_to_price_jump(
+                jump,
+                float(mult),
+                jump_tol=jump_tol,
+                rel_tol=rel_tol,
+            )
+            if (
+                matched is not None
+                and abs(matched - float(mult)) <= max(1e-6, rel_tol * abs(mult))
+                and not yahoo_adj_looks_back_adjusted(points, eff, float(mult), rel_tol=rel_tol)
+            ):
+                accepted = True
+
+        if not accepted and jump is None:
+            prev_row, curr_row = _metric_row_at_date(metric_rows, eff)
+            if prev_row is not None and curr_row is not None:
+                issuer_mult = confirm_split_from_shares_or_nav(
+                    shares_prev=prev_row.get("shares_outstanding"),
+                    shares_curr=curr_row.get("shares_outstanding"),
+                    nav_prev=prev_row.get("nav"),
+                    nav_curr=curr_row.get("nav"),
+                    declared_mult=float(mult),
+                    rel_tol=rel_tol,
+                )
+                if issuer_mult is not None:
+                    accepted = True
+
+        if accepted:
             out.append((eff, float(mult)))
     return out
 
@@ -253,6 +412,32 @@ def apply_split_adjustments_to_points(
         else:
             out.append((d, px_close, px_adj))
     return out
+
+
+def cum_split_factor_to_latest(
+    row_date: dt.date,
+    events: list[tuple[dt.date, float]],
+) -> float:
+    """Multiply a price at ``row_date`` onto the latest (post-all-splits) basis."""
+    if not events:
+        return 1.0
+    mult = 1.0
+    for eff, m in events:
+        if row_date < eff:
+            mult *= m
+    return mult if math.isfinite(mult) and mult > 0 else 1.0
+
+
+def etf_adj_close_needs_split_scaling(
+    close: float,
+    adj: float,
+    *,
+    eps: float = 1e-4,
+) -> bool:
+    """True when Yahoo ``etf_adj_close`` is unadjusted (identical to raw close)."""
+    if not (math.isfinite(close) and math.isfinite(adj) and close > 0 and adj > 0):
+        return False
+    return abs(adj / close - 1.0) <= eps
 
 
 def corporate_actions_build_time(path: Path | None = None) -> dt.datetime | None:
