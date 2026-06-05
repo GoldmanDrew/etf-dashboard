@@ -2,15 +2,21 @@
 from __future__ import annotations
 
 import math
-from datetime import date
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from yieldboost_fof_constants import YIELDBOOST_FOF_SYMBOLS
-from yieldboost_fof_holdings import build_fof_holdings_history, stale_days
+from yieldboost_fof_constants import (
+    YIELDBOOST_CHILD_TO_UNDERLYING,
+    YIELDBOOST_FOF_SYMBOLS,
+)
+from yieldboost_fof_forward import (
+    bootstrap_fof_net_edge,
+    weighted_child_nav_decay_forward,
+    weighted_child_pair_pnl_blend,
+)
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _TRADING_DAYS = 252
@@ -41,37 +47,56 @@ def _load_metrics_daily(path: Path | None = None) -> pd.DataFrame:
 
 
 def _fof_nav_series(metrics: pd.DataFrame, fof_symbol: str) -> pd.Series:
+    """FoF price path: issuer NAV first, then Yahoo adj close, then raw close."""
     sym = _norm_sym(fof_symbol)
     sub = metrics[metrics["ticker"].astype(str).str.upper() == sym].copy()
     if sub.empty:
         return pd.Series(dtype=float)
     sub = sub.sort_values("date")
-    if "etf_adj_close" in sub.columns:
+    px = pd.to_numeric(sub.get("nav"), errors="coerce")
+    if px.notna().sum() < 3 and "etf_adj_close" in sub.columns:
         px = pd.to_numeric(sub["etf_adj_close"], errors="coerce")
-    else:
-        px = pd.Series(index=sub.index, dtype=float)
-    if px.notna().sum() < 3:
-        px = pd.to_numeric(sub["nav"], errors="coerce")
     if px.notna().sum() < 3:
         px = pd.to_numeric(sub.get("close_price"), errors="coerce")
     out = pd.Series(px.values, index=sub["date"].astype(str))
     return out.dropna()
 
 
-def _underlying_tr_series(metrics: pd.DataFrame, underlying: str) -> pd.Series:
+def _tickers_for_underlying(underlying: str) -> list[str]:
     und = _norm_sym(underlying)
-    if metrics.empty:
+    tickers = [t for t, u in YIELDBOOST_CHILD_TO_UNDERLYING.items() if _norm_sym(u) == und]
+    if und not in tickers:
+        tickers.append(und)
+    return [_norm_sym(t) for t in tickers]
+
+
+def _underlying_tr_series(metrics: pd.DataFrame, underlying: str) -> pd.Series:
+    """Global underlying panel: first ``underlying_adj_close`` per date across child ETF rows."""
+    if metrics.empty or "underlying_adj_close" not in metrics.columns:
         return pd.Series(dtype=float)
-    if "underlying" in metrics.columns:
-        sub = metrics[metrics["underlying"].astype(str).str.upper() == und].copy()
-    else:
-        sub = metrics.copy()
+    tickers = _tickers_for_underlying(underlying)
+    sub = metrics[metrics["ticker"].astype(str).str.upper().isin(tickers)].copy()
     if sub.empty:
         return pd.Series(dtype=float)
     sub = sub.sort_values("date")
     by_date = sub.groupby("date", sort=True)["underlying_adj_close"].first()
     px = pd.to_numeric(by_date, errors="coerce").dropna()
     return px
+
+
+def _cash_fraction_from_snap(snap: dict[str, Any] | None) -> float:
+    if not snap:
+        return 0.0
+    raw = snap.get("cash_pct")
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(v):
+        return 0.0
+    if v > 1.0:
+        return min(1.0, max(0.0, v / 100.0))
+    return min(1.0, max(0.0, v))
 
 
 def _weights_for_date(
@@ -86,12 +111,18 @@ def _weights_for_date(
     return dict(snap.get("underlying_weights") or {})
 
 
+def _snap_for_date(history_snaps: list[dict[str, Any]], d: str) -> dict[str, Any] | None:
+    applicable = [s for s in history_snaps if str(s.get("as_of") or "") <= d]
+    return applicable[-1] if applicable else (history_snaps[0] if history_snaps else None)
+
+
 def compute_fof_realized_pair_metrics(
     fof_symbol: str,
     history_snaps: list[dict[str, Any]],
     metrics: pd.DataFrame,
     *,
     borrow_annual: float | None = None,
+    cash_return_annual: float = 0.0,
 ) -> dict[str, Any]:
     """Short FoF vs weighted underlying long basket — log-drag series."""
     fof_px = _fof_nav_series(metrics, fof_symbol)
@@ -99,8 +130,8 @@ def compute_fof_realized_pair_metrics(
         return {"ok": False, "error": "insufficient FoF price history"}
 
     all_dates = sorted(fof_px.index.tolist())
-    und_series: dict[str, pd.Series] = {}
     weights0 = _weights_for_date(history_snaps, all_dates[-1]) if history_snaps else {}
+    und_series: dict[str, pd.Series] = {}
     for und in weights0:
         s = _underlying_tr_series(metrics, und)
         if not s.empty:
@@ -109,9 +140,14 @@ def compute_fof_realized_pair_metrics(
     if not und_series:
         return {"ok": False, "error": "no underlying price series for basket"}
 
+    latest_snap = _snap_for_date(history_snaps, all_dates[-1])
+    cash_frac = _cash_fraction_from_snap(latest_snap)
+    invested_frac = max(0.0, 1.0 - cash_frac)
+
     daily_drags: list[tuple[str, float]] = []
     for i in range(1, len(all_dates)):
         d0, d1 = all_dates[i - 1], all_dates[i]
+        snap = _snap_for_date(history_snaps, d1)
         wmap = _weights_for_date(history_snaps, d1)
         if not wmap:
             continue
@@ -138,8 +174,13 @@ def compute_fof_realized_pair_metrics(
         if wsum <= 0:
             continue
         basket_log /= wsum
-        # Short-favorable: long basket minus short FoF (same sign as gross_decay).
-        drag = basket_log - math.log(r_fof)
+        # Cash sleeve earns cash_return; invested sleeve tracks basket.
+        if cash_frac > 0 and cash_return_annual:
+            cash_log = math.log1p(cash_return_annual / _TRADING_DAYS)
+            blended_basket = invested_frac * basket_log + cash_frac * cash_log
+        else:
+            blended_basket = basket_log
+        drag = blended_basket - math.log(r_fof)
         daily_drags.append((d1, drag))
 
     if len(daily_drags) < 3:
@@ -178,6 +219,10 @@ def compute_fof_realized_pair_metrics(
         "end_date": daily_drags[-1][0],
         "horizons": horizons,
         "daily_drag_mean": round(float(np.mean(drags)), 8),
+        "daily_drags": [round(float(x), 8) for x in drags.tolist()],
+        "cash_pct": round(cash_frac * 100.0, 4),
+        "effective_invested_pct": round(invested_frac * 100.0, 4),
+        "weights_as_of": latest_snap.get("as_of") if latest_snap else None,
     }
 
 
@@ -185,63 +230,8 @@ def weighted_child_forward_metrics(
     basket: dict[str, Any],
     child_records: dict[str, dict[str, Any]],
 ) -> dict[str, float | None]:
-    """Blend child screener forward pair / net edge by FoF child weights."""
-    children = basket.get("children") or []
-    if not children:
-        return {
-            "expected_pair_pnl_p50_annual": None,
-            "expected_pair_pnl_p10_annual": None,
-            "expected_pair_pnl_p90_annual": None,
-            "net_edge_p50_annual": None,
-            "effective_beta": None,
-        }
-    wsum = sum(float(c.get("weight_pct") or 0) for c in children)
-    if wsum <= 0:
-        wsum = 100.0
-    acc = {
-        "expected_pair_pnl_p50_annual": 0.0,
-        "expected_pair_pnl_p10_annual": 0.0,
-        "expected_pair_pnl_p90_annual": 0.0,
-        "net_edge_p50_annual": 0.0,
-        "effective_beta": 0.0,
-    }
-    got = {k: False for k in acc}
-    for c in children:
-        yb = _norm_sym(c.get("yb_etf"))
-        w = float(c.get("weight_pct") or 0) / wsum
-        if w <= 0:
-            continue
-        rec = child_records.get(yb) or {}
-        for key in (
-            "expected_pair_pnl_p50_annual",
-            "expected_pair_pnl_p10_annual",
-            "expected_pair_pnl_p90_annual",
-            "net_edge_p50_annual",
-        ):
-            v = rec.get(key)
-            if v is None:
-                continue
-            try:
-                fv = float(v)
-                if math.isfinite(fv):
-                    acc[key] += w * fv
-                    got[key] = True
-            except (TypeError, ValueError):
-                pass
-        d = rec.get("delta")
-        if d is not None:
-            try:
-                fd = float(d)
-                if math.isfinite(fd):
-                    acc["effective_beta"] += w * fd
-                    got["effective_beta"] = True
-            except (TypeError, ValueError):
-                pass
-
-    return {
-        k: (round(acc[k], 6) if got[k] else None)
-        for k in acc
-    }
+    """Legacy v1 wrapper — prefer ``weighted_child_nav_decay_forward``."""
+    return weighted_child_nav_decay_forward(basket, child_records)
 
 
 def build_fof_dashboard_record(
@@ -259,7 +249,8 @@ def build_fof_dashboard_record(
     if not basket:
         return None
 
-    fwd = weighted_child_forward_metrics(basket, child_records)
+    fwd = weighted_child_nav_decay_forward(basket, child_records)
+    child_diag = weighted_child_pair_pnl_blend(basket, child_records)
     realized = compute_fof_realized_pair_metrics(
         sym,
         history_snaps,
@@ -272,24 +263,36 @@ def build_fof_dashboard_record(
     underlying_display = "BASKET" if len(und_list) != 1 else und_list[0]
 
     gross = realized.get("gross_decay_annual") if realized.get("ok") else None
-    exp_p50 = fwd.get("expected_pair_pnl_p50_annual")
-    child_ne = fwd.get("net_edge_p50_annual")
-    net_edge = None
-    if child_ne is not None and borrow_current is not None:
-        try:
-            net_edge = round(float(child_ne) - float(borrow_current), 6)
-        except (TypeError, ValueError):
-            net_edge = child_ne
-    elif child_ne is not None:
-        net_edge = child_ne
+    exp_p50 = fwd.get("expected_gross_decay_p50_annual")
+    exp_p10 = fwd.get("expected_gross_decay_p10_annual")
+    exp_p90 = fwd.get("expected_gross_decay_p90_annual")
 
-    stale = stale_days(basket.get("as_of"))
+    net_boot = {}
+    if realized.get("ok"):
+        net_boot = bootstrap_fof_net_edge(
+            realized.get("daily_drags") or [],
+            borrow_annual=borrow_current,
+            forward_p50=exp_p50,
+            forward_p10=exp_p10,
+            forward_p90=exp_p90,
+        )
+
+    stale = None
+    try:
+        from yieldboost_fof_holdings import stale_days
+
+        stale = stale_days(basket.get("as_of"))
+    except Exception:
+        pass
 
     fof_basket = {
         **basket,
         "effective_beta": fwd.get("effective_beta"),
         "weights_stale_days": stale,
         "history_points": len(history_snaps),
+        "cash_pct": fwd.get("cash_pct") if fwd.get("cash_pct") is not None else basket.get("cash_pct"),
+        "effective_invested_pct": fwd.get("effective_invested_pct"),
+        "expense_ratio_annual": fwd.get("expense_ratio_annual"),
     }
 
     rec: dict[str, Any] = {
@@ -306,24 +309,42 @@ def build_fof_dashboard_record(
         "gross_decay_annual": gross,
         "expected_gross_decay_annual": exp_p50,
         "expected_gross_decay_p50_annual": exp_p50,
-        "expected_gross_decay_p10_annual": fwd.get("expected_pair_pnl_p10_annual"),
-        "expected_gross_decay_p90_annual": fwd.get("expected_pair_pnl_p90_annual"),
+        "expected_gross_decay_p10_annual": exp_p10,
+        "expected_gross_decay_p90_annual": exp_p90,
         "expected_pair_pnl_p50_annual": exp_p50,
-        "expected_pair_pnl_p10_annual": fwd.get("expected_pair_pnl_p10_annual"),
-        "expected_pair_pnl_p90_annual": fwd.get("expected_pair_pnl_p90_annual"),
-        "expected_pair_pnl_basis": "fof_weighted_child_forward",
+        "expected_pair_pnl_p10_annual": exp_p10,
+        "expected_pair_pnl_p90_annual": exp_p90,
+        "expected_pair_pnl_basis": "fof_weighted_child_nav_decay",
         "expected_pair_pnl_units": "log_continuous_annual",
-        "net_edge_p50_annual": net_edge,
+        "net_edge_p50_annual": net_boot.get("net_edge_p50_annual"),
+        "net_edge_p05_annual": net_boot.get("net_edge_p05_annual"),
+        "net_edge_p25_annual": net_boot.get("net_edge_p25_annual"),
+        "net_edge_p75_annual": net_boot.get("net_edge_p75_annual"),
+        "net_edge_p95_annual": net_boot.get("net_edge_p95_annual"),
+        "net_edge_hist_json": net_boot.get("net_edge_hist_json"),
+        "gross_realized_mean_annual": net_boot.get("gross_realized_mean_annual"),
+        "gross_anchor_target_annual": net_boot.get("gross_anchor_target_annual"),
+        "gross_blend_weight_forward": net_boot.get("gross_blend_weight_forward"),
+        "gross_sigma_realized_annual": net_boot.get("gross_sigma_realized_annual"),
+        "gross_sigma_forward_annual": net_boot.get("gross_sigma_forward_annual"),
         "borrow_current": borrow_current,
         "borrow_fee_annual": borrow_current,
         "borrow_net_annual": borrow_current,
+        "borrow_for_net_annual": borrow_current,
         "shares_available": shares_available,
         "borrow_source": borrow_source,
-        "decomposition_note": "fof_synthetic_dashboard_v1",
+        "decomposition_note": "fof_synthetic_dashboard_v2",
         "gross_edge_definition": "fof_weighted_basket_realized",
         "schema_v": 4,
         "edge_sign_convention": "short_favorable_positive",
         "fof_basket": fof_basket,
+        "fof_forward_meta": {
+            "child_pair_p50_blend": child_diag.get("child_pair_p50_annual"),
+            "child_pair_p10_blend": child_diag.get("child_pair_p10_annual"),
+            "child_pair_p90_blend": child_diag.get("child_pair_p90_annual"),
+            "expense_ratio_annual": fwd.get("expense_ratio_annual"),
+            "cash_drag_annual": fwd.get("cash_drag_annual"),
+        },
         "fof_realized_pair": realized if realized.get("ok") else {"ok": False, "error": realized.get("error")},
     }
     if und_list:
@@ -340,6 +361,8 @@ def build_all_fof_dashboard_records(
     ibkr_borrow: dict[str, Any] | None = None,
     metrics_path: Path | None = None,
 ) -> list[dict[str, Any]]:
+    from yieldboost_fof_holdings import build_fof_holdings_history
+
     history_by_sym = build_fof_holdings_history(holdings_df)
     metrics = _load_metrics_daily(metrics_path)
     ibkr_borrow = ibkr_borrow or {}

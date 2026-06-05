@@ -2560,7 +2560,11 @@ const isVolatilityEtp = r => (
   || VOLATILITY_ETP_SYMBOLS.has(String(r?.symbol || '').toUpperCase())
   || VOLATILITY_ETP_SYMBOLS.has(String(r?.underlying || '').toUpperCase())
 );
-const suppressScenarioForRow = r => r?.bucket === 'bucket_2_low_beta' && !isYieldBoostIncomeStrategy(r);
+const suppressScenarioForRow = r => (
+  r?.bucket === 'bucket_2_low_beta'
+  && !isYieldBoostIncomeStrategy(r)
+  && !isYieldBoostFoF(r)
+);
 // Both YieldBOOST and LETF/inverse/vol-ETP rows now show a long-perspective
 // expected ETF return, so the coloring is unified: more-negative = better for
 // a structural short = green (scenShortFavCls).
@@ -2773,16 +2777,27 @@ function decayDistTooltip(r, chartVolLookbackRange) {
   }
   if (isYieldBoostFoF(r)) {
     const pair = expectedPairPnlDistribution(r);
+    const meta = r?.fof_forward_meta || {};
     const lines = [
-      'Exp. edge (fwd) — weighted child YieldBOOST forward pair P&L (dashboard v1).',
+      'Exp. edge (fwd) — weighted child NAV structural decay minus FoF expense ratio and cash drag (v2).',
       'Realized gross: short FoF vs proportional underlying long basket from Granite holdings.',
-      'Sign: short-favorable positive (+ = profit). Net edge ≈ weighted child net − FoF borrow.',
+      'Net edge: block-bootstrap daily pair drags, blended to forward p50, minus FoF borrow once.',
     ];
     if (pair?.p50 != null) {
-      lines.push(`Weighted child p50: ${fmtLogYr(pair.p50)} log/yr (${fmtPct(logToSimpleAnnual(pair.p50))} simple)`);
+      lines.push(`FoF forward p50: ${fmtLogYr(pair.p50)} log/yr (${fmtPct(logToSimpleAnnual(pair.p50))} simple)`);
       if (pair.p10 != null && pair.p90 != null) {
         lines.push(`Band (p10 / p90): ${fmtLogYr(pair.p10)} / ${fmtLogYr(pair.p90)} log/yr`);
       }
+    }
+    if (meta.child_pair_p50_blend != null) {
+      lines.push(`Legacy child pair blend (diagnostic): ${fmtLogYr(meta.child_pair_p50_blend)} log/yr`);
+    }
+    if (meta.expense_ratio_annual != null) {
+      lines.push(`FoF expense ratio: ${fmt(meta.expense_ratio_annual)}/yr`);
+    }
+    const cashPct = Number(r?.fof_basket?.cash_pct);
+    if (Number.isFinite(cashPct) && cashPct > 0) {
+      lines.push(`Cash sleeve: ${cashPct.toFixed(2)}% (excluded from underlying normalization)`);
     }
     const stale = fofWeightsStaleDays(r);
     if (stale != null) lines.push(`Holdings as-of stale: ${stale} calendar days`);
@@ -2884,7 +2899,7 @@ function decayDistTooltip(r, chartVolLookbackRange) {
 
 function expectedDecayDisplayLabel(r) {
   if (!expectedDecayAvailableForRow(r)) return 'Edge (N/A)';
-  if (isYieldBoostFoF(r)) return 'Edge (child-wt fwd)';
+  if (isYieldBoostFoF(r)) return 'Edge (FoF fwd)';
   if (isYieldBoostIncomeStrategy(r)) return 'Edge (struct · 1Y)';
   if (expectedPairPnlDistribution(r) || expectedDecayDistribution(r)) return 'Edge (median)';
   return isVolatilityEtp(r) ? 'Edge (vol-adj)' : 'Edge (Ito)';
@@ -5483,6 +5498,90 @@ function VrpFreshnessBar({ mode, data, vrpHealth, freshnessSummary, row, compact
   return null;
 }
 
+function FoFScenarioPanel({ r }) {
+  if (!isYieldBoostFoF(r)) return null;
+  const pair = expectedPairPnlDistribution(r);
+  const meta = r?.fof_forward_meta || {};
+  const rp = r?.fof_realized_pair || {};
+  const stale = fofWeightsStaleDays(r);
+  const cashPct = Number(r?.fof_basket?.cash_pct);
+  const horizons = Array.isArray(rp?.horizons) ? rp.horizons : [];
+  return (
+    <>
+      <div className="scenario-card" style={{ marginTop: 0, marginBottom: 14 }}>
+        <div className="scenario-head">
+          <div>
+            <div className="scenario-title">FoF forward &amp; net edge (v2)</div>
+            <div className="scenario-sub">
+              Forward gross blends child <strong>expected NAV decay</strong> (put-spread structural), scaled by invested sleeve,
+              minus FoF expense ratio{Number.isFinite(cashPct) && cashPct > 0 ? <> and {cashPct.toFixed(1)}% cash drag</> : null}.
+              Net edge bootstraps daily short-FoF vs basket drags, anchored to forward p50, then subtracts FoF borrow once.
+            </div>
+          </div>
+          {stale != null && stale > 14 ? (
+            <span className="chart-bucket-badge b3" title="Holdings weights stale > 14 calendar days">weights {stale}d stale</span>
+          ) : null}
+        </div>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+          gap: 10,
+          fontSize: 12,
+          fontVariantNumeric: 'tabular-nums',
+        }}>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Exp. edge p50</div><strong>{pair?.p50 != null ? fmtLogYr(pair.p50) : '—'}</strong></div>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>p10 / p90</div><strong>{pair?.p10 != null && pair?.p90 != null ? `${fmtLogYr(pair.p10)} / ${fmtLogYr(pair.p90)}` : '—'}</strong></div>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Realized gross</div><strong>{r?.gross_decay_annual != null ? fmtLogYr(r.gross_decay_annual) : '—'}</strong></div>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Net edge p50</div><strong>{r?.net_edge_p50_annual != null ? fmtLogYr(r.net_edge_p50_annual) : '—'}</strong></div>
+          <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Net p05 / p95</div><strong>{r?.net_edge_p05_annual != null && r?.net_edge_p95_annual != null ? `${fmtLogYr(r.net_edge_p05_annual)} / ${fmtLogYr(r.net_edge_p95_annual)}` : '—'}</strong></div>
+          {meta.child_pair_p50_blend != null ? (
+            <div title="Legacy v1 diagnostic — child short-YB pair blend, not FoF economics">
+              <div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Child pair blend</div>
+              <strong>{fmtLogYr(meta.child_pair_p50_blend)}</strong>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {horizons.length ? (
+        <div className="scenario-card">
+          <div className="scenario-head">
+            <div>
+              <div className="scenario-title">Realized pair horizons</div>
+              <div className="scenario-sub">
+                From <code>fof_realized_pair</code> — same engine as Decay tab.
+                {rp.start_date && rp.end_date ? <> Window {rp.start_date} → {rp.end_date} ({rp.n_days || 0} days).</> : null}
+              </div>
+            </div>
+          </div>
+          <div className="scenario-table-wrap">
+            <table className="scenario-table">
+              <thead>
+                <tr><th>Horizon</th><th>Gross (simple)</th><th>Net (simple)</th></tr>
+              </thead>
+              <tbody>
+                {horizons.map((h) => (
+                  <tr key={`fof-scen-${h.days || h.horizonDays}`}>
+                    <td>{h.days || h.horizonDays}d</td>
+                    <td>{h.grossSimple != null ? fmt(h.grossSimple) : '—'}</td>
+                    <td>{h.netSimple != null ? fmt(h.netSimple) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : (
+        <div className="scenario-warning">{rp?.error || 'FoF realized pair not ready — run backfill + build_data.'}</div>
+      )}
+
+      {(Number(rp?.n_days) > 0 && Number(rp?.n_days) < 40) ? (
+        <div className="scenario-warning">Only {rp.n_days} aligned pair days — treat realized gross as indicative until ≥40 days.</div>
+      ) : null}
+    </>
+  );
+}
+
 function FoFBasketPanel({ r, allRecords = [], onNavigateToChart = null }) {
   if (!isYieldBoostFoF(r)) return null;
   const basket = r?.fof_basket;
@@ -5593,7 +5692,7 @@ function FoFBasketPanel({ r, allRecords = [], onNavigateToChart = null }) {
         </div>
         <div className="chart-note" style={{ marginTop: 10 }}>
           Realized gross on the main grid and Decay tab uses daily basket log-return minus FoF log-return from <code>fof_realized_pair</code> (build-time).
-          Forward Exp. edge blends child screener pair P&amp;L by child weights (v1 — not a full FoF NAV model).
+          Forward Exp. edge blends child NAV structural decay minus FoF ER and cash drag (v2). Child pair P&amp;L blend is a legacy diagnostic only.
         </div>
       </div>
     </div>
@@ -7283,8 +7382,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <button className={cls('chart-view-btn', activePanel === 'vrp' && 'active')} onClick={() => navigateChartPanel('vrp')}>Vol / VRP</button>
           )}
           <button className={cls('chart-view-btn', activePanel === 'borrow' && 'active')} onClick={() => navigateChartPanel('borrow')}>Borrow</button>
-          {showBacktestPanel && (
+          {showDecayPanel && (
             <button className={cls('chart-view-btn', activePanel === 'decay' && 'active')} onClick={() => navigateChartPanel('decay')}>Decay</button>
+          )}
+          {showBasketPanel && (
+            <button className={cls('chart-view-btn', activePanel === 'basket' && 'active')} onClick={() => navigateChartPanel('basket')}>Basket</button>
           )}
           {showBacktestPanel && (
             <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => navigateChartPanel('backtest')}>Backtest</button>
@@ -7329,12 +7431,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
           <div className="chart-note">
             Chart shows % change comparison with {etfSym} (blue) vs {isFoF ? (
-              <>{chartCompareSym} (largest basket weight; full rollup on Basket tab)</>
+              <>{chartCompareSym} (largest basket weight — proxy; see Basket tab for full weights)</>
             ) : (
               <>{undSym || 'underlying'} (orange)</>
             )}.
             TradingView may not expose formal total-return series for every symbol.
             Use the dividend adjustment panel below for explicit period dividend impact.
+            {isFoF ? ' FoF vs weighted basket TR is computed at build time for realized gross / Decay.' : null}
           </div>
 
           <div className="chart-stats">
@@ -7397,7 +7500,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <div className="chart-stat" title={decayDistTooltip(r, chartVolLookbackRange)}>
               <div className="cs-label">Exp. edge (fwd)</div>
               <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>
-                {isYieldBoostIncomeStrategy(r) ? 'struct gross · 1Y · band' : isFoF ? 'child-wt fwd · band' : 'pair P&L · 1Y · band'}
+                {isYieldBoostIncomeStrategy(r) ? 'struct gross · 1Y · band' : isFoF ? 'FoF fwd · band' : 'pair P&L · 1Y · band'}
               </div>
               {(() => {
                 if (!expectedDecayAvailableForRow(r)) {
@@ -7892,6 +7995,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
       {activePanel === 'scenarios' && (
         <div className="chart-section">
+          {isYieldBoostFoF(r) ? (
+            <>
+              <FoFScenarioPanel r={r} />
+              <FoFBasketPanel r={r} allRecords={allRecords} onNavigateToChart={onNavigateToChart} />
+            </>
+          ) : null}
           {isYieldBoostIncomeStrategy(r) ? (
             <>
               <div style={{
@@ -8034,7 +8143,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 Income scenarios: tagged YieldBOOST names only. Other low-β rows hide this grid — vol-drag near β=1 is ~0 so LETF shock math would mislead.
               </div>
             </>
-          ) : (
+          ) : !isYieldBoostFoF(r) ? (
             <>
               <div className="scenario-card" style={{ marginTop: 0 }}>
             <div className="scenario-head">
@@ -8175,7 +8284,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             Shock ladder {`±⅓σ, ±σ, ±3σ`} on the underlying; log map keeps R<sub>U</sub> &gt; −100%.
           </div>
             </>
-          )}
+          ) : null}
         </div>
       )}
 
@@ -8607,7 +8716,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           </div>
 
           {isFoF && !fofRealizedPair?.ok ? (
-            <div className="scenario-warning">{fofRealizedPair?.error || 'FoF realized pair metrics not ready — run build_data.py with holdings + metrics.'}</div>
+            <div className="scenario-warning">{fofRealizedPair?.error || 'FoF realized pair metrics not ready — run backfill_fof_metrics.py + build_data.py.'}</div>
+          ) : isFoF && Number(fofRealizedPair?.n_days) > 0 && Number(fofRealizedPair?.n_days) < 40 ? (
+            <div className="scenario-warning">FoF realized pair: only {fofRealizedPair.n_days} aligned days — horizons may be partial until ≥40 days.</div>
+          ) : null}
+          {isFoF && fofWeightsStaleDays(r) != null && fofWeightsStaleDays(r) > 14 ? (
+            <div className="scenario-warning">Granite holdings weights are {fofWeightsStaleDays(r)} calendar days stale — rebalance drift may affect realized pair.</div>
+          ) : null}
+
+          {isFoF && !fofRealizedPair?.ok ? (
+            null
           ) : !isFoF && etfMetricsLoading ? (
             <div className="scenario-warning">Loading ETF metrics…</div>
           ) : !isFoF && etfMetricsError ? (

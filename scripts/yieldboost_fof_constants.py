@@ -37,3 +37,6 @@ YIELDBOOST_CHILD_TICKERS: frozenset[str] = frozenset(YIELDBOOST_CHILD_TO_UNDERLY
 
 FOF_HOLDINGS_LATEST_JSON = "data/yieldboost_fof_holdings_latest.json"
 FOF_HOLDINGS_HISTORY_JSON = "data/yieldboost_fof_holdings_history.json"
+
+# Granite YieldBOOST FoF expense ratio (~99 bps) when product JSON unavailable.
+FOF_DEFAULT_EXPENSE_RATIO_ANNUAL = 0.0099

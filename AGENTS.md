@@ -527,6 +527,7 @@ The dashboard reads `product_class` and `expected_decay_available` and routes ev
 | `inverse` | realized | HARQ-Log p50 (= pair P&L) | `pair · p10/p90` | bootstrap fan | LETF vol-drag grid + pair heatmap | `Inverse` |
 | `volatility_etp` | realized | simple Itô + roll/tracking | `vol-adj` | bootstrap fan | LETF vol-drag grid + pair heatmap | `Volatility ETP` |
 | `income_yieldboost` | realized | **Weekly compound MC pair P&L p50** | `pair · p10/p90 log/yr` | bootstrap fan, **re-blended to pair MC anchor** | **Income put-spread grid + pair heatmap** | `YieldBOOST (income)` |
+| `income_yieldboost_fof` | realized (FoF vs basket) | **Weighted child NAV decay − FoF ER − cash drag** | `FoF fwd · p10/p90` | bootstrap fan from FoF daily drags − FoF borrow | **FoF scenario panel + basket rollup** | `YieldBOOST FoF` |
 | `income_put_spread` | realized | HARQ-Log p50 | `pair · p10/p90` | bootstrap fan (anchor-shifted when expected p50 available) | LETF vol-drag grid | `Income (put-spread)` |
 | `passive_low_delta` | realized | **`—` (N/A)** | `passive low-β: N/A by policy` | **`—` (N/A)** | hidden | `Passive low-β` |
 | `other_structured` | realized | `—` | — | realized fallback | hidden | `Structured` |
@@ -534,7 +535,8 @@ The dashboard reads `product_class` and `expected_decay_available` and routes ev
 The front-end helpers that implement this:
 
 - `expectedDecayAvailableForRow(r)` — checks `expected_decay_available` flag with a fallback for older builds (`product_class !== passive_low_delta && product_class !== other_structured`).
-- `isYieldBoostIncomeStrategy(r)` — checks `is_yieldboost === true` or the YIELDBOOST_INCOME_PAIRS Set (~25 known sym/und pairs).
+- `isYieldBoostIncomeStrategy(r)` — checks `is_yieldboost === true` or the YIELDBOOST_INCOME_PAIRS Set (~25 known sym/und pairs). **Excludes FoF** (`income_yieldboost_fof`).
+- `isYieldBoostFoF(r)` — checks `product_class === "income_yieldboost_fof"` or YBTY/YBST symbols. Synthetic dashboard rows from `scripts/yieldboost_fof_pair_pnl.py`.
 - `isVolatilityEtp(r)` — checks `product_class === "volatility_etp"` or symbol/underlying in VOLATILITY_ETP_SYMBOLS.
 - `isPassiveLowBetaRow(r)` — checks `product_class === "passive_low_delta"` or `expected_decay_available === false` or bucket-2 + non-YieldBOOST + non-volatility-ETP.
 

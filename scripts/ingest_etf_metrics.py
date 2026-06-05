@@ -2104,6 +2104,12 @@ def main() -> None:
             )
         else:
             LOGGER.info("Skip path: no new underlying_adj_close fills (%d non-null)", after)
+        try:
+            from backfill_fof_metrics import bootstrap_fof_nav_history
+
+            bootstrap_fof_nav_history(save=True)
+        except Exception as exc:
+            LOGGER.warning("FoF metrics bootstrap failed (continuing): %s", exc)
         return
 
     session = _build_session()
@@ -2273,6 +2279,13 @@ def main() -> None:
             LOGGER.warning("holdings phase failed (continuing): %s", e)
     else:
         LOGGER.info("holdings phase skipped (ETF_METRICS_SKIP_HOLDINGS)")
+
+    try:
+        from backfill_fof_metrics import bootstrap_fof_nav_history
+
+        bootstrap_fof_nav_history(save=True)
+    except Exception as exc:
+        LOGGER.warning("FoF metrics bootstrap failed (continuing): %s", exc)
 
 
 if __name__ == "__main__":
