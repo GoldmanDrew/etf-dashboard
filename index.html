@@ -5876,8 +5876,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
   const widgetHtml = useMemo(() => {
     keyRef.current++;
-    return buildWidgetHtml(etfSym, undSym, activeTf.range, activeTf.interval);
-  }, [etfSym, undSym, activeTf]);
+    return buildWidgetHtml(etfSym, chartCompareSym, activeTf.range, activeTf.interval);
+  }, [etfSym, chartCompareSym, activeTf]);
 
   // Reset loaded state when widget changes
   useEffect(() => { setIframeLoaded(false); }, [widgetHtml]);
@@ -6596,14 +6596,41 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return { underlying: und, peers, symbols, isFoF: false };
   }, [allRecords, undSym, r, etfSym]);
 
-  const tradeSpotBySymbol = useMemo(() => {
-    const out = {};
-    for (const sym of tradeUnderlyingGroup.symbols) {
-      const spot = Number(optionsCache?.symbols?.[sym]?.spot);
-      out[sym] = Number.isFinite(spot) ? spot : 100;
+  const tradeSpotsResolved = useMemo(() => {
+    const symbols = tradeUnderlyingGroup.symbols;
+    if (typeof tradeSpotFns.resolveTradeSpots === 'function') {
+      return tradeSpotFns.resolveTradeSpots({
+        symbols,
+        underlyingSymbol: undSym,
+        optionsCache,
+        intradaySpot: intradaySpotPayload,
+      });
     }
-    return out;
-  }, [tradeUnderlyingGroup.symbols, optionsCache]);
+    const bySymbol = {};
+    const metaBySymbol = {};
+    for (const symRaw of symbols) {
+      const sym = String(symRaw || '').toUpperCase();
+      if (!sym) continue;
+      const spot = Number(optionsCache?.symbols?.[sym]?.spot);
+      const ok = Number.isFinite(spot) && spot > 0;
+      metaBySymbol[sym] = {
+        symbol: sym,
+        spot,
+        ok,
+        stale: !ok,
+        missing: !ok,
+      };
+      if (ok) bySymbol[sym] = spot;
+    }
+    return {
+      bySymbol,
+      metaBySymbol,
+      hasStale: Object.values(metaBySymbol).some((m) => m && (m.stale || m.missing)),
+    };
+  }, [tradeSpotFns, tradeUnderlyingGroup.symbols, undSym, optionsCache, intradaySpotPayload]);
+  const tradeSpotBySymbol = tradeSpotsResolved.bySymbol;
+  const tradeSpotMetaBySymbol = tradeSpotsResolved.metaBySymbol;
+  const tradeSpotsBlocked = !!tradeSpotsResolved.hasStale;
   const tradeLeverageBySymbol = useMemo(() => {
     const out = {};
     const und = String(undSym || '').toUpperCase();
