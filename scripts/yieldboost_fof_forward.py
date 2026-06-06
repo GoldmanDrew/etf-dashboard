@@ -191,17 +191,23 @@ def bootstrap_fof_net_edge(
 
     rng = np.random.default_rng(seed)
     arr = np.array(drags, dtype=float)
-    mu_r = float(np.mean(arr))
-    sigma_r = float(np.std(arr, ddof=1)) if len(arr) > 1 else 0.0
+    mu_r_daily = float(np.mean(arr))
+    mu_r_annual = mu_r_daily * _TRADING_DAYS
+    sigma_r_daily = float(np.std(arr, ddof=1)) if len(arr) > 1 else 0.0
+    sigma_r_annual = sigma_r_daily * math.sqrt(_TRADING_DAYS)
 
-    mu_f = forward_p50 if forward_p50 is not None and math.isfinite(forward_p50) else mu_r
+    mu_f_annual = (
+        float(forward_p50)
+        if forward_p50 is not None and math.isfinite(float(forward_p50))
+        else mu_r_annual
+    )
     sigma_f = _band_sigma(forward_p10, forward_p90)
     w_f = 0.0
-    if sigma_f is not None and sigma_f > 1e-12 and sigma_r > 1e-12:
-        w_f = float(sigma_r**2 / (sigma_f**2 + sigma_r**2))
+    if sigma_f is not None and sigma_f > 1e-12 and sigma_r_annual > 1e-12:
+        w_f = float(sigma_r_annual**2 / (sigma_f**2 + sigma_r_annual**2))
     elif sigma_f is not None and sigma_f <= 1e-12:
         w_f = 1.0
-    posterior_mu = w_f * mu_f + (1.0 - w_f) * mu_r
+    posterior_mu = w_f * mu_f_annual + (1.0 - w_f) * mu_r_annual
 
     block = max(1, min(5, len(arr) // 10))
     gross_samples = []
@@ -215,7 +221,7 @@ def bootstrap_fof_net_edge(
         gross_samples.append(float(np.mean(sample)) * _TRADING_DAYS)
 
     gross_samples = np.array(gross_samples, dtype=float)
-    shift = posterior_mu * _TRADING_DAYS - float(np.mean(gross_samples))
+    shift = posterior_mu - float(np.mean(gross_samples))
     gross_samples = gross_samples + shift
 
     b = float(borrow_annual) if borrow_annual is not None and math.isfinite(borrow_annual) else 0.0
@@ -235,10 +241,10 @@ def bootstrap_fof_net_edge(
         "net_edge_p50_annual": round(q(net_samples, 0.50), 6),
         "net_edge_p75_annual": round(q(net_samples, 0.75), 6),
         "net_edge_p95_annual": round(q(net_samples, 0.95), 6),
-        "gross_realized_mean_annual": round(mu_r * _TRADING_DAYS, 6),
-        "gross_anchor_target_annual": round(posterior_mu * _TRADING_DAYS, 6),
+        "gross_realized_mean_annual": round(mu_r_annual, 6),
+        "gross_anchor_target_annual": round(posterior_mu, 6),
         "gross_blend_weight_forward": round(w_f, 4) if math.isfinite(w_f) else None,
-        "gross_sigma_realized_annual": round(sigma_r * math.sqrt(_TRADING_DAYS), 6),
+        "gross_sigma_realized_annual": round(sigma_r_annual, 6),
         "gross_sigma_forward_annual": round(sigma_f, 6) if sigma_f is not None else None,
         "net_edge_hist_json": json.dumps({
             "e": [round(float(x), 6) for x in centers],

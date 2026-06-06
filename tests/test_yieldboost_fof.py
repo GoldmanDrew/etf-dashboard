@@ -208,6 +208,22 @@ def test_bootstrap_fof_net_edge():
     assert out["net_edge_p50_annual"] is not None
     assert out["net_edge_p05_annual"] <= out["net_edge_p95_annual"]
     assert out["net_edge_hist_json"]
+    assert abs(out["net_edge_p50_annual"]) < 5.0
+    assert abs(out["gross_anchor_target_annual"]) < 5.0
+
+
+def test_bootstrap_fof_net_edge_not_inflated_by_252():
+    """Regression: posterior shift must stay in annual log units (not ×252 twice)."""
+    drags = [0.0006] * 120
+    out = bootstrap_fof_net_edge(
+        drags,
+        borrow_annual=0.05,
+        forward_p50=0.40,
+        forward_p10=0.40,
+        forward_p90=0.40,
+    )
+    assert out["net_edge_p50_annual"] == pytest.approx(0.35, abs=0.05)
+    assert out["gross_anchor_target_annual"] == pytest.approx(0.40, abs=0.01)
 
 
 def test_build_fof_dashboard_record_v2():

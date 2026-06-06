@@ -3214,6 +3214,127 @@ function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel 
 function computeScenarioEtf3mFlatUnd(r, chartVolLookbackRange) {
   return computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
 }
+
+/** Weighted child long TR at flat underlying — FoF long holder, no borrow. */
+function computeFoFLongHolderReturn(r, allRecords, chartVolLookbackRange, horizonLabel = '3M') {
+  if (!isYieldBoostFoF(r)) return null;
+  const basket = r?.fof_basket;
+  const children = Array.isArray(basket?.children) ? basket.children : [];
+  if (!children.length) return null;
+  const SR = typeof window !== 'undefined' ? window.ScenarioReturns : null;
+  if (!SR || typeof SR.horizonToYears !== 'function') return null;
+  const horizonYears = SR.horizonToYears(horizonLabel);
+  if (!Number.isFinite(horizonYears) || horizonYears <= 0) return null;
+
+  const wsum = children.reduce((s, c) => s + (Number(c?.weight_pct) || 0), 0) || 100;
+  let weightedChild = 0;
+  let wgot = 0;
+  const recs = Array.isArray(allRecords) ? allRecords : [];
+  for (const c of children) {
+    const yb = String(c?.yb_etf || '').toUpperCase();
+    const w = (Number(c?.weight_pct) || 0) / wsum;
+    if (!yb || w <= 0) continue;
+    const childRec = recs.find((x) => String(x?.symbol || '').toUpperCase() === yb);
+    if (!childRec) continue;
+    const childLong = computeExpectedEtfReturnFlatUnd(childRec, chartVolLookbackRange, horizonLabel);
+    if (childLong != null && Number.isFinite(Number(childLong))) {
+      weightedChild += w * Number(childLong);
+      wgot += w;
+    }
+  }
+  if (wgot <= 0) return null;
+
+  const cashPct = Number(basket?.cash_pct);
+  const cashFrac = Number.isFinite(cashPct) ? (cashPct > 1 ? cashPct / 100 : cashPct) : 0;
+  const investedFrac = Math.max(0, 1 - Math.min(1, Math.max(0, cashFrac)));
+  const er = Number(r?.fof_forward_meta?.expense_ratio_annual ?? basket?.expense_ratio_annual ?? 0.0099);
+  const investedReturn = (weightedChild / wgot) * investedFrac;
+  const erDrag = Number.isFinite(er) ? er * horizonYears : 0;
+  return investedReturn - erDrag;
+}
+
+function calendarDaysBetween(startDate, endDate) {
+  const a = Date.parse(String(startDate || '').slice(0, 10));
+  const b = Date.parse(String(endDate || '').slice(0, 10));
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return Math.max(0, Math.round((b - a) / 86400000));
+}
+
+function fmtPeriodReturn(v) {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  const n = Number(v) * 100;
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+
+/** Expected long FoF total return by horizon (flat underlying, no borrow). */
+function FoFLongHolderReturnChart({ r, allRecords, chartVolLookbackRange }) {
+  const horizons = useMemo(() => (
+    SCENARIO_HORIZONS.map((h) => ({
+      label: h.label,
+      key: h.key,
+      value: computeFoFLongHolderReturn(r, allRecords, chartVolLookbackRange, h.key),
+    })).filter((x) => x.value != null && Number.isFinite(Number(x.value)))
+  ), [r, allRecords, chartVolLookbackRange]);
+
+  if (!horizons.length) {
+    return (
+      <div className="scenario-warning">
+        Long-holder return chart unavailable — child YieldBOOST records or forecast σ missing.
+      </div>
+    );
+  }
+
+  const vals = horizons.map((h) => Number(h.value));
+  let lo = Math.min(...vals, 0);
+  let hi = Math.max(...vals, 0);
+  if (!(hi > lo)) { lo -= 0.01; hi += 0.01; }
+  const pad = (hi - lo) * 0.1 || 0.01;
+  lo -= pad;
+  hi += pad;
+  const span = Math.max(1e-9, hi - lo);
+  const zeroPct = Math.min(100, Math.max(0, ((0 - lo) / span) * 100));
+
+  return (
+    <div className="scenario-card">
+      <div className="scenario-head">
+        <div>
+          <div className="scenario-title">Expected long FoF return (flat underlying)</div>
+          <div className="scenario-sub">
+            Weighted child <strong>Long TR</strong> (NAV + distributions, no borrow) minus FoF expense ratio.
+            Same engine as single-name YieldBOOST <strong>Exp. ETF return</strong> on Stats.
+          </div>
+        </div>
+      </div>
+      <div className="decay-horizons-bars" role="img" aria-label="Expected long FoF return by horizon">
+        {horizons.map((h) => {
+          const v = Number(h.value);
+          const valPct = Math.min(100, Math.max(0, ((v - lo) / span) * 100));
+          const barBottom = Math.min(zeroPct, valPct);
+          const barTop = Math.max(zeroPct, valPct);
+          const barH = Math.max(2, barTop - barBottom);
+          return (
+            <div key={`fof-long-${h.key}`} className="decay-horizon-col" title={`${h.label}: ${fmtPeriodReturn(v)}`}>
+              <div className="decay-horizon-val" style={{ color: v >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
+                {fmtPeriodReturn(v)}
+              </div>
+              <div className="decay-horizon-bar-stack decay-horizon-bar-stack--single">
+                <div className="decay-horizon-zero" style={{ bottom: `${zeroPct}%` }} />
+                <div
+                  className={cls('decay-horizon-bar', v >= 0 ? 'pos' : 'neg')}
+                  style={{ position: 'absolute', left: 0, right: 0, bottom: `${barBottom}%`, height: `${barH}%` }}
+                />
+              </div>
+              <div className="decay-horizon-label">{h.label}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="scenario-sub" style={{ marginTop: 8 }}>
+        Cash sleeve earns ~0 at flat spot · invested sleeve uses holdings weights · ER drag scales with horizon.
+      </div>
+    </div>
+  );
+}
 const borrowBadge = v => {
   if (v == null) return null;
   if (v > 0.15) return <span className="badge badge-bad">HIGH</span>;
@@ -5706,7 +5827,7 @@ function FoFStaticScenarioGrid({ r }) {
   );
 }
 
-function FoFScenarioPanel({ r }) {
+function FoFScenarioPanel({ r, allRecords, chartVolLookbackRange, borrowAnnual }) {
   if (!isYieldBoostFoF(r)) return null;
   const pair = expectedPairPnlDistribution(r);
   const meta = r?.fof_forward_meta || {};
@@ -5715,6 +5836,14 @@ function FoFScenarioPanel({ r }) {
   const cashPct = Number(r?.fof_basket?.cash_pct);
   const horizons = Array.isArray(rp?.horizons) ? rp.horizons : [];
   const bandCollapsed = meta.forward_band_collapsed === true;
+  const calDays = rp.start_date && rp.end_date ? calendarDaysBetween(rp.start_date, rp.end_date) : null;
+  const fofHorizonBars = horizons.map((h) => ({
+    horizonDays: h.horizonDays || h.days,
+    grossSimple: h.grossSimple,
+    netSimple: h.netSimple,
+    borrowLog: h.borrowLog,
+    sufficient: h.sufficient !== false,
+  }));
   return (
     <>
       <FoFDataStatusBanner r={r} />
@@ -5753,28 +5882,40 @@ function FoFScenarioPanel({ r }) {
         </div>
       </div>
 
+      <FoFLongHolderReturnChart r={r} allRecords={allRecords} chartVolLookbackRange={chartVolLookbackRange} />
+
       {horizons.length ? (
         <div className="scenario-card">
           <div className="scenario-head">
             <div>
-              <div className="scenario-title">Realized pair horizons</div>
+              <div className="scenario-title">Realized pair horizons (short FoF vs basket)</div>
               <div className="scenario-sub">
-                From <code>fof_realized_pair</code> — same engine as Decay tab.
-                {rp.start_date && rp.end_date ? <> Window {rp.start_date} → {rp.end_date} ({rp.n_days || 0} days).</> : null}
+                Trailing window simple returns from compounded daily pair drags (<code>expm1(Σ log spread)</code>).
+                {rp.start_date && rp.end_date ? (
+                  <> History {rp.start_date} → {rp.end_date} · {rp.n_days || 0} aligned trading days{calDays != null ? ` · ${calDays} calendar days` : ''}.</>
+                ) : null}
               </div>
             </div>
           </div>
-          <div className="scenario-table-wrap">
+          <RealizedDecayHorizonsBarChart
+            horizons={fofHorizonBars}
+            beta={r?.delta}
+            borrowAnnual={borrowAnnual}
+            etfLabel={r?.symbol || 'FoF'}
+            undLabel="Basket"
+          />
+          <div className="scenario-table-wrap" style={{ marginTop: 10 }}>
             <table className="scenario-table">
               <thead>
-                <tr><th>Horizon</th><th>Gross (simple)</th><th>Net (simple)</th></tr>
+                <tr><th>Horizon</th><th>Gross (simple)</th><th>Net (simple)</th><th>Borrow drag</th></tr>
               </thead>
               <tbody>
                 {horizons.map((h) => (
                   <tr key={`fof-scen-${h.days || h.horizonDays}`}>
                     <td>{h.days || h.horizonDays}d</td>
-                    <td>{h.grossSimple != null ? fmt(h.grossSimple) : '—'}</td>
-                    <td>{h.netSimple != null ? fmt(h.netSimple) : '—'}</td>
+                    <td>{h.grossSimple != null ? fmtPeriodReturn(h.grossSimple) : '—'}</td>
+                    <td>{h.netSimple != null ? fmtPeriodReturn(h.netSimple) : '—'}</td>
+                    <td>{h.borrow_drag != null ? fmtPeriodReturn(-Number(h.borrow_drag)) : '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -8301,7 +8442,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         <div className="chart-section">
           {isYieldBoostFoF(r) ? (
             <>
-              <FoFScenarioPanel r={r} />
+              <FoFScenarioPanel r={r} allRecords={allRecords} chartVolLookbackRange={chartVolLookbackRange} borrowAnnual={decayBorrowAnnual} />
               <div className="chart-note">Full holdings breakdown on the <button type="button" className="sym-link-btn" onClick={() => navigateChartPanel('basket')}>Basket</button> tab.</div>
             </>
           ) : null}
