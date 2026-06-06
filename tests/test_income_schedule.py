@@ -142,6 +142,56 @@ def test_normalize_events_carries_capture_ratio_when_sigma_known():
     assert normalized[0]["ratio"] == pytest.approx(0.02 / bs, rel=1e-6)
 
 
+def test_run_rate_uses_post_split_nav_after_reverse_split_jump():
+    """Regression: MTYY/TSYY-style reverse split must not annualize pre-split yields."""
+    today = dt.date(2026, 6, 5)
+    events = _mk_events([
+        ("2026-05-01", 0.516),
+        ("2026-05-08", 0.528),
+        ("2026-05-15", 0.420),
+        ("2026-05-22", 0.384),
+        ("2026-05-29", 0.378),
+    ])
+    nav_series = _mk_nav([
+        ("2026-05-01", 4.40),
+        ("2026-05-29", 4.00),
+        ("2026-06-01", 3.93),
+        ("2026-06-02", 23.00),
+        ("2026-06-03", 22.80),
+    ])
+    metric_rows = [
+        {"date": d, "nav": n, "close_price": n}
+        for d, n in nav_series
+    ]
+    split_events = [(dt.date(2026, 6, 2), 6.0)]
+    block = ic.build_income_calibration_row(
+        "MTYY",
+        events,
+        nav_series,
+        current_sigma=0.70,
+        today=today,
+        metric_rows=metric_rows,
+        split_events=split_events,
+    )
+    assert block is not None
+    assert block["run_rate_basis"] == "post_split_latest_nav"
+    assert block["run_rate_annual_display"] == pytest.approx(0.378 / 22.80 * 52, rel=0.02)
+    assert block["run_rate_annual_display"] < ic.MAX_RUN_RATE_ANNUAL
+    legacy = ic.build_legacy_yield_fields(block)
+    assert legacy["income_yield_trailing_annual"] == block["run_rate_annual_display"]
+
+
+def test_infer_split_events_from_metric_rows_detects_six_for_one():
+    rows = [
+        {"date": "2026-06-01", "nav": 3.93, "close_price": 3.93},
+        {"date": "2026-06-02", "nav": 23.00, "close_price": 23.00},
+    ]
+    events = ic.infer_split_events_from_metric_rows(rows)
+    assert events
+    assert events[0][0] == dt.date(2026, 6, 2)
+    assert events[0][1] == pytest.approx(6.0, rel=0.05)
+
+
 # ---------------------------------------------------------------------------
 # 3. Cadence detection
 # ---------------------------------------------------------------------------

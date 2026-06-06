@@ -134,6 +134,16 @@ test("calibratedWeeklyDistribution returns null weekly when sigma invalid", () =
   assert.equal(out.ratioSource, "invalid_sigma");
 });
 
+test("calibratedWeeklyDistribution ignores poisoned legacyAnnualYield above cap", () => {
+  const out = calibratedWeeklyDistribution({
+    sigmaAnnual: 0.7,
+    calibration: { blended_ratio_used: 0.65, fund_ratio_confidence: "high" },
+    legacyAnnualYield: 11.0,
+  });
+  assert.ok(out.annualizedDistribution < 2.0);
+  assert.notEqual(out.ratioSource, "legacy_scalar_fallback");
+});
+
 // ---------------------------------------------------------------------------
 // 4. Capture-ratio bands match the documented thresholds
 // ---------------------------------------------------------------------------

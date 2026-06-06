@@ -43,6 +43,7 @@
   const DEFAULT_EXPENSE_RATIO_ANNUAL = 0.0099;
   const DEFAULT_CROSS_FUND_RATIO = 0.65;
   const DEFAULT_TAIL_ADJUSTMENT_ANNUAL = 0.0;
+  const MAX_INCOME_YIELD_ANNUAL = 1.5;
   const RATIO_FULL_CONFIDENCE_N = 12;
 
   // Capture-ratio color bands surfaced in the UI.  Lower ratio = larger
@@ -181,10 +182,15 @@
     }
     if (!Number.isFinite(bs) || bs == null) {
       // BS unavailable -> last-ditch: legacy scalar treated as annualized run-rate
-      if (Number.isFinite(legacyAnnual) && legacyAnnual > 0) {
+      const legacyCap = _toNum((params && params.legacyAnnualYield));
+      if (
+        Number.isFinite(legacyCap)
+        && legacyCap > 0
+        && legacyCap <= MAX_INCOME_YIELD_ANNUAL
+      ) {
         return {
-          weeklyDistribution: legacyAnnual / WEEKS_PER_YEAR,
-          annualizedDistribution: legacyAnnual,
+          weeklyDistribution: legacyCap / WEEKS_PER_YEAR,
+          annualizedDistribution: legacyCap,
           ratioUsed: ratio,
           ratioSource: 'legacy_scalar_fallback',
           bsPremiumWeekly: null,
@@ -861,6 +867,7 @@
     DEFAULT_EXPENSE_RATIO_ANNUAL,
     DEFAULT_CROSS_FUND_RATIO,
     DEFAULT_TAIL_ADJUSTMENT_ANNUAL,
+    MAX_INCOME_YIELD_ANNUAL,
     RATIO_FULL_CONFIDENCE_N,
     RATIO_BANDS,
     expectedPutSpreadLossWeekly,

@@ -60,6 +60,7 @@ References
 from __future__ import annotations
 
 import datetime as dt
+import json
 import math
 import statistics
 import zlib
@@ -68,6 +69,14 @@ from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
+
+from price_basis import detect_split_boundary, parse_split_events_from_corp, resolve_split_context
+from split_adjustments import (
+    DEFAULT_CORPORATE_ACTIONS_PATH,
+    dedupe_split_events,
+    load_split_events_for_ticker,
+    nearest_split_ratio,
+)
 
 # ?????????????????????????????????????????????????????????????????
 # Constants - mirror ``assets/income_scenario.js`` exactly.
@@ -96,6 +105,13 @@ DEFAULT_TAIL_ADJUSTMENT_ANNUAL = 0.0
 
 # Trailing window over which capture ratio is computed.
 TRAILING_WINDOW_DAYS = 365
+
+# Sanity caps — pre-split NAV + unchanged $/share distributions can imply
+# >500% run-rates after reverse splits; never ship those to Exp. ETF return.
+MAX_WEEKLY_YIELD_FRAC = 0.05
+MAX_RUN_RATE_ANNUAL = 1.5
+POST_SPLIT_RUN_RATE_LOOKBACK_DAYS = 120
+POST_SPLIT_MIN_EVENTS_FOR_MEDIAN = 4
 
 
 # ?????????????????????????????????????????????????????????????????
@@ -152,14 +168,20 @@ def expected_put_spread_loss_weekly(
 # ?????????????????????????????????????????????????????????????????
 # NAV / ? history loaders
 # ?????????????????????????????????????????????????????????????????
-def load_nav_series_by_ticker(metrics_path: Path) -> dict[str, list[tuple[str, float]]]:
-    """Return ``{ticker ? [(iso_date, price), -]}`` sorted ascending.
+def _nav_price_from_metric_row(row: dict) -> float | None:
+    for key in ("nav", "close_price"):
+        v = row.get(key)
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f) and f > 0:
+            return f
+    return None
 
-    Prefers issuer ``nav`` and falls back to ``close_price`` (for early
-    lifecycle rows where the data pipeline only has Yahoo bootstrap close).
-    Distribution events that arrive before any NAV record are dropped by
-    :func:`normalize_events` (counted as ``nav_missing``).
-    """
+
+def load_metric_rows_by_ticker(metrics_path: Path) -> dict[str, list[dict]]:
+    """Return ``{ticker: [metric_row, ...]}`` sorted by date ascending."""
     if not metrics_path.exists():
         return {}
     try:
@@ -169,26 +191,185 @@ def load_nav_series_by_ticker(metrics_path: Path) -> dict[str, list[tuple[str, f
     if "ticker" not in df.columns or "date" not in df.columns:
         return {}
     df = df.sort_values(["ticker", "date"], kind="stable")
-    out: dict[str, list[tuple[str, float]]] = {}
+    out: dict[str, list[dict]] = {}
     for _, row in df.iterrows():
         ticker = _norm_sym(row.get("ticker"))
         date_str = str(row.get("date") or "").strip()
         if not ticker or not date_str:
             continue
-        price = None
-        for key in ("nav", "close_price"):
-            v = row.get(key)
-            try:
-                f = float(v)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(f) and f > 0:
-                price = f
-                break
+        out.setdefault(ticker, []).append(row.to_dict())
+    return out
+
+
+def load_nav_series_by_ticker(metrics_path: Path) -> dict[str, list[tuple[str, float]]]:
+    """Return ``{ticker ? [(iso_date, price), -]}`` sorted ascending.
+
+    Prefers issuer ``nav`` and falls back to ``close_price`` (for early
+    lifecycle rows where the data pipeline only has Yahoo bootstrap close).
+    Distribution events that arrive before any NAV record are dropped by
+    :func:`normalize_events` (counted as ``nav_missing``).
+    """
+    out: dict[str, list[tuple[str, float]]] = {}
+    for ticker, rows in load_metric_rows_by_ticker(metrics_path).items():
+        series: list[tuple[str, float]] = []
+        for row in rows:
+            date_str = str(row.get("date") or "").strip()
+            price = _nav_price_from_metric_row(row)
+            if date_str and price is not None:
+                series.append((date_str, price))
+        if series:
+            out[ticker] = series
+    return out
+
+
+def infer_split_events_from_metric_rows(
+    metric_rows: list[dict],
+    *,
+    min_jump_ratio: float = 1.45,
+) -> list[tuple[dt.date, float]]:
+    """Infer reverse/forward splits from discrete close/NAV jumps in metrics."""
+    points: list[tuple[dt.date, float]] = []
+    for row in metric_rows or []:
+        ds = str(row.get("date") or "")[:10]
+        if len(ds) != 10:
+            continue
+        price = _nav_price_from_metric_row(row)
         if price is None:
             continue
-        out.setdefault(ticker, []).append((date_str, price))
-    return out
+        try:
+            points.append((dt.date.fromisoformat(ds), price))
+        except ValueError:
+            continue
+    points.sort(key=lambda x: x[0])
+    out: list[tuple[dt.date, float]] = []
+    for i in range(1, len(points)):
+        prev_px = points[i - 1][1]
+        cur_px = points[i][1]
+        if prev_px <= 0 or cur_px <= 0:
+            continue
+        jump = cur_px / prev_px
+        if jump < min_jump_ratio and jump > (1.0 / min_jump_ratio):
+            continue
+        matched = nearest_split_ratio(jump, rel_tol=0.18)
+        if matched is None and jump >= min_jump_ratio:
+            matched = nearest_split_ratio(jump, rel_tol=0.25)
+        if matched is not None and matched > 0:
+            out.append((points[i][0], float(matched)))
+    return dedupe_split_events(out)
+
+
+def merge_split_events_for_ticker(
+    symbol: str,
+    metric_rows: list[dict] | None,
+    *,
+    corp_actions_path: Path | None = None,
+) -> list[tuple[dt.date, float]]:
+    corp_path = corp_actions_path or DEFAULT_CORPORATE_ACTIONS_PATH
+    corp_payload: dict = {}
+    if corp_path.exists():
+        try:
+            corp_payload = json.loads(corp_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            corp_payload = {}
+    declared = load_split_events_for_ticker(symbol, corp_path)
+    declared.extend(parse_split_events_from_corp(corp_payload, symbol))
+    inferred = infer_split_events_from_metric_rows(metric_rows or [])
+    return dedupe_split_events(sorted(declared + inferred))
+
+
+def resolve_recent_split_context(
+    nav_series: list[tuple[str, float]],
+    split_events: list[tuple[dt.date, float]],
+    metric_rows: list[dict] | None = None,
+) -> dict:
+    close_pts: list[tuple[dt.date, float]] = []
+    for ds, px in nav_series or []:
+        if len(str(ds)) != 10:
+            continue
+        try:
+            close_pts.append((dt.date.fromisoformat(str(ds)[:10]), float(px)))
+        except (TypeError, ValueError):
+            continue
+    close_pts.sort(key=lambda x: x[0])
+    ctx = resolve_split_context(close_pts, split_events, metric_rows=metric_rows)
+    if ctx.get("mode") == "discrete_split" and ctx.get("boundary") and ctx.get("mult"):
+        return ctx
+    if split_events and close_pts:
+        for _eff, mult in sorted(split_events):
+            boundary = detect_split_boundary(close_pts, mult)
+            if boundary is not None:
+                return {
+                    "mode": "discrete_split",
+                    "boundary": boundary,
+                    "mult": float(mult),
+                    "filtered": [],
+                }
+    return {"mode": "continuous", "boundary": None, "mult": None, "filtered": []}
+
+
+def _cap_run_rate_annual(value: float | None) -> float | None:
+    if value is None or not math.isfinite(float(value)):
+        return None
+    capped = min(float(value), MAX_RUN_RATE_ANNUAL)
+    return round(capped, 6) if capped >= 0 else None
+
+
+def _compute_run_rate_annual(
+    *,
+    in_window: list[dict],
+    all_norm: list[dict],
+    nav_series: list[tuple[str, float]],
+    split_ctx: dict,
+    periods_per_year: int,
+    today: dt.date,
+) -> tuple[float | None, str]:
+    """Run-rate for legacy display fields — post-split aware after reverse splits."""
+    boundary = split_ctx.get("boundary")
+    mult = split_ctx.get("mult")
+    if (
+        split_ctx.get("mode") == "discrete_split"
+        and boundary is not None
+        and mult is not None
+        and (today - boundary).days <= POST_SPLIT_RUN_RATE_LOOKBACK_DAYS
+    ):
+        boundary_s = boundary.isoformat()
+        post_split = [e for e in in_window if str(e.get("ex_date") or "") >= boundary_s]
+        if len(post_split) >= POST_SPLIT_MIN_EVENTS_FOR_MEDIAN:
+            median_yield = statistics.median([e["yield_frac"] for e in post_split])
+            return _cap_run_rate_annual(float(median_yield) * periods_per_year), "post_split_events"
+
+        latest_nav = nav_series[-1][1] if nav_series else None
+        latest_event = all_norm[-1] if all_norm else None
+        if latest_nav and latest_nav > 0 and latest_event:
+            try:
+                latest_amount = float(latest_event.get("amount"))
+            except (TypeError, ValueError):
+                latest_amount = float("nan")
+            if math.isfinite(latest_amount) and latest_amount > 0:
+                weekly = latest_amount / float(latest_nav)
+                if weekly <= MAX_WEEKLY_YIELD_FRAC:
+                    return _cap_run_rate_annual(weekly * periods_per_year), "post_split_latest_nav"
+
+    if not in_window:
+        return None, "none"
+    yields = [e["yield_frac"] for e in in_window if e.get("yield_frac") is not None]
+    if not yields:
+        return None, "none"
+    if any(y > MAX_WEEKLY_YIELD_FRAC for y in yields):
+        latest_nav = nav_series[-1][1] if nav_series else None
+        latest_event = all_norm[-1] if all_norm else None
+        if latest_nav and latest_nav > 0 and latest_event:
+            try:
+                latest_amount = float(latest_event.get("amount"))
+            except (TypeError, ValueError):
+                latest_amount = float("nan")
+            if math.isfinite(latest_amount) and latest_amount > 0:
+                weekly = latest_amount / float(latest_nav)
+                if weekly <= MAX_WEEKLY_YIELD_FRAC:
+                    return _cap_run_rate_annual(weekly * periods_per_year), "latest_nav_suppressed_pre_split"
+        return None, "suppressed_split_suspect"
+    median_yield = statistics.median(yields)
+    return _cap_run_rate_annual(float(median_yield) * periods_per_year), "trailing_median"
 
 
 def lookup_value_at_or_before(
@@ -392,6 +573,8 @@ def build_income_calibration_row(
     cross_fund_ratio: float = DEFAULT_CROSS_FUND_RATIO,
     trailing_window_days: int = TRAILING_WINDOW_DAYS,
     today: dt.date | None = None,
+    metric_rows: list[dict] | None = None,
+    split_events: list[tuple[dt.date, float]] | None = None,
 ) -> dict | None:
     """Build the per-ETF ``income_distribution_calibration`` block.
 
@@ -402,6 +585,12 @@ def build_income_calibration_row(
     cutoff = (today - dt.timedelta(days=trailing_window_days)).isoformat()
     if not raw_events:
         return None
+
+    split_events = split_events if split_events is not None else merge_split_events_for_ticker(
+        symbol,
+        metric_rows,
+    )
+    split_ctx = resolve_recent_split_context(nav_series, split_events, metric_rows)
 
     all_norm, nav_missing_all = normalize_events(
         raw_events,
@@ -421,10 +610,14 @@ def build_income_calibration_row(
     cadence_label, periods_per_year = detect_cadence(all_norm)
     template = build_template_yields(all_norm, max_len=12)
 
-    run_rate = None
-    if in_window:
-        median_yield = statistics.median([e["yield_frac"] for e in in_window])
-        run_rate = round(float(median_yield) * periods_per_year, 6)
+    run_rate, run_rate_basis = _compute_run_rate_annual(
+        in_window=in_window,
+        all_norm=all_norm,
+        nav_series=nav_series,
+        split_ctx=split_ctx,
+        periods_per_year=periods_per_year,
+        today=today,
+    )
 
     latest = all_norm[-1] if all_norm else None
 
@@ -441,6 +634,18 @@ def build_income_calibration_row(
         "periods_per_year": periods_per_year,
         "nav_missing_count": nav_missing_all,
         "run_rate_annual_display": run_rate,
+        "run_rate_basis": run_rate_basis,
+        "split_mode": split_ctx.get("mode"),
+        "split_boundary": (
+            split_ctx.get("boundary").isoformat()
+            if split_ctx.get("boundary") is not None
+            else None
+        ),
+        "split_mult": (
+            round(float(split_ctx["mult"]), 6)
+            if split_ctx.get("mult") is not None and math.isfinite(float(split_ctx["mult"]))
+            else None
+        ),
         "template_yields": template,
         "events_recent": trim_events_for_export(all_norm, max_len=16),
         "latest_event": latest,
@@ -1188,12 +1393,17 @@ def build_legacy_yield_fields(
         return out
     run_rate = block.get("run_rate_annual_display")
     if run_rate is not None:
-        out["income_yield_trailing_annual"] = round(float(run_rate), 6)
+        capped = _cap_run_rate_annual(float(run_rate))
+        if capped is not None:
+            out["income_yield_trailing_annual"] = capped
     latest = block.get("latest_event") or {}
     latest_yield = latest.get("yield_frac")
     ppy = block.get("periods_per_year") or WEEKS_PER_YEAR
     if latest_yield is not None:
-        out["income_yield_recent_annual"] = round(float(latest_yield) * float(ppy), 6)
+        recent_annual = float(latest_yield) * float(ppy)
+        capped_recent = _cap_run_rate_annual(recent_annual)
+        if capped_recent is not None:
+            out["income_yield_recent_annual"] = capped_recent
     n_events = block.get("events_used")
     if n_events is not None:
         out["income_distribution_count_1y"] = int(n_events)
@@ -1235,6 +1445,7 @@ def build_all_calibrations(
         return {}, round(float(cross_fund_ratio), 6)
 
     nav_by_ticker = load_nav_series_by_ticker(metrics_path)
+    metrics_by_ticker = load_metric_rows_by_ticker(metrics_path)
     sigma_by_symbol = sigma_by_symbol or {}
     target_set: set[str] | None = (
         {_norm_sym(s) for s in yieldboost_symbols if s} if yieldboost_symbols else None
@@ -1256,6 +1467,7 @@ def build_all_calibrations(
                 nav_by_ticker.get(sym, []),
                 current_sigma=sigma_by_symbol.get(sym),
                 cross_fund_ratio=prior,
+                metric_rows=metrics_by_ticker.get(sym, []),
             )
             if block is not None:
                 out[sym] = block
