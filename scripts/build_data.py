@@ -3938,8 +3938,14 @@ def _calc_summary(records: list[dict]) -> dict:
         for r in with_realized_vs_avg[:5]
     ]
 
+    _MAX_NET_EDGE_LOG_YR = 5.0
+
     with_edge = sorted(
-        [r for r in records if r.get("net_edge_p50_annual") is not None],
+        [
+            r for r in records
+            if r.get("net_edge_p50_annual") is not None
+            and abs(float(r["net_edge_p50_annual"])) <= _MAX_NET_EDGE_LOG_YR
+        ],
         key=lambda r: float(r["net_edge_p50_annual"] or 0.0),
         reverse=True,
     )

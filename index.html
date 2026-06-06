@@ -2571,6 +2571,12 @@ const suppressScenarioForRow = r => (
 // a structural short = green (scenShortFavCls).
 const scenarioValueCls = (_r, v) => scenShortFavCls(v);
 
+function fmtGrossRealizedLog(r, v) {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  if (isYieldBoostFoF(r)) return fmtLogYr(v);
+  return fmt(v);
+}
+
 function expectedDecayDisplayValue(r) {
   const expected = Number(r?.expected_gross_decay_annual);
   if (!isVolatilityEtp(r)) return Number.isFinite(expected) ? expected : null;
@@ -2723,6 +2729,7 @@ function yieldBoostIntrinsicAnnualDecay(r) {
 // Step 5d ("passive_low_beta policy") and screener_v2_fields
 // _expected_decay_available.
 function isPassiveLowBetaRow(r) {
+  if (isYieldBoostFoF(r)) return false;
   if (r?.product_class === 'passive_low_delta' || r?.product_class === 'passive_low_beta') return true;
   if (r?.expected_decay_available === false && r?.bucket === 'bucket_2_low_beta') {
     return true;
@@ -12295,7 +12302,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             />
             <SummaryCard
               label="Top net edge (p50)"
-              value={summary.top_net_edge?.[0] ? fmt(summary.top_net_edge[0].net_edge_p50_annual) : '—'}
+              value={summary.top_net_edge?.[0] ? fmtLogYr(summary.top_net_edge[0].net_edge_p50_annual) : '—'}
               sub={summary.top_net_edge?.[0]?.symbol || ''}
               color="var(--positive)"
             />
@@ -12320,7 +12327,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                 {(summary.top_net_edge || []).map(s => (
                   <li key={s.symbol}>
                     <span className="sym">{s.symbol}</span>
-                    <span className="val-positive">{fmt(s.net_edge_p50_annual)}</span>
+                    <span className="val-positive">{fmtLogYr(s.net_edge_p50_annual)}</span>
                   </li>
                 ))}
               </ul>
@@ -12512,7 +12519,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                           {fmt(getBorrowRate(r))} {borrowBadge(getBorrowRate(r))}
                         </td>
                         <td>{fmtNum(r.shares_available)}</td>
-                        <td title="Realized trailing hedge drag (ls-algo screener)">{fmt(r.gross_decay_annual)}</td>
+                        <td title="Realized trailing hedge drag (ls-algo screener)">{fmtGrossRealizedLog(r, r.gross_decay_annual)}</td>
                         <td title={decayDistTooltip(r, chartVolLookbackRange)}>
                           {renderExpectedDecayCell(r, chartVolLookbackRange)}
                         </td>
