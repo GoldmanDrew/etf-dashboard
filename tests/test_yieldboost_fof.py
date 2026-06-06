@@ -196,6 +196,29 @@ def test_compute_fof_realized_pair_metrics_60d():
     assert h60 is not None
 
 
+def test_fof_horizon_net_simple_matches_expm1_of_log_net():
+    """Net simple return = expm1(gross_log - borrow_log), not gross_simple - borrow."""
+    metrics = _yb_metrics_fixture()
+    history = [{
+        "as_of": "2026-01-01",
+        "underlying_weights": {"SMCI": 1.0},
+        "cash_pct": 0.0,
+        "children": [{"yb_etf": "SMYY", "underlying": "SMCI", "weight_pct": 100.0}],
+    }]
+    borrow = 0.0971
+    out = compute_fof_realized_pair_metrics("YBTY", history, metrics, borrow_annual=borrow)
+    assert out["ok"] is True
+    for h in out["horizons"]:
+        n = h["days"]
+        gross_log = h["grossLog"]
+        borrow_log = h["borrowLog"]
+        assert borrow_log == pytest.approx(borrow * n / 252, abs=1e-6)
+        assert h["netLog"] == pytest.approx(gross_log - borrow_log, abs=1e-6)
+        assert h["netSimple"] == pytest.approx(math.expm1(h["netLog"]), abs=1e-6)
+        assert h["start_date"] <= h["end_date"]
+        assert h["obs"] == n
+
+
 def test_bootstrap_fof_net_edge():
     drags = [0.001] * 30
     out = bootstrap_fof_net_edge(
@@ -208,6 +231,8 @@ def test_bootstrap_fof_net_edge():
     assert out["net_edge_p50_annual"] is not None
     assert out["net_edge_p05_annual"] <= out["net_edge_p95_annual"]
     assert out["net_edge_hist_json"]
+    assert out["gross_blend_method"] in ("inverse_variance", "anchor_shift_fallback")
+    assert out["gross_anchor_source"] == "fof_weighted_child_nav_decay"
     assert abs(out["net_edge_p50_annual"]) < 5.0
     assert abs(out["gross_anchor_target_annual"]) < 5.0
 
@@ -242,6 +267,17 @@ def test_build_fof_dashboard_record_v2():
             "expected_gross_decay_p90_annual": 0.45,
             "expected_pair_pnl_p50_annual": 0.70,
             "delta": 0.48,
+            "forecast_vol_underlying_annual": 0.72,
+            "income_distribution_calibration": {
+                "blended_ratio_used": 0.65,
+                "fund_ratio_median": 0.60,
+                "events_used": 8,
+                "events_total": 10,
+                "cross_fund_ratio": 0.65,
+                "events_recent": [
+                    {"ex_date": "2026-01-10", "amount": 0.40, "yield_frac": 0.028, "ratio": 0.64, "nav_at_ex": 14.2},
+                ],
+            },
         },
     }
     metrics = pd.DataFrame([
@@ -276,6 +312,12 @@ def test_build_fof_dashboard_record_v2():
     assert rec["gross_decay_annual"] is not None
     assert rec["net_edge_p50_annual"] is not None
     assert rec["net_edge_p05_annual"] is not None
+    assert rec.get("forecast_vol_underlying_annual") == pytest.approx(0.72)
+    assert rec.get("pair_scenario_grid") is not None
+    assert len(rec["pair_scenario_grid"]["p50_log_grid"]) == 5
+    assert rec.get("income_distribution_calibration") is not None
+    assert rec["income_distribution_calibration"]["source"] == "fof_weighted_child_rollup"
+    assert rec.get("gross_blend_method") in ("inverse_variance", "anchor_shift_fallback")
 
 
 def test_build_fof_holdings_payload_history():

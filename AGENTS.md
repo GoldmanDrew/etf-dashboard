@@ -527,7 +527,7 @@ The dashboard reads `product_class` and `expected_decay_available` and routes ev
 | `inverse` | realized | HARQ-Log p50 (= pair P&L) | `pair · p10/p90` | bootstrap fan | LETF vol-drag grid + pair heatmap | `Inverse` |
 | `volatility_etp` | realized | simple Itô + roll/tracking | `vol-adj` | bootstrap fan | LETF vol-drag grid + pair heatmap | `Volatility ETP` |
 | `income_yieldboost` | realized | **Weekly compound MC pair P&L p50** | `pair · p10/p90 log/yr` | bootstrap fan, **re-blended to pair MC anchor** | **Income put-spread grid + pair heatmap** | `YieldBOOST (income)` |
-| `income_yieldboost_fof` | realized (FoF vs basket) | **Weighted child NAV decay − FoF ER − cash drag** | `FoF fwd · p10/p90` | bootstrap fan from FoF daily drags − FoF borrow | **FoF scenario panel + basket rollup** | `YieldBOOST FoF` |
+| `income_yieldboost_fof` | realized (FoF vs basket) | **Weighted child NAV decay − FoF ER − cash drag** | `FoF fwd · p10/p90` | bootstrap fan from FoF daily drags − FoF borrow | **Same Scenarios layout as `income_yieldboost`** (basket-weighted heatmap + income table); Decay tab = realized pair horizons; Basket tab = holdings | `YieldBOOST FoF` |
 | `income_put_spread` | realized | HARQ-Log p50 | `pair · p10/p90` | bootstrap fan (anchor-shifted when expected p50 available) | LETF vol-drag grid | `Income (put-spread)` |
 | `passive_low_delta` | realized | **`—` (N/A)** | `passive low-β: N/A by policy` | **`—` (N/A)** | hidden | `Passive low-β` |
 | `other_structured` | realized | `—` | — | realized fallback | hidden | `Structured` |

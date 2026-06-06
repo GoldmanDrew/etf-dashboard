@@ -2556,6 +2556,8 @@ const isYieldBoostIncomeStrategy = r => {
   const und = String(r?.underlying || '').toUpperCase();
   return YIELDBOOST_INCOME_PAIRS.has(`${sym}|${und}`);
 };
+/** MTYY-style Scenarios layout: single-name YieldBOOST or FoF basket (YBTY/YBST). */
+const isYieldBoostScenarioLayout = r => isYieldBoostIncomeStrategy(r) || isYieldBoostFoF(r);
 const isVolatilityEtp = r => (
   r?.product_class === 'volatility_etp'
   || VOLATILITY_ETP_SYMBOLS.has(String(r?.symbol || '').toUpperCase())
@@ -2997,7 +2999,7 @@ function incomeAnnualYieldForScenario(r, chartVolLookbackRange, scenarioSigma) {
  * weak 0.75-1.00, adverse > 1.00).
  */
 function captureRatioSummary(r) {
-  if (!isYieldBoostIncomeStrategy(r)) return null;
+  if (!isYieldBoostScenarioLayout(r)) return null;
   const calib = r?.income_distribution_calibration;
   if (!calib) return null;
   const ratio = Number(calib.blended_ratio_used);
@@ -3006,7 +3008,9 @@ function captureRatioSummary(r) {
   const band = IS ? IS.captureRatioBand(ratio) : null;
   const confidence = String(calib.fund_ratio_confidence || 'none');
   let source;
-  if (confidence === 'high') source = 'fund (high confidence)';
+  if (String(calib.source || '') === 'fof_weighted_child_rollup') {
+    source = 'weighted child rollup';
+  } else if (confidence === 'high') source = 'fund (high confidence)';
   else if (confidence === 'medium') source = 'fund + prior (medium)';
   else if (confidence === 'low') source = 'fund + prior (low)';
   else source = 'cross-fund prior';
@@ -3106,6 +3110,26 @@ function realizedVolPointForScenarioColumn(r, chartVolLookbackRange) {
 }
 
 function forecastVolForScenario(r, chartVolLookbackRange) {
+  if (isYieldBoostFoF(r)) {
+    const forecast = Number(r?.forecast_vol_underlying_annual);
+    const basketVol = Number(r?.fof_basket_vol_annual);
+    const sigma = (Number.isFinite(forecast) && forecast > 0)
+      ? forecast
+      : ((Number.isFinite(basketVol) && basketVol > 0) ? basketVol : null);
+    if (sigma != null) {
+      return {
+        sigma,
+        source: r?.forecast_vol_source || (Number.isFinite(forecast) && forecast > 0 ? 'fof_basket_weighted_child_forecast' : 'fof_basket_realized_60d'),
+        model: null,
+        robustEwma: null,
+        rawEwma: null,
+        realized: Number.isFinite(basketVol) ? basketVol : null,
+        eventAdjusted: false,
+        note: 'FoF basket σ: weighted child forecast with 60d basket realized fallback.',
+        isFallback: !(Number.isFinite(forecast) && forecast > 0),
+      };
+    }
+  }
   const forecast = Number(r?.forecast_vol_underlying_annual);
   if (Number.isFinite(forecast) && forecast > 0) {
     return {
@@ -3271,6 +3295,93 @@ function fmtPeriodReturn(v) {
   if (v == null || !Number.isFinite(Number(v))) return '—';
   const n = Number(v) * 100;
   return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+
+/** FoF income scenario grid — same columns as MTYY, basket-weighted child math. */
+function computeFoFIncomeScenarioGrid(r, allRecords, scenarioSigma, horizonYears, annualBorrowCost) {
+  if (!isYieldBoostFoF(r)) return { ok: false, error: 'Not a FoF row.' };
+  const basket = r?.fof_basket;
+  const children = Array.isArray(basket?.children) ? basket.children : [];
+  if (!children.length) return { ok: false, error: 'FoF basket children missing.' };
+  const sigma = Number(scenarioSigma);
+  const t = Number(horizonYears);
+  if (!Number.isFinite(sigma) || sigma <= 0 || !Number.isFinite(t) || t <= 0) {
+    return { ok: false, error: 'Invalid σ or horizon.' };
+  }
+  const wsum = children.reduce((s, c) => s + (Number(c?.weight_pct) || 0), 0) || 100;
+  const cashPct = Number(basket?.cash_pct);
+  const cashFrac = Number.isFinite(cashPct) ? (cashPct > 1 ? cashPct / 100 : cashPct) : 0;
+  const investedFrac = Math.max(0, 1 - Math.min(1, Math.max(0, cashFrac)));
+  const er = Number(r?.fof_forward_meta?.expense_ratio_annual ?? basket?.expense_ratio_annual ?? 0.0099);
+  const recs = Array.isArray(allRecords) ? allRecords : [];
+  const borrow = Number.isFinite(Number(annualBorrowCost)) ? Number(annualBorrowCost) : 0;
+  const annualIncomeYield = incomeAnnualYieldForScenario(r, '6M', sigma);
+  if (annualIncomeYield == null || !Number.isFinite(Number(annualIncomeYield)) || Number(annualIncomeYield) < 0) {
+    return { ok: false, error: 'Missing weighted child distribution yield for FoF scenario.' };
+  }
+
+  const rows = SCENARIO_SHOCK_MULTIPLIERS.map((sigmaMultiple) => {
+    const basketUndReturn = Math.exp(sigmaMultiple * sigma * Math.sqrt(t)) - 1;
+    let wNavDecay = 0;
+    let wDist = 0;
+    let wLongTr = 0;
+    let wNetShortChild = 0;
+    let wWeeklyLoss = 0;
+    let wgot = 0;
+    for (const c of children) {
+      const yb = String(c?.yb_etf || '').toUpperCase();
+      const w = (Number(c?.weight_pct) || 0) / wsum;
+      if (!yb || w <= 0) continue;
+      const childRec = recs.find((x) => String(x?.symbol || '').toUpperCase() === yb);
+      if (!childRec) continue;
+      const childSigma = Number(childRec?.forecast_vol_underlying_annual ?? childRec?.vol_underlying_annual ?? sigma);
+      const childYield = incomeAnnualYieldForScenario(childRec, '6M', childSigma);
+      if (childYield == null) continue;
+      const childUndReturn = Math.exp(sigmaMultiple * childSigma * Math.sqrt(t)) - 1;
+      const modeled = estimateIncomeStyleScenarioReturn({
+        underlyingReturn: childUndReturn,
+        sigmaAnnual: childSigma,
+        annualIncomeYield: childYield,
+        annualBorrowCost: Number(childRec?.borrow_for_net_annual ?? childRec?.borrow_fee_annual ?? 0),
+        horizonYears: t,
+      });
+      if (!modeled) continue;
+      wNavDecay += w * Number(modeled.navDecay || 0);
+      wDist += w * Number(modeled.distributionsPaid || 0);
+      wLongTr += w * Number(modeled.longTotalReturn || 0);
+      wNetShortChild += w * Number(modeled.netShortPnl || 0);
+      wWeeklyLoss += w * Number(modeled.weeklySpreadLoss || 0);
+      wgot += w;
+    }
+    if (wgot <= 0) {
+      return { sigmaMultiple, underlyingReturn: basketUndReturn, ok: false };
+    }
+    const scale = investedFrac;
+    const erDrag = Number.isFinite(er) ? er * t : 0;
+    const navDecay = wNavDecay * scale;
+    const distributionsPaid = wDist * scale;
+    const longTotalReturn = wLongTr * scale - erDrag;
+    const netShortPnl = basketUndReturn - longTotalReturn - borrow * t;
+    return {
+      sigmaMultiple,
+      underlyingReturn: basketUndReturn,
+      weeklySpreadLoss: wWeeklyLoss * scale,
+      navDecay,
+      distributionsPaid,
+      longTotalReturn,
+      borrowCost: borrow * t,
+      netShortPnl,
+    };
+  });
+
+  return {
+    ok: true,
+    annualIncomeYield: Number(annualIncomeYield),
+    annualBorrowCost: borrow,
+    weeks: Math.max(1, Math.round(t * 52)),
+    rows,
+    captureRatio: captureRatioSummary(r),
+  };
 }
 
 /** Expected long FoF total return by horizon (flat underlying, no borrow). */
@@ -3895,7 +4006,7 @@ function RealizedDecayHorizonsBarChart({ horizons, beta, borrowAnnual, etfLabel,
       <div className="scenario-sub" style={{ marginTop: 8 }}>
         β = {Number.isFinite(Number(beta)) ? Number(beta).toFixed(3) : '—'} · short-favorable + ·{' '}
         <span style={{ color: 'rgba(59,130,246,0.95)' }}>■</span> gross ·{' '}
-        <span style={{ color: 'rgba(6,182,212,0.95)' }}>■</span> net (gross − avg borrow × N/252) ·{' '}
+        <span style={{ color: 'rgba(6,182,212,0.95)' }}>■</span> net (expm1 of gross<sub>log</sub> − borrow × N/252) ·{' '}
         borrow {Number.isFinite(Number(borrowAnnual)) ? fmt(borrowAnnual) : '—'} avg
       </div>
     </div>
@@ -4559,24 +4670,35 @@ function buildWidgetHtml(symbol, compareSymbol, range, interval) {
 // YB scenario anchor + net-edge bridge (Scenarios tab)
 // =============================================================================
 function YbScenarioAnchorPanel({ r }) {
-  if (!isYieldBoostIncomeStrategy(r)) return null;
+  if (!isYieldBoostScenarioLayout(r)) return null;
+  const isFoF = isYieldBoostFoF(r);
   const dist = expectedDecayDistribution(r);
   const pair = expectedPairPnlDistribution(r);
   const weeklyMc = pair?.weeklyMc || expectedPairPnlWeeklyMc(r);
   const grossP50 = dist?.p50 ?? Number(r?.expected_gross_decay_p50_annual);
-  const grossModel = dist?.model || r?.expected_gross_decay_dist_model || '—';
+  const grossModel = dist?.model || r?.expected_gross_decay_dist_model || (isFoF ? 'fof_weighted_child_nav_decay' : '—');
   const anchorTarget = Number(r?.gross_anchor_target_annual);
   const netP50 = Number(r?.net_edge_p50_annual);
   const pairFwd = pair?.p50 ?? Number(r?.expected_pair_pnl_p50_annual);
   const realized = Number(r?.gross_realized_mean_annual);
+  const childPairDiag = Number(r?.fof_forward_meta?.child_pair_p50_blend);
   return (
     <div className="scenario-card" style={{ marginTop: 0, marginBottom: 14 }}>
       <div className="scenario-head">
         <div>
-          <div className="scenario-title">Anchor metrics (YieldBOOST)</div>
+          <div className="scenario-title">Anchor metrics (YieldBOOST{isFoF ? ' FoF' : ''})</div>
           <div className="scenario-sub">
-            <strong>Exp. decay</strong>, <strong>Exp. edge (fwd)</strong>, and the heatmap center share the same put-spread structural gross anchor ({DECAY_DIST_MODEL_LABELS[grossModel] || grossModel}).
-            Net edge blends realized history to that anchor, then subtracts borrow.
+            {isFoF ? (
+              <>
+                <strong>Exp. edge (fwd)</strong> blends weighted child NAV structural decay (invested sleeve), minus FoF expense ratio and cash drag.
+                Heatmap center matches that anchor. Net edge bootstraps short FoF vs basket drags, then subtracts <strong>FoF borrow once</strong>.
+              </>
+            ) : (
+              <>
+                <strong>Exp. decay</strong>, <strong>Exp. edge (fwd)</strong>, and the heatmap center share the same put-spread structural gross anchor ({DECAY_DIST_MODEL_LABELS[grossModel] || grossModel}).
+                Net edge blends realized history to that anchor, then subtracts borrow.
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -4592,8 +4714,14 @@ function YbScenarioAnchorPanel({ r }) {
         <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Gross anchor (posterior)</div><strong>{fmtLogYr(anchorTarget)}</strong></div>
         <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Realized gross mean</div><strong>{fmtLogYr(realized)}</strong></div>
         <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Net edge p50</div><strong>{fmtLogYr(netP50)}</strong></div>
-        {weeklyMc?.p50 != null ? (
+        {!isFoF && weeklyMc?.p50 != null ? (
           <div><div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Weekly pair MC p50</div><strong>{fmtLogYr(weeklyMc.p50)}</strong></div>
+        ) : null}
+        {isFoF && Number.isFinite(childPairDiag) ? (
+          <div title="Legacy diagnostic — weighted child short-YB pair blend, not FoF economics">
+            <div style={{ color: 'var(--text-muted)', fontSize: 10 }}>Child pair (diag)</div>
+            <strong style={{ opacity: 0.8 }}>{fmtLogYr(childPairDiag)}</strong>
+          </div>
         ) : null}
       </div>
     </div>
@@ -4601,7 +4729,7 @@ function YbScenarioAnchorPanel({ r }) {
 }
 
 function NetEdgeBridgePanel({ r }) {
-  if (!isYieldBoostIncomeStrategy(r)) return null;
+  if (!isYieldBoostScenarioLayout(r)) return null;
   if (!expectedDecayAvailableForRow(r)) return null;
   const IS = typeof window !== 'undefined' ? window.IncomeScenario : null;
   const muF = Number(r?.expected_gross_decay_p50_annual);
@@ -4633,7 +4761,9 @@ function NetEdgeBridgePanel({ r }) {
         <div>
           <div className="scenario-title">Net edge bridge</div>
           <div className="scenario-sub">
-            Realized gross bootstrap is inverse-variance blended to forward Exp. decay p50, then borrow is applied for net edge.
+            {isYieldBoostFoF(r)
+              ? 'Realized short-FoF vs basket drags are inverse-variance blended to forward Exp. edge p50, then FoF borrow is applied once for net edge.'
+              : 'Realized gross bootstrap is inverse-variance blended to forward Exp. decay p50, then borrow is applied for net edge.'}
           </div>
         </div>
       </div>
@@ -4649,7 +4779,7 @@ function NetEdgeBridgePanel({ r }) {
           {' '}· method: {blendMethod}
         </div>
         <div>Net edge p50: <strong>{fmtLogYr(netP50)}</strong>
-          {Number.isFinite(borrow) ? <> (after borrow ≈ {fmt(borrow)}/yr)</> : null}
+          {Number.isFinite(borrow) ? <> (after {isYieldBoostFoF(r) ? 'FoF ' : ''}borrow ≈ {fmt(borrow)}/yr)</> : null}
         </div>
       </div>
     </div>
@@ -4677,7 +4807,7 @@ function _heatmapCellColor(v) {
 }
 
 function PairScenarioHeatmap({ r, forecastSigma }) {
-  if (!isYieldBoostIncomeStrategy(r)) return null;
+  if (!isYieldBoostScenarioLayout(r)) return null;
   const grid = r?.pair_scenario_grid || null;
   const pair = expectedPairPnlDistribution(r);
   const weeklyMc = pair?.weeklyMc || expectedPairPnlWeeklyMc(r);
@@ -4705,8 +4835,10 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
   const isLetfAnalytic = grid.basis === 'letf_ito_analytic';
   const isPutSpreadStructural = grid.engine === 'yieldboost_put_spread_structural'
     || grid.basis === 'put_spread_gross_anchor';
+  const isFoFGrid = grid.engine === 'fof_weighted_child_structural'
+    || grid.basis === 'fof_weighted_child_put_spread_gross';
   const isYb = isYieldBoostIncomeStrategy(r);
-  const gridTitle = isPutSpreadStructural
+  const gridTitle = (isPutSpreadStructural || isFoFGrid)
     ? 'Structural gross pair heatmap (log/yr)'
     : 'Forward pair P&L heatmap (log/yr)';
   return (
@@ -4726,10 +4858,10 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
           </div>
           <div className="scenario-sub">
             Rows = σ multiplier · Cols = 1Y underlying log drift ·
-            {isPutSpreadStructural
+            {(isPutSpreadStructural || isFoFGrid)
               ? ' Gross structural (distributions/borrow in Net edge bridge + income table below).'
               : ' Cells = median forward pair P&L on the same axis as Realized.'}
-            {isPutSpreadStructural && weeklyMc?.p50 != null ? (
+            {isPutSpreadStructural && !isFoFGrid && weeklyMc?.p50 != null ? (
               <> Weekly pair MC p50 (diagnostic): <strong>{fmtLogYr(weeklyMc.p50)}</strong>.</>
             ) : null}
           </div>
@@ -4795,7 +4927,14 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
         </table>
       </div>
       <div className="scenario-sub" style={{ marginTop: 8, fontSize: 11, lineHeight: 1.5 }}>
-        {isPutSpreadStructural ? (
+        {isFoFGrid ? (
+          <>
+            FoF structural gross = weighted child put-spread structural cells × invested sleeve, minus FoF expense ratio and cash drag.
+            Center cell (σ×1.0, drift 0%) is calibrated to FoF Exp. edge p50
+            {grid.anchor_p50_annual != null ? <> ({fmtLogYr(grid.anchor_p50_annual)})</> : null}.
+            FoF borrow enters net edge via the bootstrap below, not this gross grid.
+          </>
+        ) : isPutSpreadStructural ? (
           <>
             Structural gross pair = put-spread ETF log decay (same engine as Exp. edge fwd) + β × underlying log drift.
             Center cell (σ×1.0, drift 0%) is calibrated to screener Exp. edge p50
@@ -4820,21 +4959,27 @@ function PairScenarioHeatmap({ r, forecastSigma }) {
 }
 
 /** Cash distribution ex-dates for Scenarios tab (same source as Chart / income yield). */
-function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYield, calibration }) {
+function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYield, calibration, isFoF = false }) {
   const rows = Array.isArray(series) ? series : [];
-  const recent = [...rows].slice(-16).reverse();
+  const calibEvents = Array.isArray(calibration?.events_recent) ? calibration.events_recent : [];
+  const recent = isFoF && calibEvents.length
+    ? calibEvents
+    : [...rows].slice(-16).reverse();
   const yNote = Number.isFinite(Number(modeledAnnualYield)) && Number(modeledAnnualYield) > 0
     ? `Income scenarios use modeled cash yield ${fmt(Number(modeledAnnualYield))}/yr.`
     : null;
+  const hasFoFRollup = isFoF && calibEvents.length > 0;
   // NAV-normalized lookup so the table can show yield/share next to cash/share.
   const normalizedByExDate = useMemo(() => {
     const out = {};
-    const events = Array.isArray(calibration?.events_recent) ? calibration.events_recent : [];
-    events.forEach((ev) => {
-      if (ev && ev.ex_date) out[ev.ex_date] = ev;
+    calibEvents.forEach((ev) => {
+      if (ev && ev.ex_date) {
+        const key = hasFoFRollup ? `${ev.child_etf || ''}:${ev.ex_date}` : ev.ex_date;
+        out[key] = ev;
+      }
     });
     return out;
-  }, [calibration]);
+  }, [calibEvents, hasFoFRollup]);
   const hasNormalized = Object.keys(normalizedByExDate).length > 0;
   return (
     <div className="scenario-card" style={{ marginTop: 0, marginBottom: 14 }}>
@@ -4842,12 +4987,16 @@ function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYi
         <div>
           <div className="scenario-title">Cash distributions (schedule)</div>
           <div className="scenario-sub">
-            {loadError ? `Could not load file: ${loadError}` : rows.length
+            {isFoF ? (
+              hasFoFRollup
+                ? `Weighted child ETF distribution events (${calibEvents.length} recent) — cash flows through child NAV, not direct FoF ex-dates.`
+                : `No child distribution calibration on file for ${etfSym} — run build_data with child YieldBOOST calibrations.`
+            ) : loadError ? `Could not load file: ${loadError}` : rows.length
               ? `${rows.length} cash event(s) on file for ${etfSym}. Showing last ${recent.length} ex-dates.`
               : `No per-share cash distribution rows on file for ${etfSym}.`}
             {yNote ? ` ${yNote}` : ''}
             {calibration && hasNormalized ? (
-              <> · NAV-normalized via Bucket 2 calibration ({calibration.events_used || 0}/{calibration.events_total || 0} events, ratio {Number.isFinite(Number(calibration.blended_ratio_used)) ? `${Number(calibration.blended_ratio_used).toFixed(2)}x` : '—'}).</>
+              <> · {isFoF ? 'Weighted child rollup' : 'NAV-normalized via Bucket 2 calibration'} ({calibration.events_used || 0}/{calibration.events_total || 0} events, ratio {Number.isFinite(Number(calibration.blended_ratio_used)) ? `${Number(calibration.blended_ratio_used).toFixed(2)}x` : '—'}).</>
             ) : null}
           </div>
         </div>
@@ -4857,6 +5006,7 @@ function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYi
           <table className="scenario-table">
             <thead>
               <tr>
+                {hasFoFRollup ? <th>Child ETF</th> : null}
                 <th>Ex-date</th>
                 <th>Cash / share</th>
                 {hasNormalized ? (
@@ -4870,9 +5020,11 @@ function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYi
             </thead>
             <tbody>
               {recent.map((d, i) => {
-                const norm = normalizedByExDate[d.ex_date] || null;
+                const lookupKey = hasFoFRollup ? `${d.child_etf || ''}:${d.ex_date}` : d.ex_date;
+                const norm = normalizedByExDate[lookupKey] || normalizedByExDate[d.ex_date] || null;
                 return (
-                  <tr key={`${d.ex_date}-${i}`}>
+                  <tr key={`${d.child_etf || ''}-${d.ex_date}-${i}`}>
+                    {hasFoFRollup ? <td><strong>{d.child_etf || '—'}</strong></td> : null}
                     <td>{d.ex_date || '—'}</td>
                     <td>{Number.isFinite(Number(d.amount)) ? fmtUsd(Number(d.amount)) : '—'}</td>
                     {hasNormalized ? (
@@ -6206,7 +6358,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     setActivePanel(mapDefaultPanel(defaultPanel));
   }, [defaultPanel]);
 
-  const isIncomeStrategyScenario = isYieldBoostIncomeStrategy(r);
+  const isIncomeStrategyScenario = isYieldBoostScenarioLayout(r);
   const hideScenarios = suppressScenarioForRow(r);
   const showVrpPanel = isIncomeStrategyScenario;
   const vrpLiveRow = useMemo(() => {
@@ -6777,10 +6929,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       horizonDays: h.horizonDays || h.days,
       grossSimple: h.grossSimple,
       netSimple: h.netSimple,
-      borrowLog: h.borrowLog,
+      grossLog: h.grossLog ?? h.gross,
+      netLog: h.netLog ?? h.net,
+      borrowLog: h.borrowLog != null ? Math.abs(Number(h.borrowLog)) : (h.borrow_drag ?? null),
+      obs: h.obs ?? h.horizonDays ?? h.days,
       sufficient: h.sufficient !== false,
-      startDate: fofRealizedPair.start_date,
-      endDate: fofRealizedPair.end_date,
+      startDate: h.start_date || fofRealizedPair.start_date,
+      endDate: h.end_date || fofRealizedPair.end_date,
       etfStartPx: null,
       etfEndPx: null,
       undStartPx: null,
@@ -7269,10 +7424,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (!Number.isFinite(horizonYears) || horizonYears <= 0) {
       return { ok: false, error: 'Invalid scenario horizon.' };
     }
-    if (scenarioSigmaIsFallback && undObs < minObsForScenario) {
+    if (!isYieldBoostFoF(r) && scenarioSigmaIsFallback && undObs < minObsForScenario) {
       return { ok: false, error: `Insufficient lookback observations (${undObs}).` };
     }
     const sigma = Number(scenarioSigmaBest);
+    const annualBorrowCost = Number.isFinite(Number(annualCarryDrag)) ? Number(annualCarryDrag) : 0;
+    if (isYieldBoostFoF(r)) {
+      return computeFoFIncomeScenarioGrid(r, allRecords, sigma, horizonYears, annualBorrowCost);
+    }
     // Bucket 2 calibrated d: ratio * BS_premium(scenario sigma) so projected
     // cash scales with the scenario vol. Falls back to legacy scalar yield
     // when calibration is absent.
@@ -7280,7 +7439,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (annualIncomeYield == null || !Number.isFinite(Number(annualIncomeYield)) || Number(annualIncomeYield) < 0) {
       return { ok: false, error: 'Missing distribution yield estimate for income-style scenario.' };
     }
-    const annualBorrowCost = Number.isFinite(Number(annualCarryDrag)) ? Number(annualCarryDrag) : 0;
     const rows = SCENARIO_SHOCK_MULTIPLIERS.map((sigmaMultiple) => {
       const underlyingReturn = Math.exp(sigmaMultiple * sigma * Math.sqrt(horizonYears)) - 1;
       const modeled = estimateIncomeStyleScenarioReturn({
@@ -7301,7 +7459,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       rows,
       captureRatio,
     };
-  }, [r, isIncomeStrategyScenario, scenarioSigmaBest, horizonYears, undObs, scenarioSigmaIsFallback, minObsForScenario, annualCarryDrag]);
+  }, [r, allRecords, isIncomeStrategyScenario, scenarioSigmaBest, horizonYears, undObs, scenarioSigmaIsFallback, minObsForScenario, annualCarryDrag]);
 
   const mcUpsideThresholds = useMemo(
     () => parseThresholdInput(mcUpsideThresholdsText),
@@ -8447,14 +8605,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
       {activePanel === 'scenarios' && (
         <div className="chart-section">
-          {isYieldBoostFoF(r) ? (
+          {isYieldBoostScenarioLayout(r) ? (
             <>
-              <FoFScenarioPanel r={r} allRecords={allRecords} chartVolLookbackRange={chartVolLookbackRange} borrowAnnual={decayBorrowAnnual} />
-              <div className="chart-note">Full holdings breakdown on the <button type="button" className="sym-link-btn" onClick={() => navigateChartPanel('basket')}>Basket</button> tab.</div>
-            </>
-          ) : null}
-          {isYieldBoostIncomeStrategy(r) ? (
-            <>
+              {isYieldBoostFoF(r) ? <FoFDataStatusBanner r={r} /> : null}
               <div style={{
                 margin: '0 0 14px',
                 padding: '12px 16px',
@@ -8466,10 +8619,20 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 color: 'var(--text-secondary)',
               }}>
                 <strong style={{ color: 'var(--text-primary)' }}>Three views on this tab:</strong>{' '}
-                (1) <strong>Structural gross heatmap</strong> — put-spread engine anchored to Exp. decay p50 (same family as net edge).
-                (2) <strong>Income scenario tables</strong> — long TR / net short with calibrated distributions.
-                (3) <strong>Net edge bridge</strong> — how realized gross is blended to forward Exp. decay.
-                Weekly-rebalanced pair MC is a <strong>diagnostic</strong> (distributions + borrow inside the sim), not the main-grid headline.
+                {isYieldBoostFoF(r) ? (
+                  <>
+                    (1) <strong>Structural gross heatmap</strong> — basket-weighted child put-spread gross, anchored to FoF Exp. edge p50.
+                    (2) <strong>Income scenario tables</strong> — weighted child long TR / short FoF vs basket at basket σ shocks.
+                    (3) <strong>Net edge bridge</strong> — how realized short-FoF vs basket drags blend to forward Exp. edge.
+                  </>
+                ) : (
+                  <>
+                    (1) <strong>Structural gross heatmap</strong> — put-spread engine anchored to Exp. decay p50 (same family as net edge).
+                    (2) <strong>Income scenario tables</strong> — long TR / net short with calibrated distributions.
+                    (3) <strong>Net edge bridge</strong> — how realized gross is blended to forward Exp. decay.
+                    Weekly-rebalanced pair MC is a <strong>diagnostic</strong> (distributions + borrow inside the sim), not the main-grid headline.
+                  </>
+                )}
               </div>
               <YbScenarioAnchorPanel r={r} />
               <PairScenarioHeatmap r={r} forecastSigma={forecastVolForScenario(r, chartVolLookbackRange)?.sigma} />
@@ -8480,7 +8643,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 loadError={etfDistributionsError}
                 modeledAnnualYield={incomeAnnualYieldForChart}
                 calibration={r?.income_distribution_calibration || null}
+                isFoF={isYieldBoostFoF(r)}
               />
+              {isYieldBoostFoF(r) ? (
+                <div className="chart-note" style={{ marginBottom: 10 }}>
+                  Full holdings breakdown on the <button type="button" className="sym-link-btn" onClick={() => navigateChartPanel('basket')}>Basket</button> tab.
+                  Realized pair horizons are on the <button type="button" className="sym-link-btn" onClick={() => navigateChartPanel('decay')}>Decay</button> tab.
+                </div>
+              ) : null}
             </>
           ) : null}
           {isIncomeStrategyScenario ? (
@@ -8496,7 +8666,15 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       Scenarios σ: <strong>{fmt(scenarioSigmaBest)}</strong> ({scenarioSigmaSource}) · ref {fmt(scenarioSigmaRef)}
                     </div>
                     <div className="scenario-sub">
-                      Weekly 95/88 put on 2× sleeve · <strong>Long ETF</strong> = NAV loss + cash (no borrow) · modeled cash {fmt(incomeScenarioGrid.annualIncomeYield)}/yr · borrow {fmt(incomeScenarioGrid.annualBorrowCost)}/yr on short
+                      {isYieldBoostFoF(r) ? (
+                        <>
+                          Basket σ shocks · <strong>Long FoF</strong> = weighted child NAV path through invested sleeve (no borrow) · modeled cash {fmt(incomeScenarioGrid.annualIncomeYield)}/yr · FoF borrow {fmt(incomeScenarioGrid.annualBorrowCost)}/yr · <strong>Net short</strong> = basket return − long FoF − borrow
+                        </>
+                      ) : (
+                        <>
+                          Weekly 95/88 put on 2× sleeve · <strong>Long ETF</strong> = NAV loss + cash (no borrow) · modeled cash {fmt(incomeScenarioGrid.annualIncomeYield)}/yr · borrow {fmt(incomeScenarioGrid.annualBorrowCost)}/yr on short
+                        </>
+                      )}
                     </div>
                     {incomeScenarioGrid.captureRatio ? (() => {
                       const cr = incomeScenarioGrid.captureRatio;
@@ -8592,10 +8770,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               </div>
 
               <div className="chart-note">
-                Income scenarios: tagged YieldBOOST names only. Other low-β rows hide this grid — vol-drag near β=1 is ~0 so LETF shock math would mislead.
+                {isYieldBoostFoF(r)
+                  ? 'FoF income scenarios: basket σ shocks with weighted child put-spread math. Child distributions roll up through FoF NAV; FoF has no direct ex-dates.'
+                  : 'Income scenarios: tagged YieldBOOST names only. Other low-β rows hide this grid — vol-drag near β=1 is ~0 so LETF shock math would mislead.'}
               </div>
             </>
-          ) : !isYieldBoostFoF(r) ? (
+          ) : !isYieldBoostScenarioLayout(r) ? (
             <>
               <div className="scenario-card" style={{ marginTop: 0 }}>
             <div className="scenario-head">
@@ -9153,8 +9333,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <>
                 FoF synthetic pair: short <strong>{etfSym}</strong> vs proportional underlying long basket
                 (weights from Granite holdings, piecewise-constant through history).{' '}
-                <code>gross = log(basket<sub>end</sub>/basket<sub>start</sub>) − log(FoF<sub>end</sub>/FoF<sub>start</sub>)</code>,{' '}
-                <code>net = gross − borrow × (N/252)</code>. Period returns are simple (<code>expm1</code> of log sums).
+                Trailing <em>N</em>-day gross = sum of daily log drags{' '}
+                (<code>basket_log − log(FoF)</code> per session); net<sub>log</sub> = gross<sub>log</sub> − borrow × (<em>N</em>/252).
+                Simple % columns are <code>expm1</code> of those log sums (not gross% − borrow%).
                 {fofRealizedPair?.start_date && fofRealizedPair?.end_date ? (
                   <> Window: {fofRealizedPair.start_date} → {fofRealizedPair.end_date} ({fofRealizedPair.n_days || 0} aligned days).</>
                 ) : null}
@@ -9204,7 +9385,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     <th>Horizon</th>
                     <th>Gross</th>
                     <th>Net</th>
-                    <th>Borrow drag</th>
+                    <th>Borrow (log)</th>
                     <th>Window</th>
                     {!isFoF ? <th>{etfSym} px</th> : null}
                     {!isFoF ? <th>{undSym || 'Und'} px</th> : null}
@@ -9315,7 +9496,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     <th>Horizon</th>
                     <th>Gross</th>
                     <th>Net</th>
-                    <th>Borrow drag</th>
+                    <th>Borrow (log)</th>
                     <th>Window</th>
                     <th>{etfSym} px</th>
                     <th>{undSym || 'Und'} px</th>

@@ -9,11 +9,15 @@ import numpy as np
 import pandas as pd
 
 from yieldboost_fof_constants import (
+    FOF_DEFAULT_EXPENSE_RATIO_ANNUAL,
     YIELDBOOST_CHILD_TO_UNDERLYING,
     YIELDBOOST_FOF_SYMBOLS,
 )
 from yieldboost_fof_forward import (
     bootstrap_fof_net_edge,
+    build_fof_income_distribution_calibration,
+    build_fof_pair_scenario_grid,
+    weighted_child_forecast_vol,
     weighted_child_nav_decay_forward,
     weighted_child_pair_pnl_blend,
 )
@@ -193,25 +197,32 @@ def compute_fof_realized_pair_metrics(
     drags = np.array([x[1] for x in daily_drags], dtype=float)
     gross_annual = float(np.mean(drags) * _TRADING_DAYS)
 
+    drag_dates = [x[0] for x in daily_drags]
     horizons: list[dict[str, Any]] = []
     for label, n in _HORIZON_DAYS.items():
-        if len(drags) < n + 1:
+        if len(drags) < n:
             continue
         window = drags[-n:]
         gross_h = float(np.sum(window))
         borrow_h = 0.0
         if borrow_annual is not None and math.isfinite(borrow_annual):
             borrow_h = float(borrow_annual) * (n / _TRADING_DAYS)
+        net_h = gross_h - borrow_h
         horizons.append({
             "label": label,
             "days": n,
             "horizonDays": n,
+            "obs": n,
             "gross": round(gross_h, 6),
-            "net": round(gross_h - borrow_h, 6),
+            "net": round(net_h, 6),
+            "grossLog": round(gross_h, 6),
+            "netLog": round(net_h, 6),
             "grossSimple": round(math.expm1(gross_h), 6),
-            "netSimple": round(math.expm1(gross_h - borrow_h), 6),
+            "netSimple": round(math.expm1(net_h), 6),
             "borrow_drag": round(borrow_h, 6),
-            "borrowLog": round(-borrow_h, 6),
+            "borrowLog": round(borrow_h, 6),
+            "start_date": drag_dates[-n],
+            "end_date": drag_dates[-1],
             "sufficient": True,
         })
 
@@ -332,6 +343,8 @@ def build_fof_dashboard_record(
         "gross_blend_weight_forward": net_boot.get("gross_blend_weight_forward"),
         "gross_sigma_realized_annual": net_boot.get("gross_sigma_realized_annual"),
         "gross_sigma_forward_annual": net_boot.get("gross_sigma_forward_annual"),
+        "gross_blend_method": net_boot.get("gross_blend_method"),
+        "gross_anchor_source": net_boot.get("gross_anchor_source"),
         "borrow_current": borrow_current,
         "borrow_fee_annual": borrow_current,
         "borrow_net_annual": borrow_current,
@@ -363,8 +376,32 @@ def build_fof_dashboard_record(
         borrow_annual=borrow_current,
     )
     rec.update(extras)
+    basket_vol = None
     if extras.get("fof_basket_vol", {}).get("vol_annual") is not None:
-        rec["fof_basket_vol_annual"] = extras["fof_basket_vol"]["vol_annual"]
+        basket_vol = extras["fof_basket_vol"]["vol_annual"]
+        rec["fof_basket_vol_annual"] = basket_vol
+
+    vol_fields = weighted_child_forecast_vol(
+        basket,
+        child_records,
+        basket_vol_fallback=basket_vol,
+    )
+    rec.update({k: v for k, v in vol_fields.items() if v is not None})
+
+    fof_calib = build_fof_income_distribution_calibration(basket, child_records)
+    if fof_calib:
+        rec["income_distribution_calibration"] = fof_calib
+
+    pair_grid = build_fof_pair_scenario_grid(
+        basket,
+        child_records,
+        anchor_p50=exp_p50,
+        expense_ratio_annual=fwd.get("expense_ratio_annual") or FOF_DEFAULT_EXPENSE_RATIO_ANNUAL,
+        cash_drag_annual=fwd.get("cash_drag_annual") or 0.0,
+    )
+    if pair_grid:
+        rec["pair_scenario_grid"] = pair_grid
+
     if und_list:
         rec["fof_underlyings"] = [
             {"underlying": u, "weight": und_weights[u]} for u in und_list
