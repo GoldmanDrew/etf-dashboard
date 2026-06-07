@@ -480,6 +480,26 @@ def etf_adj_close_needs_split_scaling(
     return abs(adj / close - 1.0) <= eps
 
 
+def etf_adj_on_post_split_basis(
+    close: float,
+    adj: float,
+    mult: float,
+    *,
+    rel_tol: float = 0.15,
+) -> bool:
+    """True when ``etf_adj_close`` is already mapped onto the latest post-split basis."""
+    if not (
+        math.isfinite(close)
+        and math.isfinite(adj)
+        and math.isfinite(mult)
+        and close > 0
+        and adj > 0
+        and mult > 1.05
+    ):
+        return False
+    return abs((adj / close) / mult - 1.0) <= rel_tol
+
+
 def corporate_actions_build_time(path: Path | None = None) -> dt.datetime | None:
     p = path or DEFAULT_CORPORATE_ACTIONS_PATH
     if not p.exists():

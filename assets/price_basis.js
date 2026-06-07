@@ -67,6 +67,21 @@
     return null;
   }
 
+  function etfAdjCloseNeedsSplitScaling(close, adj, eps = 1e-4) {
+    const c = toNum(close);
+    const a = toNum(adj);
+    if (!(c > 0 && a > 0)) return false;
+    return Math.abs(a / c - 1) <= eps;
+  }
+
+  function etfAdjOnPostSplitBasis(close, adj, mult, relTol = 0.15) {
+    const c = toNum(close);
+    const a = toNum(adj);
+    const m = toNum(mult);
+    if (!(c > 0 && a > 0 && m > 1.05)) return false;
+    return Math.abs((a / c) / m - 1) <= relTol;
+  }
+
   function yahooAdjLooksBackAdjusted(points, effectiveDate, mult, relTol = 0.15) {
     const eff = parseDate(effectiveDate);
     const m = toNum(mult);
@@ -247,7 +262,10 @@
     const mult = toNum(ctx?.mult);
 
     if (preSplit && mult > 0) {
-      if (adj > 0) return adj * mult;
+      if (adj > 0) {
+        if (etfAdjOnPostSplitBasis(close, adj, mult)) return adj;
+        return adj * mult;
+      }
       if (navTr > 0 && close > 0 && mult > 1.05) {
         if (navTr / close >= mult * 0.85 || navTr / close > 2.5) return close * mult;
         return navTr * mult;
@@ -268,7 +286,10 @@
     const mult = toNum(ctx?.mult);
 
     if (preSplit && mult > 0) {
-      if (adj > 0) return "pre_split_adj_mapped";
+      if (adj > 0) {
+        if (etfAdjOnPostSplitBasis(close, adj, mult)) return "pre_split_adj_already_mapped";
+        return "pre_split_adj_mapped";
+      }
       if (navTr > 0 && close > 0 && mult > 1.05
         && (navTr / close >= mult * 0.85 || navTr / close > 2.5)) {
         return "pre_split_close_scaled";
@@ -424,6 +445,8 @@
     nearestSplitRatio,
     matchSplitToPriceJump,
     confirmSplitFromSharesOrNav,
+    etfAdjCloseNeedsSplitScaling,
+    etfAdjOnPostSplitBasis,
     yahooAdjLooksBackAdjusted,
     splitCloseJumpRatio,
     filterSplitsNeedingCloseBasisFix,

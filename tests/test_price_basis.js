@@ -98,6 +98,18 @@ test("matchSplitToPriceJump trusts declared mult within 18%", () => {
   assert.equal(PB.nearestSplitRatio(5.64), 6);
 });
 
+test("APLZ backfilled adj is not double-scaled onto post-split basis", () => {
+  const rows = [
+    { date: "2026-05-27", close_price: 2.565, etf_adj_close: 12.825, underlying_adj_close: 10 },
+    { date: "2026-06-03", close_price: 15.0, etf_adj_close: 15.0, underlying_adj_close: 11 },
+  ];
+  const tr = PB.buildTrSeriesFromMetrics(rows, [{ date: "2026-06-03", mult: 5 }]);
+  const pre = tr.find((x) => x.date === "2026-05-27");
+  assert.ok(Math.abs(pre.trEtfPx - 12.825) < 0.01, `pre-split TR ${pre.trEtfPx}`);
+  const cov = PB.summarizeTrCoverage(rows, [{ date: "2026-06-03", mult: 5 }]);
+  assert.ok(cov.maxEtfDailyLogReturn < 0.35, `max jump ${cov.maxEtfDailyLogReturn}`);
+});
+
 test("realized_decay re-exports filter from price_basis", () => {
   const points = [
     { date: "2026-01-23", close: 421.25 },

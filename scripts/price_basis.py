@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 from split_adjustments import (
+    etf_adj_on_post_split_basis,
     filter_splits_needing_close_basis_fix,
     match_split_to_price_jump,
 )
@@ -136,6 +137,8 @@ def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | No
     mult = float(ctx.get("mult") or 0)
     if _is_pre_split(ds, ctx) and mult > 0:
         if math.isfinite(adj_f) and adj_f > 0:
+            if etf_adj_on_post_split_basis(close, adj_f, mult):
+                return adj_f
             return adj_f * mult
         if math.isfinite(nav_f) and nav_f > 0 and close > 0 and mult > 1.05:
             if nav_f / close >= mult * 0.85 or nav_f / close > 2.5:

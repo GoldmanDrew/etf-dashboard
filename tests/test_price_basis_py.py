@@ -145,6 +145,63 @@ def test_match_split_to_price_jump_trusts_declared_mult():
     assert match_split_to_price_jump(5.64, 5.0) == pytest.approx(5.0)
 
 
+def test_aplz_backfilled_adj_not_double_scaled():
+    """Regression: ingest backfill maps adj to post-split basis; do not multiply again."""
+    rows = [
+        {
+            "date": "2026-05-27",
+            "close_price": 2.565,
+            "etf_adj_close": 12.825,
+            "nav": 2.5625,
+            "shares_outstanding": 2405000,
+            "underlying_adj_close": 10,
+        },
+        {
+            "date": "2026-06-03",
+            "close_price": 15.0,
+            "etf_adj_close": 15.0,
+            "nav": 15.0602,
+            "shares_outstanding": 484000,
+            "underlying_adj_close": 11,
+        },
+    ]
+    events = [(dt.date(2026, 6, 3), 5.0)]
+    tr = build_tr_series_from_metrics(rows, events)
+    pre = next(r for r in tr if r["date"] == "2026-05-27")
+    assert pre["tr_etf_px"] == pytest.approx(12.825, rel=1e-3)
+    max_jump, _ = max_abs_log_return(tr, "tr_etf_px")
+    assert max_jump < 0.35
+
+
+def test_mtyy_partial_adj_backfill_no_oscillation():
+    rows = [
+        {
+            "date": "2026-05-27",
+            "close_price": 4.04,
+            "etf_adj_close": 24.24,
+            "underlying_adj_close": 154.2,
+        },
+        {
+            "date": "2026-05-28",
+            "close_price": 4.0,
+            "etf_adj_close": 3.937,
+            "underlying_adj_close": 151.64,
+        },
+        {
+            "date": "2026-06-02",
+            "close_price": 22.99,
+            "etf_adj_close": 22.99,
+            "underlying_adj_close": 136.08,
+        },
+    ]
+    tr = build_tr_series_from_metrics(rows, [(dt.date(2026, 6, 2), 6.0)])
+    by_date = {r["date"]: r["tr_etf_px"] for r in tr}
+    assert by_date["2026-05-27"] == pytest.approx(24.24, rel=1e-3)
+    assert by_date["2026-05-28"] == pytest.approx(23.622, rel=0.02)
+    max_jump, _ = max_abs_log_return(tr, "tr_etf_px")
+    assert max_jump < 0.15
+
+
 def test_mtyy_real_metrics_no_nov_cliff():
     """Regression: pre-split adj must map consistently (no close-threshold cliff)."""
     import pandas as pd
