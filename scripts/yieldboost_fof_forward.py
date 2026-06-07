@@ -7,13 +7,21 @@ from typing import Any
 
 import numpy as np
 
-from income_schedule import scenario_grid_put_spread_pair
+from income_schedule import (
+    DEFAULT_CROSS_FUND_RATIO,
+    MAX_INCOME_YIELD_ANNUAL,
+    build_legacy_yield_fields,
+    estimate_income_style_scenario_return,
+    expected_put_spread_loss_weekly,
+    scenario_grid_put_spread_pair,
+)
 from yieldboost_fof_constants import FOF_DEFAULT_EXPENSE_RATIO_ANNUAL
 
 _TRADING_DAYS = 252
 _SIGMA_MULTIPLIERS = (0.5, 0.7, 1.0, 1.3, 1.5)
 _DRIFTS = (-0.50, -0.25, 0.00, 0.25, 0.50)
 _HORIZON_YEARS = 1.0
+_INCOME_SCENARIO_SHOCKS = (-3.0, -1.0, -1.0 / 3.0, 0.0, 1.0 / 3.0, 1.0, 3.0)
 
 
 def _norm_sym(s: object) -> str:
@@ -28,10 +36,8 @@ def _cash_fraction(basket: dict[str, Any]) -> float:
         return 0.0
     if not math.isfinite(v):
         return 0.0
-    # Stored as percent (0–100), e.g. 33.37 for YBST.
-    if v > 1.0:
-        return min(1.0, max(0.0, v / 100.0))
-    return min(1.0, max(0.0, v))
+    # Granite holdings store percent on 0–100 scale (e.g. 0.2603 = 0.26% cash).
+    return min(1.0, max(0.0, v / 100.0))
 
 
 def weighted_child_pair_pnl_blend(
@@ -420,6 +426,131 @@ def build_fof_pair_scenario_grid(
         "cash_drag_annual": round(cash_drag, 6),
         "invested_fraction": round(invested_frac, 6),
         "horizon_years": _HORIZON_YEARS,
+    }
+
+
+def _child_annual_income_yield(rec: dict[str, Any], sigma_annual: float) -> float | None:
+    """Mirror client ``incomeAnnualYieldForScenario`` for a child YB row."""
+    cal = rec.get("income_distribution_calibration") or {}
+    if cal:
+        legacy = build_legacy_yield_fields(cal)
+        trailing = legacy.get("income_yield_trailing_annual")
+        if trailing is not None:
+            try:
+                t = float(trailing)
+                if math.isfinite(t) and 0 < t <= MAX_INCOME_YIELD_ANNUAL:
+                    return t
+            except (TypeError, ValueError):
+                pass
+        try:
+            blended = float(cal.get("blended_ratio_used") or DEFAULT_CROSS_FUND_RATIO)
+        except (TypeError, ValueError):
+            blended = DEFAULT_CROSS_FUND_RATIO
+        if math.isfinite(sigma_annual) and sigma_annual > 0 and blended > 0:
+            bs = expected_put_spread_loss_weekly(0.0, float(sigma_annual), 1.0)
+            if math.isfinite(bs) and bs > 0:
+                return min(MAX_INCOME_YIELD_ANNUAL, blended * bs * 52.0)
+    return None
+
+
+def build_fof_income_scenario_grid(
+    basket: dict[str, Any],
+    child_records: dict[str, dict[str, Any]],
+    *,
+    scenario_sigma: float,
+    horizon_years: float = 0.25,
+    fof_borrow_annual: float | None = None,
+    expense_ratio_annual: float = FOF_DEFAULT_EXPENSE_RATIO_ANNUAL,
+) -> dict[str, Any] | None:
+    """Holdings-weighted child income scenarios (not short-FoF vs long-basket pair)."""
+    children = basket.get("children") or []
+    if not children:
+        return None
+    try:
+        sigma_fof = float(scenario_sigma)
+        t = float(horizon_years)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(sigma_fof) and sigma_fof > 0 and math.isfinite(t) and t > 0):
+        return None
+
+    wsum = sum(float(c.get("weight_pct") or 0) for c in children) or 100.0
+    cash_frac = _cash_fraction(basket)
+    invested_frac = max(0.0, 1.0 - cash_frac)
+    er = max(0.0, float(expense_ratio_annual))
+    borrow = float(fof_borrow_annual) if fof_borrow_annual is not None and math.isfinite(float(fof_borrow_annual)) else 0.0
+
+    rows: list[dict[str, Any]] = []
+    for sigma_mult in _INCOME_SCENARIO_SHOCKS:
+        basket_und = math.expm1(float(sigma_mult) * sigma_fof * math.sqrt(t))
+        w_nav = w_dist = w_long = w_net_short = w_loss = 0.0
+        wgot = 0.0
+        for c in children:
+            yb = _norm_sym(c.get("yb_etf"))
+            w = float(c.get("weight_pct") or 0) / wsum
+            if w <= 0 or not yb:
+                continue
+            rec = child_records.get(yb) or {}
+            child_sigma = rec.get("forecast_vol_underlying_annual")
+            if child_sigma is None:
+                child_sigma = rec.get("vol_underlying_annual")
+            try:
+                cs = float(child_sigma) if child_sigma is not None else sigma_fof
+            except (TypeError, ValueError):
+                cs = sigma_fof
+            if not (math.isfinite(cs) and cs > 0):
+                cs = sigma_fof
+            child_yield = _child_annual_income_yield(rec, cs)
+            if child_yield is None:
+                continue
+            child_und = math.expm1(float(sigma_mult) * cs * math.sqrt(t))
+            modeled = estimate_income_style_scenario_return(
+                child_und,
+                cs,
+                child_yield,
+                annual_borrow_cost=0.0,
+                horizon_years=t,
+            )
+            if not modeled:
+                continue
+            w_nav += w * float(modeled["nav_decay"])
+            w_dist += w * float(modeled["distributions_paid"])
+            w_long += w * float(modeled["long_total_return"])
+            w_net_short += w * float(modeled["net_short_pnl"])
+            w_loss += w * float(modeled["weekly_spread_loss"])
+            wgot += w
+        if wgot <= 0:
+            rows.append({"sigma_multiple": sigma_mult, "underlying_return": basket_und, "ok": False})
+            continue
+        scale = invested_frac
+        er_drag = er * t
+        nav_decay = w_nav * scale
+        distributions_paid = w_dist * scale
+        long_total_return = w_long * scale - er_drag
+        net_short_pnl = (w_net_short / wgot) * scale - er_drag - borrow * t
+        rows.append({
+            "sigma_multiple": sigma_mult,
+            "underlying_return": basket_und,
+            "weekly_spread_loss": w_loss * scale,
+            "nav_decay": nav_decay,
+            "distributions_paid": distributions_paid,
+            "long_total_return": long_total_return,
+            "borrow_cost": borrow * t,
+            "net_short_pnl": net_short_pnl,
+            "child_net_short_blended": (w_net_short / wgot) * scale,
+            "ok": True,
+        })
+
+    if not any(r.get("ok") for r in rows):
+        return None
+    return {
+        "basis": "fof_weighted_child_income_scenario",
+        "horizon_years": round(t, 6),
+        "scenario_sigma": round(sigma_fof, 6),
+        "invested_fraction": round(invested_frac, 6),
+        "expense_ratio_annual": round(er, 6),
+        "fof_borrow_annual": round(borrow, 6),
+        "rows": rows,
     }
 
 

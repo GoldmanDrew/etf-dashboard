@@ -3247,6 +3247,12 @@ function computeScenarioEtf3mFlatUnd(r, chartVolLookbackRange) {
   return computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
 }
 
+function fofCashFractionFromBasket(basket) {
+  const cashPct = Number(basket?.cash_pct);
+  if (!Number.isFinite(cashPct)) return 0;
+  return Math.min(1, Math.max(0, cashPct / 100));
+}
+
 /** Weighted child long TR at flat underlying — FoF long holder, no borrow. */
 function computeFoFLongHolderReturn(r, allRecords, chartVolLookbackRange, horizonLabel = '3M') {
   if (!isYieldBoostFoF(r)) return null;
@@ -3276,9 +3282,7 @@ function computeFoFLongHolderReturn(r, allRecords, chartVolLookbackRange, horizo
   }
   if (wgot <= 0) return null;
 
-  const cashPct = Number(basket?.cash_pct);
-  const cashFrac = Number.isFinite(cashPct) ? (cashPct > 1 ? cashPct / 100 : cashPct) : 0;
-  const investedFrac = Math.max(0, 1 - Math.min(1, Math.max(0, cashFrac)));
+  const investedFrac = Math.max(0, 1 - fofCashFractionFromBasket(basket));
   const er = Number(r?.fof_forward_meta?.expense_ratio_annual ?? basket?.expense_ratio_annual ?? 0.0099);
   const investedReturn = (weightedChild / wgot) * investedFrac;
   const erDrag = Number.isFinite(er) ? er * horizonYears : 0;
@@ -3310,9 +3314,7 @@ function computeFoFIncomeScenarioGrid(r, allRecords, scenarioSigma, horizonYears
     return { ok: false, error: 'Invalid σ or horizon.' };
   }
   const wsum = children.reduce((s, c) => s + (Number(c?.weight_pct) || 0), 0) || 100;
-  const cashPct = Number(basket?.cash_pct);
-  const cashFrac = Number.isFinite(cashPct) ? (cashPct > 1 ? cashPct / 100 : cashPct) : 0;
-  const investedFrac = Math.max(0, 1 - Math.min(1, Math.max(0, cashFrac)));
+  const investedFrac = Math.max(0, 1 - fofCashFractionFromBasket(basket));
   const er = Number(r?.fof_forward_meta?.expense_ratio_annual ?? basket?.expense_ratio_annual ?? 0.0099);
   const recs = Array.isArray(allRecords) ? allRecords : [];
   const borrow = Number.isFinite(Number(annualBorrowCost)) ? Number(annualBorrowCost) : 0;
@@ -3362,7 +3364,9 @@ function computeFoFIncomeScenarioGrid(r, allRecords, scenarioSigma, horizonYears
     const navDecay = wNavDecay * scale;
     const distributionsPaid = wDist * scale;
     const longTotalReturn = wLongTr * scale - erDrag;
-    const netShortPnl = basketUndReturn - longTotalReturn - borrow * t;
+    const childNetShortBlended = (wNetShortChild / wgot) * scale;
+    const netShortPnl = childNetShortBlended - erDrag - borrow * t;
+    const basketPairNetShort = basketUndReturn - longTotalReturn - borrow * t;
     return {
       sigmaMultiple,
       underlyingReturn: basketUndReturn,
@@ -3372,6 +3376,8 @@ function computeFoFIncomeScenarioGrid(r, allRecords, scenarioSigma, horizonYears
       longTotalReturn,
       borrowCost: borrow * t,
       netShortPnl,
+      childNetShortBlended,
+      basketPairNetShort,
     };
   });
 
@@ -3382,6 +3388,7 @@ function computeFoFIncomeScenarioGrid(r, allRecords, scenarioSigma, horizonYears
     weeks: Math.max(1, Math.round(t * 52)),
     rows,
     captureRatio: captureRatioSummary(r),
+    basis: 'fof_weighted_child_income_scenario',
   };
 }
 
@@ -8673,7 +8680,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     <div className="scenario-sub">
                       {isYieldBoostFoF(r) ? (
                         <>
-                          Basket σ shocks · <strong>Long FoF</strong> = weighted child NAV path through invested sleeve (no borrow) · modeled cash {fmt(incomeScenarioGrid.annualIncomeYield)}/yr · FoF borrow {fmt(incomeScenarioGrid.annualBorrowCost)}/yr · <strong>Net short</strong> = basket return − long FoF − borrow
+                          Child-weighted YieldBOOST scenarios (holdings average) · <strong>Long FoF</strong> = weighted child NAV path through invested sleeve (no borrow) · modeled cash {fmt(incomeScenarioGrid.annualIncomeYield)}/yr · FoF borrow {fmt(incomeScenarioGrid.annualBorrowCost)}/yr · <strong>Net short</strong> = weighted child short − FoF ER − FoF borrow (not underlying-basket pair)
                         </>
                       ) : (
                         <>

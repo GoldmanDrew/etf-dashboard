@@ -10,7 +10,9 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from yieldboost_fof_forward import (  # noqa: E402
+    _cash_fraction,
     build_fof_income_distribution_calibration,
+    build_fof_income_scenario_grid,
     build_fof_pair_scenario_grid,
     weighted_child_forecast_vol,
 )
@@ -91,3 +93,45 @@ def test_build_fof_pair_scenario_grid_shape_and_anchor():
     assert len(grid["p50_log_grid"][0]) == 5
     center = grid["p50_log_grid"][2][2]
     assert center == pytest.approx(anchor, abs=0.002)
+    assert grid["invested_fraction"] == pytest.approx(0.95, abs=0.001)
+
+
+def test_cash_fraction_granite_percent_scale():
+    assert _cash_fraction({"cash_pct": 0.2603}) == pytest.approx(0.002603, rel=1e-4)
+    assert _cash_fraction({"cash_pct": 5.0}) == pytest.approx(0.05, rel=1e-6)
+    assert 1.0 - _cash_fraction({"cash_pct": 0.2603}) == pytest.approx(0.997397, rel=1e-4)
+
+
+def test_build_fof_income_scenario_grid_child_weighted_not_basket_pair():
+    basket = {
+        "children": [
+            {"yb_etf": "SMYY", "weight_pct": 50.0},
+            {"yb_etf": "IOYY", "weight_pct": 50.0},
+        ],
+        "cash_pct": 0.26,
+    }
+    child_records = {
+        "SMYY": _child_with_grid("SMYY", sigma=0.80, beta=0.5, p50=0.4),
+        "IOYY": _child_with_grid("IOYY", sigma=0.60, beta=0.4, p50=0.3),
+    }
+    grid = build_fof_income_scenario_grid(
+        basket,
+        child_records,
+        scenario_sigma=0.72,
+        horizon_years=0.25,
+        fof_borrow_annual=0.10,
+        expense_ratio_annual=0.0099,
+    )
+    assert grid is not None
+    assert grid["basis"] == "fof_weighted_child_income_scenario"
+    assert grid["invested_fraction"] == pytest.approx(0.9974, rel=1e-3)
+    flat = next(r for r in grid["rows"] if r.get("sigma_multiple") == 0)
+    assert flat["ok"] is True
+    er_drag = 0.0099 * 0.25
+    borrow_drag = 0.10 * 0.25
+    assert flat["net_short_pnl"] == pytest.approx(
+        flat["child_net_short_blended"] - er_drag - borrow_drag,
+        rel=1e-4,
+    )
+    legacy_basket_pair = -flat["long_total_return"] - borrow_drag
+    assert flat["net_short_pnl"] != pytest.approx(legacy_basket_pair, abs=1e-4)

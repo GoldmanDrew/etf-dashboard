@@ -16,6 +16,7 @@ from yieldboost_fof_constants import (
 from yieldboost_fof_forward import (
     bootstrap_fof_net_edge,
     build_fof_income_distribution_calibration,
+    build_fof_income_scenario_grid,
     build_fof_pair_scenario_grid,
     weighted_child_forecast_vol,
     weighted_child_nav_decay_forward,
@@ -401,6 +402,26 @@ def build_fof_dashboard_record(
     )
     if pair_grid:
         rec["pair_scenario_grid"] = pair_grid
+
+    fof_sigma = vol_fields.get("forecast_vol_underlying_annual")
+    if fof_sigma is not None:
+        try:
+            fof_sigma_f = float(fof_sigma)
+        except (TypeError, ValueError):
+            fof_sigma_f = None
+    else:
+        fof_sigma_f = None
+    if fof_sigma_f is not None and math.isfinite(fof_sigma_f) and fof_sigma_f > 0:
+        income_grid = build_fof_income_scenario_grid(
+            basket,
+            child_records,
+            scenario_sigma=fof_sigma_f,
+            horizon_years=0.25,
+            fof_borrow_annual=borrow_current,
+            expense_ratio_annual=fwd.get("expense_ratio_annual") or FOF_DEFAULT_EXPENSE_RATIO_ANNUAL,
+        )
+        if income_grid:
+            rec["income_scenario_grid"] = income_grid
 
     if und_list:
         rec["fof_underlyings"] = [
