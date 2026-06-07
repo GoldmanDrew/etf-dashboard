@@ -134,6 +134,15 @@ test("calibratedWeeklyDistribution returns null weekly when sigma invalid", () =
   assert.equal(out.ratioSource, "invalid_sigma");
 });
 
+test("calibratedWeeklyDistribution caps annualized yield at MAX_INCOME_YIELD_ANNUAL", () => {
+  const out = calibratedWeeklyDistribution({
+    sigmaAnnual: 0.463,
+    calibration: { blended_ratio_used: 11.39, fund_ratio_confidence: "high" },
+  });
+  assert.ok(out.annualizedDistribution <= 1.5 + 1e-9, `annual ${out.annualizedDistribution}`);
+  assert.ok(out.weeklyDistribution > 0);
+});
+
 test("calibratedWeeklyDistribution ignores poisoned legacyAnnualYield above cap", () => {
   const out = calibratedWeeklyDistribution({
     sigmaAnnual: 0.7,

@@ -2974,7 +2974,8 @@ function incomeAnnualYieldForScenario(r, chartVolLookbackRange, scenarioSigma) {
       legacyAnnualYield: incomeYieldAnnualUsable(r?.income_yield_trailing_annual),
     });
     if (calib && Number.isFinite(Number(calib.annualizedDistribution))) {
-      return Number(calib.annualizedDistribution);
+      const capped = incomeYieldAnnualUsable(Number(calib.annualizedDistribution));
+      if (capped != null) return capped;
     }
   }
   const trailing = incomeYieldAnnualUsable(r?.income_yield_trailing_annual);
@@ -5008,7 +5009,7 @@ function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYi
               <tr>
                 {hasFoFRollup ? <th>Child ETF</th> : null}
                 <th>Ex-date</th>
-                <th>Cash / share</th>
+                <th title="Economic cash per share (issuer-comparable; pre-split rows undo Yahoo restatement).">Cash / share</th>
                 {hasNormalized ? (
                   <>
                     <th title="NAV at ex-date (issuer NAV, fallback to close).">NAV at ex</th>
@@ -5026,7 +5027,11 @@ function ScenarioDistributionsPanel({ etfSym, series, loadError, modeledAnnualYi
                   <tr key={`${d.child_etf || ''}-${d.ex_date}-${i}`}>
                     {hasFoFRollup ? <td><strong>{d.child_etf || '—'}</strong></td> : null}
                     <td>{d.ex_date || '—'}</td>
-                    <td>{Number.isFinite(Number(d.amount)) ? fmtUsd(Number(d.amount)) : '—'}</td>
+                    <td title={norm?.amount_basis === 'yahoo_restated' ? `Yahoo restated $${Number(d.amount).toFixed(3)} → economic $${Number(norm?.amount_economic ?? d.amount).toFixed(3)}` : (norm?.amount_basis || '')}>
+                      {Number.isFinite(Number(norm?.amount_economic))
+                        ? fmtUsd(Number(norm.amount_economic))
+                        : (Number.isFinite(Number(d.amount)) ? fmtUsd(Number(d.amount)) : '—')}
+                    </td>
                     {hasNormalized ? (
                       <>
                         <td>{Number.isFinite(Number(norm?.nav_at_ex)) ? fmtUsd(Number(norm.nav_at_ex)) : '—'}</td>

@@ -142,6 +142,84 @@ def test_normalize_events_carries_capture_ratio_when_sigma_known():
     assert normalized[0]["ratio"] == pytest.approx(0.02 / bs, rel=1e-6)
 
 
+def test_normalize_events_reverse_split_yahoo_restated():
+    split_ctx = {
+        "mode": "discrete_split",
+        "boundary": dt.date(2026, 6, 2),
+        "mult": 8.0,
+    }
+    events = _mk_events([("2026-05-29", 0.24)])
+    nav_series = _mk_nav([("2026-05-29", 3.09)])
+    normalized, _ = ic.normalize_events(
+        events,
+        nav_series,
+        current_sigma=0.8,
+        split_ctx=split_ctx,
+    )
+    assert normalized[0]["amount_economic"] == pytest.approx(0.03, rel=1e-3)
+    assert normalized[0]["amount_basis"] == "yahoo_restated"
+    assert normalized[0]["yield_frac"] == pytest.approx(0.03 / 3.09, rel=1e-3)
+
+
+def test_capture_ratio_uses_cross_fund_after_recent_split_no_post_events():
+    today = dt.date(2026, 6, 7)
+    events = _mk_events([
+        ("2026-05-01", 0.48),
+        ("2026-05-08", 0.40),
+        ("2026-05-15", 0.39),
+        ("2026-05-22", 0.28),
+        ("2026-05-29", 0.24),
+    ])
+    nav_series = _mk_nav([
+        ("2026-05-01", 3.17),
+        ("2026-05-29", 3.09),
+        ("2026-06-02", 22.99),
+    ])
+    split_ctx = {
+        "mode": "discrete_split",
+        "boundary": dt.date(2026, 6, 2),
+        "mult": 8.0,
+    }
+    block = ic.build_income_calibration_row(
+        "TSYY",
+        events,
+        nav_series,
+        current_sigma=0.70,
+        today=today,
+        split_events=[(dt.date(2026, 6, 2), 8.0)],
+    )
+    assert block is not None
+    assert block["blended_ratio_used"] == pytest.approx(ic.DEFAULT_CROSS_FUND_RATIO, rel=1e-6)
+    assert block["fund_ratio_confidence"] == "none"
+
+
+def test_tsyy_calibration_sane_after_split_basis_fix():
+    today = dt.date(2026, 6, 7)
+    events = _mk_events([
+        ("2026-05-15", 0.392),
+        ("2026-05-22", 0.280),
+        ("2026-05-29", 0.240),
+    ])
+    nav_series = _mk_nav([
+        ("2026-05-15", 3.11),
+        ("2026-05-29", 3.09),
+        ("2026-06-02", 22.99),
+    ])
+    block = ic.build_income_calibration_row(
+        "TSYY",
+        events,
+        nav_series,
+        current_sigma=0.463,
+        today=today,
+        split_events=[(dt.date(2026, 6, 2), 8.0)],
+    )
+    assert block is not None
+    assert block["blended_ratio_used"] <= ic.MAX_BLENDED_RATIO_AFTER_SPLIT
+    pre = [e for e in block["events_recent"] if e["ex_date"] < "2026-06-02"]
+    assert pre
+    assert max(e["yield_frac"] for e in pre) <= ic.MAX_WEEKLY_YIELD_FRAC
+
+
 def test_run_rate_uses_post_split_nav_after_reverse_split_jump():
     """Regression: MTYY/TSYY-style reverse split must not annualize pre-split yields."""
     today = dt.date(2026, 6, 5)

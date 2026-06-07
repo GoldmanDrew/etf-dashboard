@@ -110,6 +110,8 @@ TRAILING_WINDOW_DAYS = 365
 # >500% run-rates after reverse splits; never ship those to Exp. ETF return.
 MAX_WEEKLY_YIELD_FRAC = 0.05
 MAX_RUN_RATE_ANNUAL = 1.5
+MAX_INCOME_YIELD_ANNUAL = 1.5
+MAX_BLENDED_RATIO_AFTER_SPLIT = 2.5
 POST_SPLIT_RUN_RATE_LOOKBACK_DAYS = 120
 POST_SPLIT_MIN_EVENTS_FOR_MEDIAN = 4
 
@@ -387,6 +389,83 @@ def lookup_value_at_or_before(
     return best
 
 
+def adjust_distribution_amount_for_split(
+    amount: float,
+    ex_date: str,
+    nav_at_ex: float,
+    split_ctx: dict | None,
+) -> tuple[float, str]:
+    """Map Yahoo dividend amount onto issuer-comparable economic $/share.
+
+    Yahoo retroactively restates pre-split ex-dates onto the post-split share
+    basis while issuer NAV in metrics stays pre-split through the boundary.
+    Detect restated rows via implausible yield (amount / pre-split NAV) and
+    undo the split factor; leave as-paid rows unchanged.
+    """
+    if not (
+        split_ctx
+        and split_ctx.get("mode") == "discrete_split"
+        and split_ctx.get("boundary") is not None
+        and split_ctx.get("mult") is not None
+    ):
+        return amount, "as_paid"
+    mult = float(split_ctx["mult"])
+    if not (math.isfinite(mult) and mult > 1.05):
+        return amount, "as_paid"
+    try:
+        ex_d = dt.date.fromisoformat(str(ex_date)[:10])
+        boundary = split_ctx["boundary"]
+        if not isinstance(boundary, dt.date):
+            boundary = dt.date.fromisoformat(str(boundary)[:10])
+    except (TypeError, ValueError):
+        return amount, "as_paid"
+    if ex_d >= boundary:
+        return amount, "post_split"
+    if nav_at_ex > 0 and amount / nav_at_ex <= MAX_WEEKLY_YIELD_FRAC:
+        return amount, "as_paid"
+    return amount / mult, "yahoo_restated"
+
+
+def _recent_split_active(split_ctx: dict, today: dt.date) -> bool:
+    boundary = split_ctx.get("boundary")
+    if split_ctx.get("mode") != "discrete_split" or boundary is None:
+        return False
+    if not isinstance(boundary, dt.date):
+        try:
+            boundary = dt.date.fromisoformat(str(boundary)[:10])
+        except ValueError:
+            return False
+    return (today - boundary).days <= POST_SPLIT_RUN_RATE_LOOKBACK_DAYS
+
+
+def _events_for_capture_ratio(
+    in_window: list[dict],
+    split_ctx: dict,
+    today: dt.date,
+) -> list[dict]:
+    """Prefer post-split events after a recent reverse split; else cross-fund prior."""
+    if not _recent_split_active(split_ctx, today):
+        return in_window
+    boundary_s = split_ctx["boundary"]
+    if not isinstance(boundary_s, dt.date):
+        boundary_s = dt.date.fromisoformat(str(boundary_s)[:10])
+    boundary_s = boundary_s.isoformat()
+    post_split = [e for e in in_window if str(e.get("ex_date") or "") >= boundary_s]
+    if len(post_split) >= POST_SPLIT_MIN_EVENTS_FOR_MEDIAN:
+        return post_split
+    return []
+
+
+def _cap_blended_ratio_after_split(
+    blended: float,
+    split_ctx: dict,
+    today: dt.date,
+) -> float:
+    if _recent_split_active(split_ctx, today):
+        return min(float(blended), MAX_BLENDED_RATIO_AFTER_SPLIT)
+    return float(blended)
+
+
 # ?????????????????????????????????????????????????????????????????
 # Per-event normalization
 # ?????????????????????????????????????????????????????????????????
@@ -396,6 +475,7 @@ def normalize_events(
     *,
     sigma_history: list[tuple[str, float]] | None = None,
     current_sigma: float | None = None,
+    split_ctx: dict | None = None,
 ) -> tuple[list[dict], int]:
     """Map raw ``{ex_date, amount}`` into NAV-normalized rows.
 
@@ -421,7 +501,13 @@ def normalize_events(
         if nav_at_ex is None or nav_at_ex <= 0:
             nav_missing += 1
             continue
-        yield_frac = amount / nav_at_ex
+        amount_economic, amount_basis = adjust_distribution_amount_for_split(
+            amount,
+            ex_date,
+            float(nav_at_ex),
+            split_ctx,
+        )
+        yield_frac = amount_economic / nav_at_ex
         sigma_at_ex = (
             lookup_value_at_or_before(sigma_history, ex_date)
             if sigma_history
@@ -440,6 +526,8 @@ def normalize_events(
             {
                 "ex_date": ex_date,
                 "amount": round(amount, 6),
+                "amount_economic": round(amount_economic, 6),
+                "amount_basis": amount_basis,
                 "nav_at_ex": round(nav_at_ex, 6),
                 "yield_frac": round(yield_frac, 6),
                 "sigma_at_ex": (
@@ -597,6 +685,7 @@ def build_income_calibration_row(
         nav_series,
         sigma_history=sigma_history,
         current_sigma=current_sigma,
+        split_ctx=split_ctx,
     )
     if not all_norm:
         return None
@@ -606,7 +695,17 @@ def build_income_calibration_row(
         # so the UI can show "stale schedule" rather than silently disappearing.
         in_window = all_norm
 
-    capture = compute_capture_ratio(in_window, cross_fund_ratio=cross_fund_ratio)
+    capture_events = _events_for_capture_ratio(in_window, split_ctx, today)
+    capture = compute_capture_ratio(capture_events, cross_fund_ratio=cross_fund_ratio)
+    if capture.get("blended_ratio_used") is not None:
+        capture["blended_ratio_used"] = round(
+            _cap_blended_ratio_after_split(
+                float(capture["blended_ratio_used"]),
+                split_ctx,
+                today,
+            ),
+            6,
+        )
     cadence_label, periods_per_year = detect_cadence(all_norm)
     template = build_template_yields(all_norm, max_len=12)
 

@@ -209,9 +209,13 @@
       };
     }
     const dWeekly = ratio * bs;
+    let annualized = dWeekly * WEEKS_PER_YEAR;
+    if (Number.isFinite(annualized) && annualized > MAX_INCOME_YIELD_ANNUAL) {
+      annualized = MAX_INCOME_YIELD_ANNUAL;
+    }
     return {
       weeklyDistribution: dWeekly,
-      annualizedDistribution: dWeekly * WEEKS_PER_YEAR,
+      annualizedDistribution: annualized,
       ratioUsed: ratio,
       ratioSource,
       bsPremiumWeekly: bs,
