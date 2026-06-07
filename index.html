@@ -3236,7 +3236,7 @@ function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel 
     minReturn: -0.9999,
   });
   if (!res.ok) return null;
-  const divAdd = dividendCashAdditiveForHorizon(r, chartVolLookbackRange, horizonYears);
+  const divAdd = dividendCashAdditiveForHorizon(r, horizonLabel, horizonYears);
   if (!Number.isFinite(divAdd) || divAdd === 0) return res.value;
   const combined = Number(res.value) + divAdd;
   return Number.isFinite(combined) ? combined : res.value;
@@ -3483,22 +3483,30 @@ const STATS_VOL_LADDER_LABELS = { '1M': '1M', '3M': '3M', '6M': '6M', 'YTD': 'YT
 
 /** Window length (years) for `dividend_adjustment` ETF yield keys. */
 const DIV_YIELD_WINDOW_YEARS = { '1M': 1 / 12, '3M': 3 / 12, '6M': 6 / 12, 'YTD': 6 / 12, '12M': 1, 'ALL': 1 };
+const MAX_LETF_DIV_ADD_ANNUAL = 0.05;
 
 /**
  * Cash dividend contribution to long total return over `horizonYears`:
- * annualizes ETF dividend yield from the chart-lookback window, scales by
- * horizon. Skipped for income-style rows (they use `longTotalReturn`).
+ * annualizes ETF dividend yield from the horizon-matched window (not chart
+ * lookback), scales by horizon. Skipped for income-style rows (longTotalReturn).
  */
-function dividendCashAdditiveForHorizon(r, chartVolLookbackRange, horizonYears) {
+function dividendCashAdditiveForHorizon(r, windowKey, horizonYears) {
   if (isYieldBoostIncomeStrategy(r)) return 0;
-  const raw = chartVolLookbackRange != null && String(chartVolLookbackRange).trim() !== ''
-    ? String(chartVolLookbackRange)
-    : '6M';
-  const vk = VOL_TF_KEY_BY_RANGE[raw] || '6M';
-  const yw = Number(r?.dividend_adjustment?.[vk]?.etf_dividend_yield);
+  const raw = windowKey != null && String(windowKey).trim() !== ''
+    ? String(windowKey)
+    : '3M';
+  const vk = VOL_TF_KEY_BY_RANGE[raw] || raw;
+  const win = r?.dividend_adjustment?.[vk];
+  if (win?.dividend_lumpy === true) return 0;
+  const ywRaw = win?.etf_dividend_yield_recurring ?? win?.etf_dividend_yield;
+  const yw = Number(ywRaw);
   const winY = DIV_YIELD_WINDOW_YEARS[vk] ?? 0.5;
   if (!Number.isFinite(yw) || yw <= 0 || !Number.isFinite(horizonYears) || horizonYears <= 0 || !(winY > 0)) return 0;
-  return (yw / winY) * horizonYears;
+  let annualized = yw / winY;
+  if (r?.scenario_style === 'letf_vol_drag') {
+    annualized = Math.min(annualized, MAX_LETF_DIV_ADD_ANNUAL);
+  }
+  return annualized * horizonYears;
 }
 
 const SCENARIO_VOL_MULTIPLIERS = [0.6, 0.8, 1.0, 1.2, 1.4];
@@ -7428,6 +7436,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     });
   }, [scenarioFns, scenarioSigmaBest, horizonYears, undObs, scenarioSigmaIsFallback, scenarioLeverage, annualCarryDrag]);
 
+  const scenarioCashAdd = useMemo(() => {
+    if (isYieldBoostScenarioLayout(r)) return 0;
+    if (!Number.isFinite(horizonYears) || horizonYears <= 0) return 0;
+    const add = dividendCashAdditiveForHorizon(r, scenarioHorizon, horizonYears);
+    return Number.isFinite(add) ? add : 0;
+  }, [r, scenarioHorizon, horizonYears]);
+
   const incomeScenarioGrid = useMemo(() => {
     if (!isIncomeStrategyScenario) return { ok: false, error: 'Income-style scenario not enabled for this product.' };
     if (!Number.isFinite(Number(scenarioSigmaBest)) || Number(scenarioSigmaBest) <= 0) {
@@ -8195,8 +8210,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                               lines.push('= −NAV decay + cash from weekly 95/88 model (0% shock row in Scenarios).');
                               lines.push(`σ (forecast): ${fmt(forecastVolForScenario(r, chartVolLookbackRange).sigma)} (${r?.forecast_vol_source || 'forecast_vol'}).`);
                             } else {
-                              lines.push('Long total return, no borrow: Itô vol path + small dividend accrual when data exist.');
+                              lines.push('Long total return, no borrow: Itô vol path + horizon-matched cash when recurring.');
                               lines.push(`σ (forecast): ${fmt(forecastVolForScenario(r, chartVolLookbackRange).sigma)}.`);
+                              const nav3 = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
+                              const div3 = dividendCashAdditiveForHorizon(r, '3M', 3 / 12);
+                              if (Number.isFinite(nav3) && Number.isFinite(div3) && div3 !== 0) {
+                                lines.push(`3M decomposition: NAV ${fmt(nav3 - div3)} + cash ${fmt(div3)} = ${fmt(nav3)}`);
+                              }
                               lines.push('Ex-dates: Scenarios tab.');
                             }
                             if (r?.forecast_vol_event_adjusted) lines.push('EWMA leg clipped a large one-day move.');
@@ -8800,7 +8820,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   Scenarios σ: <strong>{fmt(scenarioSigmaBest)}</strong> ({scenarioSigmaSource}) · ref {fmt(scenarioSigmaRef)}
                 </div>
                 <div className="scenario-sub">
-                  Leverage <strong>L</strong> = {Number.isFinite(Number(scenarioLeverage)) ? scenarioLeverage.toFixed(3) : '—'} · cells = long <strong>total return</strong> without borrow (see Net edge)
+                  Leverage <strong>L</strong> = {Number.isFinite(Number(scenarioLeverage)) ? scenarioLeverage.toFixed(3) : '—'} · cells = long <strong>total return</strong> (NAV vol path + horizon-matched cash when recurring), no borrow
                 </div>
               </div>
               <div className="tf-group" style={{ marginLeft: 0 }}>
@@ -8833,15 +8853,21 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     {scenarioGrid.rows.map((row, ridx) => (
                       <tr key={ridx}>
                         <td>{fmtSigmaMultiple(row.sigmaMultiple)} ({fmt(row.underlyingReturn)})</td>
-                        {row.cells.map((cell, cidx) => (
+                        {row.cells.map((cell, cidx) => {
+                          const navVal = cell?.ok ? Number(cell.value) : null;
+                          const totalVal = navVal != null && Number.isFinite(navVal)
+                            ? navVal + (scenarioCashAdd || 0)
+                            : null;
+                          return (
                           <td
                             key={cidx}
-                            style={{ background: scenarioCellBg(cell?.value), color: 'var(--text-primary)' }}
-                            title={cell?.clamped ? 'Clamped display value' : ''}
+                            style={{ background: scenarioCellBg(totalVal), color: 'var(--text-primary)' }}
+                            title={cell?.clamped ? 'Clamped display value' : (scenarioCashAdd ? `NAV ${fmt(navVal)} + cash ${fmt(scenarioCashAdd)}` : '')}
                           >
-                            {cell?.ok ? `${fmt(cell.value)}${cell.clamped ? '*' : ''}` : '—'}
+                            {totalVal != null && Number.isFinite(totalVal) ? `${fmt(totalVal)}${cell.clamped ? '*' : ''}` : '—'}
                           </td>
-                        ))}
+                          );
+                        })}
                       </tr>
                     ))}
                   </tbody>
@@ -12739,8 +12765,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                                       lines.push('= −NAV decay + cash from weekly 95/88 model (0% shock row in Scenarios).');
                                       lines.push(`σ (forecast): ${fmt(forecastVolForScenario(r, chartVolLookbackRange).sigma)} (${r?.forecast_vol_source || 'forecast_vol'}).`);
                                     } else {
-                                      lines.push('Long total return, no borrow: Itô vol path + small dividend accrual when data exist.');
+                                      lines.push('Long total return, no borrow: Itô vol path + horizon-matched cash when recurring.');
                                       lines.push(`σ (forecast): ${fmt(forecastVolForScenario(r, chartVolLookbackRange).sigma)}.`);
+                                      const div3 = dividendCashAdditiveForHorizon(r, '3M', 3 / 12);
+                                      if (Number.isFinite(expEtf3m) && Number.isFinite(div3) && div3 !== 0) {
+                                        lines.push(`3M decomposition: NAV ${fmt(expEtf3m - div3)} + cash ${fmt(div3)} = ${fmt(expEtf3m)}`);
+                                      }
                                       lines.push('Ex-dates: Scenarios tab.');
                                     }
                                     if (r?.forecast_vol_event_adjusted) lines.push('EWMA leg clipped a large one-day move.');

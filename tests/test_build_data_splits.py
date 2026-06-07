@@ -54,7 +54,61 @@ def test_build_market_windows_mtyy_split_metadata():
     assert w["price_return"] == pytest.approx((3.934 / 4.709) - 1, rel=1e-4)
     # No Yahoo bar spans the split → cannot verify a close jump → do not scale live spot.
     assert w["split_factor_end_to_asof"] == pytest.approx(1.0)
-    assert w["dividend_yield"] == pytest.approx(0.371 / 4.709, rel=1e-4)
+    assert w["dividend_yield"] == pytest.approx((0.371 / 6.0) / 4.709, rel=1e-4)
+    assert w["dividend_lumpy"] is False
+
+
+def test_window_dividend_reverse_split_restated_smup():
+    points = [
+        (dt.date(2025, 12, 5), 662.5, 563.36),
+        (dt.date(2026, 6, 5), 7.7, 7.7),
+    ]
+    events = [(dt.date(2026, 1, 26), 0.1)]
+    windows = build_data._build_market_windows(
+        points,
+        dividends=[(dt.date(2026, 1, 20), 52.75)],
+        split_events=events,
+        asof_calendar=dt.date(2026, 6, 5),
+    )
+    w = windows["6M"]
+    assert w["total_dividends_raw"] == pytest.approx(52.75)
+    assert w["total_dividends"] == pytest.approx(5.275, rel=1e-3)
+    assert w["dividend_yield"] == pytest.approx(5.275 / 66.25, rel=1e-3)
+    assert w["dividend_lumpy"] is True
+    assert w["dividend_yield_recurring"] == pytest.approx(0.0)
+
+
+def test_window_dividend_post_split_unchanged():
+    points = [
+        (dt.date(2026, 5, 1), 10.0, 10.0),
+        (dt.date(2026, 6, 10), 12.0, 12.0),
+    ]
+    events = [(dt.date(2026, 6, 2), 6.0)]
+    windows = build_data._build_market_windows(
+        points,
+        dividends=[(dt.date(2026, 6, 5), 0.25)],
+        split_events=events,
+        asof_calendar=dt.date(2026, 6, 10),
+    )
+    w = windows["3M"]
+    assert w["total_dividends"] == pytest.approx(0.25)
+    assert w["dividend_split_basis"].get("as_paid") == 1
+
+
+def test_window_dividend_lumpy_flag():
+    points = [
+        (dt.date(2026, 3, 1), 20.0, 20.0),
+        (dt.date(2026, 6, 1), 18.0, 18.0),
+    ]
+    windows = build_data._build_market_windows(
+        points,
+        dividends=[(dt.date(2026, 4, 1), 2.0)],
+        split_events=[],
+        asof_calendar=dt.date(2026, 6, 1),
+    )
+    w = windows["3M"]
+    assert w["dividend_lumpy"] is True
+    assert w["dividend_yield_recurring"] == pytest.approx(0.0)
 
 
 def test_split_factor_end_to_asof_applies_discontinuous_jump():

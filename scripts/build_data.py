@@ -31,6 +31,8 @@ import requests
 
 from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_metrics
 from split_adjustments import (
+    MAX_WINDOW_DIVIDEND_YIELD_FRAC,
+    adjust_window_dividend_for_split,
     apply_split_adjustments_to_points,
     cum_split_factor,
     filter_splits_needing_close_basis_fix,
@@ -3493,11 +3495,28 @@ def _build_market_windows(
         adj_closes = [adj for _, _, adj in scoped]
         stats = _compute_vol_stats_from_closes(adj_closes)
 
+        close_by_date = {d: c for d, c, _a in scoped}
         total_dividends = 0.0
+        total_dividends_raw = 0.0
+        dividend_events: list[tuple[dt.date, float]] = []
+        dividend_split_basis: dict[str, int] = {}
         for d, amount in dividends:
             if d < start_date or d > end_date:
                 continue
-            total_dividends += float(amount)
+            total_dividends_raw += float(amount)
+            close_ex = None
+            for bar_date in sorted(close_by_date):
+                if bar_date <= d:
+                    close_ex = close_by_date[bar_date]
+            amount_ec, basis = adjust_window_dividend_for_split(
+                float(amount),
+                d,
+                split_events=split_events,
+                close_on_ex_date=close_ex,
+            )
+            total_dividends += amount_ec
+            dividend_events.append((d, amount_ec))
+            dividend_split_basis[basis] = dividend_split_basis.get(basis, 0) + 1
 
         split_factor_start_to_end = cum_split_factor(start_date, end_date, split_events)
         split_factor_end_to_asof = split_factor_end_to_asof_safe(
@@ -3508,9 +3527,19 @@ def _build_market_windows(
         price_return = None
         adj_return = None
         dividend_yield = None
+        dividend_yield_recurring = None
+        dividend_lumpy = False
         if start_close_on_end_basis > 0:
             price_return = (end_close / start_close_on_end_basis) - 1.0
             dividend_yield = total_dividends / start_close_on_end_basis
+            if dividend_events:
+                max_single = max(amt for _d, amt in dividend_events)
+                if max_single > MAX_WINDOW_DIVIDEND_YIELD_FRAC * start_close_on_end_basis:
+                    dividend_lumpy = True
+            if dividend_lumpy and len(dividend_events) <= 2:
+                dividend_yield_recurring = 0.0
+            else:
+                dividend_yield_recurring = dividend_yield
         if start_adj > 0:
             adj_return = (end_adj / start_adj) - 1.0
 
@@ -3534,7 +3563,15 @@ def _build_market_windows(
             "split_factor_end_to_asof": round(float(split_factor_end_to_asof), 6),
             "price_basis": "split_adjusted_end",
             "total_dividends": round(float(total_dividends), 6),
+            "total_dividends_raw": round(float(total_dividends_raw), 6),
             "dividend_yield": round(float(dividend_yield), 6) if dividend_yield is not None else None,
+            "dividend_yield_recurring": (
+                round(float(dividend_yield_recurring), 6)
+                if dividend_yield_recurring is not None
+                else None
+            ),
+            "dividend_lumpy": bool(dividend_lumpy),
+            "dividend_split_basis": dividend_split_basis,
             "price_return": round(float(price_return), 6) if price_return is not None else None,
             "adj_return": round(float(adj_return), 6) if adj_return is not None else None,
         }
@@ -4450,8 +4487,12 @@ def build():
             }
             dividend_adjustment[window] = {
                 "etf_total_dividends": etf_w.get("total_dividends"),
+                "etf_total_dividends_raw": etf_w.get("total_dividends_raw"),
                 "underlying_total_dividends": und_w.get("total_dividends"),
                 "etf_dividend_yield": etf_w.get("dividend_yield"),
+                "etf_dividend_yield_recurring": etf_w.get("dividend_yield_recurring"),
+                "dividend_lumpy": etf_w.get("dividend_lumpy"),
+                "dividend_split_basis": etf_w.get("dividend_split_basis"),
                 "underlying_dividend_yield": und_w.get("dividend_yield"),
                 "etf_price_return": etf_w.get("price_return"),
                 "underlying_price_return": und_w.get("price_return"),

@@ -189,6 +189,11 @@ jobs:
         continue-on-error: true
         run: python scripts/audit_distribution_split_basis.py
 
+      - name: Exp ETF return / Scenarios alignment audit
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/audit_exp_etf_scenario_alignment.py --strict-only --warn
+
       - name: Commit nightly artifacts
         if: steps.build_data.outcome == 'success'
         id: commit

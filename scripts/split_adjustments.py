@@ -514,6 +514,53 @@ def corporate_actions_build_time(path: Path | None = None) -> dt.datetime | None
         return None
 
 
+MAX_WINDOW_DIVIDEND_YIELD_FRAC = 0.05
+
+
+def dividend_undo_mult(price_mult: float) -> float:
+    """Map price-basis split factor to Yahoo dividend restatement divisor."""
+    if not math.isfinite(price_mult) or price_mult <= 0:
+        return 1.0
+    if price_mult < 0.95:
+        return 1.0 / price_mult
+    if price_mult > 1.05:
+        return price_mult
+    return 1.0
+
+
+def compound_dividend_undo_mult(
+    ex_date: dt.date,
+    split_events: list[tuple[dt.date, float]],
+) -> float:
+    """Product of undo factors for splits strictly after ``ex_date``."""
+    undo = 1.0
+    for eff, price_mult in split_events:
+        if ex_date < eff:
+            undo *= dividend_undo_mult(float(price_mult))
+    return undo if math.isfinite(undo) and undo > 0 else 1.0
+
+
+def adjust_window_dividend_for_split(
+    amount: float,
+    ex_date: dt.date,
+    *,
+    split_events: list[tuple[dt.date, float]],
+    close_on_ex_date: float | None = None,
+) -> tuple[float, str]:
+    """Return economic dividend amount and basis tag for window yield sums."""
+    if not math.isfinite(amount) or amount <= 0:
+        return 0.0, "invalid"
+    if not split_events:
+        return float(amount), "as_paid"
+    undo = compound_dividend_undo_mult(ex_date, split_events)
+    if undo <= 1.05:
+        return float(amount), "as_paid"
+    close = float(close_on_ex_date) if close_on_ex_date is not None else float("nan")
+    if math.isfinite(close) and close > 0 and amount / close <= MAX_WINDOW_DIVIDEND_YIELD_FRAC:
+        return float(amount), "as_paid"
+    return float(amount) / undo, "yahoo_restated"
+
+
 def split_factor_end_to_asof_safe(
     points: list[tuple[dt.date, float, float]],
     end_date: dt.date,
