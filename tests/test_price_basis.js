@@ -110,6 +110,33 @@ test("APLZ backfilled adj is not double-scaled onto post-split basis", () => {
   assert.ok(cov.maxEtfDailyLogReturn < 0.35, `max jump ${cov.maxEtfDailyLogReturn}`);
 });
 
+test("APLX 3-for-1 adj basis switch: no split cliff in TR", () => {
+  const rows = [
+    { date: "2026-03-05", close_price: 16.94, etf_adj_close: 5.647, underlying_adj_close: 10 },
+    { date: "2026-03-09", close_price: 15.377, etf_adj_close: 5.126, underlying_adj_close: 10.1 },
+    { date: "2026-03-10", close_price: 15.71, etf_adj_close: 15.71, underlying_adj_close: 10.2 },
+    { date: "2026-03-11", close_price: 17.08, etf_adj_close: 17.08, underlying_adj_close: 10.3 },
+  ];
+  const events = [{ date: "2026-03-10", mult: 1 / 3 }];
+  const ctx = PB.resolveSplitContext(
+    rows.map((r) => ({ date: r.date, close: r.close_price, adj: r.etf_adj_close })),
+    events,
+    rows,
+  );
+  assert.equal(ctx.mode, "adj_basis_switch");
+  const tr = PB.buildTrSeriesFromMetrics(rows, events);
+  let maxJump = 0;
+  for (let i = 1; i < tr.length; i += 1) {
+    const lr = Math.abs(Math.log(tr[i].trEtfPx / tr[i - 1].trEtfPx));
+    if (lr > maxJump) maxJump = lr;
+  }
+  assert.ok(maxJump < 0.35, `split cliff ${maxJump}`);
+  const pre = tr.find((x) => x.date === "2026-03-09");
+  const post = tr.find((x) => x.date === "2026-03-10");
+  assert.ok(Math.abs(pre.trEtfPx - 5.126) < 0.02);
+  assert.ok(Math.abs(post.trEtfPx - 15.71 / 3) < 0.15);
+});
+
 test("realized_decay re-exports filter from price_basis", () => {
   const points = [
     { date: "2026-01-23", close: 421.25 },

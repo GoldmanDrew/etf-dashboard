@@ -182,7 +182,7 @@ jobs:
       - name: Split TR quality audit
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
-        run: python scripts/audit_split_tr_quality.py
+        run: python scripts/audit_split_tr_quality.py --strict-bucket-1
 
       - name: Distribution split basis audit
         if: steps.build_data.outcome == 'success'

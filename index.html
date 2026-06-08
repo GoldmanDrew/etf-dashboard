@@ -3912,15 +3912,23 @@ function TrCoverageBadge({ coverage, etfLabel }) {
   const pct = (x) => (Number.isFinite(Number(x)) ? `${Math.round(Number(x) * 100)}%` : '—');
   const splitLabel = coverage.splitMode === 'discrete_split'
     ? `split ${coverage.splitMult || '?'}× @ ${coverage.splitBoundary || '?'}`
-    : 'Yahoo continuous (no close jump)';
+    : coverage.splitMode === 'adj_basis_switch'
+      ? `adj basis switch ${coverage.splitMult || '?'}× @ ${coverage.splitBoundary || '?'}`
+      : 'Yahoo continuous (no close jump)';
   const etfBasisLabels = {
     yahoo_adj: 'Yahoo adj close',
     yahoo_adj_mapped: 'Yahoo adj (pre-split mapped)',
+    adj_basis_switch: 'Adj basis switch (back-adj TR)',
     nav_tr: 'NAV TR fallback',
     close_scaled: 'Close scaled',
     split_adjusted: 'Split-adjusted',
     mixed: 'Mixed basis',
   };
+  const nearSplitCliff = Number.isFinite(Number(coverage.maxEtfDailyLogReturn))
+    && Number(coverage.maxEtfDailyLogReturn) > 0.35
+    && coverage.splitBoundary
+    && coverage.maxJumpDate
+    && Math.abs(new Date(String(coverage.maxJumpDate)) - new Date(String(coverage.splitBoundary))) / 86400000 <= 7;
   const etfBasis = etfBasisLabels[coverage.primaryEtfBasis] || coverage.primaryEtfBasis || '—';
   return (
     <div className={cls('tr-coverage-badge', q === 'degraded' && 'degraded', q === 'poor' && 'poor')}>
@@ -3930,6 +3938,9 @@ function TrCoverageBadge({ coverage, etfLabel }) {
       <span className="tcb-item">Und adj {pct(coverage.undAdjCoveragePct)}</span>
       <span className="tcb-item">Basis: {etfBasis} / Yahoo und adj</span>
       <span className="tcb-item">{splitLabel}</span>
+      {nearSplitCliff ? (
+        <div className="tcb-warn">Large TR move near corp split ({coverage.maxJumpDate}) — check split normalization.</div>
+      ) : null}
       {(coverage.warnings || []).map((w, i) => (
         <div key={`tcb-w-${i}`} className="tcb-warn">{w}</div>
       ))}

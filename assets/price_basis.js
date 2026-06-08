@@ -74,6 +74,14 @@
     return Math.abs(a / c - 1) <= eps;
   }
 
+  function etfAdjOnBackAdjustedForwardBasis(close, adj, mult, relTol = 0.15) {
+    const c = toNum(close);
+    const a = toNum(adj);
+    const m = toNum(mult);
+    if (!(c > 0 && a > 0 && m > 0 && m < 1)) return false;
+    return Math.abs((a / c) / m - 1) <= relTol;
+  }
+
   function etfAdjOnPostSplitBasis(close, adj, mult, relTol = 0.15) {
     const c = toNum(close);
     const a = toNum(adj);
@@ -89,13 +97,61 @@
     const before = points.filter((p) => parseDate(p.date) < eff);
     const onAfter = points.filter((p) => parseDate(p.date) >= eff);
     if (!before.length || !onAfter.length) return false;
-    const closeBefore = toNum(before[before.length - 1].close);
-    const closeAfter = toNum(onAfter[0].close);
-    const adjBefore = toNum(before[before.length - 1].adj);
-    const adjAfter = toNum(onAfter[0].adj);
+    const closeBefore = toNum(before[before.length - 1].close ?? before[before.length - 1][1]);
+    const closeAfter = toNum(onAfter[0].close ?? onAfter[0][1]);
+    const adjBefore = toNum(before[before.length - 1].adj ?? before[before.length - 1][2]);
+    const adjAfter = toNum(onAfter[0].adj ?? onAfter[0][2]);
     if (!(closeBefore > 0 && closeAfter > 0 && adjBefore > 0 && adjAfter > 0)) return false;
     if (Math.abs(closeAfter / closeBefore - 1) > 0.08) return false;
-    return Math.abs((adjBefore * m) / adjAfter - 1) <= relTol;
+    const ratio = adjAfter / adjBefore;
+    return (
+      Math.abs(ratio * m - 1) <= relTol
+      || Math.abs(ratio / m - 1) <= relTol
+      || Math.abs((adjBefore * m) / adjAfter - 1) <= relTol
+    );
+  }
+
+  function detectAdjBoundary(points, effectiveDate, mult, relTol = 0.15) {
+    const eff = parseDate(effectiveDate);
+    const m = toNum(mult);
+    if (!eff || !(m > 0) || !Array.isArray(points) || points.length < 2) return null;
+    const sorted = [...points].sort((a, b) => parseDate(a.date).localeCompare(parseDate(b.date)));
+    const candidates = [];
+    for (let i = 1; i < sorted.length; i += 1) {
+      const cPrev = toNum(sorted[i - 1].close ?? sorted[i - 1][1]);
+      const cCur = toNum(sorted[i].close ?? sorted[i][1]);
+      const aPrev = toNum(sorted[i - 1].adj ?? sorted[i - 1][2]);
+      const aCur = toNum(sorted[i].adj ?? sorted[i][2]);
+      const dCur = parseDate(sorted[i].date);
+      if (!(cPrev > 0 && cCur > 0 && aPrev > 0 && aCur > 0 && dCur)) continue;
+      if (Math.abs(cCur / cPrev - 1) > 0.08) continue;
+      const ratio = aCur / aPrev;
+      if (
+        Math.abs(ratio * m - 1) <= relTol
+        || Math.abs(ratio / m - 1) <= relTol
+        || Math.abs((aPrev * m) / aCur - 1) <= relTol
+      ) {
+        candidates.push(dCur);
+      }
+    }
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => Math.abs(new Date(a) - new Date(eff)) - Math.abs(new Date(b) - new Date(eff)));
+    return candidates[0];
+  }
+
+  function detectAdjBasisSwitchSplits(points, events, relTol = 0.15, metricRows = null) {
+    if (!Array.isArray(events) || !events.length) return [];
+    const out = [];
+    for (const ev of events) {
+      const mult = toNum(ev.mult);
+      if (!(mult > 0) || mult >= 1) continue;
+      const boundary = detectAdjBoundary(points, ev.date, mult, relTol);
+      if (boundary) {
+        const dayDiff = Math.abs((new Date(boundary) - new Date(parseDate(ev.date))) / 86400000);
+        if (dayDiff <= 7) out.push({ date: parseDate(ev.date), mult });
+      }
+    }
+    return out;
   }
 
   function splitCloseJumpRatio(points, effectiveDate) {
@@ -118,7 +174,10 @@
       const mult = toNum(ev.mult);
       if (!(mult > 0)) continue;
       const jump = splitCloseJumpRatio(points, ev.date);
-      if (jump != null && Math.abs(jump - 1) <= 0.08) continue;
+      if (jump != null && Math.abs(jump - 1) <= 0.08) {
+        if (yahooAdjLooksBackAdjusted(points, ev.date, mult, relTol)) continue;
+        continue;
+      }
 
       let accepted = false;
       if (jump != null) {
@@ -218,6 +277,18 @@
         filtered: [],
       };
     }
+    const adjSwitch = detectAdjBasisSwitchSplits(closePoints, events, 0.15, metricRows);
+    if (adjSwitch.length) {
+      const boundary = detectAdjBoundary(closePoints, adjSwitch[0].date, adjSwitch[0].mult)
+        || adjSwitch[0].date;
+      return {
+        mode: "adj_basis_switch",
+        boundary,
+        mult: adjSwitch[0].mult,
+        filtered: adjSwitch,
+      };
+    }
+
     const filtered = filterSplitsNeedingCloseBasisFix(closePoints, events, 0.15, metricRows);
     let mult = null;
     let boundary = null;
@@ -246,13 +317,27 @@
     const ds = parseDate(dateStr);
     const boundary = parseDate(ctx?.boundary);
     const mult = toNum(ctx?.mult);
-    return ctx?.mode === "discrete_split" && boundary && mult > 0 && ds && ds < boundary;
+    const mode = ctx?.mode;
+    return (
+      (mode === "discrete_split" || mode === "adj_basis_switch")
+      && boundary
+      && mult > 0
+      && ds
+      && ds < boundary
+    );
   }
 
   /**
    * ETF TR price on a common post-split (latest) basis when a discrete split applies.
    * When Yahoo adj is present it is authoritative; pre-split adj is mapped with mult.
    */
+  function adjBasisSwitchTrPrice(close, mult) {
+    const c = toNum(close);
+    const m = toNum(mult);
+    if (!(c > 0 && m > 0)) return NaN;
+    return m <= 1 ? c * m : c / m;
+  }
+
   function etfTrPriceForPoint(point, ctx) {
     const close = toNum(point.close);
     if (!(close > 0)) return NaN;
@@ -260,9 +345,19 @@
     const navTr = toNum(point.navTr);
     const preSplit = isPreSplitDate(point.date, ctx);
     const mult = toNum(ctx?.mult);
+    const mode = ctx?.mode;
+
+    if (mode === "adj_basis_switch") {
+      if (preSplit) {
+        if (adj > 0) return adj;
+        return adjBasisSwitchTrPrice(close, mult);
+      }
+      return adjBasisSwitchTrPrice(close, mult);
+    }
 
     if (preSplit && mult > 0) {
       if (adj > 0) {
+        if (mult < 1 && etfAdjOnBackAdjustedForwardBasis(close, adj, mult)) return adj;
         if (etfAdjOnPostSplitBasis(close, adj, mult)) return adj;
         return adj * mult;
       }
@@ -284,9 +379,15 @@
     const navTr = toNum(point.navTr);
     const preSplit = isPreSplitDate(point.date, ctx);
     const mult = toNum(ctx?.mult);
+    const mode = ctx?.mode;
+
+    if (mode === "adj_basis_switch") {
+      return preSplit ? "pre_split_back_adj" : "post_split_back_adj_mapped";
+    }
 
     if (preSplit && mult > 0) {
       if (adj > 0) {
+        if (mult < 1 && etfAdjOnBackAdjustedForwardBasis(close, adj, mult)) return "pre_split_back_adj";
         if (etfAdjOnPostSplitBasis(close, adj, mult)) return "pre_split_adj_already_mapped";
         return "pre_split_adj_mapped";
       }
@@ -400,12 +501,20 @@
     if (etfJump.maxAbsLogReturn > 0.35) {
       warnings.push(`Large ETF TR daily move (${(Math.expm1(etfJump.maxAbsLogReturn) * 100).toFixed(0)}%) on ${etfJump.maxJumpDate || "?"}.`);
     }
+    if (
+      ctx.mode === "adj_basis_switch"
+      && etfJump.maxAbsLogReturn <= 0.35
+      && ctx.boundary
+    ) {
+      warnings.push(`Adj basis switch normalized at ${ctx.boundary} (×${ctx.mult}).`);
+    }
 
     let quality = "good";
     if (etfJump.maxAbsLogReturn > 0.35 || droppedDays > bothLegDays * 0.1) quality = "degraded";
     if (trJointDays < 20 || etfJump.maxAbsLogReturn > 0.75) quality = "poor";
 
     const primaryEtfBasis = (() => {
+      if (ctx.mode === "adj_basis_switch") return "adj_basis_switch";
       if (ctx.mode === "discrete_split") {
         const mapped = (etfTrModes.pre_split_adj_mapped || 0) + (etfTrModes.post_split_adj || 0);
         if (mapped >= trJointDays * 0.5) return "yahoo_adj_mapped";
@@ -435,6 +544,7 @@
       undBasis: "yahoo_adj",
       maxEtfDailyLogReturn: etfJump.maxAbsLogReturn,
       maxUndDailyLogReturn: undJump.maxAbsLogReturn,
+      maxJumpDate: etfJump.maxJumpDate,
       quality,
       warnings,
     };
@@ -448,6 +558,7 @@
     etfAdjCloseNeedsSplitScaling,
     etfAdjOnPostSplitBasis,
     yahooAdjLooksBackAdjusted,
+    detectAdjBasisSwitchSplits,
     splitCloseJumpRatio,
     filterSplitsNeedingCloseBasisFix,
     detectSplitBoundary,

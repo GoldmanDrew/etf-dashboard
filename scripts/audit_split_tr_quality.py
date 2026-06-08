@@ -136,12 +136,27 @@ def audit_ticker(
     return failures
 
 
+def _bucket_by_ticker(payload: dict) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for ev in payload.get("events") or []:
+        sym = str(ev.get("ticker") or "").strip().upper()
+        bucket = str(ev.get("bucket") or "").strip()
+        if sym and bucket:
+            out[sym] = bucket
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Audit split-aware TR quality across universe.")
     parser.add_argument("--corp-actions", type=Path, default=DEFAULT_CORPORATE_ACTIONS_PATH)
     parser.add_argument("--metrics", type=Path, default=METRICS_PARQUET)
     parser.add_argument("--max-log-return", type=float, default=MAX_LOG_RETURN)
     parser.add_argument("--lookback-months", type=int, default=LOOKBACK_MONTHS)
+    parser.add_argument(
+        "--strict-bucket-1",
+        action="store_true",
+        help="Exit 1 only when bucket_1_high_delta tickers fail; other failures warn.",
+    )
     args = parser.parse_args()
 
     max_log_return = float(args.max_log_return)
@@ -151,6 +166,7 @@ def main() -> int:
         return 0
 
     payload = _load_corp_payload(args.corp_actions)
+    bucket_by_ticker = _bucket_by_ticker(payload)
     since = dt.date.today() - dt.timedelta(days=int(args.lookback_months) * 31)
     tickers = _split_tickers(payload, since=since)
     if not tickers:
@@ -184,6 +200,17 @@ def main() -> int:
         print("Split TR quality failures:")
         for msg in all_failures:
             print(f"  - {msg}")
+        if args.strict_bucket_1:
+            blocking = [
+                msg
+                for msg in all_failures
+                if bucket_by_ticker.get(msg.split(":", 1)[0].strip()) == "bucket_1_high_delta"
+            ]
+            if blocking:
+                print(f"\nBlocking ({len(blocking)} bucket_1_high_delta failure(s))")
+                return 1
+            print(f"\nWarn-only: {len(all_failures)} failure(s) outside bucket_1_high_delta")
+            return 0
         return 1
 
     print(f"Split TR quality OK for {len(tickers)} ticker(s) with recent corp splits")

@@ -6,6 +6,10 @@ import math
 from typing import Any
 
 from split_adjustments import (
+    adj_basis_switch_tr_price,
+    detect_adj_basis_switch_splits,
+    detect_adj_boundary,
+    etf_adj_on_back_adjusted_forward_basis,
     etf_adj_on_post_split_basis,
     filter_splits_needing_close_basis_fix,
     match_split_to_price_jump,
@@ -76,11 +80,27 @@ def resolve_split_context(
         return {"mode": "continuous", "boundary": None, "mult": None, "filtered": []}
     dated = [(d, c) for d, c in close_points]
     adj_map = adj_by_date or {}
+    points3 = [
+        (d, c, float(adj_map.get(d, c)))
+        for d, c in dated
+    ]
+    adj_switch = detect_adj_basis_switch_splits(
+        points3,
+        split_events,
+        metric_rows=metric_rows,
+    )
+    if adj_switch:
+        eff, mult = adj_switch[0]
+        boundary = detect_adj_boundary(points3, eff, mult) or eff
+        return {
+            "mode": "adj_basis_switch",
+            "boundary": boundary,
+            "mult": mult,
+            "filtered": adj_switch,
+        }
+
     filtered = filter_splits_needing_close_basis_fix(
-        [
-            (d, c, float(adj_map.get(d, c)))
-            for d, c in dated
-        ],
+        points3,
         split_events,
         metric_rows=metric_rows,
     )
@@ -101,16 +121,72 @@ def resolve_split_context(
     return {"mode": mode, "boundary": boundary, "mult": mult, "filtered": filtered}
 
 
+def _row_date(ds: str) -> dt.date | None:
+    try:
+        return dt.date.fromisoformat(ds[:10])
+    except ValueError:
+        return None
+
+
 def _is_pre_split(ds: str, ctx: dict[str, Any]) -> bool:
     boundary = ctx.get("boundary")
     mult = ctx.get("mult")
-    if ctx.get("mode") != "discrete_split" or not boundary or not mult:
+    mode = ctx.get("mode")
+    if mode not in {"discrete_split", "adj_basis_switch"} or not boundary or not mult:
         return False
-    try:
-        d0 = dt.date.fromisoformat(ds[:10])
-    except ValueError:
+    d0 = _row_date(ds)
+    if d0 is None:
         return False
     return d0 < boundary
+
+
+def _tr_mode_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> str:
+    ds = str(row.get("date") or "")[:10]
+    try:
+        close = float(row.get("close_price") or row.get("nav") or 0)
+    except (TypeError, ValueError):
+        return "unknown"
+    if close <= 0:
+        return "unknown"
+    adj = row.get("etf_adj_close")
+    nav_tr = row.get("nav_total_return")
+    try:
+        adj_f = float(adj) if adj is not None else float("nan")
+    except (TypeError, ValueError):
+        adj_f = float("nan")
+    try:
+        nav_f = float(nav_tr) if nav_tr is not None else float("nan")
+    except (TypeError, ValueError):
+        nav_f = float("nan")
+    pre_split = _is_pre_split(ds, ctx)
+    mult = float(ctx.get("mult") or 0)
+    mode = ctx.get("mode")
+
+    if mode == "adj_basis_switch":
+        return "pre_split_back_adj" if pre_split else "post_split_back_adj_mapped"
+    if pre_split and mult > 0:
+        if math.isfinite(adj_f) and adj_f > 0:
+            if mult < 1.0 and etf_adj_on_back_adjusted_forward_basis(close, adj_f, mult):
+                return "pre_split_back_adj"
+            if etf_adj_on_post_split_basis(close, adj_f, mult):
+                return "pre_split_adj_already_mapped"
+            return "pre_split_adj_mapped"
+        if math.isfinite(nav_f) and nav_f > 0 and close > 0 and mult > 1.05:
+            if nav_f / close >= mult * 0.85 or nav_f / close > 2.5:
+                return "pre_split_close_scaled"
+            return "pre_split_nav_tr_scaled"
+        if math.isfinite(nav_f) and nav_f > 0:
+            return "pre_split_nav_tr_scaled"
+        return "pre_split_close_scaled"
+    if math.isfinite(adj_f) and adj_f > 0:
+        return "post_split_adj" if mode == "discrete_split" else "continuous_adj"
+    if math.isfinite(nav_f) and nav_f > 0:
+        return "nav_tr_fallback"
+    return "close_fallback"
+
+
+def _adj_basis_switch_tr_price(close: float, mult: float) -> float:
+    return adj_basis_switch_tr_price(close, mult)
 
 
 def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | None:
@@ -135,8 +211,19 @@ def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | No
         nav_f = float("nan")
 
     mult = float(ctx.get("mult") or 0)
+    mode = ctx.get("mode")
+
+    if mode == "adj_basis_switch":
+        if _is_pre_split(ds, ctx):
+            if math.isfinite(adj_f) and adj_f > 0:
+                return adj_f
+            return _adj_basis_switch_tr_price(close, mult)
+        return _adj_basis_switch_tr_price(close, mult)
+
     if _is_pre_split(ds, ctx) and mult > 0:
         if math.isfinite(adj_f) and adj_f > 0:
+            if mult < 1.0 and etf_adj_on_back_adjusted_forward_basis(close, adj_f, mult):
+                return adj_f
             if etf_adj_on_post_split_basis(close, adj_f, mult):
                 return adj_f
             return adj_f * mult
@@ -194,6 +281,7 @@ def build_tr_series_from_metrics(
                     "tr_etf_px": tr_etf,
                     "tr_und_px": und,
                     "trade_close": float(row.get("close_price") or row.get("nav") or 0),
+                    "tr_mode": _tr_mode_for_row(row, ctx),
                 }
             )
     return out

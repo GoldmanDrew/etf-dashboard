@@ -49,8 +49,11 @@ import pandas as pd
 # Split price multipliers for ``repair_close_price_split_basis_mismatch``.
 from split_adjustments import (
     SPLIT_RATIOS as _SPLIT_RATIOS,
+    adj_basis_switch_tr_price,
     cum_split_factor_to_latest,
     dedupe_split_events,
+    detect_adj_basis_switch_splits,
+    detect_adj_boundary,
     etf_adj_close_needs_split_scaling,
     load_split_execution_events_for_ticker,
     load_split_hints_from_corporate_actions,
@@ -1235,6 +1238,50 @@ def backfill_split_adjusted_etf_adj_close(
     return out
 
 
+def normalize_adj_basis_switch_etf_adj_close(
+    df: pd.DataFrame,
+    *,
+    corporate_actions_path: Path | None = None,
+) -> pd.DataFrame:
+    """Re-map post-split ``etf_adj_close`` onto back-adjusted basis (APLX 3-for-1 pattern)."""
+    if df.empty or "etf_adj_close" not in df.columns or "close_price" not in df.columns:
+        return df
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    n_norm = 0
+    for ticker in out["ticker"].unique():
+        events = load_split_execution_events_for_ticker(ticker, corporate_actions_path)
+        if not events:
+            continue
+        g = out[out["ticker"] == ticker].sort_values("date")
+        pts = []
+        for _, row in g.iterrows():
+            close = pd.to_numeric(row.get("close_price"), errors="coerce")
+            adj = pd.to_numeric(row.get("etf_adj_close"), errors="coerce")
+            if not (math.isfinite(float(close)) and float(close) > 0):
+                continue
+            a = float(adj) if math.isfinite(float(adj)) and float(adj) > 0 else float(close)
+            pts.append((row["date"], float(close), a))
+        adj_switch = detect_adj_basis_switch_splits(pts, events, metric_rows=g.to_dict("records"))
+        if not adj_switch:
+            continue
+        eff, mult = adj_switch[0]
+        boundary = detect_adj_boundary(pts, eff, float(mult)) or eff
+        for ix, row in g.iterrows():
+            if row["date"] < boundary:
+                continue
+            close = pd.to_numeric(row.get("close_price"), errors="coerce")
+            if not (math.isfinite(float(close)) and float(close) > 0):
+                continue
+            mapped = adj_basis_switch_tr_price(float(close), float(mult))
+            out.loc[ix, "etf_adj_close"] = mapped
+            n_norm += 1
+    if n_norm > 0:
+        LOGGER.info("normalize adj-basis-switch etf_adj_close on %d post-split row(s)", n_norm)
+    return out
+
+
 def yahoo_join_dates_series(dates: pd.Series, urls: pd.Series | None) -> pd.Series:
     """Yahoo session date for (ETF close, underlying close) joins vs issuer ``#as_of=`` / carry-forward.
 
@@ -2219,6 +2266,7 @@ def main() -> None:
     merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
     merged = backfill_etf_adj_close_gaps(merged)
     merged = backfill_split_adjusted_etf_adj_close(merged)
+    merged = normalize_adj_basis_switch_etf_adj_close(merged)
     merged, n_vol_bf = backfill_shares_traded_gaps(merged)
     if n_vol_bf:
         LOGGER.info("Backfilled Yahoo shares_traded on %d historical row(s)", n_vol_bf)

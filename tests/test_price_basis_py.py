@@ -5,6 +5,7 @@ import datetime as dt
 import sys
 from pathlib import Path
 
+import math
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -139,6 +140,58 @@ def test_aplz_reverse_split_declared_five_accepted():
     assert max_jump < 0.35
     pre = next(r for r in tr if r["date"] == "2026-05-27")
     assert 12 < pre["tr_etf_px"] < 14
+
+
+def test_aplx_forward_split_adj_basis_switch():
+    """APLX 3-for-1: continuous close, adj switches from back-adjusted to raw."""
+    rows = [
+        {"date": "2026-03-05", "close_price": 16.94, "etf_adj_close": 5.647, "underlying_adj_close": 10.0},
+        {"date": "2026-03-06", "close_price": 13.357, "etf_adj_close": 4.452, "underlying_adj_close": 10.0},
+        {"date": "2026-03-09", "close_price": 15.377, "etf_adj_close": 5.126, "underlying_adj_close": 10.1},
+        {"date": "2026-03-10", "close_price": 15.71, "etf_adj_close": 15.71, "underlying_adj_close": 10.2},
+        {"date": "2026-03-11", "close_price": 17.08, "etf_adj_close": 17.08, "underlying_adj_close": 10.3},
+    ]
+    events = [(dt.date(2026, 3, 10), 1 / 3)]
+    ctx = resolve_split_context(
+        [(dt.date.fromisoformat(r["date"]), r["close_price"]) for r in rows],
+        events,
+        metric_rows=rows,
+        adj_by_date={
+            dt.date.fromisoformat(r["date"]): float(r["etf_adj_close"])
+            for r in rows
+        },
+    )
+    assert ctx["mode"] == "adj_basis_switch"
+    assert ctx["mult"] == pytest.approx(1 / 3)
+    tr = build_tr_series_from_metrics(rows, events)
+    max_jump, jump_date = max_abs_log_return(tr, "tr_etf_px")
+    assert max_jump < 0.35, f"split cliff on {jump_date}: {max_jump}"
+    pre = next(r for r in tr if r["date"] == "2026-03-09")
+    post = next(r for r in tr if r["date"] == "2026-03-10")
+    assert pre["tr_etf_px"] == pytest.approx(5.126, rel=1e-3)
+    assert post["tr_etf_px"] == pytest.approx(15.71 / 3, rel=0.02)
+
+
+def test_aplx_real_metrics_no_split_cliff():
+    import pandas as pd
+
+    p = Path(__file__).resolve().parent.parent / "data" / "etf_metrics_daily.parquet"
+    if not p.exists():
+        pytest.skip("etf_metrics_daily.parquet not present")
+    df = pd.read_parquet(p)
+    m = df[df["ticker"] == "APLX"].copy()
+    m["date"] = m["date"].astype(str).str[:10]
+    rows = m.sort_values("date").to_dict("records")
+    tr = build_tr_series_from_metrics(rows, [(dt.date(2026, 3, 10), 1 / 3)])
+    split_dates = {dt.date(2026, 3, 10), dt.date(2026, 3, 11)}
+    max_near = 0.0
+    for i in range(1, len(tr)):
+        d0 = dt.date.fromisoformat(tr[i]["date"])
+        if not any(abs((d0 - sd).days) <= 7 for sd in split_dates):
+            continue
+        lr = abs(math.log(tr[i]["tr_etf_px"] / tr[i - 1]["tr_etf_px"]))
+        max_near = max(max_near, lr)
+    assert max_near < 0.35, f"APLX TR cliff near split: log jump {max_near}"
 
 
 def test_match_split_to_price_jump_trusts_declared_mult():

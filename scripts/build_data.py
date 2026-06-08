@@ -30,6 +30,7 @@ import pandas as pd
 import requests
 
 from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_metrics
+from realized_gross_decay import load_gross_decay_from_metrics
 from split_adjustments import (
     MAX_WINDOW_DIVIDEND_YIELD_FRAC,
     adjust_window_dividend_for_split,
@@ -4413,6 +4414,20 @@ def build():
         f"Vol-shape from etf_metrics_daily (joint underlying_adj_close): "
         f"{len(vol_shape_by_symbol)}/{len(universe_symbols)} symbols"
     )
+    beta_by_symbol = {
+        norm_sym(str(r["symbol"])): float(r["Delta"])
+        for _, r in df.iterrows()
+        if pd.notna(r.get("Delta"))
+    }
+    gross_decay_by_symbol = load_gross_decay_from_metrics(
+        ETF_METRICS_DAILY_FILE,
+        universe_symbols,
+        beta_by_symbol=beta_by_symbol,
+    )
+    print(
+        f"Gross decay from etf_metrics_daily (split-aware TR): "
+        f"{len(gross_decay_by_symbol)}/{len(universe_symbols)} symbols"
+    )
     print(
         f"Vol-shape history JSON: "
         f"{vol_shape_history_payload.get('symbols_count', 0)} symbols "
@@ -4808,6 +4823,15 @@ def build():
             "edge_sign_convention": (str(rdict.get("edge_sign_convention", "short_favorable_positive"))),
         }
         apply_vol_shape_to_record(rec, vol_shape_by_symbol.get(norm_sym(sym)))
+        _gd = gross_decay_by_symbol.get(norm_sym(sym))
+        if _gd and _gd.get("gross_decay_annual") is not None:
+            rec["gross_decay_annual"] = _gd["gross_decay_annual"]
+            rec["gross_decay_annual_source"] = "etf_metrics_daily"
+            rec["gross_decay_n_obs"] = _gd.get("n_obs")
+            if rec.get("borrow_current") is not None:
+                rec["net_decay_annual"] = round(
+                    float(_gd["gross_decay_annual"]) - float(rec["borrow_current"]), 6,
+                )
         records.append(rec)
 
     # 5b. NAV-normalized YieldBOOST distribution calibration.

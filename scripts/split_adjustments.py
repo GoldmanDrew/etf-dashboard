@@ -285,7 +285,78 @@ def yahoo_adj_looks_back_adjusted(
     # Raw close jumped at the split → adj≡close listings are unadjusted, not back-adjusted.
     if abs(close_after / close_before - 1.0) > 0.08:
         return False
-    return abs(adj_before * mult / adj_after - 1.0) <= rel_tol
+    ratio = adj_after / adj_before
+    # Symmetric: forward splits (mult<1) show ratio≈1/mult; reverse (mult>1) show ratio≈mult.
+    return (
+        abs(ratio * mult - 1.0) <= rel_tol
+        or abs(ratio / mult - 1.0) <= rel_tol
+        or abs(adj_before * mult / adj_after - 1.0) <= rel_tol
+    )
+
+
+def adj_basis_switch_tr_price(close: float, mult: float) -> float:
+    """Map raw close onto back-adjusted TR basis when adj switches at a split."""
+    if not (math.isfinite(close) and close > 0 and math.isfinite(mult) and mult > 0):
+        return close
+    if mult <= 1.0:
+        return close * mult
+    return close / mult
+
+
+def detect_adj_boundary(
+    points: list[tuple[dt.date, float, float]],
+    effective: dt.date,
+    mult: float,
+    *,
+    rel_tol: float = 0.15,
+    window_days: int = 3,
+) -> dt.date | None:
+    """First session after which adj jumps while close stays continuous (adj basis switch)."""
+    if not points or mult <= 0:
+        return None
+    sorted_pts = sorted(points)
+    candidates: list[dt.date] = []
+    for i in range(1, len(sorted_pts)):
+        d_prev, c_prev, a_prev = sorted_pts[i - 1]
+        d_cur, c_cur, a_cur = sorted_pts[i]
+        if not all(
+            math.isfinite(x) and x > 0
+            for x in (c_prev, c_cur, a_prev, a_cur)
+        ):
+            continue
+        if abs(c_cur / c_prev - 1.0) > 0.08:
+            continue
+        ratio = a_cur / a_prev
+        if (
+            abs(ratio * mult - 1.0) <= rel_tol
+            or abs(ratio / mult - 1.0) <= rel_tol
+            or abs(a_prev * mult / a_cur - 1.0) <= rel_tol
+        ):
+            candidates.append(d_cur)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda d: abs((d - effective).days))
+
+
+def detect_adj_basis_switch_splits(
+    points: list[tuple[dt.date, float, float]],
+    events: list[tuple[dt.date, float]],
+    *,
+    rel_tol: float = 0.15,
+    metric_rows: list[dict] | None = None,
+) -> list[tuple[dt.date, float]]:
+    """Splits where Yahoo *close* is continuous but *adj* switches basis (e.g. APLX 3-for-1)."""
+    if not events:
+        return []
+    out: list[tuple[dt.date, float]] = []
+    for eff, mult in events:
+        # Forward splits only; reverse splits use discrete close-jump path (APLZ, MTYY).
+        if float(mult) >= 1.0:
+            continue
+        boundary = detect_adj_boundary(points, eff, float(mult), rel_tol=rel_tol)
+        if boundary is not None and abs((boundary - eff).days) <= 7:
+            out.append((eff, float(mult)))
+    return out
 
 
 def _metric_row_at_date(
@@ -338,8 +409,11 @@ def filter_splits_needing_close_basis_fix(
     for eff, mult in events:
         jump = split_close_jump_ratio(points, eff)
 
-        # Continuous Yahoo close through the split (e.g. MTYY): never mechanical-scale.
+        # Continuous Yahoo close: adj-basis-switch (APLX 3-for-1) is handled in price_basis;
+        # fully back-adjusted continuous listings (MTYY) must not mechanical-scale.
         if jump is not None and abs(jump - 1.0) <= 0.08:
+            if yahoo_adj_looks_back_adjusted(points, eff, float(mult), rel_tol=rel_tol):
+                continue
             continue
 
         accepted = False
@@ -478,6 +552,26 @@ def etf_adj_close_needs_split_scaling(
     if not (math.isfinite(close) and math.isfinite(adj) and close > 0 and adj > 0):
         return False
     return abs(adj / close - 1.0) <= eps
+
+
+def etf_adj_on_back_adjusted_forward_basis(
+    close: float,
+    adj: float,
+    mult: float,
+    *,
+    rel_tol: float = 0.15,
+) -> bool:
+    """True when ``etf_adj_close`` is already on back-adjusted TR basis (adj ≈ close × mult, mult<1)."""
+    if not (
+        math.isfinite(close)
+        and math.isfinite(adj)
+        and math.isfinite(mult)
+        and close > 0
+        and adj > 0
+        and 0 < mult < 1.0
+    ):
+        return False
+    return abs((adj / close) / mult - 1.0) <= rel_tol
 
 
 def etf_adj_on_post_split_basis(
