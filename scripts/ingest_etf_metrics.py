@@ -38,6 +38,7 @@ import argparse
 import json
 import logging
 import math
+import time
 import os
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1063,6 +1064,144 @@ def fetch_close_prices_batch(
         return pd.DataFrame(columns=cols)
     merged = pd.concat(parts, ignore_index=True)
     return merged.drop_duplicates(subset=["date", "ticker"], keep="last")
+
+
+def _polygon_daily_bars(
+    ticker: str,
+    start: date,
+    end: date,
+    session,
+    api_key: str,
+) -> pd.DataFrame:
+    """Polygon v2 aggs for one symbol over [start, end] (close + volume)."""
+    cols = ["date", "ticker", "close_price", "shares_traded"]
+    sym = _normalize_symbol(ticker)
+    if not sym or not api_key:
+        return pd.DataFrame(columns=cols)
+    url = (
+        f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/"
+        f"{start.isoformat()}/{end.isoformat()}"
+        f"?adjusted=true&sort=asc&limit=50000&apiKey={api_key}"
+    )
+    try:
+        r = session.get(url, timeout=float(os.getenv("ETF_METRICS_HTTP_TIMEOUT_SEC", "15")))
+        if r.status_code != 200:
+            return pd.DataFrame(columns=cols)
+        rows_raw = (r.json() if r.text else {}).get("results") or []
+    except Exception as exc:
+        LOGGER.debug("polygon bars failed for %s: %s", sym, exc)
+        return pd.DataFrame(columns=cols)
+    rows: list[dict] = []
+    for bar in rows_raw:
+        ts = bar.get("t")
+        if ts is None:
+            continue
+        try:
+            d = datetime.fromtimestamp(int(ts) / 1000.0, tz=UTC).date()
+        except Exception:
+            continue
+        close = pd.to_numeric(bar.get("c"), errors="coerce")
+        vol = pd.to_numeric(bar.get("v"), errors="coerce")
+        if not (pd.notna(close) and close > 0):
+            continue
+        rows.append({
+            "date": d,
+            "ticker": sym,
+            "close_price": float(close),
+            "shares_traded": float(vol) if pd.notna(vol) and vol >= 0 else None,
+        })
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows, columns=cols)
+
+
+def backfill_close_prices_polygon_gaps(
+    df: pd.DataFrame,
+    *,
+    start: date | None = None,
+    end: date | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """Fill missing ``close_price`` / ``shares_traded`` via Polygon when Yahoo fails."""
+    api_key = os.getenv("POLYGON_API_KEY") or os.getenv("POLYGON_IO_API_KEY") or ""
+    if not api_key or df.empty:
+        return df, 0
+    if os.getenv("ETF_METRICS_DISABLE_POLYGON_CLOSE", "").lower() in ("1", "true", "yes"):
+        return df, 0
+
+    from etf_providers import _build_session
+
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    data_start = out["date"].min()
+    data_end = out["date"].max()
+    start = start or data_start
+    end = end or data_end
+    if start is None or end is None:
+        return df, 0
+
+    close_f = pd.to_numeric(out["close_price"], errors="coerce")
+    vol_f = pd.to_numeric(out.get("shares_traded"), errors="coerce")
+    in_range = (out["date"] >= start) & (out["date"] <= end)
+    need = in_range & (close_f.isna() | (close_f <= 0))
+    if not bool(need.any()):
+        return df, 0
+
+    tickers = sorted(out.loc[need, "ticker"].unique().tolist())
+    max_req = int(os.getenv("POLYGON_CLOSE_BACKFILL_MAX_REQUESTS", "600"))
+    sleep_ms = float(os.getenv("POLYGON_CLOSE_BACKFILL_SLEEP_MS", "150"))
+    session = _build_session()
+    parts: list[pd.DataFrame] = []
+    n_req = 0
+    for sym in tickers:
+        if n_req >= max_req:
+            LOGGER.warning(
+                "polygon close backfill stopped at request budget (%d)", max_req,
+            )
+            break
+        sub = out.loc[need & (out["ticker"] == sym)]
+        dmin = sub["date"].min()
+        dmax = sub["date"].max()
+        bars = _polygon_daily_bars(sym, dmin, dmax, session, api_key)
+        n_req += 1
+        if not bars.empty:
+            parts.append(bars)
+        if sleep_ms > 0:
+            time.sleep(sleep_ms / 1000.0)
+
+    if not parts:
+        LOGGER.info("polygon close backfill: no bars returned for %d ticker(s)", len(tickers))
+        return df, 0
+
+    patch = pd.concat(parts, ignore_index=True).drop_duplicates(subset=["date", "ticker"], keep="last")
+    merged = out.merge(
+        patch.rename(columns={
+            "close_price": "_poly_close",
+            "shares_traded": "_poly_vol",
+        }),
+        on=["date", "ticker"],
+        how="left",
+    )
+    cur_close = pd.to_numeric(merged["close_price"], errors="coerce")
+    cur_vol = pd.to_numeric(merged.get("shares_traded"), errors="coerce")
+    poly_close = pd.to_numeric(merged["_poly_close"], errors="coerce")
+    poly_vol = pd.to_numeric(merged["_poly_vol"], errors="coerce")
+    take_close = cur_close.isna() | (cur_close <= 0)
+    merged["close_price"] = cur_close.where(~take_close | poly_close.isna(), poly_close)
+    take_vol = cur_vol.isna()
+    merged["shares_traded"] = cur_vol.where(~take_vol | poly_vol.isna(), poly_vol)
+    merged = merged.drop(columns=["_poly_close", "_poly_vol"], errors="ignore")
+    n_new = int(
+        (take_close & poly_close.notna()).sum()
+        + (take_vol & poly_vol.notna()).sum()
+    )
+    if n_new:
+        LOGGER.info(
+            "polygon close backfill: filled gaps on %d field(s) across %d ticker(s)",
+            n_new,
+            len(tickers),
+        )
+    return merged, n_new
 
 
 def fetch_underlying_adj_close_batch(
@@ -2255,6 +2394,15 @@ def main() -> None:
         if "close_price" not in incoming.columns:
             incoming["close_price"] = None
         LOGGER.info("close_price fetch returned no rows")
+    incoming, n_poly_close = backfill_close_prices_polygon_gaps(
+        incoming, start=resolved_start_date, end=resolved_end_date,
+    )
+    if n_poly_close:
+        got = pd.to_numeric(incoming["close_price"], errors="coerce").notna().sum()
+        LOGGER.info(
+            "after polygon close backfill: %d/%d rows have close_price",
+            int(got), len(incoming),
+        )
 
     etf_adj_df = fetch_etf_adj_close_batch(
         tickers, start=resolved_start_date, end=resolved_end_date,
@@ -2288,6 +2436,11 @@ def main() -> None:
         max_stale_business_days=max_stale_business_days,
     )
     merged = upsert(existing, incoming)
+    merged, n_poly_merged = backfill_close_prices_polygon_gaps(
+        merged, start=resolved_start_date, end=resolved_end_date,
+    )
+    if n_poly_merged:
+        LOGGER.info("polygon close backfill on merged store: %d field(s) filled", n_poly_merged)
     merged, n_sess = repair_close_price_vs_issuer_session(merged, underlying_map)
     if n_sess:
         LOGGER.info(

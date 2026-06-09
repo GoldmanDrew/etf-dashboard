@@ -39,6 +39,7 @@ from ingest_etf_metrics import (  # noqa: E402
     HEALTH_JSON_PATH,
     PARQUET_PATH,
     REQUIRED_COLUMNS,
+    backfill_close_prices_polygon_gaps,
     collapse_redundant_consecutive_rows,
     enforce_status_consistency,
     load_existing,
@@ -181,36 +182,60 @@ def backfill(
     )
 
     # Fetch in ticker chunks to stay under Yahoo's URL-length cap.
+    orig_close = pd.to_numeric(existing["close_price"], errors="coerce")
+    orig_dates = pd.to_datetime(existing["date"], errors="coerce").dt.date
+    orig_mask = (orig_dates >= start) & (orig_dates <= end)
+    orig_filled = int((orig_mask & orig_close.notna() & (orig_close > 0)).sum())
+
     all_closes: list[pd.DataFrame] = []
     for batch in chunked(tickers, chunk_size):
         df = fetch_close_history(batch, start, end)
         if not df.empty:
             all_closes.append(df)
+    closes_rows_fetched = 0
     if not all_closes:
         LOGGER.warning("no close_price rows returned from yfinance")
-        return work, {"rows_updated": 0, "tickers": len(tickers)}
-    closes = pd.concat(all_closes, ignore_index=True)
-    closes = closes.drop_duplicates(subset=["date", "ticker"], keep="last")
-
-    merged = work.merge(
-        closes.rename(columns={"close_price": "_close_new"}),
-        on=["date", "ticker"],
-        how="left",
-    )
-    new_num = pd.to_numeric(merged["_close_new"], errors="coerce")
-    cur_num = pd.to_numeric(merged.get("close_price"), errors="coerce")
-    if only_missing:
-        take_new = cur_num.isna() | (cur_num <= 0)
-        merged["close_price"] = np.where(take_new & new_num.notna(), new_num, cur_num)
     else:
-        merged["close_price"] = new_num.combine_first(cur_num)
-    merged = merged.drop(columns=["_close_new"])
+        closes = pd.concat(all_closes, ignore_index=True)
+        closes = closes.drop_duplicates(subset=["date", "ticker"], keep="last")
+        closes_rows_fetched = int(len(closes))
 
-    rows_updated = int(((~cur_num.notna()) & pd.to_numeric(merged["close_price"], errors="coerce").notna()).sum())
-    return merged, {
+        merged = work.merge(
+            closes.rename(columns={"close_price": "_close_new"}),
+            on=["date", "ticker"],
+            how="left",
+        )
+        new_num = pd.to_numeric(merged["_close_new"], errors="coerce")
+        cur_num = pd.to_numeric(merged.get("close_price"), errors="coerce")
+        if only_missing:
+            take_new = cur_num.isna() | (cur_num <= 0)
+            merged["close_price"] = np.where(take_new & new_num.notna(), new_num, cur_num)
+        else:
+            merged["close_price"] = new_num.combine_first(cur_num)
+        merged = merged.drop(columns=["_close_new"])
+        work = merged
+
+    close_after_yf = pd.to_numeric(work["close_price"], errors="coerce")
+    still_need = int(
+        ((work["date"] >= start) & (work["date"] <= end) & (close_after_yf.isna() | (close_after_yf <= 0))).sum()
+    )
+    if still_need:
+        LOGGER.info(
+            "%d row(s) still missing close after yfinance; trying Polygon",
+            still_need,
+        )
+        work, n_poly = backfill_close_prices_polygon_gaps(work, start=start, end=end)
+        if n_poly:
+            LOGGER.info("polygon backfill filled %d field(s)", n_poly)
+
+    new_close = pd.to_numeric(work["close_price"], errors="coerce")
+    new_mask = (work["date"] >= start) & (work["date"] <= end)
+    new_filled = int((new_mask & new_close.notna() & (new_close > 0)).sum())
+    rows_updated = max(0, new_filled - orig_filled)
+    return work, {
         "rows_updated": rows_updated,
         "tickers": len(tickers),
-        "closes_rows_fetched": int(len(closes)),
+        "closes_rows_fetched": closes_rows_fetched,
     }
 
 
