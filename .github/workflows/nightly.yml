@@ -130,6 +130,14 @@ jobs:
         continue-on-error: true
         run: python scripts/backfill_close_prices.py --chunk 50
 
+      - name: Backfill etf adj. close gaps
+        continue-on-error: true
+        run: python scripts/backfill_etf_adj_close.py
+
+      - name: Audit metrics field gaps
+        continue-on-error: true
+        run: python scripts/audit_metrics_gaps.py --start $(python -c "from datetime import date,timedelta; print((date.today()-timedelta(days=14)).isoformat())")
+
       - name: Bootstrap Yahoo prices before first stored metrics row
         continue-on-error: true
         run: python scripts/bootstrap_metrics_yahoo_history.py --max-tickers 500

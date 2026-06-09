@@ -1143,7 +1143,9 @@ def backfill_close_prices_polygon_gaps(
     close_f = pd.to_numeric(out["close_price"], errors="coerce")
     vol_f = pd.to_numeric(out.get("shares_traded"), errors="coerce")
     in_range = (out["date"] >= start) & (out["date"] <= end)
-    need = in_range & (close_f.isna() | (close_f <= 0))
+    need_close = in_range & (close_f.isna() | (close_f <= 0))
+    need_vol = in_range & close_f.notna() & (close_f > 0) & vol_f.isna()
+    need = need_close | need_vol
     if not bool(need.any()):
         return df, 0
 
@@ -1190,10 +1192,17 @@ def backfill_close_prices_polygon_gaps(
     merged["close_price"] = cur_close.where(~take_close | poly_close.isna(), poly_close)
     take_vol = cur_vol.isna()
     merged["shares_traded"] = cur_vol.where(~take_vol | poly_vol.isna(), poly_vol)
+    n_adj = 0
+    if "etf_adj_close" in merged.columns:
+        cur_adj = pd.to_numeric(merged["etf_adj_close"], errors="coerce")
+        fill_adj = cur_adj.isna() & poly_close.notna()
+        n_adj = int(fill_adj.sum())
+        merged["etf_adj_close"] = cur_adj.where(~fill_adj, poly_close)
     merged = merged.drop(columns=["_poly_close", "_poly_vol"], errors="ignore")
     n_new = int(
         (take_close & poly_close.notna()).sum()
         + (take_vol & poly_vol.notna()).sum()
+        + n_adj
     )
     if n_new:
         LOGGER.info(
@@ -1339,6 +1348,25 @@ def backfill_etf_adj_close_gaps(df: pd.DataFrame) -> pd.DataFrame:
     if n_new > 0:
         LOGGER.info("backfill etf_adj_close: +%d non-null row(s) after gap fetch", n_new)
     return out
+
+
+def backfill_etf_adj_close_from_close_gaps(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Copy ``close_price`` into null ``etf_adj_close`` when Yahoo/Polygon adj fetch failed.
+
+    Safe for young listings and no-dividend ETFs where adjusted close equals raw close.
+    Split-aware scaling runs later via ``backfill_split_adjusted_etf_adj_close``.
+    """
+    if df.empty or "etf_adj_close" not in df.columns or "close_price" not in df.columns:
+        return df, 0
+    out = df.copy()
+    adj = pd.to_numeric(out["etf_adj_close"], errors="coerce")
+    close = pd.to_numeric(out["close_price"], errors="coerce")
+    need = close.notna() & (close > 0) & adj.isna()
+    n = int(need.sum())
+    if n:
+        out.loc[need, "etf_adj_close"] = close[need]
+        LOGGER.info("backfill etf_adj_close from close_price: +%d row(s)", n)
+    return out, n
 
 
 def backfill_split_adjusted_etf_adj_close(
@@ -1753,6 +1781,20 @@ def backfill_shares_traded_gaps(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
     if filled:
         LOGGER.info("backfill shares_traded: filled %d row(s) with Yahoo volume", filled)
+
+    close_f = pd.to_numeric(out["close_price"], errors="coerce")
+    vol_f = pd.to_numeric(out.get("shares_traded"), errors="coerce")
+    status_ok = out["status"].astype(str) == "ok"
+    still_need = int(
+        (close_f.notna() & (close_f > 0) & vol_f.isna() & status_ok).sum()
+    )
+    if still_need:
+        LOGGER.info(
+            "backfill shares_traded: %d row(s) still missing volume; trying Polygon",
+            still_need,
+        )
+        out, n_poly = backfill_close_prices_polygon_gaps(out)
+        filled += n_poly
     return out, filled
 
 
@@ -2467,11 +2509,22 @@ def main() -> None:
     # so an earlier backfill never saw legacy null rows in the parquet store.
     merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
     merged = backfill_etf_adj_close_gaps(merged)
+    merged, n_adj_close = backfill_etf_adj_close_from_close_gaps(merged)
+    if n_adj_close:
+        LOGGER.info("Backfilled etf_adj_close from close_price on %d row(s)", n_adj_close)
     merged = backfill_split_adjusted_etf_adj_close(merged)
     merged = normalize_adj_basis_switch_etf_adj_close(merged)
     merged, n_vol_bf = backfill_shares_traded_gaps(merged)
     if n_vol_bf:
-        LOGGER.info("Backfilled Yahoo shares_traded on %d historical row(s)", n_vol_bf)
+        LOGGER.info("Backfilled shares_traded on %d historical row(s)", n_vol_bf)
+    merged, n_poly_tail = backfill_close_prices_polygon_gaps(
+        merged, start=resolved_start_date, end=resolved_end_date,
+    )
+    if n_poly_tail:
+        LOGGER.info("Polygon market-field tail backfill: %d field(s) filled", n_poly_tail)
+    merged, n_adj_tail = backfill_etf_adj_close_from_close_gaps(merged)
+    if n_adj_tail:
+        LOGGER.info("Post-Polygon etf_adj_close from close on %d row(s)", n_adj_tail)
     merged, n_nav_partial = repair_nav_only_partial_aum(merged)
     if n_nav_partial:
         LOGGER.info("Repaired nav-only partial AUM on %d row(s) via Yahoo fallback", n_nav_partial)
