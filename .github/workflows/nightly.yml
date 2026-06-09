@@ -6,8 +6,11 @@ name: Nightly Metrics & Full Build
 
 on:
   schedule:
-    - cron: "0 10 * * 2-6"
-    - cron: "0 11 * * 2-6"
+    # Two UTC slots cover 6 AM ET across DST (10 UTC = EDT, 11 UTC = EST).
+    # The resolve-slot job exits non-6 AM slots; cancel-in-progress MUST stay
+    # false or the 11 UTC placeholder run kills the in-flight 10 UTC ingest.
+    - cron: "0 10 * * 1-6"
+    - cron: "0 11 * * 1-6"
   workflow_dispatch:
 
 permissions:
@@ -17,12 +20,59 @@ permissions:
 
 concurrency:
   group: "nightly-build"
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  nightly:
+  resolve-slot:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    outputs:
+      run: ${{ steps.slot.outputs.run }}
+      monday_catchup: ${{ steps.slot.outputs.monday_catchup }}
+    steps:
+      - name: Resolve 6 AM ET schedule slot
+        id: slot
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch; running full pipeline."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "monday_catchup=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SLOT=$(python - <<'PY'
+          from datetime import datetime
+          import pytz
+          now_et = datetime.now(pytz.timezone("America/New_York"))
+          print(f"{now_et.hour} {now_et.weekday()}")
+          PY
+          )
+          ET_HOUR=$(echo "$SLOT" | awk '{print $1}')
+          ET_DOW=$(echo "$SLOT" | awk '{print $2}')
+          echo "Current ET hour=$ET_HOUR weekday(0=Mon)=$ET_DOW"
+          if [ "$ET_HOUR" != "6" ]; then
+            echo "Not 6 AM ET; skipping nightly."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "monday_catchup=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$ET_DOW" -eq 6 ]; then
+            echo "Sunday; skipping nightly."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "monday_catchup=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+          if [ "$ET_DOW" -eq 0 ]; then
+            echo "Monday catch-up slot (multi-day ingest through prior Fri)."
+            echo "monday_catchup=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "monday_catchup=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  nightly:
+    needs: resolve-slot
+    if: needs.resolve-slot.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
     env:
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
       TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
@@ -32,6 +82,7 @@ jobs:
       ETF_METRICS_HTTP_RETRY_BACKOFF: "0.5"
       ETF_METRICS_MAX_STALE_BUSINESS_DAYS: "3"
       ETF_METRICS_SKIP_IF_RECENT_HOURS: ${{ github.event_name == 'schedule' && '8' || '0' }}
+      ETF_METRICS_MONDAY_CATCHUP_BDAYS: "3"
 
     steps:
       - name: Checkout
@@ -56,33 +107,16 @@ jobs:
             exit 1
           fi
 
-      - name: Skip duplicate DST slot (run only at 6 AM ET Tue-Sat)
-        if: ${{ github.event_name == 'schedule' }}
-        run: |
-          SLOT=$(python - <<'PY'
-          from datetime import datetime
-          import pytz
-          now_et = datetime.now(pytz.timezone("America/New_York"))
-          print(f"{now_et.hour} {now_et.weekday()}")
-          PY
-          )
-          ET_HOUR=$(echo $SLOT | awk '{print $1}')
-          ET_DOW=$(echo $SLOT | awk '{print $2}')
-          echo "Current ET hour=$ET_HOUR weekday(0=Mon)=$ET_DOW"
-          if [ "$ET_HOUR" != "6" ]; then
-            echo "Not 6 AM ET slot; exiting."
-            exit 0
-          fi
-          if [ "$ET_DOW" -lt "1" ] || [ "$ET_DOW" -gt "5" ]; then
-            echo "Not a Tue-Sat run (weekday=$ET_DOW); exiting."
-            exit 0
-          fi
-
       - name: Pull latest main
         run: git pull --ff-only origin main
 
       - name: Ingest ETF metrics
-        run: python scripts/ingest_etf_metrics.py --lookback-days 10 --polygon-lookback-days 5
+        run: |
+          EXTRA=""
+          if [ "${{ needs.resolve-slot.outputs.monday_catchup }}" = "true" ]; then
+            EXTRA="--monday-catchup"
+          fi
+          python scripts/ingest_etf_metrics.py --lookback-days 10 --polygon-lookback-days 5 $EXTRA
 
       - name: Repair REX issuer NAV vs market close (tail)
         continue-on-error: true
@@ -131,6 +165,35 @@ jobs:
       - name: Refresh corporate actions if stale
         continue-on-error: true
         run: python scripts/ensure_corporate_actions_fresh.py --max-age-hours 6
+
+      # Persist metrics/scoring before the long build_data step so a timeout or
+      # build failure does not leave issuer NAV backfills stranded in the runner.
+      - name: Commit metrics and scoring artifacts
+        id: commit_metrics
+        uses: ./.github/actions/commit-data
+        with:
+          files: >-
+            data/etf_metrics_daily.parquet
+            data/etf_metrics_daily.csv
+            data/etf_metrics_latest.json
+            data/etf_metrics_health.json
+            data/etf_distributions.json
+            data/etf_holdings_daily.parquet
+            data/etf_holdings_latest.csv
+            data/etf_holdings_latest.json
+            data/nav_forecasts/_anchors.json
+            data/nav_forecasts/_metrics_daily.json
+            data/nav_forecasts/_history_panel.json
+            data/nav_forecasts/realized
+            data/letf_rebalance_flows_daily.parquet
+            data/letf_rebalance_flows_daily.json
+            data/letf_rebalance_flows_latest.json
+            data/underlying_volume_history.parquet
+            data/letf_intraday_flow_realized.jsonl
+            data/letf_intraday_flow_metrics.json
+            data/letf_intraday_remaining_backtest.json
+            data/freshness_summary.json
+          commit_message: ${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday metrics catch-up ingest' || 'chore: nightly metrics ingest' }}
 
       - name: Full dashboard build
         id: build_data
@@ -193,51 +256,31 @@ jobs:
         continue-on-error: true
         run: python scripts/audit_exp_etf_scenario_alignment.py --strict-only --warn
 
-      - name: Commit nightly artifacts
+      - name: Commit dashboard build artifacts
         if: steps.build_data.outcome == 'success'
-        id: commit
+        id: commit_dashboard
         uses: ./.github/actions/commit-data
         with:
           files: >-
-            data/etf_metrics_daily.parquet
-            data/etf_metrics_daily.csv
-            data/etf_metrics_latest.json
-            data/etf_metrics_health.json
-            data/etf_distributions.json
-            data/etf_holdings_daily.parquet
-            data/etf_holdings_latest.csv
-            data/etf_holdings_latest.json
-            data/yieldboost_put_spreads_latest.json
-            data/nav_forecasts/_anchors.json
-            data/nav_forecasts/_metrics_daily.json
-            data/nav_forecasts/_history_panel.json
-            data/nav_forecasts/realized
-            data/borrow_spike_realized.jsonl
-            data/borrow_spike_metrics.json
-            data/letf_rebalance_flows_daily.parquet
-            data/letf_rebalance_flows_daily.json
-            data/letf_rebalance_flows_latest.json
-            data/underlying_volume_history.parquet
-            data/letf_intraday_flow_realized.jsonl
-            data/letf_intraday_flow_metrics.json
-            data/letf_intraday_remaining_backtest.json
             data/dashboard_data.json
             data/etf_screened_today.csv
             data/borrow_history.json
             data/borrow_spike_risk.json
             data/borrow_spike_predictions
+            data/borrow_spike_realized.jsonl
+            data/borrow_spike_metrics.json
             data/options_cache.json
             data/vol_shape_history.json
             data/vrp_live.json
             data/vrp_health.json
+            data/yieldboost_put_spreads_latest.json
             data/yieldboost_options_target.json
             data/event_calendar_known.json
             data/event_calendar_inferred.json
             data/event_calendar_combined.json
             data/ci_state.json
-            data/freshness_summary.json
-          commit_message: "chore: nightly metrics and full build"
+          commit_message: ${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday dashboard catch-up build' || 'chore: nightly dashboard build' }}
 
       - name: Deploy Pages
-        if: steps.commit.outputs.changed == '1'
+        if: steps.commit_dashboard.outputs.changed == '1' || steps.commit_metrics.outputs.changed == '1'
         uses: ./.github/actions/deploy-pages

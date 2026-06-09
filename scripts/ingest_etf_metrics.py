@@ -2046,6 +2046,30 @@ def previous_business_day(ref: date) -> date:
     return d
 
 
+def resolve_monday_catchup_range(
+    ref: date | None = None,
+    *,
+    business_days: int | None = None,
+) -> tuple[date, date]:
+    """Return (start, end) for the Monday 6 AM ET catch-up ingest.
+
+    After a weekend with no scheduled runs (Sun off; Sat may fail), backfill the last
+    ``business_days`` sessions ending on the prior Friday. Default window is Wed–Fri.
+    """
+    ref = ref or date.today()
+    if ref.weekday() != 0:
+        raise ValueError(f"Monday catch-up requires weekday Monday, got {ref.weekday()}")
+    n = business_days if business_days is not None else int(
+        os.getenv("ETF_METRICS_MONDAY_CATCHUP_BDAYS", "3")
+    )
+    n = max(1, n)
+    end = previous_business_day(ref)
+    start = end
+    for _ in range(n - 1):
+        start = previous_business_day(start)
+    return start, end
+
+
 def should_skip_scheduled_redundant_ingest(
     existing: pd.DataFrame,
     tickers: list[str],
@@ -2110,6 +2134,11 @@ def main() -> None:
     parser.add_argument("--polygon-lookback-days", type=int, default=5)
     parser.add_argument("--start-date", default=None, help="YYYY-MM-DD")
     parser.add_argument("--end-date", default=None, help="YYYY-MM-DD")
+    parser.add_argument(
+        "--monday-catchup",
+        action="store_true",
+        help="Multi-day ingest for Mon 6 AM ET: backfill last N business days through prior Fri",
+    )
     parser.add_argument("--disable-yfinance", action="store_true", help="skip the Yahoo Finance fallback")
     args = parser.parse_args()
 
@@ -2127,15 +2156,33 @@ def main() -> None:
     # Resolve end_date: CLI arg wins, else use previous business day (the data-date
     # for a T+1 run). This keeps rows stamped on their actual trading day and avoids
     # every row looking "stale" on a routine Tue-Sat run.
-    resolved_end_date = parse_date_arg(args.end_date) or resolve_ingest_end_date()
-    resolved_start_date = parse_date_arg(args.start_date) or resolved_end_date
+    if args.monday_catchup:
+        if date.today().weekday() != 0:
+            LOGGER.warning("--monday-catchup set but today is not Monday; using normal date range")
+            resolved_end_date = parse_date_arg(args.end_date) or resolve_ingest_end_date()
+            resolved_start_date = parse_date_arg(args.start_date) or resolved_end_date
+        else:
+            resolved_start_date, resolved_end_date = resolve_monday_catchup_range()
+            LOGGER.info(
+                "Monday catch-up range: start=%s end=%s (%d business day(s))",
+                resolved_start_date,
+                resolved_end_date,
+                int(np.busday_count(str(resolved_start_date), str(resolved_end_date))) + 1,
+            )
+    else:
+        resolved_end_date = parse_date_arg(args.end_date) or resolve_ingest_end_date()
+        resolved_start_date = parse_date_arg(args.start_date) or resolved_end_date
     LOGGER.info(
         "Run target dates: start=%s end=%s (today=%s, resolved_as_prev_bday=%s)",
         resolved_start_date, resolved_end_date, date.today(), parse_date_arg(args.end_date) is None,
     )
 
     existing = load_existing()
-    if should_skip_scheduled_redundant_ingest(existing, tickers, resolved_end_date):
+    if (
+        not args.monday_catchup
+        and resolved_start_date == resolved_end_date
+        and should_skip_scheduled_redundant_ingest(existing, tickers, resolved_end_date)
+    ):
         LOGGER.info(
             "Skipping redundant provider ingest — still running underlying_adj_close gap backfill on store",
         )
