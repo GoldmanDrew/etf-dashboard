@@ -1,180 +1,152 @@
 {
-  "build_time": "2026-06-05T15:15:09.365569Z",
+  "build_time": "2026-06-09T19:36:08.251111Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-06-05T03:38:53.184080Z",
+    "build_time": "2026-06-09T15:47:39.096404Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
     "yieldboost_underlyings_refreshed_count": 30,
     "yieldboost_underlyings_prefetched_count": 30,
     "yieldboost_underlyings_skipped_fresh_count": 0,
     "yieldboost_refresh_order_head": [
-      "XBI",
-      "AMD",
-      "RIOT",
-      "TSLA",
-      "RGTI",
+      "MARA",
+      "IONQ",
+      "XLK",
       "TSM",
-      "TLT",
-      "AMZN"
+      "SPY",
+      "RGTI",
+      "SMCI",
+      "QBTS"
     ],
     "monitored_symbols_count": 283,
     "freshness_enforced_count": 61,
     "cached_monitored_count": 283,
     "missing_monitored_symbols": [],
-    "stale_enforced_symbols": [],
+    "stale_enforced_symbols": [
+      "TQQQ",
+      "TSMU",
+      "SMCX",
+      "SPXL",
+      "RGTX"
+    ],
     "pruned_unmonitored_count": null,
-    "oldest_symbol": "SOXL",
-    "oldest_symbol_age_minutes": 1383,
-    "oldest_enforced_symbol": "SOXL",
-    "oldest_enforced_symbol_age_minutes": 1383
+    "oldest_symbol": "TQQQ",
+    "oldest_symbol_age_minutes": 5979,
+    "oldest_enforced_symbol": "TQQQ",
+    "oldest_enforced_symbol_age_minutes": 5979
   },
   "vrp": {
     "worst_underlying_symbol": "AMD",
     "worst_underlying_options_age_minutes": 16,
-    "underlying_options_as_of_min": "2026-06-05T03:38:53.184080Z",
-    "iv_coverage_front_pct": 0.9677
+    "underlying_options_as_of_min": "2026-06-09T15:47:39.096404Z",
+    "iv_coverage_front_pct": 0.8387
   },
   "flow": {
-    "latest_date": "2026-06-05",
-    "build_time": "2026-06-05T15:15:06.777834Z",
+    "latest_date": "2026-06-09",
+    "build_time": "2026-06-09T19:36:05.788281Z",
     "underlyings_total": 229,
-    "underlyings_stale": 18,
-    "underlyings_stale_pct": 7.86,
+    "underlyings_stale": 0,
+    "underlyings_stale_pct": 0.0,
     "underlyings_issuer_publish_lag": 0,
-    "underlyings_actionable_stale": 18,
-    "underlyings_actionable_stale_pct": 7.86,
-    "underlyings_stale_by_reason": {
-      "missing_metrics": 14,
-      "quality_excluded": 4
-    },
-    "fund_rows_on_latest_date": 461,
+    "underlyings_actionable_stale": 0,
+    "underlyings_actionable_stale_pct": 0.0,
+    "underlyings_stale_by_reason": {},
+    "fund_rows_on_latest_date": 483,
     "fund_quality_counts": {
       "income_overlay": 31,
-      "missing_leverage": 1,
-      "missing_prior_aum": 3,
-      "ok": 356,
-      "product_class:passive_low_delta": 64,
-      "stale_aum": 6
+      "missing_prior_aum": 2,
+      "ok": 384,
+      "product_class:passive_low_delta": 66
     },
-    "stale_aum_by_prior_kind": {
-      "anchor_lag": 6
-    },
-    "top_stale_by_abs_net_moc": [
-      {
-        "underlying": "SOEZ",
-        "date": "2026-06-04",
-        "abs_net_moc_dollars": 42793765.45,
-        "reason": "quality_excluded"
-      },
-      {
-        "underlying": "USAR",
-        "date": "2026-06-01",
-        "abs_net_moc_dollars": 3451830.85,
-        "reason": "missing_metrics"
-      },
-      {
-        "underlying": "HUT",
-        "date": "2026-06-01",
-        "abs_net_moc_dollars": 1289115.43,
-        "reason": "missing_metrics"
-      },
-      {
-        "underlying": "AMPX",
-        "date": "2026-06-04",
-        "abs_net_moc_dollars": 1103254.51,
-        "reason": "quality_excluded"
-      },
-      {
-        "underlying": "DKNG",
-        "date": "2026-06-01",
-        "abs_net_moc_dollars": 796959.72,
-        "reason": "quality_excluded"
-      }
-    ]
+    "stale_aum_by_prior_kind": {},
+    "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-06-05",
-    "latest_ok": 458,
-    "latest_stale_ok": 101,
+    "latest_date": "2026-06-09",
+    "latest_ok": 477,
+    "latest_stale_ok": 117,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "carry_forward": 62,
-      "issuer_lag": 33,
-      "anchor_lag": 6
+      "carry_forward": 117
     },
-    "flow_blockers_prior_stale": 6,
+    "flow_blockers_prior_stale": 0,
     "prem_disc": {
       "rows_with_close": 488,
       "rows_with_nav_and_close": 488,
-      "median_prem_disc_bps": -2.7476125014214488e-05,
-      "lockstep_nav_close_count": 153,
-      "lockstep_nav_close_pct": 31.35,
-      "rex_nav_vs_implied_div_bps_gt5": 34,
+      "median_prem_disc_bps": -0.005433661439155732,
+      "lockstep_nav_close_count": 143,
+      "lockstep_nav_close_pct": 29.3,
+      "rex_nav_vs_implied_div_bps_gt5": 26,
       "by_provider": {
         "polygon": {
-          "rows": 108,
-          "median_prem_disc_bps": 0.0,
-          "lockstep_count": 103
+          "rows": 118,
+          "median_prem_disc_bps": 1.4646562412593095e-05,
+          "lockstep_count": 112
         },
         "tradr_axs": {
           "rows": 61,
-          "median_prem_disc_bps": -6.574747360198789,
+          "median_prem_disc_bps": -11.491222584925266,
           "lockstep_count": 0
         },
-        "granite_shares": {
-          "rows": 71,
-          "median_prem_disc_bps": 0.8387722710684756,
-          "lockstep_count": 4
+        "carry_forward": {
+          "rows": 117,
+          "median_prem_disc_bps": -1281.2381156562294,
+          "lockstep_count": 0
         },
         "direxion": {
           "rows": 35,
-          "median_prem_disc_bps": -173.8945075199419,
+          "median_prem_disc_bps": -64.30067152047623,
           "lockstep_count": 0
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 1.7568517217143376,
-          "lockstep_count": 1
+          "median_prem_disc_bps": 0.0,
+          "lockstep_count": 4
         },
         "rex_shares": {
           "rows": 35,
-          "median_prem_disc_bps": 0.0,
-          "lockstep_count": 6
+          "median_prem_disc_bps": -4.955401387511403,
+          "lockstep_count": 7
         },
         "yieldmax": {
           "rows": 30,
           "median_prem_disc_bps": 0.0,
-          "lockstep_count": 3
-        },
-        "carry_forward": {
-          "rows": 62,
-          "median_prem_disc_bps": -0.00022117010366021986,
-          "lockstep_count": 25
-        },
-        "merged": {
-          "rows": 30,
-          "median_prem_disc_bps": 1.5343107108321723,
           "lockstep_count": 6
+        },
+        "granite_shares": {
+          "rows": 24,
+          "median_prem_disc_bps": -0.02574185926391162,
+          "lockstep_count": 3
         },
         "proshares": {
           "rows": 29,
-          "median_prem_disc_bps": -0.615346747892825,
-          "lockstep_count": 4
+          "median_prem_disc_bps": -0.478053246416255,
+          "lockstep_count": 6
         },
         "yfinance": {
-          "rows": 3,
-          "median_prem_disc_bps": 0.0,
+          "rows": 4,
+          "median_prem_disc_bps": -3.226626882429182,
+          "lockstep_count": 2
+        },
+        "merged": {
+          "rows": 9,
+          "median_prem_disc_bps": 2.4323091850545455,
           "lockstep_count": 1
+        },
+        "fof_child_synthetic": {
+          "rows": 2,
+          "median_prem_disc_bps": 0.0,
+          "lockstep_count": 2
         }
       }
     }
   },
   "violations": [
-    "metrics: 34 rex row(s) with published NAV vs AUM/shares divergence >5bp"
+    "oldest enforced cache TQQQ is 99h old (limit 48h)",
+    "metrics: 26 rex row(s) with published NAV vs AUM/shares divergence >5bp"
   ],
   "ok": false
 }
