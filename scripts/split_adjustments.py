@@ -380,6 +380,82 @@ def detect_adj_boundary(
     return min(pool)
 
 
+def find_close_jump_boundary(
+    close_points: list[tuple[dt.date, float]],
+    mult: float,
+    near: dt.date,
+    *,
+    window_days: int = 7,
+    jump_tol: float = 0.18,
+    rel_tol: float = 0.15,
+) -> dt.date | None:
+    """First session where raw close jumps ~``mult`` within ``window_days`` of ``near``."""
+    if not close_points or mult <= 0:
+        return None
+    dated = sorted(close_points)
+    candidates: list[dt.date] = []
+    for i in range(1, len(dated)):
+        d_cur, c_cur = dated[i]
+        _, c_prev = dated[i - 1]
+        if abs((d_cur - near).days) > window_days:
+            continue
+        if not (c_prev > 0 and c_cur > 0):
+            continue
+        jump = c_cur / c_prev
+        matched = match_split_to_price_jump(jump, mult, jump_tol=jump_tol, rel_tol=rel_tol)
+        if matched is not None and abs(matched - mult) <= max(1e-6, rel_tol * abs(mult)):
+            candidates.append(d_cur)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda d: abs((d - near).days))
+
+
+def detect_staggered_discrete_splits(
+    points: list[tuple[dt.date, float, float]],
+    close_points: list[tuple[dt.date, float]],
+    events: list[tuple[dt.date, float]],
+    *,
+    rel_tol: float = 0.15,
+    window_days: int = 7,
+) -> list[tuple[dt.date, float, dt.date]]:
+    """Reverse splits where close jumps before adj switches (BAIG, BMNG, …)."""
+    if not events:
+        return []
+    out: list[tuple[dt.date, float, dt.date]] = []
+    for eff, mult in events:
+        if float(mult) < 1.05:
+            continue
+        boundary = find_close_jump_boundary(
+            close_points,
+            float(mult),
+            eff,
+            window_days=window_days,
+            rel_tol=rel_tol,
+        )
+        if boundary is None:
+            continue
+        adj_boundary = detect_adj_boundary(points, eff, float(mult), rel_tol=rel_tol) or eff
+        if boundary > adj_boundary:
+            continue
+        out.append((eff, float(mult), boundary))
+    return out
+
+
+def _close_jump_near_date(
+    close_points: list[tuple[dt.date, float]],
+    mult: float,
+    center: dt.date,
+    *,
+    window_days: int = 7,
+) -> bool:
+    return find_close_jump_boundary(
+        close_points,
+        mult,
+        center,
+        window_days=window_days,
+    ) is not None
+
+
 def _boundary_has_raw_forward_adj(
     points: list[tuple[dt.date, float, float]],
     boundary: dt.date,
@@ -387,7 +463,11 @@ def _boundary_has_raw_forward_adj(
     *,
     rel_tol: float = 0.15,
 ) -> bool:
-    """True when the pre-boundary row carries raw Yahoo forward adj (adj/close ≈ 1/mult)."""
+    """True when pre-boundary adj is raw forward (adj/close ≈ 1/mult).
+
+    Mislabeled reverse corp actions (APPX) can still show a market close move at the
+    adj boundary; ratio match alone selects ``forward_continuous_close``.
+    """
     if not points or not (0 < fwd_mult < 1):
         return False
     sorted_pts = sorted(points)
@@ -399,7 +479,13 @@ def _boundary_has_raw_forward_adj(
             return False
         ratio = a_prev / c_prev
         inv = 1.0 / fwd_mult
-        return abs(ratio - inv) <= rel_tol or abs(ratio * fwd_mult - inv * fwd_mult) <= rel_tol
+        if abs(ratio - inv) > rel_tol:
+            return False
+        close_pts = [(d, c) for d, c, _ in sorted_pts]
+        declared_dm = 1.0 / fwd_mult
+        if _close_jump_near_date(close_pts, declared_dm, boundary, window_days=7):
+            return False
+        return True
     return False
 
 
@@ -431,14 +517,17 @@ def detect_adj_basis_switch_splits(
         if dm < 1.0:
             trials.append((dm, "forward"))
         else:
-            if close_continuous:
+            close_pts = [(d, c) for d, c, _ in points]
+            adj_b = detect_adj_boundary(points, eff, dm, rel_tol=rel_tol) or eff
+            staggered = _close_jump_near_date(close_pts, dm, adj_b, window_days=7)
+            if close_continuous and not staggered:
                 trials.append((dm, "reverse_continuous"))
             fwd_mult = 1.0 / dm
             boundary = detect_adj_boundary(points, eff, fwd_mult, rel_tol=rel_tol)
             if boundary is not None and abs((boundary - eff).days) <= 7:
                 if _boundary_has_raw_forward_adj(points, boundary, fwd_mult, rel_tol=rel_tol):
                     trials.append((fwd_mult, "forward_continuous_close"))
-                else:
+                elif not staggered:
                     trials.append((fwd_mult, "forward"))
         for mult, variant in trials:
             key = (eff, mult, variant)
@@ -448,7 +537,10 @@ def detect_adj_basis_switch_splits(
             if boundary is None or abs((boundary - eff).days) > 7:
                 continue
             if variant == "reverse_continuous":
-                jump_at = split_close_jump_ratio(points, boundary)
+                close_pts = [(d, c) for d, c, _ in points]
+                if _close_jump_near_date(close_pts, mult, boundary, window_days=7):
+                    continue
+                jump_at = split_close_jump_ratio(close_pts, boundary)
                 if jump_at is not None and abs(jump_at - 1.0) > 0.12:
                     continue
             seen.add(key)

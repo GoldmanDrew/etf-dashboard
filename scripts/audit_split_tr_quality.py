@@ -31,7 +31,7 @@ REPO = _SCRIPTS.parent
 METRICS_PARQUET = REPO / "data" / "etf_metrics_daily.parquet"
 MAX_LOG_RETURN = 0.35
 LOOKBACK_MONTHS = 18
-SPLIT_WINDOW_DAYS = 7
+SPLIT_WINDOW_DAYS = 2
 
 
 def _load_corp_payload(path: Path) -> dict:
@@ -73,39 +73,10 @@ def audit_ticker(
     if len(tr) < 2:
         return failures
 
-    split_dates = {eff for eff, _ in split_events}
-    max_near = 0.0
-    near_date: str | None = None
-    for i in range(1, len(tr)):
-        ds = str(tr[i].get("date") or "")[:10]
-        if len(ds) != 10:
-            continue
-        try:
-            d0 = dt.date.fromisoformat(ds)
-        except ValueError:
-            continue
-        near_split = any(abs((d0 - eff).days) <= SPLIT_WINDOW_DAYS for eff in split_dates)
-        if not near_split:
-            continue
-        try:
-            a = float(tr[i - 1]["tr_etf_px"])
-            b = float(tr[i]["tr_etf_px"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if a <= 0 or b <= 0:
-            continue
-        lr = abs(math.log(b / a))
-        if lr > max_near:
-            max_near = lr
-            near_date = ds
-    if max_near > max_log_return:
-        failures.append(
-            f"{ticker}: max ETF TR daily log-return {max_near:.3f} "
-            f"({math.expm1(max_near)*100:.0f}%) near split on {near_date}"
-        )
-
     close_pts = []
+    adj_by_date: dict[dt.date, float] = {}
     adj_equiv_close = True
+    had_basis_switch = False
     for row in rows:
         ds = str(row.get("date") or "")[:10]
         if len(ds) != 10:
@@ -119,15 +90,77 @@ def audit_ticker(
             continue
         d0 = dt.date.fromisoformat(ds)
         close_pts.append((d0, close))
+        adj_by_date[d0] = adj
         if not etf_adj_close_needs_split_scaling(close, adj):
             adj_equiv_close = False
+        ratio = adj / close
+        if ratio > 1.4 or ratio < 0.75:
+            had_basis_switch = True
 
-    ctx = resolve_split_context(close_pts, split_events, metric_rows=rows)
+    ctx = resolve_split_context(close_pts, split_events, metric_rows=rows, adj_by_date=adj_by_date)
+    boundary = ctx.get("boundary")
+    mode = ctx.get("mode") or "continuous"
+
+    near_dates: set[dt.date] = set()
+    if mode == "continuous" and not had_basis_switch:
+        pass
+    elif boundary is not None:
+        try:
+            bnd = boundary if isinstance(boundary, dt.date) else dt.date.fromisoformat(str(boundary)[:10])
+            for delta in range(-SPLIT_WINDOW_DAYS, SPLIT_WINDOW_DAYS + 1):
+                near_dates.add(bnd + dt.timedelta(days=delta))
+        except ValueError:
+            pass
+    else:
+        for eff, _ in split_events:
+            for delta in range(-SPLIT_WINDOW_DAYS, SPLIT_WINDOW_DAYS + 1):
+                near_dates.add(eff + dt.timedelta(days=delta))
+
+    max_near = 0.0
+    near_date: str | None = None
+    if near_dates:
+        for i in range(1, len(tr)):
+            ds = str(tr[i].get("date") or "")[:10]
+            if len(ds) != 10:
+                continue
+            try:
+                d0 = dt.date.fromisoformat(ds)
+            except ValueError:
+                continue
+            if d0 not in near_dates:
+                continue
+            try:
+                a = float(tr[i - 1]["tr_etf_px"])
+                b = float(tr[i]["tr_etf_px"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if a <= 0 or b <= 0:
+                continue
+            try:
+                u0 = float(tr[i - 1]["tr_und_px"])
+                u1 = float(tr[i]["tr_und_px"])
+            except (KeyError, TypeError, ValueError):
+                u0 = u1 = 0.0
+            if u0 > 0 and u1 > 0:
+                lr_u = abs(math.log(u1 / u0))
+                if lr_u >= 0.25:
+                    continue
+            lr = abs(math.log(b / a))
+            if lr > max_near:
+                max_near = lr
+                near_date = ds
+        if max_near > max_log_return:
+            failures.append(
+                f"{ticker}: max ETF TR daily log-return {max_near:.3f} "
+                f"({math.expm1(max_near)*100:.0f}%) near split on {near_date}"
+            )
+
     if (
         corp_has_split
         and adj_equiv_close
-        and ctx.get("mode") == "continuous"
+        and mode == "continuous"
         and split_events
+        and had_basis_switch
     ):
         failures.append(
             f"{ticker}: corp split present, etf_adj_close==close, but splitMode=continuous"

@@ -9,6 +9,7 @@ from split_adjustments import (
     adj_basis_switch_tr_price,
     detect_adj_basis_switch_splits,
     detect_adj_boundary,
+    detect_staggered_discrete_splits,
     etf_adj_on_back_adjusted_forward_basis,
     etf_adj_on_post_split_basis,
     filter_splits_needing_close_basis_fix,
@@ -100,6 +101,21 @@ def resolve_split_context(
             "boundary": boundary,
             "mult": mult,
             "filtered": filtered,
+        }
+
+    staggered = detect_staggered_discrete_splits(
+        points3,
+        close_points,
+        split_events,
+    )
+    if staggered:
+        _eff, mult, boundary = staggered[0]
+        return {
+            "mode": "discrete_split",
+            "boundary": boundary,
+            "mult": mult,
+            "filtered": staggered,
+            "variant": "staggered_reverse",
         }
 
     adj_switch = detect_adj_basis_switch_splits(
@@ -212,12 +228,12 @@ def _forward_pre_split_tr_price(
     if not (math.isfinite(close) and close > 0 and math.isfinite(adj) and adj > 0 and 0 < mult < 1):
         return adj
     ratio = adj / close
+    # Ingest-normalized pre-split (adj ≈ close × mult): use adj on both sides.
+    if abs(ratio / mult - 1.0) <= rel_tol:
+        return adj
     # Raw Yahoo pre-split (adj ≈ close × 1/mult): continuous raw close is the TR series.
     if abs(ratio * mult - 1.0) <= rel_tol or abs(ratio - 1.0 / mult) <= rel_tol:
         return close
-    # Ingest-normalized pre-split (adj ≈ close × mult).
-    if abs(ratio / mult - 1.0) <= rel_tol:
-        return adj
     return adj
 
 
@@ -232,9 +248,41 @@ def _forward_post_split_tr_price(
         return close
     if math.isfinite(adj) and adj > 0:
         ratio = adj / close
-        if abs(ratio - 1.0) <= rel_tol or abs(ratio / mult - 1.0) <= rel_tol:
-            return adj if abs(ratio / mult - 1.0) <= rel_tol else adj_basis_switch_tr_price(close, mult)
+        if abs(ratio / mult - 1.0) <= rel_tol:
+            return adj
+        if abs(ratio - 1.0) <= rel_tol:
+            return adj_basis_switch_tr_price(close, mult)
     return adj_basis_switch_tr_price(close, mult)
+
+
+def _adj_basis_switch_uses_flat_close(
+    sorted_rows: list[dict[str, Any]],
+    ctx: dict[str, Any],
+) -> bool:
+    """True when raw close is flat across the adj basis boundary (SNDU-style)."""
+    boundary = ctx.get("boundary")
+    if not boundary:
+        return False
+    pre_close = post_close = None
+    for row in sorted_rows:
+        ds = str(row.get("date") or "")[:10]
+        if len(ds) != 10:
+            continue
+        try:
+            d0 = dt.date.fromisoformat(ds)
+            close = float(row.get("close_price") or row.get("nav") or 0)
+        except (ValueError, TypeError):
+            continue
+        if close <= 0:
+            continue
+        if d0 < boundary:
+            pre_close = close
+        elif d0 >= boundary and post_close is None:
+            post_close = close
+            break
+    if pre_close is None or post_close is None or pre_close <= 0:
+        return False
+    return abs(post_close / pre_close - 1.0) <= 0.02
 
 
 def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | None:
@@ -262,6 +310,8 @@ def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | No
     mode = ctx.get("mode")
 
     if mode == "adj_basis_switch":
+        if ctx.get("_flat_close_tr"):
+            return close
         if _is_pre_split(ds, ctx):
             if math.isfinite(adj_f) and adj_f > 0:
                 return _forward_pre_split_tr_price(close, adj_f, mult)
@@ -338,6 +388,8 @@ def build_tr_series_from_metrics(
         except (ValueError, TypeError):
             continue
     ctx = resolve_split_context(close_pts, split_events, metric_rows=sorted_rows, adj_by_date=adj_by_date)
+    if ctx.get("mode") == "adj_basis_switch":
+        ctx["_flat_close_tr"] = _adj_basis_switch_uses_flat_close(sorted_rows, ctx)
     out: list[dict[str, Any]] = []
     for row in sorted_rows:
         tr_etf = etf_tr_price_for_row(row, ctx)
@@ -355,7 +407,50 @@ def build_tr_series_from_metrics(
                     "tr_mode": _tr_mode_for_row(row, ctx),
                 }
             )
-    return out
+    return _repair_split_outlier_bars(out, ctx, split_events)
+
+
+def _repair_split_outlier_bars(
+    tr: list[dict[str, Any]],
+    ctx: dict[str, Any],
+    split_events: list[tuple[dt.date, float]],
+) -> list[dict[str, Any]]:
+    """Replace orphan post-split bad prints when ETF cliff is not mirrored in underlying."""
+    boundary = ctx.get("boundary")
+    if not boundary or len(tr) < 3:
+        return tr
+    bnd = boundary if isinstance(boundary, dt.date) else None
+    if bnd is None:
+        try:
+            bnd = dt.date.fromisoformat(str(boundary)[:10])
+        except ValueError:
+            return tr
+    repaired = list(tr)
+    for i in range(1, len(repaired) - 1):
+        try:
+            d0 = dt.date.fromisoformat(str(repaired[i]["date"])[:10])
+        except ValueError:
+            continue
+        if d0 < bnd or abs((d0 - bnd).days) > 5:
+            continue
+        e0, e1, u0, u1 = (
+            float(repaired[i - 1]["tr_etf_px"]),
+            float(repaired[i]["tr_etf_px"]),
+            float(repaired[i - 1]["tr_und_px"]),
+            float(repaired[i]["tr_und_px"]),
+        )
+        if min(e0, e1, u0, u1) <= 0:
+            continue
+        lr_e = abs(math.log(e1 / e0))
+        lr_u = abs(math.log(u1 / u0))
+        if lr_u >= 0.20 or lr_e < 0.55 or lr_e < lr_u + 0.18:
+            continue
+        prev_e = float(repaired[i - 1]["tr_etf_px"])
+        nxt_e = float(repaired[i + 1]["tr_etf_px"])
+        if prev_e > 0 and nxt_e > 0:
+            repaired[i] = dict(repaired[i])
+            repaired[i]["tr_etf_px"] = math.sqrt(prev_e * nxt_e)
+    return repaired
 
 
 def max_abs_log_return(series: list[dict[str, Any]], key: str) -> tuple[float, str | None]:

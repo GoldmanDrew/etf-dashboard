@@ -174,6 +174,70 @@
     return pool.sort((a, b) => a.localeCompare(b))[0];
   }
 
+  function findCloseJumpBoundary(closePoints, mult, near, windowDays = 7, jumpTol = 0.18, relTol = 0.15) {
+    const m = toNum(mult);
+    const center = parseDate(near);
+    if (!center || !(m > 0) || !Array.isArray(closePoints) || !closePoints.length) return null;
+    const sorted = [...closePoints].sort((a, b) => parseDate(a.date ?? a[0]).localeCompare(parseDate(b.date ?? b[0])));
+    const candidates = [];
+    for (let i = 1; i < sorted.length; i += 1) {
+      const dCur = parseDate(sorted[i].date ?? sorted[i][0]);
+      const cCur = toNum(sorted[i].close ?? sorted[i][1]);
+      const cPrev = toNum(sorted[i - 1].close ?? sorted[i - 1][1]);
+      if (!dCur || !(cPrev > 0 && cCur > 0)) continue;
+      if (Math.abs((new Date(dCur) - new Date(center)) / 86400000) > windowDays) continue;
+      const jump = cCur / cPrev;
+      const matched = matchSplitToPriceJump(jump, m, jumpTol, relTol);
+      if (matched != null && Math.abs(matched - m) <= Math.max(1e-6, relTol * Math.abs(m))) {
+        candidates.push(dCur);
+      }
+    }
+    if (!candidates.length) return null;
+    return candidates.sort(
+      (a, b) => Math.abs(new Date(a) - new Date(center)) - Math.abs(new Date(b) - new Date(center)),
+    )[0];
+  }
+
+  function closeJumpNearDate(closePoints, mult, center, windowDays = 7) {
+    return findCloseJumpBoundary(closePoints, mult, center, windowDays) != null;
+  }
+
+  function detectStaggeredDiscreteSplits(points, closePoints, events, relTol = 0.15, windowDays = 7) {
+    if (!Array.isArray(events) || !events.length) return [];
+    const out = [];
+    for (const ev of events) {
+      const mult = toNum(ev.mult);
+      if (!(mult >= 1.05)) continue;
+      const boundary = findCloseJumpBoundary(closePoints, mult, ev.date, windowDays, 0.18, relTol);
+      if (!boundary) continue;
+      const adjBoundary = detectAdjBoundary(points, ev.date, mult, relTol) || parseDate(ev.date);
+      if (boundary > adjBoundary) continue;
+      out.push({ date: parseDate(ev.date), mult, boundary, variant: "staggered_reverse" });
+    }
+    return out;
+  }
+
+  function boundaryHasRawForwardAdj(points, boundary, fwdMult, relTol = 0.15) {
+    const fm = toNum(fwdMult);
+    const bnd = parseDate(boundary);
+    if (!bnd || !(fm > 0 && fm < 1) || !Array.isArray(points) || !points.length) return false;
+    const sorted = [...points].sort((a, b) => parseDate(a.date).localeCompare(parseDate(b.date)));
+    for (let i = 1; i < sorted.length; i += 1) {
+      if (parseDate(sorted[i].date) !== bnd) continue;
+      const cPrev = toNum(sorted[i - 1].close ?? sorted[i - 1][1]);
+      const aPrev = toNum(sorted[i - 1].adj ?? sorted[i - 1][2]);
+      if (!(cPrev > 0 && aPrev > 0)) return false;
+      const ratio = aPrev / cPrev;
+      const inv = 1 / fm;
+      if (Math.abs(ratio - inv) > relTol) return false;
+      const closePts = sorted.map((p) => ({ date: p.date, close: p.close ?? p[1] }));
+      const declaredDm = 1 / fm;
+      if (closeJumpNearDate(closePts, declaredDm, bnd, 7)) return false;
+      return true;
+    }
+    return false;
+  }
+
   function detectAdjBasisSwitchSplits(points, events, relTol = 0.15, metricRows = null) {
     if (!Array.isArray(events) || !events.length) return [];
     const out = [];
@@ -186,26 +250,20 @@
       const trials = [];
       if (declared < 1) trials.push({ mult: declared, variant: "forward" });
       else {
-        if (closeContinuous) trials.push({ mult: declared, variant: "reverse_continuous" });
+        const closePts = points.map((p) => ({ date: p.date, close: p.close ?? p[1] }));
+        const adjB = detectAdjBoundary(points, ev.date, declared, relTol) || parseDate(ev.date);
+        const staggered = closeJumpNearDate(closePts, declared, adjB, 7);
+        if (closeContinuous && !staggered) trials.push({ mult: declared, variant: "reverse_continuous" });
         const fwdMult = 1 / declared;
         const boundary = detectAdjBoundary(points, ev.date, fwdMult, relTol);
         if (boundary) {
           const dayDiff = Math.abs((new Date(boundary) - new Date(parseDate(ev.date))) / 86400000);
           if (dayDiff <= 7) {
-            let rawForward = false;
-            const sorted = [...points].sort((a, b) => parseDate(a.date).localeCompare(parseDate(b.date)));
-            for (let i = 1; i < sorted.length; i += 1) {
-              if (parseDate(sorted[i].date) !== boundary) continue;
-              const cPrev = toNum(sorted[i - 1].close ?? sorted[i - 1][1]);
-              const aPrev = toNum(sorted[i - 1].adj ?? sorted[i - 1][2]);
-              if (cPrev > 0 && aPrev > 0) {
-                const ratio = aPrev / cPrev;
-                const inv = 1 / fwdMult;
-                rawForward = Math.abs(ratio - inv) <= relTol;
-              }
-              break;
+            if (boundaryHasRawForwardAdj(points, boundary, fwdMult, relTol)) {
+              trials.push({ mult: fwdMult, variant: "forward_continuous_close" });
+            } else if (!staggered) {
+              trials.push({ mult: fwdMult, variant: "forward" });
             }
-            trials.push({ mult: fwdMult, variant: rawForward ? "forward_continuous_close" : "forward" });
           }
         }
       }
@@ -217,6 +275,8 @@
         const dayDiff = Math.abs((new Date(boundary) - new Date(parseDate(ev.date))) / 86400000);
         if (dayDiff > 7) continue;
         if (trial.variant === "reverse_continuous") {
+          const closePts = points.map((p) => ({ date: p.date, close: p.close ?? p[1] }));
+          if (closeJumpNearDate(closePts, trial.mult, boundary, 7)) continue;
           const jumpAt = splitCloseJumpRatio(points, boundary);
           if (jumpAt != null && Math.abs(jumpAt - 1) > 0.12) continue;
         }
@@ -360,6 +420,18 @@
       return { mode: "discrete_split", boundary, mult, filtered };
     }
 
+    const staggered = detectStaggeredDiscreteSplits(closePoints, closePoints, events);
+    if (staggered.length) {
+      const sw = staggered[0];
+      return {
+        mode: "discrete_split",
+        boundary: sw.boundary,
+        mult: sw.mult,
+        filtered: staggered,
+        variant: sw.variant,
+      };
+    }
+
     const adjSwitch = detectAdjBasisSwitchSplits(closePoints, events, 0.15, metricRows);
     if (adjSwitch.length) {
       const sw = adjSwitch[0];
@@ -418,6 +490,49 @@
     return m <= 1 ? c * m : c / m;
   }
 
+  function forwardPreSplitTrPrice(close, adj, mult, relTol = 0.15) {
+    const c = toNum(close);
+    const a = toNum(adj);
+    const m = toNum(mult);
+    if (!(c > 0 && a > 0 && m > 0 && m < 1)) return a;
+    const ratio = a / c;
+    if (Math.abs(ratio / m - 1) <= relTol) return a;
+    if (Math.abs(ratio * m - 1) <= relTol || Math.abs(ratio - 1 / m) <= relTol) return c;
+    return a;
+  }
+
+  function forwardPostSplitTrPrice(close, adj, mult, relTol = 0.15) {
+    const c = toNum(close);
+    const m = toNum(mult);
+    if (!(c > 0 && m > 0 && m < 1)) return c;
+    const a = toNum(adj);
+    if (a > 0) {
+      const ratio = a / c;
+      if (Math.abs(ratio / m - 1) <= relTol) return a;
+      if (Math.abs(ratio - 1) <= relTol) return adjBasisSwitchTrPrice(c, m);
+    }
+    return adjBasisSwitchTrPrice(c, m);
+  }
+
+  function adjBasisSwitchUsesFlatClose(sortedRows, ctx) {
+    const boundary = parseDate(ctx?.boundary);
+    if (!boundary || !Array.isArray(sortedRows)) return false;
+    let preClose = null;
+    let postClose = null;
+    for (const row of sortedRows) {
+      const ds = parseDate(row?.date);
+      const close = toNum(row?.close_price) || toNum(row?.nav);
+      if (!ds || !(close > 0)) continue;
+      if (ds < boundary) preClose = close;
+      else if (postClose == null) {
+        postClose = close;
+        break;
+      }
+    }
+    if (!(preClose > 0 && postClose > 0)) return false;
+    return Math.abs(postClose / preClose - 1) <= 0.02;
+  }
+
   function etfTrPriceForPoint(point, ctx) {
     const close = toNum(point.close);
     if (!(close > 0)) return NaN;
@@ -428,10 +543,12 @@
     const mode = ctx?.mode;
 
     if (mode === "adj_basis_switch") {
+      if (ctx?._flatCloseTr) return close;
       if (preSplit) {
-        if (adj > 0) return adj;
+        if (adj > 0) return forwardPreSplitTrPrice(close, adj, mult);
         return adjBasisSwitchTrPrice(close, mult);
       }
+      if (adj > 0) return forwardPostSplitTrPrice(close, adj, mult);
       return adjBasisSwitchTrPrice(close, mult);
     }
 
@@ -512,6 +629,30 @@
     };
   }
 
+  function repairSplitOutlierBars(tr, ctx) {
+    const boundary = parseDate(ctx?.boundary);
+    if (!boundary || !Array.isArray(tr) || tr.length < 3) return tr;
+    const repaired = tr.map((row) => ({ ...row }));
+    for (let i = 1; i < repaired.length - 1; i += 1) {
+      const d0 = parseDate(repaired[i].date);
+      if (!d0 || d0 < boundary || Math.abs((new Date(d0) - new Date(boundary)) / 86400000) > 5) continue;
+      const e0 = toNum(repaired[i - 1].trEtfPx);
+      const e1 = toNum(repaired[i].trEtfPx);
+      const u0 = toNum(repaired[i - 1].trUndPx);
+      const u1 = toNum(repaired[i].trUndPx);
+      if (!(e0 > 0 && e1 > 0 && u0 > 0 && u1 > 0)) continue;
+      const lrE = Math.abs(Math.log(e1 / e0));
+      const lrU = Math.abs(Math.log(u1 / u0));
+      if (lrU >= 0.20 || lrE < 0.55 || lrE < lrU + 0.18) continue;
+      const prevE = toNum(repaired[i - 1].trEtfPx);
+      const nxtE = toNum(repaired[i + 1].trEtfPx);
+      if (prevE > 0 && nxtE > 0) {
+        repaired[i].trEtfPx = Math.sqrt(prevE * nxtE);
+      }
+    }
+    return repaired;
+  }
+
   /**
    * Build split-aware TR prices for decay, backtest, and charts.
    * @returns {Array<{date, trEtfPx, trUndPx, tradeClose, trMode, row}>}
@@ -524,7 +665,10 @@
     if (!points.length) return [];
     const closePoints = points.map((p) => ({ date: p.date, close: p.close, adj: p.adj }));
     const ctx = resolveSplitContext(closePoints, splitEvents || [], sorted);
-    return points.map((p) => {
+    if (ctx.mode === "adj_basis_switch") {
+      ctx._flatCloseTr = adjBasisSwitchUsesFlatClose(sorted, ctx);
+    }
+    const built = points.map((p) => {
       const trEtfPx = etfTrPriceForPoint(p, ctx);
       const trUndPx = toNum(p.row && p.row.underlying_adj_close);
       return {
@@ -536,6 +680,7 @@
         row: p.row,
       };
     }).filter((x) => x.date && x.trEtfPx > 0 && x.trUndPx > 0);
+    return repairSplitOutlierBars(built, ctx);
   }
 
   function maxAbsLogReturn(series, valueKey) {
