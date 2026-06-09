@@ -193,7 +193,7 @@ jobs:
             data/letf_intraday_flow_metrics.json
             data/letf_intraday_remaining_backtest.json
             data/freshness_summary.json
-          commit_message: ${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday metrics catch-up ingest' || 'chore: nightly metrics ingest' }}
+          commit_message: "${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday metrics catch-up ingest' || 'chore: nightly metrics ingest' }}"
 
       - name: Full dashboard build
         id: build_data
@@ -279,7 +279,7 @@ jobs:
             data/event_calendar_inferred.json
             data/event_calendar_combined.json
             data/ci_state.json
-          commit_message: ${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday dashboard catch-up build' || 'chore: nightly dashboard build' }}
+          commit_message: "${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday dashboard catch-up build' || 'chore: nightly dashboard build' }}"
 
       - name: Deploy Pages
         if: steps.commit_dashboard.outputs.changed == '1' || steps.commit_metrics.outputs.changed == '1'
