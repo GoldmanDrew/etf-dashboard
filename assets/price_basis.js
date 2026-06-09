@@ -111,7 +111,30 @@
     );
   }
 
-  function detectAdjBoundary(points, effectiveDate, mult, relTol = 0.15) {
+  function adjCloseRatioMatchesPreBackAdjusted(ratio, mult, relTol = 0.15) {
+    const r = toNum(ratio);
+    const m = toNum(mult);
+    if (!(r > 0 && m > 0)) return false;
+    if (m < 1) {
+      return (
+        Math.abs(r * m - 1) <= relTol
+        || Math.abs(r / m - 1) <= relTol
+        || Math.abs(r - 1 / m) <= relTol
+      );
+    }
+    return Math.abs(r / m - 1) <= relTol;
+  }
+
+  function adjCloseRatioMatchesPostSplit(ratio, mult, relTol = 0.08) {
+    const r = toNum(ratio);
+    const m = toNum(mult);
+    if (!(r > 0 && m > 0)) return false;
+    if (Math.abs(r - 1) <= relTol) return true;
+    if (m < 1 && Math.abs(r / m - 1) <= relTol) return true;
+    return false;
+  }
+
+  function detectAdjBoundary(points, effectiveDate, mult, relTol = 0.15, closeTol = 0.08) {
     const eff = parseDate(effectiveDate);
     const m = toNum(mult);
     if (!eff || !(m > 0) || !Array.isArray(points) || points.length < 2) return null;
@@ -124,31 +147,81 @@
       const aCur = toNum(sorted[i].adj ?? sorted[i][2]);
       const dCur = parseDate(sorted[i].date);
       if (!(cPrev > 0 && cCur > 0 && aPrev > 0 && aCur > 0 && dCur)) continue;
-      if (Math.abs(cCur / cPrev - 1) > 0.08) continue;
       const ratio = aCur / aPrev;
-      if (
-        Math.abs(ratio * m - 1) <= relTol
-        || Math.abs(ratio / m - 1) <= relTol
-        || Math.abs((aPrev * m) / aCur - 1) <= relTol
-      ) {
+      if (Math.abs(cCur / cPrev - 1) <= closeTol) {
+        if (
+          Math.abs(ratio * m - 1) <= relTol
+          || Math.abs(ratio / m - 1) <= relTol
+          || Math.abs((aPrev * m) / aCur - 1) <= relTol
+        ) {
+          candidates.push(dCur);
+          continue;
+        }
+      }
+      const rPrev = aPrev / cPrev;
+      const rCur = aCur / cCur;
+      if (adjCloseRatioMatchesPostSplit(rCur, m, Math.min(relTol, 0.1))
+        && adjCloseRatioMatchesPreBackAdjusted(rPrev, m, relTol)) {
         candidates.push(dCur);
       }
     }
     if (!candidates.length) return null;
-    candidates.sort((a, b) => Math.abs(new Date(a) - new Date(eff)) - Math.abs(new Date(b) - new Date(eff)));
-    return candidates[0];
+    const near = candidates.filter((d) => {
+      const dayDiff = Math.abs((new Date(d) - new Date(eff)) / 86400000);
+      return dayDiff <= 7;
+    });
+    const pool = near.length ? near : candidates;
+    return pool.sort((a, b) => a.localeCompare(b))[0];
   }
 
   function detectAdjBasisSwitchSplits(points, events, relTol = 0.15, metricRows = null) {
     if (!Array.isArray(events) || !events.length) return [];
     const out = [];
+    const seen = new Set();
     for (const ev of events) {
-      const mult = toNum(ev.mult);
-      if (!(mult > 0) || mult >= 1) continue;
-      const boundary = detectAdjBoundary(points, ev.date, mult, relTol);
-      if (boundary) {
+      const declared = toNum(ev.mult);
+      if (!(declared > 0)) continue;
+      const jump = splitCloseJumpRatio(points, ev.date);
+      const closeContinuous = jump == null || Math.abs(jump - 1) <= 0.12;
+      const trials = [];
+      if (declared < 1) trials.push({ mult: declared, variant: "forward" });
+      else {
+        if (closeContinuous) trials.push({ mult: declared, variant: "reverse_continuous" });
+        const fwdMult = 1 / declared;
+        const boundary = detectAdjBoundary(points, ev.date, fwdMult, relTol);
+        if (boundary) {
+          const dayDiff = Math.abs((new Date(boundary) - new Date(parseDate(ev.date))) / 86400000);
+          if (dayDiff <= 7) {
+            let rawForward = false;
+            const sorted = [...points].sort((a, b) => parseDate(a.date).localeCompare(parseDate(b.date)));
+            for (let i = 1; i < sorted.length; i += 1) {
+              if (parseDate(sorted[i].date) !== boundary) continue;
+              const cPrev = toNum(sorted[i - 1].close ?? sorted[i - 1][1]);
+              const aPrev = toNum(sorted[i - 1].adj ?? sorted[i - 1][2]);
+              if (cPrev > 0 && aPrev > 0) {
+                const ratio = aPrev / cPrev;
+                const inv = 1 / fwdMult;
+                rawForward = Math.abs(ratio - inv) <= relTol;
+              }
+              break;
+            }
+            trials.push({ mult: fwdMult, variant: rawForward ? "forward_continuous_close" : "forward" });
+          }
+        }
+      }
+      for (const trial of trials) {
+        const key = `${ev.date}:${trial.mult}:${trial.variant}`;
+        if (seen.has(key)) continue;
+        const boundary = detectAdjBoundary(points, ev.date, trial.mult, relTol);
+        if (!boundary) continue;
         const dayDiff = Math.abs((new Date(boundary) - new Date(parseDate(ev.date))) / 86400000);
-        if (dayDiff <= 7) out.push({ date: parseDate(ev.date), mult });
+        if (dayDiff > 7) continue;
+        if (trial.variant === "reverse_continuous") {
+          const jumpAt = splitCloseJumpRatio(points, boundary);
+          if (jumpAt != null && Math.abs(jumpAt - 1) > 0.12) continue;
+        }
+        seen.add(key);
+        out.push({ date: parseDate(ev.date), mult: trial.mult, variant: trial.variant });
       }
     }
     return out;
@@ -277,18 +350,6 @@
         filtered: [],
       };
     }
-    const adjSwitch = detectAdjBasisSwitchSplits(closePoints, events, 0.15, metricRows);
-    if (adjSwitch.length) {
-      const boundary = detectAdjBoundary(closePoints, adjSwitch[0].date, adjSwitch[0].mult)
-        || adjSwitch[0].date;
-      return {
-        mode: "adj_basis_switch",
-        boundary,
-        mult: adjSwitch[0].mult,
-        filtered: adjSwitch,
-      };
-    }
-
     const filtered = filterSplitsNeedingCloseBasisFix(closePoints, events, 0.15, metricRows);
     let mult = null;
     let boundary = null;
@@ -296,7 +357,26 @@
       mult = filtered[0].mult;
       boundary = detectSplitBoundary(closePoints, mult);
       if (!boundary) boundary = filtered[0].date;
+      return { mode: "discrete_split", boundary, mult, filtered };
     }
+
+    const adjSwitch = detectAdjBasisSwitchSplits(closePoints, events, 0.15, metricRows);
+    if (adjSwitch.length) {
+      const sw = adjSwitch[0];
+      const boundaryAdj = detectAdjBoundary(closePoints, sw.date, sw.mult)
+        || sw.date;
+      const mode = (sw.variant === "reverse_continuous" || sw.variant === "forward_continuous_close")
+        ? "continuous_close_tr"
+        : "adj_basis_switch";
+      return {
+        mode,
+        boundary: boundaryAdj,
+        mult: sw.mult,
+        filtered: adjSwitch,
+        variant: sw.variant,
+      };
+    }
+
     if (!boundary) {
       for (const ev of events) {
         const m = toNum(ev.mult);
@@ -319,7 +399,7 @@
     const mult = toNum(ctx?.mult);
     const mode = ctx?.mode;
     return (
-      (mode === "discrete_split" || mode === "adj_basis_switch")
+      (mode === "discrete_split" || mode === "adj_basis_switch" || mode === "continuous_close_tr")
       && boundary
       && mult > 0
       && ds
@@ -355,6 +435,8 @@
       return adjBasisSwitchTrPrice(close, mult);
     }
 
+    if (mode === "continuous_close_tr") return close;
+
     if (preSplit && mult > 0) {
       if (adj > 0) {
         if (mult < 1 && etfAdjOnBackAdjustedForwardBasis(close, adj, mult)) return adj;
@@ -367,6 +449,22 @@
       }
       if (navTr > 0) return navTr * mult;
       return close * mult;
+    }
+    if (
+      mode === "discrete_split"
+      && mult > 1.05
+      && adj > 0
+      && etfAdjOnPostSplitBasis(close, adj, mult)
+    ) {
+      return close;
+    }
+    if (
+      mode === "discrete_split"
+      && mult > 1.05
+      && adj > 0
+      && Math.abs((adj / close) * mult - 1) <= 0.15
+    ) {
+      return close;
     }
     if (adj > 0) return adj;
     if (navTr > 0) return navTr;
@@ -384,6 +482,7 @@
     if (mode === "adj_basis_switch") {
       return preSplit ? "pre_split_back_adj" : "post_split_back_adj_mapped";
     }
+    if (mode === "continuous_close_tr") return "continuous_close_tr";
 
     if (preSplit && mult > 0) {
       if (adj > 0) {

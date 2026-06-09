@@ -1266,7 +1266,9 @@ def normalize_adj_basis_switch_etf_adj_close(
         adj_switch = detect_adj_basis_switch_splits(pts, events, metric_rows=g.to_dict("records"))
         if not adj_switch:
             continue
-        eff, mult = adj_switch[0]
+        eff, mult, variant = adj_switch[0]
+        if variant not in {"forward", "forward_continuous_close"}:
+            continue
         boundary = detect_adj_boundary(pts, eff, float(mult)) or eff
         for ix, row in g.iterrows():
             if row["date"] < boundary:

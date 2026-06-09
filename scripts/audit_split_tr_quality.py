@@ -183,9 +183,9 @@ def main() -> int:
         if sub.empty:
             continue
         rows = sub.to_dict("records")
-        events = load_split_events_for_ticker(sym, args.corp_actions)
+        events = parse_split_events_from_corp(payload, sym)
         if not events:
-            events = parse_split_events_from_corp(payload, sym)
+            events = load_split_events_for_ticker(sym, args.corp_actions)
         all_failures.extend(
             audit_ticker(
                 sym,

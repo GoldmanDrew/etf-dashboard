@@ -194,6 +194,60 @@ def test_aplx_real_metrics_no_split_cliff():
     assert max_near < 0.35, f"APLX TR cliff near split: log jump {max_near}"
 
 
+def test_appx_mislabeled_reverse_uses_continuous_close_tr():
+    """APPX 1-for-3 reverse label with forward adj-basis-switch Yahoo panel."""
+    rows = [
+        {"date": "2026-03-09", "close_price": 48.15, "etf_adj_close": 144.45, "underlying_adj_close": 10.0},
+        {"date": "2026-03-10", "close_price": 40.67, "etf_adj_close": 40.67, "underlying_adj_close": 10.1},
+        {"date": "2026-03-11", "close_price": 37.89, "etf_adj_close": 37.89, "underlying_adj_close": 10.2},
+    ]
+    base = dt.date(2026, 1, 15)
+    extended = []
+    for i in range(40):
+        d = base + dt.timedelta(days=i)
+        extended.append(
+            {
+                "date": d.isoformat(),
+                "close_price": 45.0 + i * 0.01,
+                "etf_adj_close": 135.0 + i * 0.03,
+                "underlying_adj_close": 9.5 + i * 0.01,
+            }
+        )
+    extended.extend(rows)
+    events = [(dt.date(2026, 3, 10), 3.0)]  # mislabeled reverse 1-for-3
+    ctx = resolve_split_context(
+        [(dt.date.fromisoformat(r["date"]), r["close_price"]) for r in rows],
+        events,
+        metric_rows=rows,
+        adj_by_date={
+            dt.date.fromisoformat(r["date"]): float(r["etf_adj_close"]) for r in rows
+        },
+    )
+    assert ctx["mode"] == "continuous_close_tr"
+    tr = build_tr_series_from_metrics(extended, events)
+    max_jump, jump_date = max_abs_log_return(tr, "tr_etf_px")
+    assert max_jump < 0.35, f"APPX cliff on {jump_date}: {max_jump}"
+
+
+def test_arcx_reverse_continuous_close_tr():
+    rows = [
+        {"date": "2025-12-01", "close_price": 36.9, "etf_adj_close": 184.5, "underlying_adj_close": 10.0},
+        {"date": "2025-12-02", "close_price": 38.74, "etf_adj_close": 38.74, "underlying_adj_close": 10.1},
+        {"date": "2025-12-03", "close_price": 45.8, "etf_adj_close": 45.8, "underlying_adj_close": 10.2},
+    ]
+    events = [(dt.date(2025, 12, 2), 5.0)]
+    ctx = resolve_split_context(
+        [(dt.date.fromisoformat(r["date"]), r["close_price"]) for r in rows],
+        events,
+        metric_rows=rows,
+        adj_by_date={dt.date.fromisoformat(r["date"]): float(r["etf_adj_close"]) for r in rows},
+    )
+    assert ctx["mode"] == "continuous_close_tr"
+    tr = build_tr_series_from_metrics(rows, events)
+    max_jump, _ = max_abs_log_return(tr, "tr_etf_px")
+    assert max_jump < 0.35
+
+
 def test_match_split_to_price_jump_trusts_declared_mult():
     assert match_split_to_price_jump(5.64, 5.0) == pytest.approx(5.0)
 

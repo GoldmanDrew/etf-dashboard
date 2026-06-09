@@ -84,33 +84,47 @@ def resolve_split_context(
         (d, c, float(adj_map.get(d, c)))
         for d, c in dated
     ]
-    adj_switch = detect_adj_basis_switch_splits(
-        points3,
-        split_events,
-        metric_rows=metric_rows,
-    )
-    if adj_switch:
-        eff, mult = adj_switch[0]
-        boundary = detect_adj_boundary(points3, eff, mult) or eff
-        return {
-            "mode": "adj_basis_switch",
-            "boundary": boundary,
-            "mult": mult,
-            "filtered": adj_switch,
-        }
 
     filtered = filter_splits_needing_close_basis_fix(
         points3,
         split_events,
         metric_rows=metric_rows,
     )
-    mult = None
-    boundary = None
     if filtered:
         mult = filtered[0][1]
         boundary = detect_split_boundary(close_points, mult)
         if boundary is None:
             boundary = filtered[0][0]
+        return {
+            "mode": "discrete_split",
+            "boundary": boundary,
+            "mult": mult,
+            "filtered": filtered,
+        }
+
+    adj_switch = detect_adj_basis_switch_splits(
+        points3,
+        split_events,
+        metric_rows=metric_rows,
+    )
+    if adj_switch:
+        eff, mult, variant = adj_switch[0]
+        boundary = detect_adj_boundary(points3, eff, mult) or eff
+        mode = (
+            "continuous_close_tr"
+            if variant in {"reverse_continuous", "forward_continuous_close"}
+            else "adj_basis_switch"
+        )
+        return {
+            "mode": mode,
+            "boundary": boundary,
+            "mult": mult,
+            "filtered": adj_switch,
+            "variant": variant,
+        }
+
+    mult = None
+    boundary = None
     if boundary is None:
         for _d, m in split_events:
             b = detect_split_boundary(close_points, m)
@@ -132,7 +146,7 @@ def _is_pre_split(ds: str, ctx: dict[str, Any]) -> bool:
     boundary = ctx.get("boundary")
     mult = ctx.get("mult")
     mode = ctx.get("mode")
-    if mode not in {"discrete_split", "adj_basis_switch"} or not boundary or not mult:
+    if mode not in {"discrete_split", "adj_basis_switch", "continuous_close_tr"} or not boundary or not mult:
         return False
     d0 = _row_date(ds)
     if d0 is None:
@@ -164,6 +178,8 @@ def _tr_mode_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> str:
 
     if mode == "adj_basis_switch":
         return "pre_split_back_adj" if pre_split else "post_split_back_adj_mapped"
+    if mode == "continuous_close_tr":
+        return "continuous_close_tr"
     if pre_split and mult > 0:
         if math.isfinite(adj_f) and adj_f > 0:
             if mult < 1.0 and etf_adj_on_back_adjusted_forward_basis(close, adj_f, mult):
@@ -185,7 +201,39 @@ def _tr_mode_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> str:
     return "close_fallback"
 
 
-def _adj_basis_switch_tr_price(close: float, mult: float) -> float:
+def _forward_pre_split_tr_price(
+    close: float,
+    adj: float,
+    mult: float,
+    *,
+    rel_tol: float = 0.15,
+) -> float:
+    """Map pre-split ETF row onto post-split TR basis for forward adj-basis-switch."""
+    if not (math.isfinite(close) and close > 0 and math.isfinite(adj) and adj > 0 and 0 < mult < 1):
+        return adj
+    ratio = adj / close
+    # Raw Yahoo pre-split (adj ≈ close × 1/mult): continuous raw close is the TR series.
+    if abs(ratio * mult - 1.0) <= rel_tol or abs(ratio - 1.0 / mult) <= rel_tol:
+        return close
+    # Ingest-normalized pre-split (adj ≈ close × mult).
+    if abs(ratio / mult - 1.0) <= rel_tol:
+        return adj
+    return adj
+
+
+def _forward_post_split_tr_price(
+    close: float,
+    adj: float,
+    mult: float,
+    *,
+    rel_tol: float = 0.15,
+) -> float:
+    if not (math.isfinite(close) and close > 0 and 0 < mult < 1):
+        return close
+    if math.isfinite(adj) and adj > 0:
+        ratio = adj / close
+        if abs(ratio - 1.0) <= rel_tol or abs(ratio / mult - 1.0) <= rel_tol:
+            return adj if abs(ratio / mult - 1.0) <= rel_tol else adj_basis_switch_tr_price(close, mult)
     return adj_basis_switch_tr_price(close, mult)
 
 
@@ -216,9 +264,14 @@ def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | No
     if mode == "adj_basis_switch":
         if _is_pre_split(ds, ctx):
             if math.isfinite(adj_f) and adj_f > 0:
-                return adj_f
-            return _adj_basis_switch_tr_price(close, mult)
-        return _adj_basis_switch_tr_price(close, mult)
+                return _forward_pre_split_tr_price(close, adj_f, mult)
+            return adj_basis_switch_tr_price(close, mult)
+        if math.isfinite(adj_f) and adj_f > 0:
+            return _forward_post_split_tr_price(close, adj_f, mult)
+        return adj_basis_switch_tr_price(close, mult)
+
+    if mode == "continuous_close_tr":
+        return close
 
     if _is_pre_split(ds, ctx) and mult > 0:
         if math.isfinite(adj_f) and adj_f > 0:
@@ -234,6 +287,24 @@ def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | No
         if math.isfinite(nav_f) and nav_f > 0:
             return nav_f * mult
         return close * mult
+    if (
+        mode == "discrete_split"
+        and mult > 1.05
+        and math.isfinite(adj_f)
+        and adj_f > 0
+        and etf_adj_on_post_split_basis(close, adj_f, mult)
+    ):
+        # Transitional bar: close already on post-split basis, adj still back-adjusted.
+        return close
+    if (
+        mode == "discrete_split"
+        and mult > 1.05
+        and math.isfinite(adj_f)
+        and adj_f > 0
+        and abs((adj_f / close) * mult - 1.0) <= 0.15
+    ):
+        # Reverse split post row wrongly forward-normalized (adj ≈ close / mult).
+        return close
     if math.isfinite(adj_f) and adj_f > 0:
         return adj_f
     if math.isfinite(nav_f) and nav_f > 0:

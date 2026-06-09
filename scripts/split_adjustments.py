@@ -303,6 +303,40 @@ def adj_basis_switch_tr_price(close: float, mult: float) -> float:
     return close / mult
 
 
+def _adj_close_ratio_matches_pre_back_adjusted(
+    ratio: float,
+    mult: float,
+    *,
+    rel_tol: float = 0.15,
+) -> bool:
+    """True when ``adj/close`` on the pre-split side looks back-adjusted for ``mult``."""
+    if not (math.isfinite(ratio) and ratio > 0 and math.isfinite(mult) and mult > 0):
+        return False
+    if mult < 1.0:
+        return (
+            abs(ratio * mult - 1.0) <= rel_tol
+            or abs(ratio / mult - 1.0) <= rel_tol
+            or abs(ratio - 1.0 / mult) <= rel_tol
+        )
+    return abs(ratio / mult - 1.0) <= rel_tol
+
+
+def _adj_close_ratio_matches_post_split(
+    ratio: float,
+    mult: float,
+    *,
+    rel_tol: float = 0.08,
+) -> bool:
+    """Post-split ``adj/close``: raw Yahoo (≈1) or forward-normalized (≈mult)."""
+    if not (math.isfinite(ratio) and ratio > 0 and math.isfinite(mult) and mult > 0):
+        return False
+    if abs(ratio - 1.0) <= rel_tol:
+        return True
+    if mult < 1.0 and abs(ratio / mult - 1.0) <= rel_tol:
+        return True
+    return False
+
+
 def detect_adj_boundary(
     points: list[tuple[dt.date, float, float]],
     effective: dt.date,
@@ -310,6 +344,7 @@ def detect_adj_boundary(
     *,
     rel_tol: float = 0.15,
     window_days: int = 3,
+    close_tol: float = 0.08,
 ) -> dt.date | None:
     """First session after which adj jumps while close stays continuous (adj basis switch)."""
     if not points or mult <= 0:
@@ -324,18 +359,48 @@ def detect_adj_boundary(
             for x in (c_prev, c_cur, a_prev, a_cur)
         ):
             continue
-        if abs(c_cur / c_prev - 1.0) > 0.08:
-            continue
         ratio = a_cur / a_prev
-        if (
-            abs(ratio * mult - 1.0) <= rel_tol
-            or abs(ratio / mult - 1.0) <= rel_tol
-            or abs(a_prev * mult / a_cur - 1.0) <= rel_tol
-        ):
-            candidates.append(d_cur)
+        if abs(c_cur / c_prev - 1.0) <= close_tol:
+            if (
+                abs(ratio * mult - 1.0) <= rel_tol
+                or abs(ratio / mult - 1.0) <= rel_tol
+                or abs(a_prev * mult / a_cur - 1.0) <= rel_tol
+            ):
+                candidates.append(d_cur)
+                continue
+        r_prev = a_prev / c_prev
+        r_cur = a_cur / c_cur
+        if _adj_close_ratio_matches_post_split(r_cur, mult, rel_tol=min(rel_tol, 0.1)):
+            if _adj_close_ratio_matches_pre_back_adjusted(r_prev, mult, rel_tol=rel_tol):
+                candidates.append(d_cur)
     if not candidates:
         return None
-    return min(candidates, key=lambda d: abs((d - effective).days))
+    near = [d for d in candidates if abs((d - effective).days) <= 7]
+    pool = near or candidates
+    return min(pool)
+
+
+def _boundary_has_raw_forward_adj(
+    points: list[tuple[dt.date, float, float]],
+    boundary: dt.date,
+    fwd_mult: float,
+    *,
+    rel_tol: float = 0.15,
+) -> bool:
+    """True when the pre-boundary row carries raw Yahoo forward adj (adj/close ≈ 1/mult)."""
+    if not points or not (0 < fwd_mult < 1):
+        return False
+    sorted_pts = sorted(points)
+    for i in range(1, len(sorted_pts)):
+        if sorted_pts[i][0] != boundary:
+            continue
+        _, c_prev, a_prev = sorted_pts[i - 1]
+        if not (c_prev > 0 and a_prev > 0):
+            return False
+        ratio = a_prev / c_prev
+        inv = 1.0 / fwd_mult
+        return abs(ratio - inv) <= rel_tol or abs(ratio * fwd_mult - inv * fwd_mult) <= rel_tol
+    return False
 
 
 def detect_adj_basis_switch_splits(
@@ -344,18 +409,50 @@ def detect_adj_basis_switch_splits(
     *,
     rel_tol: float = 0.15,
     metric_rows: list[dict] | None = None,
-) -> list[tuple[dt.date, float]]:
-    """Splits where Yahoo *close* is continuous but *adj* switches basis (e.g. APLX 3-for-1)."""
+) -> list[tuple[dt.date, float, str]]:
+    """Splits where Yahoo *adj* switches basis at a corp event (APLX 3-for-1, ARCX 1-for-5).
+
+    Returns ``(effective_date, price_mult, variant)`` where *variant* is
+    ``forward`` (pre adj, post ``close × mult``), ``forward_continuous_close``
+    (raw Yahoo forward with continuous close), or ``reverse_continuous``
+    (continuous raw close is the TR series; pre adj was back-adjusted).
+    """
     if not events:
         return []
-    out: list[tuple[dt.date, float]] = []
-    for eff, mult in events:
-        # Forward splits only; reverse splits use discrete close-jump path (APLZ, MTYY).
-        if float(mult) >= 1.0:
+    out: list[tuple[dt.date, float, str]] = []
+    seen: set[tuple[dt.date, float, str]] = set()
+    for eff, declared in events:
+        dm = float(declared)
+        if dm <= 0:
             continue
-        boundary = detect_adj_boundary(points, eff, float(mult), rel_tol=rel_tol)
-        if boundary is not None and abs((boundary - eff).days) <= 7:
-            out.append((eff, float(mult)))
+        jump = split_close_jump_ratio(points, eff)
+        close_continuous = jump is None or abs(jump - 1.0) <= 0.12
+        trials: list[tuple[float, str]] = []
+        if dm < 1.0:
+            trials.append((dm, "forward"))
+        else:
+            if close_continuous:
+                trials.append((dm, "reverse_continuous"))
+            fwd_mult = 1.0 / dm
+            boundary = detect_adj_boundary(points, eff, fwd_mult, rel_tol=rel_tol)
+            if boundary is not None and abs((boundary - eff).days) <= 7:
+                if _boundary_has_raw_forward_adj(points, boundary, fwd_mult, rel_tol=rel_tol):
+                    trials.append((fwd_mult, "forward_continuous_close"))
+                else:
+                    trials.append((fwd_mult, "forward"))
+        for mult, variant in trials:
+            key = (eff, mult, variant)
+            if key in seen:
+                continue
+            boundary = detect_adj_boundary(points, eff, mult, rel_tol=rel_tol)
+            if boundary is None or abs((boundary - eff).days) > 7:
+                continue
+            if variant == "reverse_continuous":
+                jump_at = split_close_jump_ratio(points, boundary)
+                if jump_at is not None and abs(jump_at - 1.0) > 0.12:
+                    continue
+            seen.add(key)
+            out.append((eff, mult, variant))
     return out
 
 

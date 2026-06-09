@@ -1,6 +1,6 @@
 # ls-algo: split-aware gross decay port
 
-**Status:** etf-dashboard implements the canonical TR path; ls-algo should mirror it.
+**Status:** etf-dashboard implements the canonical TR path; ls-algo overlays split-aware gross decay from ``etf_metrics_daily`` via ``metrics_gross_decay.py``.
 
 ## Problem
 
