@@ -146,6 +146,11 @@ def audit_ticker(
                 if lr_u >= 0.25:
                     continue
             lr = abs(math.log(b / a))
+            mult = float(ctx.get("mult") or 0)
+            if mult > 0 and mode == "discrete_split" and mult >= 1.05:
+                expected = math.log(mult)
+                if abs(lr - expected) <= 0.25 or abs(lr + expected) <= 0.25:
+                    continue
             if lr > max_near:
                 max_near = lr
                 near_date = ds

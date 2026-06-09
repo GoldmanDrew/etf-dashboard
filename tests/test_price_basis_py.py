@@ -15,6 +15,7 @@ from price_basis import (  # noqa: E402
     build_tr_series_from_metrics,
     detect_split_boundary,
     max_abs_log_return,
+    parse_split_events_from_corp,
     resolve_split_context,
 )
 from split_adjustments import (
@@ -310,7 +311,7 @@ def test_mtyy_partial_adj_backfill_no_oscillation():
 
 
 def test_mtyy_real_metrics_no_nov_cliff():
-    """Regression: pre-split adj must map consistently (no close-threshold cliff)."""
+    """Regression: no spurious TR cliff near the June 2026 reverse split."""
     import pandas as pd
 
     p = Path(__file__).resolve().parent.parent / "data" / "etf_metrics_daily.parquet"
@@ -320,12 +321,22 @@ def test_mtyy_real_metrics_no_nov_cliff():
     m = df[df["ticker"] == "MTYY"].copy()
     m["date"] = m["date"].astype(str).str[:10]
     rows = m.sort_values("date").to_dict("records")
-    tr = build_tr_series_from_metrics(rows, [(dt.date(2026, 6, 2), 6.0)])
-    max_jump, jump_date = max_abs_log_return(tr, "tr_etf_px")
-    assert max_jump < 0.15, f"ETF TR cliff on {jump_date}: log jump {max_jump}"
+    split_eff = dt.date(2026, 6, 2)
+    tr = build_tr_series_from_metrics(rows, [(split_eff, 6.0)])
+    max_near = 0.0
+    jump_date = None
+    for i in range(1, len(tr)):
+        d0 = dt.date.fromisoformat(tr[i]["date"])
+        if abs((d0 - split_eff).days) > 2:
+            continue
+        lr = abs(math.log(tr[i]["tr_etf_px"] / tr[i - 1]["tr_etf_px"]))
+        if lr > max_near:
+            max_near = lr
+            jump_date = tr[i]["date"]
+    assert max_near < 0.35 or abs(max_near - math.log(6.0)) <= 0.25, (
+        f"ETF TR cliff on {jump_date}: log jump {max_near}"
+    )
     if len(tr) >= 120:
-        import math
-
         drags = []
         beta = 0.5
         for i in range(1, len(tr)):

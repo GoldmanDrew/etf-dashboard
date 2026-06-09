@@ -4826,12 +4826,23 @@ def build():
         apply_vol_shape_to_record(rec, vol_shape_by_symbol.get(norm_sym(sym)))
         _gd = gross_decay_by_symbol.get(norm_sym(sym))
         if _gd and _gd.get("gross_decay_annual") is not None:
-            rec["gross_decay_annual"] = _gd["gross_decay_annual"]
-            rec["gross_decay_annual_source"] = "etf_metrics_daily"
-            rec["gross_decay_n_obs"] = _gd.get("n_obs")
+            metrics_gross = float(_gd["gross_decay_annual"])
+            screener_gross = _safe_float(rdict, "blended_gross_decay")
+            if (
+                screener_gross is not None
+                and metrics_gross > 1.5
+                and screener_gross < metrics_gross * 0.45
+            ):
+                rec["gross_decay_annual"] = screener_gross
+                rec["gross_decay_annual_source"] = "screener_fallback"
+                rec["gross_decay_n_obs"] = _gd.get("n_obs")
+            else:
+                rec["gross_decay_annual"] = metrics_gross
+                rec["gross_decay_annual_source"] = "etf_metrics_daily"
+                rec["gross_decay_n_obs"] = _gd.get("n_obs")
             if rec.get("borrow_current") is not None:
                 rec["net_decay_annual"] = round(
-                    float(_gd["gross_decay_annual"]) - float(rec["borrow_current"]), 6,
+                    float(rec["gross_decay_annual"]) - float(rec["borrow_current"]), 6,
                 )
         records.append(rec)
 

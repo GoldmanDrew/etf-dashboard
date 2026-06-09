@@ -13,7 +13,11 @@ from typing import Any
 
 import pandas as pd
 
-from price_basis import build_tr_series_from_metrics, parse_split_events_from_corp
+from price_basis import (
+    build_tr_series_from_metrics,
+    parse_split_events_from_corp,
+    resolve_split_context,
+)
 
 TRADING_DAYS = 252
 DEFAULT_MIN_OBS = 40
@@ -32,11 +36,51 @@ def compute_gross_decay_annual(
     tr = build_tr_series_from_metrics(rows, split_events or [])
     if len(tr) < min_obs + 1:
         return None
+
+    skip_dates: set[dt.date] = set()
+    if split_events:
+        close_pts = []
+        adj_by_date: dict[dt.date, float] = {}
+        for row in rows:
+            ds = str(row.get("date") or "")[:10]
+            if len(ds) != 10:
+                continue
+            try:
+                d0 = dt.date.fromisoformat(ds)
+                close = float(row.get("close_price") or row.get("nav") or 0)
+                if close <= 0:
+                    continue
+                close_pts.append((d0, close))
+                if row.get("etf_adj_close") is not None:
+                    adj_by_date[d0] = float(row["etf_adj_close"])
+            except (ValueError, TypeError):
+                continue
+        ctx = resolve_split_context(
+            close_pts,
+            split_events or [],
+            metric_rows=rows,
+            adj_by_date=adj_by_date or None,
+        )
+        boundary = ctx.get("boundary")
+        if boundary is not None:
+            bnd = boundary if isinstance(boundary, dt.date) else dt.date.fromisoformat(str(boundary)[:10])
+            for delta in range(-2, 3):
+                skip_dates.add(bnd + dt.timedelta(days=delta))
+
     drags: list[float] = []
     for i in range(1, len(tr)):
+        ds = str(tr[i].get("date") or "")[:10]
+        try:
+            d0 = dt.date.fromisoformat(ds)
+        except ValueError:
+            d0 = None
         u0, u1 = tr[i - 1]["tr_und_px"], tr[i]["tr_und_px"]
         e0, e1 = tr[i - 1]["tr_etf_px"], tr[i]["tr_etf_px"]
         if u0 > 0 and u1 > 0 and e0 > 0 and e1 > 0:
+            lr_e = abs(math.log(e1 / e0))
+            lr_u = abs(math.log(u1 / u0))
+            if d0 in skip_dates and lr_e > 0.35 and lr_u < 0.15:
+                continue
             drags.append(beta * math.log(u1 / u0) - math.log(e1 / e0))
     if len(drags) < min_obs:
         return None

@@ -9,6 +9,7 @@ from split_adjustments import (
     adj_basis_switch_tr_price,
     detect_adj_basis_switch_splits,
     detect_adj_boundary,
+    detect_forward_normalized_splits,
     detect_staggered_discrete_splits,
     etf_adj_on_back_adjusted_forward_basis,
     etf_adj_on_post_split_basis,
@@ -86,6 +87,33 @@ def resolve_split_context(
         for d, c in dated
     ]
 
+    staggered = detect_staggered_discrete_splits(
+        points3,
+        close_points,
+        split_events,
+    )
+    if staggered:
+        _eff, mult, boundary = staggered[0]
+        return {
+            "mode": "discrete_split",
+            "boundary": boundary,
+            "mult": mult,
+            "filtered": staggered,
+            "variant": "staggered_reverse",
+        }
+
+    fwd_norm = detect_forward_normalized_splits(points3, split_events)
+    if fwd_norm:
+        eff, mult, variant = fwd_norm[0]
+        boundary = detect_split_boundary(close_points, mult) or eff
+        return {
+            "mode": "forward_normalized",
+            "boundary": boundary,
+            "mult": mult,
+            "filtered": fwd_norm,
+            "variant": variant,
+        }
+
     filtered = filter_splits_needing_close_basis_fix(
         points3,
         split_events,
@@ -101,21 +129,6 @@ def resolve_split_context(
             "boundary": boundary,
             "mult": mult,
             "filtered": filtered,
-        }
-
-    staggered = detect_staggered_discrete_splits(
-        points3,
-        close_points,
-        split_events,
-    )
-    if staggered:
-        _eff, mult, boundary = staggered[0]
-        return {
-            "mode": "discrete_split",
-            "boundary": boundary,
-            "mult": mult,
-            "filtered": staggered,
-            "variant": "staggered_reverse",
         }
 
     adj_switch = detect_adj_basis_switch_splits(
@@ -162,7 +175,7 @@ def _is_pre_split(ds: str, ctx: dict[str, Any]) -> bool:
     boundary = ctx.get("boundary")
     mult = ctx.get("mult")
     mode = ctx.get("mode")
-    if mode not in {"discrete_split", "adj_basis_switch", "continuous_close_tr"} or not boundary or not mult:
+    if mode not in {"discrete_split", "adj_basis_switch", "continuous_close_tr", "forward_normalized"} or not boundary or not mult:
         return False
     d0 = _row_date(ds)
     if d0 is None:
@@ -309,6 +322,11 @@ def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | No
     mult = float(ctx.get("mult") or 0)
     mode = ctx.get("mode")
 
+    if mode == "forward_normalized":
+        if _is_pre_split(ds, ctx) and math.isfinite(adj_f) and adj_f > 0:
+            return adj_f
+        return close
+
     if mode == "adj_basis_switch":
         if ctx.get("_flat_close_tr"):
             return close
@@ -426,6 +444,8 @@ def _repair_split_outlier_bars(
         except ValueError:
             return tr
     repaired = list(tr)
+    mode = ctx.get("mode")
+    mult = float(ctx.get("mult") or 0)
     for i in range(1, len(repaired) - 1):
         try:
             d0 = dt.date.fromisoformat(str(repaired[i]["date"])[:10])
@@ -443,6 +463,10 @@ def _repair_split_outlier_bars(
             continue
         lr_e = abs(math.log(e1 / e0))
         lr_u = abs(math.log(u1 / u0))
+        if mult > 0 and abs((d0 - bnd).days) <= 2:
+            expected = abs(math.log(mult)) if mult >= 1 else abs(math.log(1.0 / mult))
+            if abs(lr_e - expected) <= 0.2 or mode in {"forward_normalized", "continuous_close_tr"}:
+                continue
         if lr_u >= 0.20 or lr_e < 0.55 or lr_e < lr_u + 0.18:
             continue
         prev_e = float(repaired[i - 1]["tr_etf_px"])

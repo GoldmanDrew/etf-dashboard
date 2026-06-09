@@ -259,6 +259,55 @@ def confirm_split_from_shares_or_nav(
     return None
 
 
+def yahoo_adj_looks_forward_normalized(
+    points: list[tuple[dt.date, float, float]],
+    effective: dt.date,
+    mult: float,
+    *,
+    rel_tol: float = 0.15,
+) -> bool:
+    """True when Yahoo keeps ``adj/close ≈ mult`` through a forward split (GEVX, SNXX)."""
+    if not points or not (0 < mult < 1):
+        return False
+    before = [p for p in points if p[0] < effective]
+    on_after = [p for p in points if p[0] >= effective]
+    if not before or not on_after:
+        return False
+    b_ratio = float(before[-1][2]) / float(before[-1][1])
+    a_ratio = float(on_after[0][2]) / float(on_after[0][1])
+    if not all(math.isfinite(x) and x > 0 for x in (b_ratio, a_ratio)):
+        return False
+    return (
+        abs(b_ratio / mult - 1.0) <= rel_tol
+        and abs(a_ratio / mult - 1.0) <= rel_tol
+    )
+
+
+def detect_forward_normalized_splits(
+    points: list[tuple[dt.date, float, float]],
+    events: list[tuple[dt.date, float]],
+    *,
+    rel_tol: float = 0.15,
+) -> list[tuple[dt.date, float, str]]:
+    """Forward splits where Yahoo adj stays ``close × mult`` and raw close jumps."""
+    if not events:
+        return []
+    out: list[tuple[dt.date, float, str]] = []
+    for eff, mult in events:
+        dm = float(mult)
+        if not (0 < dm < 1):
+            continue
+        jump = split_close_jump_ratio(points, eff)
+        if jump is None:
+            continue
+        matched = match_split_to_price_jump(jump, dm, jump_tol=0.18, rel_tol=rel_tol)
+        if matched is None or abs(matched - dm) > max(1e-6, rel_tol * abs(dm)):
+            continue
+        if yahoo_adj_looks_forward_normalized(points, eff, dm, rel_tol=rel_tol):
+            out.append((eff, dm, "forward_normalized"))
+    return out
+
+
 def yahoo_adj_looks_back_adjusted(
     points: list[tuple[dt.date, float, float]],
     effective: dt.date,
@@ -402,12 +451,21 @@ def find_close_jump_boundary(
         if not (c_prev > 0 and c_cur > 0):
             continue
         jump = c_cur / c_prev
-        matched = match_split_to_price_jump(jump, mult, jump_tol=jump_tol, rel_tol=rel_tol)
-        if matched is not None and abs(matched - mult) <= max(1e-6, rel_tol * abs(mult)):
-            candidates.append(d_cur)
+        trials = [float(mult)]
+        if float(mult) > 1.05:
+            trials.append(1.0 / float(mult))
+        matched_declared = False
+        for trial in trials:
+            matched = match_split_to_price_jump(jump, trial, jump_tol=jump_tol, rel_tol=rel_tol)
+            if matched is not None and abs(matched - trial) <= max(1e-6, rel_tol * abs(trial)):
+                matched_declared = True
+                break
+        if not matched_declared:
+            continue
+        candidates.append(d_cur)
     if not candidates:
         return None
-    return min(candidates, key=lambda d: abs((d - near).days))
+    return min(candidates)
 
 
 def detect_staggered_discrete_splits(
@@ -416,7 +474,7 @@ def detect_staggered_discrete_splits(
     events: list[tuple[dt.date, float]],
     *,
     rel_tol: float = 0.15,
-    window_days: int = 7,
+    window_days: int = 14,
 ) -> list[tuple[dt.date, float, dt.date]]:
     """Reverse splits where close jumps before adj switches (BAIG, BMNG, …)."""
     if not events:
@@ -603,6 +661,11 @@ def filter_splits_needing_close_basis_fix(
         if jump is not None and abs(jump - 1.0) <= 0.08:
             if yahoo_adj_looks_back_adjusted(points, eff, float(mult), rel_tol=rel_tol):
                 continue
+            continue
+
+        if 0 < float(mult) < 1 and yahoo_adj_looks_forward_normalized(
+            points, eff, float(mult), rel_tol=rel_tol
+        ):
             continue
 
         accepted = False
