@@ -167,6 +167,7 @@ BORROW_SPIKE_PREDICTIONS_DIR = OUTPUT_DIR / "borrow_spike_predictions"
 OPTIONS_CACHE_FILE = OUTPUT_DIR / "options_cache.json"
 VOL_SHAPE_HISTORY_FILE = OUTPUT_DIR / "vol_shape_history.json"
 ETF_METRICS_DAILY_FILE = OUTPUT_DIR / "etf_metrics_daily.csv"
+ETF_METRICS_PARQUET_FILE = OUTPUT_DIR / "etf_metrics_daily.parquet"
 ETF_HOLDINGS_LATEST_FILE = OUTPUT_DIR / "etf_holdings_latest.csv"
 ETF_DISTRIBUTIONS_FILE = OUTPUT_DIR / "etf_distributions.json"
 YIELDBOOST_PUT_SPREADS_FILE = OUTPUT_DIR / "yieldboost_put_spreads_latest.json"
@@ -4420,7 +4421,7 @@ def build():
         if pd.notna(r.get("Delta"))
     }
     gross_decay_by_symbol = load_gross_decay_from_metrics(
-        ETF_METRICS_DAILY_FILE,
+        ETF_METRICS_PARQUET_FILE,
         universe_symbols,
         beta_by_symbol=beta_by_symbol,
     )
