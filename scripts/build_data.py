@@ -319,6 +319,38 @@ def _vol_annual_source(
     return None
 
 
+_VOL_WINDOW_EXPECTED_RETURNS = {
+    "1M": 20,
+    "3M": 60,
+    "6M": 126,
+    "YTD": 126,
+    "12M": 252,
+    "ALL": 252,
+}
+
+
+def _vol_window_obs(realized_vol: dict, window: str | None, leg: str) -> int | None:
+    if not window:
+        return None
+    slot = realized_vol.get(window) or {}
+    raw = slot.get("n_returns_etf" if leg == "etf" else "n_returns_underlying")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _vol_effective_label(window: str | None, obs: int | None) -> str | None:
+    if not window:
+        return None
+    if obs is None:
+        return window
+    expected = _VOL_WINDOW_EXPECTED_RETURNS.get(str(window))
+    if expected and obs < expected:
+        return f"partial {obs} obs"
+    return window
+
+
 def is_volatility_etp(symbol: object, underlying: object) -> bool:
     sym = norm_sym(symbol or "")
     und = norm_sym(underlying or "")
@@ -4620,6 +4652,10 @@ def build():
             vol_und = vol_und_csv
         if vol_etf is None:
             vol_etf = vol_etf_csv
+        vol_und_obs = _vol_window_obs(realized_vol, vol_und_window, "underlying")
+        vol_etf_obs = _vol_window_obs(realized_vol, vol_etf_window, "etf")
+        vol_und_effective_label = _vol_effective_label(vol_und_window, vol_und_obs)
+        vol_etf_effective_label = _vol_effective_label(vol_etf_window, vol_etf_obs)
 
         # Append/overwrite today's most recent borrow snapshot in history.
         hist_rows = borrow_history_symbols.get(sym, [])
@@ -4686,6 +4722,35 @@ def build():
 
         expected_p50_for_forecast = _safe_float(rdict, "expected_gross_decay_p50_annual")
         expected_decay_for_forecast = expected_p50_for_forecast if expected_p50_for_forecast is not None else expected_display
+        expected_decay_available_raw = (
+            _truthy(rdict.get("expected_decay_available"))
+            if rdict.get("expected_decay_available") is not None
+            else (
+                product_class_out
+                not in ("passive_low_delta", "passive_low_beta", "other_structured")
+            )
+        )
+        has_expected_decay_value = any(
+            v is not None
+            for v in (
+                expected_display,
+                expected_p50_for_forecast,
+                _safe_float(rdict, "expected_gross_decay_p10_annual"),
+                _safe_float(rdict, "expected_gross_decay_p90_annual"),
+            )
+        )
+        expected_decay_available_final = bool(expected_decay_available_raw and has_expected_decay_value)
+        expected_decay_status = (
+            "ok"
+            if expected_decay_available_final
+            else (
+                "insufficient_history"
+                if expected_decay_available_raw and not has_expected_decay_value
+                else "not_applicable"
+            )
+        )
+        if expected_decay_status == "insufficient_history":
+            expected_reliable = False
         forecast_vol_fields = _build_forecast_vol_fields(
             beta=beta,
             expected_decay=expected_decay_for_forecast,
@@ -4783,6 +4848,10 @@ def build():
             "vol_etf_annual_source": _vol_annual_source(vol_etf_from_builder, vol_etf_csv, vol_etf),
             "vol_underlying_annual_window": vol_und_window,
             "vol_etf_annual_window": vol_etf_window,
+            "vol_underlying_annual_obs": vol_und_obs,
+            "vol_etf_annual_obs": vol_etf_obs,
+            "vol_underlying_annual_effective_label": vol_und_effective_label,
+            "vol_etf_annual_effective_label": vol_etf_effective_label,
             "vol_underlying_annual_screener": vol_und_csv,
             "vol_etf_annual_screener": vol_etf_csv,
             "und_rv_20d_daily_annual": _safe_float(rdict, "und_rv_20d_daily_annual"),
@@ -4828,14 +4897,8 @@ def build():
             # Screener schema v2 (optional; from ls-algo daily_screener export)
             "asof_date": (str(rdict["asof_date"]) if rdict.get("asof_date") and str(rdict.get("asof_date") or "").strip() not in ("", "nan", "None") else None),
             "product_class": product_class_out,
-            "expected_decay_available": (
-                _truthy(rdict.get("expected_decay_available"))
-                if rdict.get("expected_decay_available") is not None
-                else (
-                    product_class_out
-                    not in ("passive_low_delta", "passive_low_beta", "other_structured")
-                )
-            ),
+            "expected_decay_available": expected_decay_available_final,
+            "expected_decay_status": expected_decay_status,
             "gross_edge_definition": (str(rdict["gross_edge_definition"]).strip() if rdict.get("gross_edge_definition") and str(rdict.get("gross_edge_definition") or "").strip() not in ("", "nan") else None),
             "primary_edge_annual": _safe_float(rdict, "primary_edge_annual"),
             "gross_for_primary_annual": _safe_float(rdict, "gross_for_primary_annual"),
@@ -4901,6 +4964,19 @@ def build():
             for _k, _v in _rp60.items():
                 if _k != "n_days" and _v is not None:
                     rec[_k] = _v
+        quality_flags: list[str] = []
+        if rec.get("realized_pair_gross_60d_sufficient") is False:
+            quality_flags.append("partial_realized_pair_60d")
+        if expected_decay_status == "insufficient_history":
+            quality_flags.append("expected_decay_insufficient_history")
+        if (
+            vol_etf_obs is not None
+            and vol_etf_from_builder
+            and vol_etf_obs < 60
+        ):
+            quality_flags.append("thin_etf_realized_vol_history")
+        if quality_flags:
+            rec["data_quality_flags"] = sorted(set(quality_flags))
         records.append(rec)
 
     # 5b. NAV-normalized YieldBOOST distribution calibration.

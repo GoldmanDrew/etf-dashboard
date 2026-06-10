@@ -1800,7 +1800,10 @@ function realizedVolHeadlineMeta(r, leg = 'underlying') {
   const screener = leg === 'etf' ? r?.vol_etf_annual_screener : r?.vol_underlying_annual_screener;
   const source = leg === 'etf' ? r?.vol_etf_annual_source : r?.vol_underlying_annual_source;
   const window = leg === 'etf' ? r?.vol_etf_annual_window : r?.vol_underlying_annual_window;
+  const obs = leg === 'etf' ? r?.vol_etf_annual_obs : r?.vol_underlying_annual_obs;
+  const effectiveLabel = leg === 'etf' ? r?.vol_etf_annual_effective_label : r?.vol_underlying_annual_effective_label;
   const winLabel = window ? (REALIZED_VOL_WINDOW_LABELS[window] || window) : null;
+  const displayLabel = effectiveLabel || winLabel;
   const fromYahoo = source === 'yahoo_realized_vol';
   const screenerDiffers = fromYahoo
     && Number.isFinite(Number(screener))
@@ -1813,6 +1816,8 @@ function realizedVolHeadlineMeta(r, leg = 'underlying') {
     source: source || (fromYahoo ? 'yahoo_realized_vol' : 'screener_csv'),
     window,
     winLabel,
+    displayLabel,
+    obs,
     role: 'realized',
     screenerDiffers,
   };
@@ -1820,8 +1825,8 @@ function realizedVolHeadlineMeta(r, leg = 'underlying') {
 
 function realizedVolSublabel(r, leg = 'underlying') {
   const m = realizedVolHeadlineMeta(r, leg);
-  if (m.source === 'yahoo_realized_vol' && m.winLabel) {
-    return `${m.winLabel} · Yahoo build`;
+  if (m.source === 'yahoo_realized_vol' && m.displayLabel) {
+    return `${m.displayLabel} · Yahoo build`;
   }
   if (m.source === 'screener_csv') return 'screener CSV';
   return '12M realized';
@@ -1833,10 +1838,11 @@ function realizedVolTooltip(r, leg = 'underlying') {
   const lines = [
     `Backward-looking realized σ (${name}), not scenario / forecast σ.`,
     m.source === 'yahoo_realized_vol'
-      ? `Headline: build_data Yahoo panel (${m.winLabel || 'ladder'} window when both legs present).`
+      ? `Headline: build_data Yahoo panel (${m.displayLabel || 'ladder'}${m.winLabel && m.displayLabel !== m.winLabel ? ` from ${m.winLabel}` : ''}).`
       : 'Headline: ls-algo screener CSV (Yahoo panel unavailable for this symbol).',
     `Displayed: ${Number.isFinite(Number(m.headline)) ? fmt(Number(m.headline)) : '—'}`,
   ];
+  if (Number.isFinite(Number(m.obs))) lines.push(`Observations: ${Number(m.obs)}`);
   if (m.screenerDiffers) {
     lines.push(`Screener CSV had: ${fmt(Number(m.screener))}`);
   }
@@ -2594,23 +2600,37 @@ function fmtGrossRealizedLog(r, v) {
 
 function realizedPairGross60dTooltip(r) {
   const v = Number(r?.realized_pair_gross_60d);
-  if (!Number.isFinite(v)) return '60 trading-day gross pair return (δ·log U − log L), period not annualized. Same as Decay tab 60d Gross. Requires joint ETF+underlying history in etf_metrics_daily.';
+  const partial = Number(r?.realized_pair_gross_partial);
+  if (!Number.isFinite(v) && !Number.isFinite(partial)) return '60 trading-day gross pair return (δ·log U − log L), period not annualized. Same as Decay tab 60d Gross. Requires joint ETF+underlying history in etf_metrics_daily.';
+  const isPartial = !Number.isFinite(v) && Number.isFinite(partial);
+  const shown = isPartial ? partial : v;
   const lines = [
-    'Trailing 60 trading-day gross pair return (period, not annualized).',
+    isPartial
+      ? 'Partial realized pair return: fewer than 60 aligned observations, not ranked as a full 60d value.'
+      : 'Trailing 60 trading-day gross pair return (period, not annualized).',
     'Same metric as Decay tab → 60d → Gross.',
     'Formula: Σ daily (δ·log U − log L) over the window; short-favorable +.',
-    `Value: ${fmt(v)} gross`,
+    `Value: ${fmt(shown)} gross`,
   ];
   const obs = Number(r?.realized_pair_gross_60d_obs);
-  if (Number.isFinite(obs)) lines.push(`Observations: ${obs}${r?.realized_pair_gross_60d_sufficient === false ? ' (partial window)' : ''}`);
+  if (Number.isFinite(obs)) lines.push(`Observations: ${obs}${isPartial || r?.realized_pair_gross_60d_sufficient === false ? ' (partial window)' : ''}`);
   if (r?.realized_pair_gross_60d_start_date && r?.realized_pair_gross_60d_end_date) {
     lines.push(`Window: ${r.realized_pair_gross_60d_start_date} → ${r.realized_pair_gross_60d_end_date}`);
   }
-  const net = Number(r?.realized_pair_net_60d);
+  const net = Number(isPartial ? r?.realized_pair_net_partial : r?.realized_pair_net_60d);
   if (Number.isFinite(net)) lines.push(`Net @ spot borrow: ${fmt(net)}`);
   if (r?.realized_pair_gross_60d_source) lines.push(`Source: ${r.realized_pair_gross_60d_source}`);
   lines.push('Not the same as Gross (realiz.) — that column is full-history annualized drag.');
   return lines.join('\n');
+}
+
+function realizedPairGross60dDisplay(r) {
+  const v = Number(r?.realized_pair_gross_60d);
+  if (Number.isFinite(v)) return fmt(v);
+  const partial = Number(r?.realized_pair_gross_partial);
+  const obs = Number(r?.realized_pair_gross_60d_obs);
+  if (Number.isFinite(partial) && Number.isFinite(obs)) return `partial ${obs}/60`;
+  return '—';
 }
 
 function expectedDecayDisplayValue(r) {
@@ -12814,7 +12834,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                           className={grossShortFavCls(Number(r?.realized_pair_gross_60d))}
                           title={realizedPairGross60dTooltip(r)}
                         >
-                          {Number.isFinite(Number(r?.realized_pair_gross_60d)) ? fmt(Number(r.realized_pair_gross_60d)) : '—'}
+                          {realizedPairGross60dDisplay(r)}
                         </td>
                         <td
                           className={scenarioValueCls(r, expEtf3m)}

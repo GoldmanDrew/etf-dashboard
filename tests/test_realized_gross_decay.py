@@ -70,6 +70,35 @@ def test_realized_pair_gross_60d_fields():
     assert fields["realized_pair_net_60d"] == 0.04
 
 
+def test_realized_pair_gross_60d_fields_partial_window_not_full_metric():
+    fields = realized_pair_gross_60d_fields(
+        {
+            "gross_simple": -0.2056,
+            "gross_log": -0.2299,
+            "net_simple": -0.21,
+            "obs": 13,
+            "sufficient": False,
+            "start_date": "2026-05-20",
+            "end_date": "2026-06-09",
+        }
+    )
+    assert "realized_pair_gross_60d" not in fields
+    assert fields["realized_pair_gross_partial"] == -0.2056
+    assert fields["realized_pair_gross_60d_obs"] == 13
+    assert fields["realized_pair_gross_60d_sufficient"] is False
+
+
+def test_compute_realized_pair_gross_60d_skips_carry_forward_rows():
+    joint = _flat_joint_rows(15)
+    joint[-1] = {**joint[-1], "source_url": "carry_forward://stale-etf-row"}
+    out = compute_realized_pair_gross_60d(joint, 2.0, [], borrow_annual=0.1)
+    assert out is not None
+    assert out["realized_pair_gross_60d_obs"] == 13
+    assert out["realized_pair_gross_60d_sufficient"] is False
+    assert "realized_pair_gross_60d" not in out
+    assert "realized_pair_gross_partial" in out
+
+
 def test_compute_realized_pair_gross_60d_from_metrics_rows():
     joint = _flat_joint_rows(REALIZED_PAIR_GROSS_60D_HORIZON + 5)
     out = compute_realized_pair_gross_60d(joint, 2.0, [], borrow_annual=0.1)

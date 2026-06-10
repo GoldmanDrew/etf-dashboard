@@ -165,21 +165,56 @@ def realized_pair_gross_60d_fields(
     gross_simple = horizon_row.get("gross_simple")
     if gross_simple is None or not math.isfinite(float(gross_simple)):
         return {}
-    out: dict[str, Any] = {
-        "realized_pair_gross_60d": round(float(gross_simple), 6),
-        "realized_pair_gross_60d_log": round(float(horizon_row.get("gross_log")), 6)
+    sufficient = bool(horizon_row.get("sufficient"))
+    gross_log = (
+        round(float(horizon_row.get("gross_log")), 6)
         if horizon_row.get("gross_log") is not None and math.isfinite(float(horizon_row.get("gross_log")))
-        else None,
+        else None
+    )
+    out: dict[str, Any] = {
         "realized_pair_gross_60d_obs": int(horizon_row.get("obs") or 0),
-        "realized_pair_gross_60d_sufficient": bool(horizon_row.get("sufficient")),
+        "realized_pair_gross_60d_sufficient": sufficient,
         "realized_pair_gross_60d_start_date": horizon_row.get("start_date"),
         "realized_pair_gross_60d_end_date": horizon_row.get("end_date"),
         "realized_pair_gross_60d_source": source,
     }
     net_simple = horizon_row.get("net_simple")
-    if net_simple is not None and math.isfinite(float(net_simple)):
-        out["realized_pair_net_60d"] = round(float(net_simple), 6)
+    if sufficient:
+        out["realized_pair_gross_60d"] = round(float(gross_simple), 6)
+        out["realized_pair_gross_60d_log"] = gross_log
+        if net_simple is not None and math.isfinite(float(net_simple)):
+            out["realized_pair_net_60d"] = round(float(net_simple), 6)
+    else:
+        out["realized_pair_gross_partial"] = round(float(gross_simple), 6)
+        out["realized_pair_gross_partial_log"] = gross_log
+        out["realized_pair_gross_partial_horizon_days"] = REALIZED_PAIR_GROSS_60D_HORIZON
+        if net_simple is not None and math.isfinite(float(net_simple)):
+            out["realized_pair_net_partial"] = round(float(net_simple), 6)
     return out
+
+
+def _metrics_row_has_usable_prices(row: dict[str, Any]) -> bool:
+    """Rows carried forward from stale ETF metrics should not drive realized decay."""
+    if not str(row.get("date") or "")[:10]:
+        return False
+    source_url = str(row.get("source_url") or "")
+    source_provider = str(row.get("source_provider") or "")
+    stale_kind = str(row.get("stale_kind") or "")
+    if (
+        source_url.startswith("carry_forward://")
+        or source_provider.lower().startswith("carry_forward")
+        or stale_kind.lower() == "carry_forward"
+    ):
+        return False
+    try:
+        close_like = row.get("close_price") if row.get("close_price") is not None else row.get("nav")
+        if float(close_like) <= 0:
+            return False
+        if float(row.get("underlying_adj_close")) <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def compute_realized_pair_gross_60d(
@@ -193,7 +228,8 @@ def compute_realized_pair_gross_60d(
     """60d gross pair decay from joint metrics rows (Decay tab parity)."""
     if not math.isfinite(beta):
         return None
-    tr = build_tr_series_from_metrics(rows, split_events or [])
+    usable_rows = [r for r in rows if _metrics_row_has_usable_prices(r)]
+    tr = build_tr_series_from_metrics(usable_rows, split_events or [])
     daily = build_daily_log_drag_series(tr, float(beta))
     if len(daily) < min_obs:
         return None
@@ -314,12 +350,7 @@ def load_gross_decay_from_metrics(
         if sub.empty:
             continue
         rows = sub.to_dict("records")
-        joint = [
-            r
-            for r in rows
-            if pd.notna(r.get("close_price") or r.get("nav"))
-            and pd.notna(r.get("underlying_adj_close"))
-        ]
+        joint = [r for r in rows if _metrics_row_has_usable_prices(r)]
         if len(joint) < min_obs + 1:
             continue
         beta = (beta_by_symbol or {}).get(sym_u)
@@ -368,12 +399,7 @@ def load_realized_pair_gross_60d_from_metrics(
         if sub.empty:
             continue
         rows = sub.to_dict("records")
-        joint = [
-            r
-            for r in rows
-            if pd.notna(r.get("close_price") or r.get("nav"))
-            and pd.notna(r.get("underlying_adj_close"))
-        ]
+        joint = [r for r in rows if _metrics_row_has_usable_prices(r)]
         if len(joint) < min_obs + 1:
             continue
         beta = (beta_by_symbol or {}).get(sym_u)
