@@ -276,6 +276,18 @@ def _build_records_from_csv():
             borrow_spiking=bool(row.get("borrow_spiking", False)),
             borrow_missing=bool(row.get("borrow_missing_from_ftp", False)),
             gross_decay_annual=gdec,
+            realized_pair_gross_60d=_v2f(row, "realized_pair_gross_60d"),
+            realized_pair_gross_60d_log=_v2f(row, "realized_pair_gross_60d_log"),
+            realized_pair_gross_60d_obs=(
+                int(row["realized_pair_gross_60d_obs"])
+                if "realized_pair_gross_60d_obs" in row and not _isnan(row.get("realized_pair_gross_60d_obs"))
+                else None
+            ),
+            realized_pair_gross_60d_sufficient=_v2bool(row, "realized_pair_gross_60d_sufficient"),
+            realized_pair_gross_60d_start_date=_v2s(row, "realized_pair_gross_60d_start_date"),
+            realized_pair_gross_60d_end_date=_v2s(row, "realized_pair_gross_60d_end_date"),
+            realized_pair_gross_60d_source=_v2s(row, "realized_pair_gross_60d_source"),
+            realized_pair_net_60d=_v2f(row, "realized_pair_net_60d"),
             expected_gross_decay_annual=expected_display,
             expected_gross_decay_adjusted_annual=expected_display if vol_etp else _v2f(row, "expected_gross_decay_adjusted_annual"),
             expected_gross_decay_simple_ito_annual=expected_simple_ito,

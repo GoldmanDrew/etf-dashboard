@@ -34,6 +34,14 @@ class ETFRecord(BaseModel):
 
     # Decay / analytics
     gross_decay_annual: Optional[float] = None
+    realized_pair_gross_60d: Optional[float] = None
+    realized_pair_gross_60d_log: Optional[float] = None
+    realized_pair_gross_60d_obs: Optional[int] = None
+    realized_pair_gross_60d_sufficient: Optional[bool] = None
+    realized_pair_gross_60d_start_date: Optional[str] = None
+    realized_pair_gross_60d_end_date: Optional[str] = None
+    realized_pair_gross_60d_source: Optional[str] = None
+    realized_pair_net_60d: Optional[float] = None
     expected_gross_decay_annual: Optional[float] = None
     expected_gross_decay_adjusted_annual: Optional[float] = None
     expected_gross_decay_simple_ito_annual: Optional[float] = None

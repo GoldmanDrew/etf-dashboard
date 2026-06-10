@@ -30,7 +30,7 @@ import pandas as pd
 import requests
 
 from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_metrics
-from realized_gross_decay import load_gross_decay_from_metrics
+from realized_gross_decay import load_gross_decay_from_metrics, load_realized_pair_gross_60d_from_metrics
 from split_adjustments import (
     MAX_WINDOW_DIVIDEND_YIELD_FRAC,
     adjust_window_dividend_for_split,
@@ -4429,6 +4429,29 @@ def build():
         f"Gross decay from etf_metrics_daily (split-aware TR): "
         f"{len(gross_decay_by_symbol)}/{len(universe_symbols)} symbols"
     )
+    borrow_by_symbol: dict[str, float] = {}
+    for _, brow in df.iterrows():
+        bsym = norm_sym(str(brow["symbol"]))
+        if ibkr["success"] and brow["symbol"] in ibkr["borrow_map"]:
+            borrow_by_symbol[bsym] = float(ibkr["borrow_map"][brow["symbol"]])
+            continue
+        bcur = _safe_float(brow, "borrow_current")
+        if bcur is None:
+            bcur = _safe_float(brow, "borrow_fee_annual")
+        if bcur is None:
+            bcur = _safe_float(brow, "borrow_net_annual")
+        if bcur is not None:
+            borrow_by_symbol[bsym] = float(bcur)
+    realized_pair_gross_60d_by_symbol = load_realized_pair_gross_60d_from_metrics(
+        ETF_METRICS_PARQUET_FILE,
+        universe_symbols,
+        beta_by_symbol=beta_by_symbol,
+        borrow_by_symbol=borrow_by_symbol,
+    )
+    print(
+        f"Realized pair gross 60d from etf_metrics_daily: "
+        f"{len(realized_pair_gross_60d_by_symbol)}/{len(universe_symbols)} symbols"
+    )
     print(
         f"Vol-shape history JSON: "
         f"{vol_shape_history_payload.get('symbols_count', 0)} symbols "
@@ -4844,6 +4867,11 @@ def build():
                 rec["net_decay_annual"] = round(
                     float(rec["gross_decay_annual"]) - float(rec["borrow_current"]), 6,
                 )
+        _rp60 = realized_pair_gross_60d_by_symbol.get(norm_sym(sym))
+        if _rp60:
+            for _k, _v in _rp60.items():
+                if _k != "n_days" and _v is not None:
+                    rec[_k] = _v
         records.append(rec)
 
     # 5b. NAV-normalized YieldBOOST distribution calibration.

@@ -2478,6 +2478,13 @@ const spreadCls = v => {
   if (v > 0) return 'val-warning';
   return 'val-negative';
 };
+/** Positive period gross pair decay → better for a β-hedged short (Decay tab Gross). */
+const grossShortFavCls = v => {
+  if (v == null || !Number.isFinite(v)) return 'val-muted';
+  if (v >= 0.03) return 'val-positive';
+  if (v >= 0) return 'val-warning';
+  return 'val-negative';
+};
 /** More negative modeled ETF return → better for a structural short (Scenarios-style). */
 const scenShortFavCls = v => {
   if (v == null || !Number.isFinite(v)) return 'val-muted';
@@ -2577,6 +2584,27 @@ function fmtGrossRealizedLog(r, v) {
   if (v == null || !Number.isFinite(Number(v))) return '—';
   if (isYieldBoostFoF(r)) return fmtLogYr(v);
   return fmt(v);
+}
+
+function realizedPairGross60dTooltip(r) {
+  const v = Number(r?.realized_pair_gross_60d);
+  if (!Number.isFinite(v)) return '60 trading-day gross pair return (δ·log U − log L), period not annualized. Same as Decay tab 60d Gross. Requires joint ETF+underlying history in etf_metrics_daily.';
+  const lines = [
+    'Trailing 60 trading-day gross pair return (period, not annualized).',
+    'Same metric as Decay tab → 60d → Gross.',
+    'Formula: Σ daily (δ·log U − log L) over the window; short-favorable +.',
+    `Value: ${fmt(v)} gross`,
+  ];
+  const obs = Number(r?.realized_pair_gross_60d_obs);
+  if (Number.isFinite(obs)) lines.push(`Observations: ${obs}${r?.realized_pair_gross_60d_sufficient === false ? ' (partial window)' : ''}`);
+  if (r?.realized_pair_gross_60d_start_date && r?.realized_pair_gross_60d_end_date) {
+    lines.push(`Window: ${r.realized_pair_gross_60d_start_date} → ${r.realized_pair_gross_60d_end_date}`);
+  }
+  const net = Number(r?.realized_pair_net_60d);
+  if (Number.isFinite(net)) lines.push(`Net @ spot borrow: ${fmt(net)}`);
+  if (r?.realized_pair_gross_60d_source) lines.push(`Source: ${r.realized_pair_gross_60d_source}`);
+  lines.push('Not the same as Gross (realiz.) — that column is full-history annualized drag.');
+  return lines.join('\n');
 }
 
 function expectedDecayDisplayValue(r) {
@@ -4057,6 +4085,14 @@ const COLS = [
     sublabel: 'best estimate · band',
     w: 130,
     hint: 'Best estimate of annual edge after borrow, short-favorable + (log/yr). Inverse-variance Bayesian blend: posterior = w_forward × Exp. edge (fwd) p50 + (1 − w_forward) × realized history, minus borrow. YieldBOOST anchor is put-spread structural gross (weekly pair MC is diagnostic-only). Box p25–p75, whisker p5–p95, dot p50.',
+  },
+  {
+    key: 'realized_pair_gross_60d',
+    label: 'Realized decay',
+    sublabel: '60d · gross · pair',
+    w: 118,
+    numeric: true,
+    hint: 'Trailing 60 trading-day gross pair return (δ·log U − log L), period not annualized. Same as Decay tab 60d Gross. Short-favorable +. Not Gross (realiz.) annual.',
   },
   {
     key: SCENARIO_ETF_3M_FLAT_SORT_KEY,
@@ -12602,7 +12638,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             <strong>Net edge</strong> — bootstrap of past gross + borrow, level-shifted to Exp. edge fwd via inverse-variance blend; dot = p50, whisker = p5–p95. Details below.
           </p>
           <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
-            <strong style={{ color: 'var(--text-secondary)' }}>Long lens (3M, different sign):</strong>{' '}
+            <strong style={{ color: 'var(--text-secondary)' }}>Recent realized vs forward long (3M):</strong>{' '}
+            <strong>Realized decay (60d)</strong> — trailing 60 trading-day gross pair return (Decay tab Gross; period, not annualized; short-favorable +).{' '}
             <strong>Exp. ETF return</strong> — long <strong>total return</strong> if the underlying is flat, <strong>borrow excluded</strong>; income names add <strong>cash payouts</strong> on top of the NAV path (+ is good for longs, bad for naked shorts). Same forecast σ as Scenarios. Hover for 1M/6M. Passive low-β (non-income): <strong>—</strong>.{' '}
             <strong>Vol Und / Vol ETF</strong> — best-estimate σ (Vol Und = forecast blend, same as Scenarios; Vol ETF = 6M robust EWMA). Hover for realized ladder.
             {data?.uncertainty_footnote && (
@@ -12623,6 +12660,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                   <strong>Exp. edge (fwd)</strong>: forward structural gross decay before borrow (log/yr). YieldBOOST = screener put-spread MC (same anchor as Net edge). LETF/inverse/vol-ETP = vol-drag identity. Weekly pair MC is a separate YB diagnostic.
                   <br /><br />
                   <strong>Net edge</strong>: inverse-variance Bayesian blend of Exp. edge (fwd) p50 and the realized bootstrap, minus borrow.
+                  <br /><br />
+                  <strong>Realized decay (60d)</strong>: trailing 60 trading-day gross pair return (Decay tab Gross; period not annualized; short-favorable +).
                   <br /><br />
                   <strong>Exp. ETF return (3M)</strong>: long total return at flat underlying (NAV + cash for income), borrow excluded. Long-favorable sign; different horizon and object than Exp. edge (fwd).
                 </p>
@@ -12763,6 +12802,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                           ) : (
                             <NetEdgeMergedCell r={r} />
                           )}
+                        </td>
+                        <td
+                          className={grossShortFavCls(Number(r?.realized_pair_gross_60d))}
+                          title={realizedPairGross60dTooltip(r)}
+                        >
+                          {Number.isFinite(Number(r?.realized_pair_gross_60d)) ? fmt(Number(r.realized_pair_gross_60d)) : '—'}
                         </td>
                         <td
                           className={scenarioValueCls(r, expEtf3m)}
