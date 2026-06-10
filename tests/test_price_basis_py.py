@@ -376,3 +376,113 @@ def test_mtyy_real_metrics_no_nov_cliff():
             drags.append(beta * r_u - r_l)
         gross_120 = math.expm1(sum(drags[-120:]))
         assert -0.5 < gross_120 < 0.75, f"120d gross out of band: {gross_120}"
+
+
+def test_provider_basis_jump_before_declared_reverse_split_is_segment_scaled():
+    """SMCL-style provider restatement: old rows are post-basis, AXS row flips early."""
+    rows = [
+        {"date": "2026-04-14", "close_price": 47.70, "etf_adj_close": 954.0, "underlying_adj_close": 27.20},
+        {"date": "2026-04-15", "close_price": 47.80, "etf_adj_close": 956.0, "underlying_adj_close": 27.29},
+        {
+            "date": "2026-04-16",
+            "close_price": 2.59,
+            "etf_adj_close": 51.8,
+            "underlying_adj_close": 28.40,
+            "source_url": "https://axsetf.filepoint.live/assets/data/NSDEAXS2.04162026.csv",
+        },
+        {"date": "2026-04-17", "close_price": 2.61, "etf_adj_close": 52.2, "underlying_adj_close": 28.56},
+        {"date": "2026-04-30", "close_price": 46.60, "etf_adj_close": 932.0, "underlying_adj_close": 27.40},
+        {"date": "2026-05-01", "close_price": 45.63, "etf_adj_close": 2.2815, "underlying_adj_close": 27.09},
+    ]
+    tr = build_tr_series_from_metrics(rows, [(dt.date(2026, 5, 1), 20.0)])
+    by_date = {r["date"]: r for r in tr}
+    assert by_date["2026-04-15"]["tr_etf_px"] == pytest.approx(47.8, rel=0.03)
+    assert by_date["2026-04-16"]["tr_etf_px"] == pytest.approx(51.8, rel=0.03)
+    max_jump, jump_date = max_abs_log_return(tr, "tr_etf_px")
+    assert max_jump < 0.35, f"basis cliff on {jump_date}: {max_jump}"
+
+
+def test_oscillating_provider_basis_segments_before_split_are_normalized():
+    """BULG/GEMG-style rows can flip old/new basis multiple times before ex-date."""
+    rows = [
+        {"date": "2026-04-15", "close_price": 36.40, "etf_adj_close": 728.0, "underlying_adj_close": 6.47},
+        {"date": "2026-04-16", "close_price": 1.83, "etf_adj_close": 36.6, "underlying_adj_close": 6.48},
+        {"date": "2026-04-17", "close_price": 1.955, "etf_adj_close": 39.1, "underlying_adj_close": 6.72},
+        {"date": "2026-04-22", "close_price": 2.27, "etf_adj_close": 45.4, "underlying_adj_close": 7.27},
+        {"date": "2026-04-23", "close_price": 41.16, "etf_adj_close": 823.2, "underlying_adj_close": 6.91},
+        {"date": "2026-04-24", "close_price": 40.966, "etf_adj_close": 2.0483, "underlying_adj_close": 6.90},
+    ]
+    tr = build_tr_series_from_metrics(rows, [(dt.date(2026, 4, 24), 20.0)])
+    by_date = {r["date"]: r["tr_etf_px"] for r in tr}
+    assert by_date["2026-04-15"] == pytest.approx(36.4, rel=0.03)
+    assert by_date["2026-04-17"] == pytest.approx(39.1, rel=0.03)
+    assert by_date["2026-04-23"] == pytest.approx(41.16, rel=0.03)
+    max_jump, jump_date = max_abs_log_return(tr, "tr_etf_px")
+    assert max_jump < 0.35, f"oscillating basis cliff on {jump_date}: {max_jump}"
+
+
+def test_real_metrics_recent_split_outliers_have_no_split_sized_tr_cliff():
+    import pandas as pd
+
+    p = Path(__file__).resolve().parent.parent / "data" / "etf_metrics_daily.parquet"
+    if not p.exists():
+        pytest.skip("etf_metrics_daily.parquet not present")
+    df = pd.read_parquet(p)
+    df["date"] = df["date"].astype(str).str[:10]
+    df["ticker"] = df["ticker"].astype(str).str.upper()
+    cases = {
+        "SMCL": (dt.date(2026, 5, 1), 20.0),
+        "MSTP": (dt.date(2026, 5, 1), 20.0),
+        "CRWG": (dt.date(2026, 5, 5), 10.0),
+        "DUOG": (dt.date(2026, 5, 5), 10.0),
+        "MRAL": (dt.date(2026, 5, 1), 10.0),
+        "FIGG": (dt.date(2026, 5, 5), 20.0),
+        "BULG": (dt.date(2026, 4, 24), 20.0),
+        "GEMG": (dt.date(2026, 4, 24), 20.0),
+        "BMNG": (dt.date(2026, 5, 5), 20.0),
+        "BAIG": (dt.date(2026, 5, 5), 10.0),
+    }
+    for sym, event in cases.items():
+        rows = df[df["ticker"] == sym].sort_values("date").to_dict("records")
+        if not rows:
+            continue
+        tr = build_tr_series_from_metrics(rows, [event])
+        split_eff = event[0]
+        max_jump = 0.0
+        jump_date = None
+        for i in range(1, len(tr)):
+            d0 = dt.date.fromisoformat(str(tr[i]["date"])[:10])
+            if abs((d0 - split_eff).days) > 45:
+                continue
+            if tr[i - 1]["tr_etf_px"] <= 0 or tr[i]["tr_etf_px"] <= 0:
+                continue
+            if tr[i - 1]["tr_und_px"] <= 0 or tr[i]["tr_und_px"] <= 0:
+                continue
+            if abs(math.log(tr[i]["tr_und_px"] / tr[i - 1]["tr_und_px"])) >= 0.25:
+                continue
+            lr = abs(math.log(tr[i]["tr_etf_px"] / tr[i - 1]["tr_etf_px"]))
+            jump = math.exp(lr)
+            split_mult = event[1] if event[1] >= 1 else 1 / event[1]
+            if abs(jump / split_mult - 1.0) > 0.18:
+                continue
+            if lr > max_jump:
+                max_jump = lr
+                jump_date = tr[i]["date"]
+        assert max_jump < 0.35, f"{sym} TR cliff on {jump_date}: {max_jump}"
+
+
+def test_future_split_does_not_rewrite_old_split_sized_market_move():
+    rows = [
+        {"date": "2024-08-21", "close_price": 448.0, "etf_adj_close": 430.208099, "underlying_adj_close": 62.377998},
+        {"date": "2024-08-22", "close_price": 753.200012, "etf_adj_close": 723.287415, "underlying_adj_close": 60.481998},
+        {"date": "2024-08-23", "close_price": 773.200012, "etf_adj_close": 742.493103, "underlying_adj_close": 61.324001},
+    ]
+    ctx = resolve_split_context(
+        [(dt.date.fromisoformat(r["date"]), r["close_price"]) for r in rows],
+        [(dt.date(2026, 3, 19), 2.0)],
+        metric_rows=rows,
+        adj_by_date={dt.date.fromisoformat(r["date"]): float(r["etf_adj_close"]) for r in rows},
+    )
+    assert ctx["mode"] == "continuous"
+    tr = build_tr_series_from_metrics(rows, [(dt.date(2026, 3, 19), 2.0)])
+    assert tr[0]["tr_etf_px"] == pytest.approx(430.208099, rel=1e-6)

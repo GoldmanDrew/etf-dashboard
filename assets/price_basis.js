@@ -496,7 +496,8 @@
         const m = toNum(ev.mult);
         if (!(m > 0)) continue;
         const b = detectSplitBoundary(closePoints, m);
-        if (b) {
+        const dayDiff = b ? Math.abs((new Date(b) - new Date(parseDate(ev.date))) / 86400000) : Infinity;
+        if (b && dayDiff <= 45) {
           boundary = b;
           mult = m;
           break;
@@ -725,6 +726,80 @@
     return repaired;
   }
 
+  function knownSplitMultipliers(splitEvents) {
+    const out = [];
+    for (const ev of Array.isArray(splitEvents) ? splitEvents : []) {
+      const mRaw = toNum(ev && ev.mult);
+      if (!(mRaw > 0)) continue;
+      const m = mRaw >= 1 ? mRaw : 1 / mRaw;
+      if (!(m > 1.05)) continue;
+      if (!out.some((x) => Math.abs(m / x - 1) <= 1e-6)) out.push(m);
+    }
+    return out.sort((a, b) => a - b);
+  }
+
+  function matchKnownSplitJump(jumpAbs, multipliers, relTol = 0.18) {
+    const j = toNum(jumpAbs);
+    if (!(j > 1) || !Array.isArray(multipliers) || !multipliers.length) return null;
+    let best = null;
+    let bestErr = Infinity;
+    for (const m of multipliers) {
+      const err = Math.abs(j / m - 1);
+      if (err <= relTol && err < bestErr) {
+        bestErr = err;
+        best = m;
+      }
+    }
+    return best;
+  }
+
+  function normalizeSplitSizedBasisJumps(tr, splitEvents, maxUnderlyingLogMove = 0.25, minEtfLogJump = 0.55) {
+    if (!Array.isArray(tr) || tr.length < 2) return tr;
+    const multipliers = knownSplitMultipliers(splitEvents);
+    if (!multipliers.length) return tr;
+
+    const out = tr.map((row) => ({ ...row }));
+    const adjusted = Array(out.length).fill(null);
+    const suffix = Array(out.length).fill("");
+    let scale = 1;
+    adjusted[out.length - 1] = toNum(out[out.length - 1].trEtfPx);
+
+    for (let i = out.length - 2; i >= 0; i -= 1) {
+      const prevRaw = toNum(out[i].trEtfPx);
+      const curAdj = toNum(adjusted[i + 1]);
+      const u0 = toNum(out[i].trUndPx);
+      const u1 = toNum(out[i + 1].trUndPx);
+      if (!(prevRaw > 0 && curAdj > 0 && u0 > 0 && u1 > 0)) {
+        adjusted[i] = prevRaw > 0 ? prevRaw * scale : null;
+        continue;
+      }
+
+      let prevAdj = prevRaw * scale;
+      const lrE = Math.log(prevAdj / curAdj);
+      const lrU = Math.abs(Math.log(u1 / u0));
+      if (Math.abs(lrE) >= minEtfLogJump && lrU < maxUnderlyingLogMove) {
+        const matched = matchKnownSplitJump(Math.exp(Math.abs(lrE)), multipliers);
+        if (matched != null) {
+          scale = lrE > 0 ? scale / matched : scale * matched;
+          prevAdj = prevRaw * scale;
+          suffix[i] = `|basis_jump_scaled(${matched})`;
+        }
+      }
+      adjusted[i] = prevAdj;
+    }
+
+    for (let i = 0; i < out.length; i += 1) {
+      const px = toNum(adjusted[i]);
+      if (!(px > 0)) continue;
+      const oldPx = toNum(out[i].trEtfPx);
+      if (oldPx > 0 && Math.abs(px / oldPx - 1) > 1e-9) {
+        out[i].trEtfPx = px;
+        out[i].trMode = `${out[i].trMode || "unknown"}${suffix[i] || "|basis_jump_scaled"}`;
+      }
+    }
+    return out;
+  }
+
   /**
    * Build split-aware TR prices for decay, backtest, and charts.
    * @returns {Array<{date, trEtfPx, trUndPx, tradeClose, trMode, row}>}
@@ -752,7 +827,8 @@
         row: p.row,
       };
     }).filter((x) => x.date && x.trEtfPx > 0 && x.trUndPx > 0);
-    return repairSplitOutlierBars(built, ctx);
+    const repaired = repairSplitOutlierBars(built, ctx);
+    return normalizeSplitSizedBasisJumps(repaired, splitEvents || []);
   }
 
   function maxAbsLogReturn(series, valueKey) {
@@ -891,6 +967,7 @@
     buildTrSeriesFromMetrics,
     summarizeTrCoverage,
     metricsRowToPoint,
+    normalizeSplitSizedBasisJumps,
   };
 
   if (typeof module !== "undefined" && module.exports) {

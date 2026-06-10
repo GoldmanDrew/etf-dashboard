@@ -120,7 +120,7 @@ def _slice_period_metrics(
         "start_date": str(start_row.get("date") or "")[:10] or None,
         "end_date": str(end_row.get("date") or "")[:10] or None,
         "etf_start_px": start_row.get("etf_px_prev"),
-        "etf_end_px": start_row.get("etf_px"),
+        "etf_end_px": end_row.get("etf_px"),
         "und_start_px": start_row.get("und_px_prev"),
         "und_end_px": end_row.get("und_px"),
     }

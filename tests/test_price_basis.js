@@ -145,3 +145,74 @@ test("realized_decay re-exports filter from price_basis", () => {
   const events = [{ date: "2026-01-26", mult: 0.1 }];
   assert.equal(RD.filterSplitsNeedingCloseBasisFix(points, events).length, 1);
 });
+
+function maxEtfJump(tr) {
+  let maxJump = 0;
+  let at = null;
+  for (let i = 1; i < tr.length; i += 1) {
+    const lr = Math.abs(Math.log(tr[i].trEtfPx / tr[i - 1].trEtfPx));
+    if (lr > maxJump) {
+      maxJump = lr;
+      at = tr[i].date;
+    }
+  }
+  return { maxJump, at };
+}
+
+test("provider basis jump before declared reverse split is segment-scaled", () => {
+  const rows = [
+    { date: "2026-04-14", close_price: 47.70, etf_adj_close: 954.0, underlying_adj_close: 27.20 },
+    { date: "2026-04-15", close_price: 47.80, etf_adj_close: 956.0, underlying_adj_close: 27.29 },
+    {
+      date: "2026-04-16",
+      close_price: 2.59,
+      etf_adj_close: 51.8,
+      underlying_adj_close: 28.40,
+      source_url: "https://axsetf.filepoint.live/assets/data/NSDEAXS2.04162026.csv",
+    },
+    { date: "2026-04-17", close_price: 2.61, etf_adj_close: 52.2, underlying_adj_close: 28.56 },
+    { date: "2026-04-30", close_price: 46.60, etf_adj_close: 932.0, underlying_adj_close: 27.40 },
+    { date: "2026-05-01", close_price: 45.63, etf_adj_close: 2.2815, underlying_adj_close: 27.09 },
+  ];
+  const tr = PB.buildTrSeriesFromMetrics(rows, [{ date: "2026-05-01", mult: 20 }]);
+  const byDate = Object.fromEntries(tr.map((r) => [r.date, r]));
+  assert.ok(Math.abs(byDate["2026-04-15"].trEtfPx - 47.8) < 1.5, byDate["2026-04-15"].trEtfPx);
+  assert.ok(Math.abs(byDate["2026-04-16"].trEtfPx - 51.8) < 1.5, byDate["2026-04-16"].trEtfPx);
+  const { maxJump, at } = maxEtfJump(tr);
+  assert.ok(maxJump < 0.35, `basis cliff on ${at}: ${maxJump}`);
+});
+
+test("oscillating provider basis segments before split are normalized", () => {
+  const rows = [
+    { date: "2026-04-15", close_price: 36.40, etf_adj_close: 728.0, underlying_adj_close: 6.47 },
+    { date: "2026-04-16", close_price: 1.83, etf_adj_close: 36.6, underlying_adj_close: 6.48 },
+    { date: "2026-04-17", close_price: 1.955, etf_adj_close: 39.1, underlying_adj_close: 6.72 },
+    { date: "2026-04-22", close_price: 2.27, etf_adj_close: 45.4, underlying_adj_close: 7.27 },
+    { date: "2026-04-23", close_price: 41.16, etf_adj_close: 823.2, underlying_adj_close: 6.91 },
+    { date: "2026-04-24", close_price: 40.966, etf_adj_close: 2.0483, underlying_adj_close: 6.90 },
+  ];
+  const tr = PB.buildTrSeriesFromMetrics(rows, [{ date: "2026-04-24", mult: 20 }]);
+  const byDate = Object.fromEntries(tr.map((r) => [r.date, r.trEtfPx]));
+  assert.ok(Math.abs(byDate["2026-04-15"] - 36.4) < 1.5, byDate["2026-04-15"]);
+  assert.ok(Math.abs(byDate["2026-04-17"] - 39.1) < 1.5, byDate["2026-04-17"]);
+  assert.ok(Math.abs(byDate["2026-04-23"] - 41.16) < 1.5, byDate["2026-04-23"]);
+  const { maxJump, at } = maxEtfJump(tr);
+  assert.ok(maxJump < 0.35, `oscillating basis cliff on ${at}: ${maxJump}`);
+});
+
+test("future split does not rewrite old split-sized market move", () => {
+  const rows = [
+    { date: "2024-08-21", close_price: 448.0, etf_adj_close: 430.208099, underlying_adj_close: 62.377998 },
+    { date: "2024-08-22", close_price: 753.200012, etf_adj_close: 723.287415, underlying_adj_close: 60.481998 },
+    { date: "2024-08-23", close_price: 773.200012, etf_adj_close: 742.493103, underlying_adj_close: 61.324001 },
+  ];
+  const events = [{ date: "2026-03-19", mult: 2 }];
+  const ctx = PB.resolveSplitContext(
+    rows.map((r) => ({ date: r.date, close: r.close_price, adj: r.etf_adj_close })),
+    events,
+    rows,
+  );
+  assert.equal(ctx.mode, "continuous");
+  const tr = PB.buildTrSeriesFromMetrics(rows, events);
+  assert.ok(Math.abs(tr[0].trEtfPx - 430.208099) < 1e-6, tr[0].trEtfPx);
+});

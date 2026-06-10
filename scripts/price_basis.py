@@ -175,7 +175,7 @@ def resolve_split_context(
     if boundary is None:
         for _d, m in split_events:
             b = detect_split_boundary(close_points, m)
-            if b is not None:
+            if b is not None and abs((b - _d).days) <= 45:
                 boundary, mult = b, m
                 break
     mode = "discrete_split" if boundary and mult else "continuous"
@@ -480,7 +480,103 @@ def build_tr_series_from_metrics(
                     "tr_mode": _tr_mode_for_row(row, ctx),
                 }
             )
-    return _repair_split_outlier_bars(out, ctx, split_events)
+    repaired = _repair_split_outlier_bars(out, ctx, split_events)
+    return _normalize_split_sized_basis_jumps(repaired, split_events)
+
+
+def _known_split_multipliers(split_events: list[tuple[dt.date, float]]) -> list[float]:
+    out: list[float] = []
+    for _d, mult in split_events or []:
+        try:
+            m = float(mult)
+        except (TypeError, ValueError):
+            continue
+        if m <= 0:
+            continue
+        cand = m if m >= 1 else 1.0 / m
+        if cand <= 1.05:
+            continue
+        if not any(abs(cand / existing - 1.0) <= 1e-6 for existing in out):
+            out.append(cand)
+    return sorted(out)
+
+
+def _match_known_split_jump(
+    jump_abs: float,
+    multipliers: list[float],
+    *,
+    rel_tol: float = 0.18,
+) -> float | None:
+    if not (math.isfinite(jump_abs) and jump_abs > 1.0):
+        return None
+    best: tuple[float, float] | None = None
+    for mult in multipliers:
+        err = abs(jump_abs / mult - 1.0)
+        if err <= rel_tol and (best is None or err < best[0]):
+            best = (err, mult)
+    return best[1] if best else None
+
+
+def _normalize_split_sized_basis_jumps(
+    tr: list[dict[str, Any]],
+    split_events: list[tuple[dt.date, float]],
+    *,
+    max_underlying_log_move: float = 0.25,
+    min_etf_log_jump: float = 0.55,
+) -> list[dict[str, Any]]:
+    """Map provider-restated split-sized TR segments onto the latest price basis.
+
+    Some metrics histories contain rows where one provider has already restated
+    close/adjusted-close for an upcoming reverse split while neighboring rows
+    are still on the old basis. Walk backward from the latest row and scale
+    earlier segments whenever an adjacent ETF-only jump matches a known split
+    multiplier. This repairs whole segments instead of interpolating away a
+    single bad bar.
+    """
+    if len(tr) < 2:
+        return tr
+    multipliers = _known_split_multipliers(split_events)
+    if not multipliers:
+        return tr
+
+    out = [dict(row) for row in tr]
+    scale = 1.0
+    adjusted: list[float | None] = [None] * len(out)
+    adjusted[-1] = float(out[-1]["tr_etf_px"])
+    mode_suffix: list[str] = [""] * len(out)
+
+    for i in range(len(out) - 2, -1, -1):
+        try:
+            prev_raw = float(out[i]["tr_etf_px"])
+            cur_adj = float(adjusted[i + 1])
+            u0 = float(out[i]["tr_und_px"])
+            u1 = float(out[i + 1]["tr_und_px"])
+        except (TypeError, ValueError, KeyError):
+            adjusted[i] = None
+            continue
+        if min(prev_raw, cur_adj, u0, u1) <= 0:
+            adjusted[i] = prev_raw * scale if prev_raw > 0 else None
+            continue
+
+        prev_adj = prev_raw * scale
+        lr_e = math.log(prev_adj / cur_adj)
+        lr_u = abs(math.log(u1 / u0))
+        if abs(lr_e) >= min_etf_log_jump and lr_u < max_underlying_log_move:
+            matched = _match_known_split_jump(math.exp(abs(lr_e)), multipliers)
+            if matched is not None:
+                scale = scale / matched if lr_e > 0 else scale * matched
+                prev_adj = prev_raw * scale
+                mode_suffix[i] = f"|basis_jump_scaled({matched:g})"
+
+        adjusted[i] = prev_adj
+
+    for i, px in enumerate(adjusted):
+        if px is None or not math.isfinite(px) or px <= 0:
+            continue
+        if abs(px / float(out[i]["tr_etf_px"]) - 1.0) > 1e-9:
+            out[i]["tr_etf_px"] = px
+            out[i]["tr_mode"] = f"{out[i].get('tr_mode') or 'unknown'}{mode_suffix[i] or '|basis_jump_scaled'}"
+    return out
 
 
 def _repair_split_outlier_bars(

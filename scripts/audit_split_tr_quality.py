@@ -32,6 +32,30 @@ METRICS_PARQUET = REPO / "data" / "etf_metrics_daily.parquet"
 MAX_LOG_RETURN = 0.35
 LOOKBACK_MONTHS = 18
 SPLIT_WINDOW_DAYS = 2
+MAX_UNDERLYING_LOG_MOVE_FOR_CLIFF = 0.25
+SPLIT_SIZED_CLIFF_EVENT_WINDOW_DAYS = 90
+
+
+def _known_split_multipliers(split_events: list[tuple[dt.date, float]]) -> list[float]:
+    out: list[float] = []
+    for _d, mult in split_events or []:
+        try:
+            m = float(mult)
+        except (TypeError, ValueError):
+            continue
+        if m <= 0:
+            continue
+        cand = m if m >= 1 else 1.0 / m
+        if cand > 1.05 and not any(abs(cand / x - 1.0) <= 1e-6 for x in out):
+            out.append(cand)
+    return out
+
+
+def _is_split_sized_jump(lr_abs: float, multipliers: list[float], *, rel_tol: float = 0.18) -> bool:
+    if not (math.isfinite(lr_abs) and lr_abs > 0):
+        return False
+    jump = math.exp(lr_abs)
+    return any(abs(jump / mult - 1.0) <= rel_tol for mult in multipliers)
 
 
 def _load_corp_payload(path: Path) -> dict:
@@ -72,6 +96,43 @@ def audit_ticker(
     tr = build_tr_series_from_metrics(rows, split_events)
     if len(tr) < 2:
         return failures
+
+    multipliers = _known_split_multipliers(split_events)
+    max_any = 0.0
+    max_any_date: str | None = None
+    for i in range(1, len(tr)):
+        try:
+            e0 = float(tr[i - 1]["tr_etf_px"])
+            e1 = float(tr[i]["tr_etf_px"])
+            u0 = float(tr[i - 1]["tr_und_px"])
+            u1 = float(tr[i]["tr_und_px"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if min(e0, e1, u0, u1) <= 0:
+            continue
+        try:
+            d_cur = dt.date.fromisoformat(str(tr[i].get("date") or "")[:10])
+        except ValueError:
+            continue
+        if not any(
+            abs((d_cur - eff).days) <= SPLIT_SIZED_CLIFF_EVENT_WINDOW_DAYS
+            for eff, _mult in split_events
+        ):
+            continue
+        lr_u = abs(math.log(u1 / u0))
+        if lr_u >= MAX_UNDERLYING_LOG_MOVE_FOR_CLIFF:
+            continue
+        lr_e = abs(math.log(e1 / e0))
+        if not _is_split_sized_jump(lr_e, multipliers):
+            continue
+        if lr_e > max_any:
+            max_any = lr_e
+            max_any_date = str(tr[i].get("date") or "")[:10]
+    if max_any > max_log_return:
+        failures.append(
+            f"{ticker}: max unexplained ETF TR daily log-return {max_any:.3f} "
+            f"({math.expm1(max_any)*100:.0f}%) on {max_any_date}"
+        )
 
     close_pts = []
     adj_by_date: dict[dt.date, float] = {}
@@ -146,6 +207,8 @@ def audit_ticker(
                 if lr_u >= 0.25:
                     continue
             lr = abs(math.log(b / a))
+            if not _is_split_sized_jump(lr, multipliers):
+                continue
             mult = float(ctx.get("mult") or 0)
             if mult > 0 and mode == "discrete_split" and mult >= 1.05:
                 expected = math.log(mult)
@@ -191,6 +254,11 @@ def main() -> int:
     parser.add_argument("--max-log-return", type=float, default=MAX_LOG_RETURN)
     parser.add_argument("--lookback-months", type=int, default=LOOKBACK_MONTHS)
     parser.add_argument(
+        "--symbols",
+        default="",
+        help="Optional comma-separated ticker filter for targeted audits.",
+    )
+    parser.add_argument(
         "--strict-bucket-1",
         action="store_true",
         help="Exit 1 only when bucket_1_high_delta tickers fail; other failures warn.",
@@ -206,7 +274,12 @@ def main() -> int:
     payload = _load_corp_payload(args.corp_actions)
     bucket_by_ticker = _bucket_by_ticker(payload)
     since = dt.date.today() - dt.timedelta(days=int(args.lookback_months) * 31)
-    tickers = _split_tickers(payload, since=since)
+    wanted = {
+        s.strip().upper()
+        for s in str(args.symbols or "").split(",")
+        if s.strip()
+    }
+    tickers = wanted or _split_tickers(payload, since=since)
     if not tickers:
         print("No recent split tickers in corporate_actions.json")
         return 0
