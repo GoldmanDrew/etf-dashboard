@@ -119,6 +119,7 @@ class ETFRecord(BaseModel):
     product_class: Optional[str] = None
     expected_decay_available: Optional[bool] = None
     is_yieldboost: bool = False
+    bucket_2_ui_visible: bool = True
     scenario_style: Optional[str] = None
     income_yield_trailing_annual: Optional[float] = None
     income_yield_recent_annual: Optional[float] = None
@@ -180,6 +181,7 @@ class DashboardSummary(BaseModel):
     total_symbols: int = 0
     bucket_1_count: int = 0
     bucket_2_count: int = 0
+    bucket_2_archived_count: int = 0
     bucket_3_count: int = 0
     best_spreads: list[dict] = Field(default_factory=list)
     worst_borrows: list[dict] = Field(default_factory=list)

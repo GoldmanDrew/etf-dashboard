@@ -1158,6 +1158,8 @@ If a single-name underlying has too thin a panel (`_HORIZON_PANEL_RATIO_MIN`), t
 
 `bucket` is for the UI grouping in the main table (B1/B2/B3 pills). `product_class` is the **routing key** for decay/edge/scenarios. A YieldBOOST income strategy lives in **Bucket 2** (β ≤ 1.5) but has `product_class = "income_yieldboost"`. Always use `product_class` for routing logic, not `bucket`.
 
+**Bucket 2 UI scope (2026-06):** The B2 pill/tab shows **YieldBOOST + FoF only** (`bucket_2_ui_visible = true`). Passive low-β rows (`passive_low_delta`) remain in `dashboard_data.json` → `records[]` for borrow history, metrics, and `#/chart/SYM` deep links — they are filtered out in `DashboardRoot` when `activeTab === 'bucket_2'`. `summary.bucket_2_count` counts visible rows; `bucket_2_archived_count` is the hidden passive-low-β remainder.
+
 ### 13.9 `borrow_history.json` is reconstructed from git history, not stored
 
 `build_data.py::reconstruct_borrow_history` walks the last `BORROW_HISTORY_MAX_COMMITS` commits of `etf_screened_today.csv` in `ls-algo` and rebuilds the daily borrow series. If you reset `ls-algo`'s git history (e.g., squash, rebase, force-push), you will lose history depth. Don't.

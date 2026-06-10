@@ -3945,9 +3945,29 @@ def assign_bucket(sym: str, beta: float) -> str:
     return "bucket_2_low_beta"
 
 
+YIELDBOOST_FOF_SYMBOLS = frozenset({"YBTY", "YBST"})
+
+
+def bucket_2_ui_visible_for_row(
+    sym: str,
+    bucket: str,
+    *,
+    is_yieldboost: bool,
+    product_class: str | None,
+) -> bool:
+    """Bucket 2 tab shows YieldBOOST (+ FoF) only; other B2 rows stay in JSON."""
+    if bucket != "bucket_2_low_beta":
+        return True
+    ns = norm_sym(sym)
+    if product_class == "income_yieldboost_fof" or ns in YIELDBOOST_FOF_SYMBOLS:
+        return True
+    return bool(is_yieldboost)
+
+
 def _calc_summary(records: list[dict]) -> dict:
     b1 = [r for r in records if r["bucket"] == "bucket_1_high_beta"]
-    b2 = [r for r in records if r["bucket"] == "bucket_2_low_beta"]
+    b2_all = [r for r in records if r["bucket"] == "bucket_2_low_beta"]
+    b2 = [r for r in b2_all if r.get("bucket_2_ui_visible", True)]
     b3 = [r for r in records if r["bucket"] == "bucket_3_inverse"]
 
     def _realized_net_vs_avg_borrow(r: dict) -> float | None:
@@ -4003,6 +4023,7 @@ def _calc_summary(records: list[dict]) -> dict:
         "total_symbols": len(records),
         "bucket_1_count": len(b1),
         "bucket_2_count": len(b2),
+        "bucket_2_archived_count": len(b2_all) - len(b2),
         "bucket_3_count": len(b3),
         "top_realized_net_vs_avg_borrow": top_realized_net_vs_avg_borrow,
         "top_net_edge": top_net_edge,
@@ -4678,6 +4699,13 @@ def build():
             )
         )
 
+        bucket_2_ui_visible = bucket_2_ui_visible_for_row(
+            sym,
+            bucket,
+            is_yieldboost=bool(is_yieldboost),
+            product_class=product_class_out,
+        )
+
         rec = {
             "symbol": sym,
             "underlying": row["underlying_sym"],
@@ -4688,6 +4716,7 @@ def build():
             ),
             "delta_n_obs": int(row["Delta_n_obs"]) if pd.notna(row.get("Delta_n_obs")) else None,
             "bucket": bucket,
+            "bucket_2_ui_visible": bucket_2_ui_visible,
             "is_yieldboost": bool(is_yieldboost),
             "scenario_style": scenario_style,
             **income_yield_map.get(norm_sym(sym), {}),

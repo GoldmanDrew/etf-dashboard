@@ -67,6 +67,22 @@ YIELDBOOST_BUCKET2_PAIRS = {
     ("TMYY", "TSM"), ("TQQY", "QQQ"), ("TSYY", "TSLA"), ("XBTY", "IBIT"),
     ("YSPY", "SPY"),
 }
+YIELDBOOST_FOF_SYMBOLS = frozenset({"YBTY", "YBST"})
+
+
+def _bucket_2_ui_visible(
+    sym: str,
+    bucket: str,
+    *,
+    is_yieldboost: bool,
+    product_class: str | None,
+) -> bool:
+    if bucket != Bucket.LOW_BETA.value:
+        return True
+    ns = norm_sym(sym)
+    if product_class == "income_yieldboost_fof" or ns in YIELDBOOST_FOF_SYMBOLS:
+        return True
+    return bool(is_yieldboost)
 
 VOLATILITY_ETP_SYMBOLS = {
     "UVIX", "SVIX", "UVXY", "SVXY", "VXX", "VIXY", "VIXM",
@@ -341,6 +357,12 @@ def _build_records_from_csv():
                 else (product_class not in ("passive_low_delta", "other_structured"))
             ),
             is_yieldboost=is_yieldboost,
+            bucket_2_ui_visible=_bucket_2_ui_visible(
+                sym,
+                bkt,
+                is_yieldboost=is_yieldboost,
+                product_class=product_class,
+            ),
             scenario_style=scenario_style,
             income_yield_trailing_annual=_v2f(row, "income_yield_trailing_annual"),
             income_yield_recent_annual=_v2f(row, "income_yield_recent_annual"),
@@ -644,7 +666,8 @@ def get_summary() -> dict:
     total = len(all_recs)
 
     b1 = [r for r in all_recs if r.bucket == Bucket.HIGH_BETA.value]
-    b2 = [r for r in all_recs if r.bucket == Bucket.LOW_BETA.value]
+    b2_all = [r for r in all_recs if r.bucket == Bucket.LOW_BETA.value]
+    b2 = [r for r in b2_all if r.bucket_2_ui_visible]
     b3 = [r for r in all_recs if r.bucket == Bucket.INVERSE.value]
 
     # Best spreads (top 5)
@@ -670,6 +693,7 @@ def get_summary() -> dict:
         total_symbols=total,
         bucket_1_count=len(b1),
         bucket_2_count=len(b2),
+        bucket_2_archived_count=len(b2_all) - len(b2),
         bucket_3_count=len(b3),
         best_spreads=best_spreads,
         worst_borrows=worst_borrows,

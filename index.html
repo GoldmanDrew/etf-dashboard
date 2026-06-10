@@ -2565,6 +2565,12 @@ const isYieldBoostIncomeStrategy = r => {
 };
 /** MTYY-style Scenarios layout: single-name YieldBOOST or FoF basket (YBTY/YBST). */
 const isYieldBoostScenarioLayout = r => isYieldBoostIncomeStrategy(r) || isYieldBoostFoF(r);
+/** Bucket 2 tab: YieldBOOST (+ FoF) only; passive low-β rows stay in JSON for deep links. */
+const isBucket2UiVisible = r => (
+  r?.bucket !== 'bucket_2_low_beta'
+  || r?.bucket_2_ui_visible === true
+  || (r?.bucket === 'bucket_2_low_beta' && isYieldBoostScenarioLayout(r))
+);
 const isVolatilityEtp = r => (
   r?.product_class === 'volatility_etp'
   || VOLATILITY_ETP_SYMBOLS.has(String(r?.symbol || '').toUpperCase())
@@ -12390,6 +12396,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
     let d = [...records];
     const bf = bucketMap[activeTab];
     if (bf) d = d.filter(r => r.bucket === bf);
+    if (activeTab === 'bucket_2') d = d.filter(isBucket2UiVisible);
     if (search) {
       const s = search.toUpperCase();
       d = d.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
@@ -12426,7 +12433,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
     const c = { all: records.length, bucket_1: 0, bucket_2: 0, bucket_3: 0 };
     records.forEach(r => {
       if (r.bucket === 'bucket_1_high_beta') c.bucket_1++;
-      if (r.bucket === 'bucket_2_low_beta') c.bucket_2++;
+      if (r.bucket === 'bucket_2_low_beta' && isBucket2UiVisible(r)) c.bucket_2++;
       if (r.bucket === 'bucket_3_inverse') c.bucket_3++;
     });
     return c;
@@ -12609,7 +12616,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             {[
               { key: 'all', label: 'All ETFs' },
               { key: 'bucket_1', label: 'Bucket 1 — High β' },
-              { key: 'bucket_2', label: 'Bucket 2 — Low β' },
+              { key: 'bucket_2', label: 'Bucket 2 — YieldBOOST' },
               { key: 'bucket_3', label: 'Bucket 3 — Inverse' },
             ].map(t => (
               <div key={t.key} className={cls('tab', activeTab === t.key && 'active')}

@@ -323,6 +323,7 @@ def build_fof_dashboard_record(
         "delta": fwd.get("effective_beta"),
         "delta_n_obs": realized.get("n_days") if realized.get("ok") else None,
         "bucket": "bucket_2_low_beta",
+        "bucket_2_ui_visible": True,
         "is_yieldboost": True,
         "is_dashboard_synthetic": True,
         "scenario_style": "income_style_fof",
