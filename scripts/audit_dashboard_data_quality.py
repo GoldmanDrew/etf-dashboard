@@ -16,7 +16,7 @@ DEFAULT_JSON_GLOBS = ("data/*.json", "data/**/*.json")
 
 
 def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def _has_conflict_marker(path: Path) -> bool:
