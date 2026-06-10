@@ -11,7 +11,9 @@ from split_adjustments import (
     detect_adj_boundary,
     detect_forward_normalized_splits,
     detect_staggered_discrete_splits,
+    detect_staggered_reverse_adj_first,
     etf_adj_on_back_adjusted_forward_basis,
+    etf_adj_on_forward_normalized_basis,
     etf_adj_on_post_split_basis,
     filter_splits_needing_close_basis_fix,
     match_split_to_price_jump,
@@ -86,6 +88,22 @@ def resolve_split_context(
         (d, c, float(adj_map.get(d, c)))
         for d, c in dated
     ]
+
+    staggered_adj_first = detect_staggered_reverse_adj_first(
+        points3,
+        close_points,
+        split_events,
+    )
+    if staggered_adj_first:
+        _eff, mult, adj_boundary, close_boundary = staggered_adj_first[0]
+        return {
+            "mode": "staggered_reverse_adj_first",
+            "boundary": close_boundary,
+            "adj_boundary": adj_boundary,
+            "mult": mult,
+            "filtered": staggered_adj_first,
+            "variant": "staggered_reverse_adj_first",
+        }
 
     staggered = detect_staggered_discrete_splits(
         points3,
@@ -209,6 +227,19 @@ def _tr_mode_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> str:
         return "pre_split_back_adj" if pre_split else "post_split_back_adj_mapped"
     if mode == "continuous_close_tr":
         return "continuous_close_tr"
+    if mode == "staggered_reverse_adj_first":
+        d0 = _row_date(ds)
+        adj_boundary = ctx.get("adj_boundary")
+        close_boundary = ctx.get("boundary")
+        if d0 is None or not adj_boundary or not close_boundary:
+            return "unknown"
+        if d0 >= close_boundary:
+            return "post_split_close"
+        if d0 >= adj_boundary:
+            return "pre_split_close_scaled"
+        if math.isfinite(adj_f) and adj_f > 0:
+            return "pre_split_adj_mapped"
+        return "pre_split_close_scaled"
     if pre_split and mult > 0:
         if math.isfinite(adj_f) and adj_f > 0:
             if mult < 1.0 and etf_adj_on_back_adjusted_forward_basis(close, adj_f, mult):
@@ -340,6 +371,30 @@ def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | No
 
     if mode == "continuous_close_tr":
         return close
+
+    if mode == "staggered_reverse_adj_first":
+        d0 = _row_date(ds)
+        adj_boundary = ctx.get("adj_boundary")
+        close_boundary = ctx.get("boundary")
+        if d0 is None or not adj_boundary or not close_boundary or mult <= 0:
+            return close
+        if d0 >= close_boundary:
+            if (
+                math.isfinite(adj_f)
+                and adj_f > 0
+                and abs(adj_f / close - 1.0) <= 0.15
+            ):
+                return adj_f
+            return close
+        if d0 >= adj_boundary:
+            return close * mult
+        if math.isfinite(adj_f) and adj_f > 0:
+            if etf_adj_on_forward_normalized_basis(close, adj_f, mult):
+                return close * mult
+            if etf_adj_on_post_split_basis(close, adj_f, mult):
+                return adj_f
+            return adj_f * mult
+        return close * mult
 
     if _is_pre_split(ds, ctx) and mult > 0:
         if math.isfinite(adj_f) and adj_f > 0:

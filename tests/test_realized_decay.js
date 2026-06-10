@@ -183,6 +183,35 @@ test("pre-split adj mapped consistently across close threshold", () => {
   assert.ok(Math.abs(novRet) < 0.15, `Nov cliff ${novRet}`);
 });
 
+test("MTYY staggered adj-before-close: no TR cliff on adj switch", () => {
+  const rows = [
+    { date: "2026-05-15", close_price: 4.401, etf_adj_close: 4.334, underlying_adj_close: 170 },
+    { date: "2026-05-20", close_price: 4.26, etf_adj_close: 4.196, underlying_adj_close: 165 },
+    { date: "2026-05-21", close_price: 4.23, etf_adj_close: 4.166, underlying_adj_close: 164.85 },
+    { date: "2026-05-27", close_price: 4.04, etf_adj_close: 0.673, underlying_adj_close: 154.2 },
+    { date: "2026-05-28", close_price: 4.0, etf_adj_close: 0.667, underlying_adj_close: 151.64 },
+    { date: "2026-06-01", close_price: 3.934, etf_adj_close: 0.656, underlying_adj_close: 149.78 },
+    { date: "2026-06-02", close_price: 22.99, etf_adj_close: 3.832, underlying_adj_close: 136.08 },
+    { date: "2026-06-08", close_price: 22.515, etf_adj_close: 22.515, underlying_adj_close: 130 },
+  ];
+  const events = [{ date: "2026-06-02", mult: 6 }];
+  const tr = prepareDecayTrRows(rows, events);
+  const may21 = tr.find((x) => x.date === "2026-05-21");
+  const may27 = tr.find((x) => x.date === "2026-05-27");
+  const jun02 = tr.find((x) => x.date === "2026-06-02");
+  assert.ok(may21.trEtfPx > 24 && may21.trEtfPx < 26, `May21 TR ${may21.trEtfPx}`);
+  assert.ok(may27.trEtfPx > 23 && may27.trEtfPx < 26, `May27 TR cliff ${may21.trEtfPx} -> ${may27.trEtfPx}`);
+  assert.ok(Math.abs(may27.trEtfPx / may21.trEtfPx - 1) < 0.08, "TR should be continuous across adj switch");
+  assert.ok(jun02.trEtfPx > 22 && jun02.trEtfPx < 24, `Jun02 TR ${jun02.trEtfPx}`);
+  const daily = buildDailyLogDragSeries(tr, 0.5);
+  const h = computeHorizonPeriodReturns(daily, [5, 20], 0.09);
+  const row5 = h.horizons.find((x) => x.horizonDays === 5);
+  assert.ok(row5.grossSimple > -0.35, `5d gross too negative: ${row5.grossSimple}`);
+  const cov = summarizeTrCoverage(rows, events);
+  assert.equal(cov.splitMode, "staggered_reverse_adj_first");
+  assert.ok(cov.maxEtfDailyLogReturn < 0.35, `max jump ${cov.maxEtfDailyLogReturn}`);
+});
+
 test("summarizeTrCoverage reports split mode and joint days", () => {
   const rows = [
     { date: "2026-05-28", close_price: 4.0, etf_adj_close: 3.94, underlying_adj_close: 150 },

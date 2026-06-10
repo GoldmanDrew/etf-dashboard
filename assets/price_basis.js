@@ -90,6 +90,14 @@
     return Math.abs((a / c) / m - 1) <= relTol;
   }
 
+  function etfAdjOnForwardNormalizedBasis(close, adj, mult, relTol = 0.15) {
+    const c = toNum(close);
+    const a = toNum(adj);
+    const m = toNum(mult);
+    if (!(c > 0 && a > 0 && m > 1.05)) return false;
+    return Math.abs((a / c) * m - 1) <= relTol;
+  }
+
   function yahooAdjLooksBackAdjusted(points, effectiveDate, mult, relTol = 0.15) {
     const eff = parseDate(effectiveDate);
     const m = toNum(mult);
@@ -213,6 +221,27 @@
       const adjBoundary = detectAdjBoundary(points, ev.date, mult, relTol) || parseDate(ev.date);
       if (boundary > adjBoundary) continue;
       out.push({ date: parseDate(ev.date), mult, boundary, variant: "staggered_reverse" });
+    }
+    return out;
+  }
+
+  function detectStaggeredReverseAdjFirst(points, closePoints, events, relTol = 0.15, windowDays = 14) {
+    if (!Array.isArray(events) || !events.length) return [];
+    const out = [];
+    for (const ev of events) {
+      const mult = toNum(ev.mult);
+      if (!(mult >= 1.05)) continue;
+      const adjBoundary = detectAdjBoundary(points, ev.date, mult, relTol);
+      if (!adjBoundary) continue;
+      const closeBoundary = findCloseJumpBoundary(closePoints, mult, ev.date, windowDays, 0.18, relTol);
+      if (!closeBoundary || adjBoundary >= closeBoundary) continue;
+      out.push({
+        date: parseDate(ev.date),
+        mult,
+        adjBoundary,
+        boundary: closeBoundary,
+        variant: "staggered_reverse_adj_first",
+      });
     }
     return out;
   }
@@ -410,6 +439,19 @@
         filtered: [],
       };
     }
+    const staggeredAdjFirst = detectStaggeredReverseAdjFirst(closePoints, closePoints, events);
+    if (staggeredAdjFirst.length) {
+      const sw = staggeredAdjFirst[0];
+      return {
+        mode: "staggered_reverse_adj_first",
+        boundary: sw.boundary,
+        adjBoundary: sw.adjBoundary,
+        mult: sw.mult,
+        filtered: staggeredAdjFirst,
+        variant: sw.variant,
+      };
+    }
+
     const filtered = filterSplitsNeedingCloseBasisFix(closePoints, events, 0.15, metricRows);
     let mult = null;
     let boundary = null;
@@ -554,8 +596,27 @@
 
     if (mode === "continuous_close_tr") return close;
 
+    if (mode === "staggered_reverse_adj_first") {
+      const d0 = parseDate(point.date);
+      const adjBoundary = parseDate(ctx?.adjBoundary);
+      const closeBoundary = parseDate(ctx?.boundary);
+      if (!d0 || !adjBoundary || !closeBoundary || !(mult > 0)) return close;
+      if (d0 >= closeBoundary) {
+        if (adj > 0 && Math.abs(adj / close - 1) <= 0.15) return adj;
+        return close;
+      }
+      if (d0 >= adjBoundary) return close * mult;
+      if (adj > 0) {
+        if (etfAdjOnForwardNormalizedBasis(close, adj, mult)) return close * mult;
+        if (etfAdjOnPostSplitBasis(close, adj, mult)) return adj;
+        return adj * mult;
+      }
+      return close * mult;
+    }
+
     if (preSplit && mult > 0) {
       if (adj > 0) {
+        if (mult > 1.05 && etfAdjOnForwardNormalizedBasis(close, adj, mult)) return close * mult;
         if (mult < 1 && etfAdjOnBackAdjustedForwardBasis(close, adj, mult)) return adj;
         if (etfAdjOnPostSplitBasis(close, adj, mult)) return adj;
         return adj * mult;
@@ -600,6 +661,17 @@
       return preSplit ? "pre_split_back_adj" : "post_split_back_adj_mapped";
     }
     if (mode === "continuous_close_tr") return "continuous_close_tr";
+
+    if (mode === "staggered_reverse_adj_first") {
+      const d0 = parseDate(point.date);
+      const adjBoundary = parseDate(ctx?.adjBoundary);
+      const closeBoundary = parseDate(ctx?.boundary);
+      if (!d0 || !adjBoundary || !closeBoundary) return "unknown";
+      if (d0 >= closeBoundary) return "post_split_close";
+      if (d0 >= adjBoundary) return "pre_split_close_scaled";
+      if (adj > 0) return "pre_split_adj_mapped";
+      return "pre_split_close_scaled";
+    }
 
     if (preSplit && mult > 0) {
       if (adj > 0) {
@@ -758,6 +830,7 @@
     if (trJointDays < 20 || etfJump.maxAbsLogReturn > 0.75) quality = "poor";
 
     const primaryEtfBasis = (() => {
+      if (ctx.mode === "staggered_reverse_adj_first") return "yahoo_adj_mapped";
       if (ctx.mode === "adj_basis_switch") return "adj_basis_switch";
       if (ctx.mode === "discrete_split") {
         const mapped = (etfTrModes.pre_split_adj_mapped || 0) + (etfTrModes.post_split_adj || 0);
@@ -782,6 +855,7 @@
       jointCoveragePct: rawInputDays ? trJointDays / rawInputDays : 0,
       splitMode: ctx.mode,
       splitBoundary: ctx.boundary,
+      adjBoundary: ctx.adjBoundary || null,
       splitMult: ctx.mult,
       etfTrModes,
       primaryEtfBasis,
@@ -801,6 +875,8 @@
     confirmSplitFromSharesOrNav,
     etfAdjCloseNeedsSplitScaling,
     etfAdjOnPostSplitBasis,
+    etfAdjOnForwardNormalizedBasis,
+    detectStaggeredReverseAdjFirst,
     yahooAdjLooksBackAdjusted,
     detectAdjBasisSwitchSplits,
     splitCloseJumpRatio,

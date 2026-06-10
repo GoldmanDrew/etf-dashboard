@@ -1448,7 +1448,7 @@
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
 <script src="assets/chart_returns.js?v=cr-v2"></script>
-<script src="assets/price_basis.js?v=pb-v2"></script>
+<script src="assets/price_basis.js?v=pb-v3"></script>
 <script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab_spots.js?v=tl-spots-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v3"></script>
@@ -3910,7 +3910,9 @@ function TrCoverageBadge({ coverage, etfLabel }) {
   if (!coverage || !Number.isFinite(Number(coverage.trJointDays))) return null;
   const q = String(coverage.quality || 'good');
   const pct = (x) => (Number.isFinite(Number(x)) ? `${Math.round(Number(x) * 100)}%` : '—');
-  const splitLabel = coverage.splitMode === 'discrete_split'
+  const splitLabel = coverage.splitMode === 'staggered_reverse_adj_first'
+    ? `split ${coverage.splitMult || '?'}× adj@${coverage.adjBoundary || '?'} close@${coverage.splitBoundary || '?'}`
+    : coverage.splitMode === 'discrete_split'
     ? `split ${coverage.splitMult || '?'}× @ ${coverage.splitBoundary || '?'}`
     : coverage.splitMode === 'adj_basis_switch'
       ? `adj basis switch ${coverage.splitMult || '?'}× @ ${coverage.splitBoundary || '?'}`

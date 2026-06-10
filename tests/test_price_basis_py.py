@@ -48,6 +48,37 @@ def test_discrete_split_scales_pre_split_not_inflated_nav_tr():
     assert 20 < pre["tr_etf_px"] < 30
 
 
+def test_mtyy_staggered_adj_before_close_no_tr_cliff():
+    """Issuer metrics: Yahoo adj switches ~2026-05-27, close jumps 2026-06-02."""
+    rows = [
+        {"date": "2026-05-21", "close_price": 4.23, "etf_adj_close": 4.166, "underlying_adj_close": 164.85},
+        {"date": "2026-05-27", "close_price": 4.04, "etf_adj_close": 0.673, "underlying_adj_close": 154.2},
+        {"date": "2026-05-28", "close_price": 4.0, "etf_adj_close": 0.667, "underlying_adj_close": 151.64},
+        {"date": "2026-06-01", "close_price": 3.934, "etf_adj_close": 0.656, "underlying_adj_close": 149.78},
+        {"date": "2026-06-02", "close_price": 22.99, "etf_adj_close": 3.832, "underlying_adj_close": 136.08},
+        {"date": "2026-06-08", "close_price": 22.515, "etf_adj_close": 22.515, "underlying_adj_close": 130.0},
+    ]
+    events = [(dt.date(2026, 6, 2), 6.0)]
+    pts = [(dt.date.fromisoformat(r["date"]), float(r["close_price"])) for r in rows]
+    adj_by_date = {
+        dt.date.fromisoformat(r["date"]): float(r["etf_adj_close"])
+        for r in rows
+        if r.get("etf_adj_close") is not None
+    }
+    ctx = resolve_split_context(pts, events, metric_rows=rows, adj_by_date=adj_by_date)
+    assert ctx["mode"] == "staggered_reverse_adj_first"
+    assert ctx["adj_boundary"] == dt.date(2026, 5, 27)
+    assert ctx["boundary"] == dt.date(2026, 6, 2)
+    tr = build_tr_series_from_metrics(rows, events)
+    may21 = next(r for r in tr if r["date"] == "2026-05-21")
+    may27 = next(r for r in tr if r["date"] == "2026-05-27")
+    assert 24 < may21["tr_etf_px"] < 26
+    assert 23 < may27["tr_etf_px"] < 26
+    assert abs(may27["tr_etf_px"] / may21["tr_etf_px"] - 1.0) < 0.08
+    max_lr, _ = max_abs_log_return(tr, "tr_etf_px")
+    assert max_lr < 0.35
+
+
 def test_mtyy_issuer_decay_gross_sane_band():
     rows = []
     for i in range(55):

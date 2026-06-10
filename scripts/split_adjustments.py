@@ -499,6 +499,38 @@ def detect_staggered_discrete_splits(
     return out
 
 
+def detect_staggered_reverse_adj_first(
+    points: list[tuple[dt.date, float, float]],
+    close_points: list[tuple[dt.date, float]],
+    events: list[tuple[dt.date, float]],
+    *,
+    rel_tol: float = 0.15,
+    window_days: int = 14,
+) -> list[tuple[dt.date, float, dt.date, dt.date]]:
+    """Reverse splits where Yahoo adj switches before raw close jumps (MTYY, …)."""
+    if not events:
+        return []
+    out: list[tuple[dt.date, float, dt.date, dt.date]] = []
+    for eff, mult in events:
+        dm = float(mult)
+        if dm < 1.05:
+            continue
+        adj_boundary = detect_adj_boundary(points, eff, dm, rel_tol=rel_tol)
+        if adj_boundary is None:
+            continue
+        close_boundary = find_close_jump_boundary(
+            close_points,
+            dm,
+            eff,
+            window_days=window_days,
+            rel_tol=rel_tol,
+        )
+        if close_boundary is None or adj_boundary >= close_boundary:
+            continue
+        out.append((eff, dm, adj_boundary, close_boundary))
+    return out
+
+
 def _close_jump_near_date(
     close_points: list[tuple[dt.date, float]],
     mult: float,
@@ -844,6 +876,26 @@ def etf_adj_on_post_split_basis(
     ):
         return False
     return abs((adj / close) / mult - 1.0) <= rel_tol
+
+
+def etf_adj_on_forward_normalized_basis(
+    close: float,
+    adj: float,
+    mult: float,
+    *,
+    rel_tol: float = 0.15,
+) -> bool:
+    """True when adj is on new-share basis while close is still pre-split (adj × mult ≈ close)."""
+    if not (
+        math.isfinite(close)
+        and math.isfinite(adj)
+        and math.isfinite(mult)
+        and close > 0
+        and adj > 0
+        and mult > 1.05
+    ):
+        return False
+    return abs((adj / close) * mult - 1.0) <= rel_tol
 
 
 def corporate_actions_build_time(path: Path | None = None) -> dt.datetime | None:
