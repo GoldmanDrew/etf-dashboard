@@ -200,6 +200,49 @@ test("oscillating provider basis segments before split are normalized", () => {
   assert.ok(maxJump < 0.35, `oscillating basis cliff on ${at}: ${maxJump}`);
 });
 
+test("fabricated adj cliff (QBTZ pre x3 / post /3) falls back to close basis", () => {
+  const rows = [
+    { date: "2026-03-18", close_price: 41.94, etf_adj_close: 125.82, underlying_adj_close: 18.0 },
+    { date: "2026-03-19", close_price: 43.98, etf_adj_close: 131.94, underlying_adj_close: 18.2 },
+    { date: "2026-03-20", close_price: 45.63, etf_adj_close: 136.89, underlying_adj_close: 19.3 },
+    { date: "2026-03-23", close_price: 41.73, etf_adj_close: 13.91, underlying_adj_close: 25.74 },
+    { date: "2026-03-24", close_price: 44.30, etf_adj_close: 14.77, underlying_adj_close: 25.5 },
+    { date: "2026-03-25", close_price: 42.95, etf_adj_close: 14.32, underlying_adj_close: 27.5 },
+  ];
+  const events = [{ date: "2026-03-23", mult: 3 }];
+  const cliffs = PB.findFabricatedAdjCliffs(
+    rows.map((r) => ({ date: r.date, close: r.close_price, adj: r.etf_adj_close })),
+    events,
+  );
+  assert.equal(cliffs.length, 1);
+  assert.equal(cliffs[0].date, "2026-03-23");
+  assert.ok(Math.abs(cliffs[0].factor - 9) < 0.5, cliffs[0].factor);
+  const tr = PB.buildTrSeriesFromMetrics(rows, events);
+  assert.equal(tr.length, rows.length);
+  for (let i = 0; i < rows.length; i += 1) {
+    assert.ok(Math.abs(tr[i].trEtfPx / rows[i].close_price - 1) < 1e-9, `${tr[i].date}: ${tr[i].trEtfPx}`);
+  }
+  const { maxJump, at } = maxEtfJump(tr);
+  assert.ok(maxJump < 0.25, `fabricated cliff leaked at ${at}: ${maxJump}`);
+});
+
+test("legit back-adjusted reverse split is not treated as fabricated", () => {
+  const points = [
+    { date: "2026-05-01", close: 3.72, adj: 37.2 },
+    { date: "2026-05-04", close: 3.79, adj: 37.9 },
+    { date: "2026-05-05", close: 37.51, adj: 37.51 },
+  ];
+  assert.deepEqual(PB.findFabricatedAdjCliffs(points, [{ date: "2026-05-05", mult: 10 }]), []);
+});
+
+test("undeclared back-adjustment (close jump, smooth adj) is not fabricated", () => {
+  const points = [
+    { date: "2024-01-01", close: 100, adj: 100 },
+    { date: "2024-01-02", close: 50, adj: 99 },
+  ];
+  assert.deepEqual(PB.findFabricatedAdjCliffs(points, []), []);
+});
+
 test("future split does not rewrite old split-sized market move", () => {
   const rows = [
     { date: "2024-08-21", close_price: 448.0, etf_adj_close: 430.208099, underlying_adj_close: 62.377998 },

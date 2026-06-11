@@ -894,7 +894,7 @@ Five workflows + shared actions (`commit-data`, `deploy-pages`):
 
 | Workflow | Cadence | What it does |
 |---|---|---|
-| `nightly.yml` | Tue–Sat 6 AM ET | ETF metrics ingest + scoring + **full** `build_data.py` → one commit + deploy |
+| `nightly.yml` | Tue–Sat 6 AM ET (10/11 UTC crons; resolve-slot picks the DST-correct slot — never gates on wall-clock hour because GitHub delivers scheduled runs hours late) | ETF metrics ingest + scoring + **full** `build_data.py` → one commit + deploy |
 | `market-hours.yml` | Every 15 min | `scripts/ci_tick.py` runs **NAV then intraday** when stale (~30m / ~5m RTH cadence), then one other stale rotation task (borrow / options / YB VRP) → commit + deploy |
 | `build-and-deploy.yml` | Mon–Fri 4:30 PM ET + code push + manual | Full `build_data.py` after ls-algo screener + deploy |
 | `update-corporate-actions.yml` | Every 6 h | News / corp actions → commit + deploy |
@@ -1182,7 +1182,8 @@ Split-aware TR must stay in sync across **`scripts/split_adjustments.py`**, **`a
 
 - **`corporate_actions.json` is authoritative** for the declared ratio (`ratio_from / ratio_to`). When the observed close jump is within ~18% of that mult, accept the event even if a different whitelist ratio is nearer (APLZ 5.64× jump with declared 5×).
 - **Mechanical pre-split scaling applies only when raw close jumps** at the event. Continuous Yahoo close through the split (MTYY) must remain `splitMode=continuous` — never double-scale.
-- **`etf_adj_close == close_price` on recent listings is not back-adjusted.** Ingest/backfill scales pre-split `etf_adj_close` via `backfill_split_adjusted_etf_adj_close`; Decay / Backtest / Stats route through `PriceBasis.buildTrSeriesFromMetrics`.
+- **`etf_adj_close == close_price` on recent listings is not back-adjusted.** Ingest/backfill scales pre-split `etf_adj_close` via `backfill_split_adjusted_etf_adj_close` — but **only when the raw close actually jumps at the event** (`filter_splits_needing_close_basis_fix`). Continuous close through a declared split (QBTZ 1-for-3) means adj==close is already correct; scaling it fabricates a cliff. Decay / Backtest / Stats route through `PriceBasis.buildTrSeriesFromMetrics`.
+- **Fabricated adj-cliff repair + guard (June 2026).** `ingest_etf_metrics.repair_fabricated_etf_adj_basis` rebuilds `etf_adj_close` from close × verified split factors whenever the adj series has a return cliff vs close that no declared split explains (`price_basis.find_fabricated_adj_cliffs`, mirrored in `assets/price_basis.js::findFabricatedAdjCliffs`). Both TR builders (`build_tr_series_from_metrics` / `buildTrSeriesFromMetrics`) sanitize such adj columns to null before resolving split context, and `scripts/audit_dashboard_data_quality.py` fails on any remaining fabricated cliff and on systemic carry-forward ingest stalls.
 - **Issuer confirmation** (`shares_outstanding`, NAV step) is a fallback when price bars do not span the split session.
 - **Regression gate:** `scripts/audit_split_tr_quality.py` (nightly, `continue-on-error`) flags `maxAbsLogReturn > 35%` within ±7 days of corp splits and `splitMode=continuous` when adj≡close.
 

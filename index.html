@@ -5200,6 +5200,12 @@ function repairEtfMetricsShareOutliers(rows) {
   });
 }
 
+function isCarryForwardMetricsRow(m) {
+  return String(m?.source_url || '').startsWith('carry_forward://')
+    || String(m?.source_provider || '').toLowerCase().startsWith('carry_forward')
+    || String(m?.stale_kind || '').toLowerCase() === 'carry_forward';
+}
+
 function buildTotalReturnMetricsSeries(rawRows, distributions) {
   const okRaw = Array.isArray(rawRows) ? rawRows.filter((x) => String(x?.status || '').toLowerCase() === 'ok') : [];
   const ok = repairEtfMetricsShareOutliers(okRaw).sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
@@ -8618,6 +8624,20 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="scenario-title">ETF Metrics Daily Time Series</div>
                 <div className="scenario-sub">{etfSym} — {etfMetricsSeries.length} observations</div>
               </div>
+              {(() => {
+                let staleTail = 0;
+                for (let i = etfMetricsSeries.length - 1; i >= 0; i -= 1) {
+                  if (isCarryForwardMetricsRow(etfMetricsSeries[i])) staleTail += 1; else break;
+                }
+                if (staleTail < 3) return null;
+                const lastReal = [...etfMetricsSeries].reverse().find((m) => !isCarryForwardMetricsRow(m));
+                const lastRealDate = lastReal ? String(lastReal.date || '').slice(0, 10) : 'unknown';
+                return (
+                  <div className="scenario-warning" style={{ marginTop: 6 }}>
+                    Issuer feed stale: the last {staleTail} rows are carried forward — last real data {lastRealDate}. Recent NAV / AUM / prem-disc values repeat stale prints.
+                  </div>
+                );
+              })()}
               <div className="metrics-stack">
                 <SimpleSeriesPlot
                   series={etfMetricsChartSeries}
@@ -8725,7 +8745,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <td>{fmtMoney(Number(m.aum))}</td>
                           <td>{fmtSharesCount(Number(m.shares_outstanding))}</td>
                           <td>{fmtSharesTradedStat(m.shares_traded)}</td>
-                          <td className={String(m.status || '').includes('repaired') ? 'val-warning' : ''}>{m.status || '—'}</td>
+                          <td className={String(m.status || '').includes('repaired') || isCarryForwardMetricsRow(m) ? 'val-warning' : ''}>
+                            {m.status || '—'}{isCarryForwardMetricsRow(m) ? ' · carry-fwd' : ''}
+                          </td>
                         </tr>
                       );
                     })}

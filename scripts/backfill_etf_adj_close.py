@@ -28,6 +28,7 @@ from ingest_etf_metrics import (  # noqa: E402
     backfill_etf_adj_close_gaps,
     backfill_split_adjusted_etf_adj_close,
     load_existing,
+    repair_fabricated_etf_adj_basis,
     save_outputs,
     validate_df,
 )
@@ -64,10 +65,13 @@ def main() -> None:
     if n_copy:
         LOGGER.info("etf_adj_close from close_price fallback: +%d", n_copy)
     updated = backfill_split_adjusted_etf_adj_close(updated)
+    updated, n_fab = repair_fabricated_etf_adj_basis(updated)
+    if n_fab:
+        LOGGER.info("Repaired fabricated adj basis on %d row(s)", n_fab)
     after = int(pd.to_numeric(updated["etf_adj_close"], errors="coerce").notna().sum())
     LOGGER.info("etf_adj_close non-null: %d -> %d (+%d)", before, after, after - before)
 
-    if after <= before and args.only_missing:
+    if after <= before and n_fab == 0 and args.only_missing:
         LOGGER.info("No new etf_adj_close values; skipping save.")
         return
 

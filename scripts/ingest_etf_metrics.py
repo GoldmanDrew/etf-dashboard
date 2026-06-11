@@ -56,6 +56,7 @@ from split_adjustments import (
     detect_adj_basis_switch_splits,
     detect_adj_boundary,
     etf_adj_close_needs_split_scaling,
+    filter_splits_needing_close_basis_fix,
     load_split_execution_events_for_ticker,
     load_split_hints_from_corporate_actions,
 )
@@ -1374,7 +1375,13 @@ def backfill_split_adjusted_etf_adj_close(
     *,
     corporate_actions_path: Path | None = None,
 ) -> pd.DataFrame:
-    """Scale pre-split ``etf_adj_close`` when Yahoo leaves it identical to raw ``close_price``."""
+    """Scale pre-split ``etf_adj_close`` when Yahoo leaves it identical to raw ``close_price``.
+
+    Only splits verified by an actual raw-close jump are applied. When the provider
+    close series is continuous through a declared split (Yahoo already serves the
+    post-split basis for the whole history, e.g. QBTZ 1-for-3), ``adj == close`` is
+    the correct continuous basis and mechanical scaling would fabricate a cliff.
+    """
     if df.empty or "etf_adj_close" not in df.columns or "close_price" not in df.columns:
         return df
     out = df.copy()
@@ -1382,11 +1389,26 @@ def backfill_split_adjusted_etf_adj_close(
     out["ticker"] = out["ticker"].astype(str).str.upper()
     n_scaled = 0
     for ticker in out["ticker"].unique():
-        events = load_split_execution_events_for_ticker(ticker, corporate_actions_path)
-        if not events:
+        declared = load_split_execution_events_for_ticker(ticker, corporate_actions_path)
+        if not declared:
             continue
         m = out["ticker"] == ticker
         g = out.loc[m].sort_values("date")
+        pts: list[tuple[date, float, float]] = []
+        for _, row in g.iterrows():
+            close = pd.to_numeric(row.get("close_price"), errors="coerce")
+            adj = pd.to_numeric(row.get("etf_adj_close"), errors="coerce")
+            if not (math.isfinite(float(close)) and float(close) > 0):
+                continue
+            a = float(adj) if math.isfinite(float(adj)) and float(adj) > 0 else float(close)
+            pts.append((row["date"], float(close), a))
+        events = filter_splits_needing_close_basis_fix(
+            pts,
+            declared,
+            metric_rows=g.to_dict("records"),
+        )
+        if not events:
+            continue
         for ix, row in g.iterrows():
             d_curr = row["date"]
             close = pd.to_numeric(row.get("close_price"), errors="coerce")
@@ -1449,6 +1471,66 @@ def normalize_adj_basis_switch_etf_adj_close(
     if n_norm > 0:
         LOGGER.info("normalize adj-basis-switch etf_adj_close on %d post-split row(s)", n_norm)
     return out
+
+
+def repair_fabricated_etf_adj_basis(
+    df: pd.DataFrame,
+    *,
+    corporate_actions_path: Path | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """Rebuild ``etf_adj_close`` from close when the adj series has fabricated cliffs.
+
+    Historic normalizer bugs could scale pre-split rows up while post-split rows
+    were mapped down (QBTZ: pre x3, post /3 -> fake 9x cliff). Detect adj-vs-close
+    return divergences that no declared split explains and rebuild the column as
+    ``close x cum_split_factor`` over close-jump-verified splits only.
+    """
+    if df.empty or "etf_adj_close" not in df.columns or "close_price" not in df.columns:
+        return df, 0
+    from price_basis import find_fabricated_adj_cliffs
+
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    n_repaired = 0
+    for ticker in out["ticker"].unique():
+        declared = load_split_execution_events_for_ticker(ticker, corporate_actions_path)
+        m = out["ticker"] == ticker
+        g = out.loc[m].sort_values("date")
+        rows = g.to_dict("records")
+        cliffs = find_fabricated_adj_cliffs(rows, declared)
+        if not cliffs:
+            continue
+        verified: list[tuple[date, float]] = []
+        if declared:
+            close_only_pts: list[tuple[date, float, float]] = []
+            for row in rows:
+                close = pd.to_numeric(row.get("close_price"), errors="coerce")
+                if math.isfinite(float(close)) and float(close) > 0:
+                    close_only_pts.append((row["date"], float(close), float(close)))
+            verified = filter_splits_needing_close_basis_fix(
+                close_only_pts,
+                declared,
+                metric_rows=rows,
+            )
+        for ix, row in g.iterrows():
+            close = pd.to_numeric(row.get("close_price"), errors="coerce")
+            if not (math.isfinite(float(close)) and float(close) > 0):
+                continue
+            rebuilt = float(close) * cum_split_factor_to_latest(row["date"], verified)
+            old = pd.to_numeric(row.get("etf_adj_close"), errors="coerce")
+            if not math.isfinite(float(old)) or abs(float(old) - rebuilt) > 1e-9:
+                out.loc[ix, "etf_adj_close"] = rebuilt
+                n_repaired += 1
+        LOGGER.warning(
+            "repaired fabricated etf_adj_close basis for %s: %d cliff(s) at %s",
+            ticker,
+            len(cliffs),
+            ", ".join(str(c["date"]) for c in cliffs[:4]),
+        )
+    if n_repaired > 0:
+        LOGGER.info("rebuilt etf_adj_close on %d row(s) with fabricated split basis", n_repaired)
+    return out, n_repaired
 
 
 def yahoo_join_dates_series(dates: pd.Series, urls: pd.Series | None) -> pd.Series:
@@ -2514,6 +2596,9 @@ def main() -> None:
         LOGGER.info("Backfilled etf_adj_close from close_price on %d row(s)", n_adj_close)
     merged = backfill_split_adjusted_etf_adj_close(merged)
     merged = normalize_adj_basis_switch_etf_adj_close(merged)
+    merged, n_fab = repair_fabricated_etf_adj_basis(merged)
+    if n_fab:
+        LOGGER.info("Repaired fabricated adj basis on %d row(s)", n_fab)
     merged, n_vol_bf = backfill_shares_traded_gaps(merged)
     if n_vol_bf:
         LOGGER.info("Backfilled shares_traded on %d historical row(s)", n_vol_bf)

@@ -7,8 +7,9 @@ name: Nightly Metrics & Full Build
 on:
   schedule:
     # Two UTC slots cover 6 AM ET across DST (10 UTC = EDT, 11 UTC = EST).
-    # The resolve-slot job exits non-6 AM slots; cancel-in-progress MUST stay
-    # false or the 11 UTC placeholder run kills the in-flight 10 UTC ingest.
+    # resolve-slot keeps only the slot matching the current DST offset (delivery
+    # can be hours late, so never gate on wall-clock hour); cancel-in-progress
+    # MUST stay false or the 11 UTC placeholder run kills the in-flight ingest.
     - cron: "0 10 * * 1-6"
     - cron: "0 11 * * 1-6"
   workflow_dispatch:
@@ -42,14 +43,25 @@ jobs:
           from datetime import datetime
           import pytz
           now_et = datetime.now(pytz.timezone("America/New_York"))
-          print(f"{now_et.hour} {now_et.weekday()}")
+          print(f"{now_et.hour} {now_et.weekday()} {int(bool(now_et.dst()))}")
           PY
           )
           ET_HOUR=$(echo "$SLOT" | awk '{print $1}')
           ET_DOW=$(echo "$SLOT" | awk '{print $2}')
-          echo "Current ET hour=$ET_HOUR weekday(0=Mon)=$ET_DOW"
-          if [ "$ET_HOUR" != "6" ]; then
-            echo "Not 6 AM ET; skipping nightly."
+          ET_DST=$(echo "$SLOT" | awk '{print $3}')
+          SCHED="${{ github.event.schedule }}"
+          echo "Current ET hour=$ET_HOUR weekday(0=Mon)=$ET_DOW dst=$ET_DST cron=$SCHED"
+          # Pick the cron slot that maps to 6 AM ET under the current UTC offset.
+          # GitHub frequently delivers scheduled runs hours late, so gating on the
+          # wall-clock hour silently skipped the entire ingest (no metrics for days).
+          if [ "$SCHED" = "0 10 * * 1-6" ] && [ "$ET_DST" != "1" ]; then
+            echo "10 UTC slot but EST in effect; the 11 UTC slot owns today."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "monday_catchup=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$SCHED" = "0 11 * * 1-6" ] && [ "$ET_DST" = "1" ]; then
+            echo "11 UTC slot but EDT in effect; the 10 UTC slot owns today."
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "monday_catchup=false" >> "$GITHUB_OUTPUT"
             exit 0

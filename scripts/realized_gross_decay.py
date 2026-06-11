@@ -17,6 +17,7 @@ from price_basis import (
     build_tr_series_from_metrics,
     parse_split_events_from_corp,
     resolve_split_context,
+    sanitize_fabricated_adj_basis,
 )
 
 TRADING_DAYS = 252
@@ -321,6 +322,7 @@ def compute_gross_decay_annual(
     rows = latest_contiguous_metrics_segment(
         [r for r in rows if _metrics_row_has_usable_prices(r)]
     )
+    rows = sanitize_fabricated_adj_basis(rows, split_events or [])
     tr = build_tr_series_from_metrics(rows, split_events or [])
     if len(tr) < min_obs + 1:
         return None

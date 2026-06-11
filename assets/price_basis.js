@@ -702,6 +702,54 @@
     };
   }
 
+  const FABRICATED_ADJ_MIN_LOG_DIVERGENCE = Math.log(1.8);
+  const FABRICATED_ADJ_EVENT_WINDOW_DAYS = 7;
+  const FABRICATED_ADJ_MULT_REL_TOL = 0.25;
+
+  function daysBetween(isoA, isoB) {
+    const a = Date.parse(`${isoA}T00:00:00Z`);
+    const b = Date.parse(`${isoB}T00:00:00Z`);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return Infinity;
+    return Math.abs(b - a) / 86400000;
+  }
+
+  /**
+   * Mirror of scripts/price_basis.py::find_fabricated_adj_cliffs — dates where
+   * the adjusted series jumps relative to close without a matching declared split.
+   */
+  function findFabricatedAdjCliffs(points, splitEvents) {
+    const pts = (Array.isArray(points) ? points : [])
+      .filter((p) => p && p.date && p.close > 0 && p.adj > 0)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    if (pts.length < 2) return [];
+    const events = (Array.isArray(splitEvents) ? splitEvents : [])
+      .map((ev) => ({ date: parseDate(ev && ev.date), mult: toNum(ev && ev.mult) }))
+      .filter((ev) => ev.date && ev.mult > 0);
+    const cliffs = [];
+    for (let i = 1; i < pts.length; i += 1) {
+      const adjRet = Math.log(pts[i].adj / pts[i - 1].adj);
+      const closeRet = Math.log(pts[i].close / pts[i - 1].close);
+      const divergence = adjRet - closeRet;
+      if (Math.abs(divergence) < FABRICATED_ADJ_MIN_LOG_DIVERGENCE) continue;
+      // Provider back-adjustment shows up as a close jump with a smooth adj
+      // series — legitimate even when the split is missing from declared
+      // events. Only the adjusted series carrying the jump is fabricated.
+      if (Math.abs(adjRet) <= Math.abs(closeRet)) continue;
+      const factor = Math.exp(Math.abs(divergence));
+      let explained = false;
+      for (const ev of events) {
+        if (daysBetween(pts[i].date, ev.date) > FABRICATED_ADJ_EVENT_WINDOW_DAYS) continue;
+        const big = ev.mult >= 1 ? ev.mult : 1 / ev.mult;
+        if (Math.abs(factor / big - 1) <= FABRICATED_ADJ_MULT_REL_TOL) {
+          explained = true;
+          break;
+        }
+      }
+      if (!explained) cliffs.push({ date: pts[i].date, factor, divergence });
+    }
+    return cliffs;
+  }
+
   function repairSplitOutlierBars(tr, ctx) {
     const boundary = parseDate(ctx?.boundary);
     if (!boundary || !Array.isArray(tr) || tr.length < 3) return tr;
@@ -808,8 +856,11 @@
     const sorted = (Array.isArray(rows) ? rows : [])
       .filter((row) => parseDate(row && row.date))
       .sort((a, b) => parseDate(a.date).localeCompare(parseDate(b.date)));
-    const points = sorted.map(metricsRowToPoint).filter((p) => p.date && p.close > 0);
+    let points = sorted.map(metricsRowToPoint).filter((p) => p.date && p.close > 0);
     if (!points.length) return [];
+    if (findFabricatedAdjCliffs(points, splitEvents || []).length) {
+      points = points.map((p) => ({ ...p, adj: NaN }));
+    }
     const closePoints = points.map((p) => ({ date: p.date, close: p.close, adj: p.adj }));
     const ctx = resolveSplitContext(closePoints, splitEvents || [], sorted);
     if (ctx.mode === "adj_basis_switch") {
@@ -968,6 +1019,7 @@
     summarizeTrCoverage,
     metricsRowToPoint,
     normalizeSplitSizedBasisJumps,
+    findFabricatedAdjCliffs,
   };
 
   if (typeof module !== "undefined" && module.exports) {

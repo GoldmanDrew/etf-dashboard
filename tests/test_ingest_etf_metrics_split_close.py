@@ -218,6 +218,92 @@ def test_backfill_split_adjusted_etf_adj_close_import_and_scales_pre_split(tmp_p
     assert abs(post - 37.51) < 0.01
 
 
+def _qbtz_ca(tmp_path: Path) -> Path:
+    ca = tmp_path / "ca.json"
+    ca.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "type": "reverse_split",
+                        "ticker": "QBTZ",
+                        "execution_date": "2026-03-23",
+                        "ratio_from": 3.0,
+                        "ratio_to": 1.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return ca
+
+
+def test_backfill_split_adjusted_skips_continuous_close(tmp_path: Path):
+    """QBTZ regression: continuous Yahoo close through a declared reverse split
+    means adj==close is the correct basis; mechanical pre-split scaling fabricated
+    a 9x cliff. No close jump -> no scaling."""
+    ca = _qbtz_ca(tmp_path)
+    df = pd.DataFrame(
+        [
+            {"date": "2026-03-19", "ticker": "QBTZ", "close_price": 43.98, "etf_adj_close": 43.98},
+            {"date": "2026-03-20", "ticker": "QBTZ", "close_price": 45.63, "etf_adj_close": 45.63},
+            {"date": "2026-03-23", "ticker": "QBTZ", "close_price": 41.73, "etf_adj_close": 41.73},
+            {"date": "2026-03-24", "ticker": "QBTZ", "close_price": 44.30, "etf_adj_close": 44.30},
+        ]
+    )
+    out = iem.backfill_split_adjusted_etf_adj_close(df, corporate_actions_path=ca)
+    for _, row in out.iterrows():
+        assert abs(float(row["etf_adj_close"]) - float(row["close_price"])) < 1e-9
+
+
+def test_repair_fabricated_etf_adj_basis_rebuilds_qbtz_corruption(tmp_path: Path):
+    """Pre rows scaled x3 and post rows mapped /3 -> rebuild adj from close."""
+    ca = _qbtz_ca(tmp_path)
+    df = pd.DataFrame(
+        [
+            {"date": "2026-03-19", "ticker": "QBTZ", "close_price": 43.98, "etf_adj_close": 131.94},
+            {"date": "2026-03-20", "ticker": "QBTZ", "close_price": 45.63, "etf_adj_close": 136.89},
+            {"date": "2026-03-23", "ticker": "QBTZ", "close_price": 41.73, "etf_adj_close": 13.91},
+            {"date": "2026-03-24", "ticker": "QBTZ", "close_price": 44.30, "etf_adj_close": 14.77},
+        ]
+    )
+    out, n = iem.repair_fabricated_etf_adj_basis(df, corporate_actions_path=ca)
+    assert n == 4
+    for _, row in out.iterrows():
+        assert abs(float(row["etf_adj_close"]) - float(row["close_price"])) < 1e-9
+
+
+def test_repair_fabricated_noop_on_legit_back_adjustment(tmp_path: Path):
+    ca = tmp_path / "ca.json"
+    ca.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "type": "reverse_split",
+                        "ticker": "BAIG",
+                        "execution_date": "2026-05-05",
+                        "ratio_from": 10.0,
+                        "ratio_to": 1.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    df = pd.DataFrame(
+        [
+            {"date": "2026-05-01", "ticker": "BAIG", "close_price": 3.72, "etf_adj_close": 37.2},
+            {"date": "2026-05-04", "ticker": "BAIG", "close_price": 3.79, "etf_adj_close": 37.9},
+            {"date": "2026-05-05", "ticker": "BAIG", "close_price": 37.51, "etf_adj_close": 37.51},
+        ]
+    )
+    out, n = iem.repair_fabricated_etf_adj_basis(df, corporate_actions_path=ca)
+    assert n == 0
+    assert abs(float(out.iloc[0]["etf_adj_close"]) - 37.2) < 1e-9
+
+
 def test_merge_close_prices_attaches_yahoo_volume_as_shares_traded():
     base = pd.DataFrame([
         _row("2026-04-01", nav=10.0, sh=1e6, close=9.9, aum=10e6, ticker="VOL"),

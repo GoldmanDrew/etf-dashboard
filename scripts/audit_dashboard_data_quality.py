@@ -12,11 +12,19 @@ from typing import Any
 
 
 REPO = Path(__file__).resolve().parent.parent
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
 DASHBOARD_JSON = REPO / "data" / "dashboard_data.json"
 METRICS_PARQUET = REPO / "data" / "etf_metrics_daily.parquet"
+CORP_ACTIONS_JSON = REPO / "data" / "corporate_actions.json"
 DEFAULT_JSON_GLOBS = ("data/*.json", "data/**/*.json")
 MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45
 HARD_LIFECYCLE_GAP_DAYS = 365
+STALE_TAIL_CARRY_FORWARD_ROWS = 3
+STALE_FEED_MAX_LAG_BDAYS = 4
+SYSTEMIC_STALE_FRACTION = 0.5
 
 
 def _load_json(path: Path) -> Any:
@@ -97,6 +105,92 @@ def _tail_window_lifecycle_gap(rows: list[dict[str, Any]], obs: int) -> int | No
         ):
             max_bad_gap = max(max_bad_gap or 0, gap)
     return max_bad_gap
+
+
+def _is_carry_forward_row(row: dict[str, Any]) -> bool:
+    return (
+        str(row.get("source_url") or "").startswith("carry_forward://")
+        or str(row.get("source_provider") or "").lower().startswith("carry_forward")
+        or str(row.get("stale_kind") or "").lower() == "carry_forward"
+    )
+
+
+def _business_days_between(d0: dt.date, d1: dt.date) -> int:
+    if d1 <= d0:
+        return 0
+    days = 0
+    cur = d0
+    while cur < d1:
+        cur += dt.timedelta(days=1)
+        if cur.weekday() < 5:
+            days += 1
+    return days
+
+
+def audit_fabricated_adj_basis(
+    metrics_by_symbol: dict[str, list[dict[str, Any]]],
+    corp_payload: dict[str, Any] | None,
+) -> list[str]:
+    """Fail when any ticker's etf_adj_close has a cliff no declared split explains."""
+    try:
+        from price_basis import find_fabricated_adj_cliffs, parse_split_events_from_corp
+    except ImportError as exc:
+        return [f"price_basis import failed for adj-basis audit: {exc}"]
+    errors: list[str] = []
+    for sym, rows in sorted(metrics_by_symbol.items()):
+        events = parse_split_events_from_corp(corp_payload or {"events": []}, sym)
+        cliffs = find_fabricated_adj_cliffs(rows, events)
+        for cliff in cliffs[:2]:
+            errors.append(
+                f"{sym}: fabricated etf_adj_close cliff on {cliff['date']} "
+                f"(x{cliff['factor']:.2f} vs close; no matching split)"
+            )
+    return errors
+
+
+def audit_stale_price_feeds(
+    metrics_by_symbol: dict[str, list[dict[str, Any]]],
+) -> tuple[list[str], list[str]]:
+    """Warn on per-ticker stale tails; fail when the whole ingest has stalled."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    last_real_by_sym: dict[str, dt.date | None] = {}
+    for sym, rows in metrics_by_symbol.items():
+        dated = sorted(
+            ((d, r) for r in rows if (d := _date(r.get("date"))) is not None),
+            key=lambda x: x[0],
+        )
+        if not dated:
+            continue
+        real_dates = [d for d, r in dated if not _is_carry_forward_row(r)]
+        last_real_by_sym[sym] = real_dates[-1] if real_dates else None
+        tail_cf = 0
+        for _d, row in reversed(dated):
+            if _is_carry_forward_row(row):
+                tail_cf += 1
+            else:
+                break
+        if tail_cf >= STALE_TAIL_CARRY_FORWARD_ROWS:
+            warnings.append(
+                f"{sym}: last {tail_cf} metrics rows are carry_forward "
+                f"(last real data {real_dates[-1] if real_dates else 'never'})"
+            )
+    real_dates_all = [d for d in last_real_by_sym.values() if d is not None]
+    if not real_dates_all:
+        return errors, warnings
+    max_real = max(real_dates_all)
+    stale_syms = [
+        sym
+        for sym, d in last_real_by_sym.items()
+        if d is None or _business_days_between(d, max_real) > STALE_FEED_MAX_LAG_BDAYS
+    ]
+    frac = len(stale_syms) / max(1, len(last_real_by_sym))
+    if frac > SYSTEMIC_STALE_FRACTION:
+        errors.append(
+            f"systemic ingest stall: {len(stale_syms)}/{len(last_real_by_sym)} tickers "
+            f"have no real metrics within {STALE_FEED_MAX_LAG_BDAYS} business days of {max_real}"
+        )
+    return errors, warnings
 
 
 def audit_dashboard(
@@ -193,6 +287,18 @@ def main() -> int:
         )
         errors.extend(dash_errors)
         warnings.extend(dash_warnings)
+
+    if metrics_by_symbol:
+        corp_payload = None
+        if CORP_ACTIONS_JSON.exists():
+            try:
+                corp_payload = _load_json(CORP_ACTIONS_JSON)
+            except (OSError, json.JSONDecodeError) as exc:
+                warnings.append(f"corporate_actions.json unreadable: {exc}")
+        errors.extend(audit_fabricated_adj_basis(metrics_by_symbol, corp_payload))
+        stale_errors, stale_warnings = audit_stale_price_feeds(metrics_by_symbol)
+        errors.extend(stale_errors)
+        warnings.extend(stale_warnings)
 
     if errors:
         print("Dashboard data quality failures:")

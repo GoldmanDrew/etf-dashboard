@@ -14,9 +14,11 @@ sys.path.insert(0, str(SCRIPTS))
 from price_basis import (  # noqa: E402
     build_tr_series_from_metrics,
     detect_split_boundary,
+    find_fabricated_adj_cliffs,
     max_abs_log_return,
     parse_split_events_from_corp,
     resolve_split_context,
+    sanitize_fabricated_adj_basis,
 )
 from split_adjustments import (
     filter_splits_needing_close_basis_fix as sa_filter,
@@ -486,3 +488,80 @@ def test_future_split_does_not_rewrite_old_split_sized_market_move():
     assert ctx["mode"] == "continuous"
     tr = build_tr_series_from_metrics(rows, [(dt.date(2026, 3, 19), 2.0)])
     assert tr[0]["tr_etf_px"] == pytest.approx(430.208099, rel=1e-6)
+
+
+def _qbtz_style_corrupted_rows() -> list[dict]:
+    """Continuous close through a declared 1-for-3 reverse split, with adj
+    corrupted to close*3 pre-split and close/3 post-split (fake 9x cliff)."""
+    closes = [
+        ("2026-03-16", 37.74, 113.22),
+        ("2026-03-17", 37.62, 112.86),
+        ("2026-03-18", 41.94, 125.82),
+        ("2026-03-19", 43.98, 131.94),
+        ("2026-03-20", 45.63, 136.89),
+        ("2026-03-23", 41.73, 13.91),
+        ("2026-03-24", 44.30, 14.77),
+        ("2026-03-25", 42.95, 14.32),
+        ("2026-03-26", 50.90, 16.97),
+        ("2026-03-27", 55.97, 18.66),
+    ]
+    return [
+        {
+            "date": d,
+            "close_price": close,
+            "etf_adj_close": adj,
+            "underlying_adj_close": 10.0 + i * 0.1,
+        }
+        for i, (d, close, adj) in enumerate(closes)
+    ]
+
+
+def test_find_fabricated_adj_cliffs_flags_qbtz_double_misadjustment():
+    rows = _qbtz_style_corrupted_rows()
+    events = [(dt.date(2026, 3, 23), 3.0)]
+    cliffs = find_fabricated_adj_cliffs(rows, events)
+    assert len(cliffs) == 1
+    assert cliffs[0]["date"] == dt.date(2026, 3, 23)
+    assert cliffs[0]["factor"] == pytest.approx(9.0, rel=0.05)
+
+
+def test_find_fabricated_adj_cliffs_accepts_legit_back_adjustment():
+    rows = [
+        {"date": "2026-05-01", "close_price": 3.72, "etf_adj_close": 37.2, "underlying_adj_close": 10},
+        {"date": "2026-05-04", "close_price": 3.79, "etf_adj_close": 37.9, "underlying_adj_close": 10},
+        {"date": "2026-05-05", "close_price": 37.51, "etf_adj_close": 37.51, "underlying_adj_close": 10},
+    ]
+    events = [(dt.date(2026, 5, 5), 10.0)]
+    assert find_fabricated_adj_cliffs(rows, events) == []
+
+
+def test_find_fabricated_adj_cliffs_accepts_undeclared_back_adjustment():
+    # Provider back-adjusted a split we have no declared event for: close jumps,
+    # adj stays smooth. The adjusted series is the trustworthy one here.
+    rows = [
+        {"date": "2024-01-01", "close_price": 100, "etf_adj_close": 100, "underlying_adj_close": 50},
+        {"date": "2024-01-02", "close_price": 50, "etf_adj_close": 99, "underlying_adj_close": 50},
+    ]
+    assert find_fabricated_adj_cliffs(rows, []) == []
+
+
+def test_sanitize_fabricated_adj_basis_drops_corrupted_adj():
+    rows = _qbtz_style_corrupted_rows()
+    events = [(dt.date(2026, 3, 23), 3.0)]
+    sanitized = sanitize_fabricated_adj_basis(rows, events)
+    assert all(r["etf_adj_close"] is None for r in sanitized)
+    # Clean rows pass through untouched.
+    clean = [{**r, "etf_adj_close": r["close_price"]} for r in rows]
+    assert sanitize_fabricated_adj_basis(clean, events) is clean
+
+
+def test_build_tr_series_ignores_fabricated_adj_cliff():
+    rows = _qbtz_style_corrupted_rows()
+    events = [(dt.date(2026, 3, 23), 3.0)]
+    tr = build_tr_series_from_metrics(rows, events)
+    assert len(tr) == len(rows)
+    max_lr, at = max_abs_log_return(tr, "tr_etf_px")
+    assert max_lr < 0.25, f"fabricated cliff leaked into TR at {at}: {max_lr}"
+    # TR should track the continuous close series.
+    for row, t in zip(rows, tr):
+        assert t["tr_etf_px"] == pytest.approx(row["close_price"], rel=1e-6)

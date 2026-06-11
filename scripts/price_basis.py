@@ -45,6 +45,88 @@ def parse_split_events_from_corp(payload: dict | None, ticker: str) -> list[tupl
     return sorted(out)
 
 
+FABRICATED_ADJ_MIN_LOG_DIVERGENCE = math.log(1.8)
+FABRICATED_ADJ_EVENT_WINDOW_DAYS = 7
+FABRICATED_ADJ_MULT_REL_TOL = 0.25
+
+
+def find_fabricated_adj_cliffs(
+    rows: list[dict[str, Any]],
+    split_events: list[tuple[dt.date, float]] | None = None,
+) -> list[dict[str, Any]]:
+    """Dates where ``etf_adj_close`` jumps relative to close without a matching split.
+
+    A mis-applied split adjustment (e.g. pre-split rows scaled up while post-split
+    rows are scaled down) fabricates a return cliff in the adjusted series that the
+    raw close series does not have. Legitimate back-adjustment also diverges from
+    close — but only at a declared split date and only by that split's multiplier.
+    Anything else is treated as corruption.
+    """
+    pts: list[tuple[dt.date, float, float]] = []
+    for row in rows or []:
+        ds = str(row.get("date") or "")[:10]
+        if len(ds) != 10:
+            continue
+        try:
+            d0 = dt.date.fromisoformat(ds)
+            close = float(row.get("close_price") or row.get("nav") or 0)
+            adj = float(row.get("etf_adj_close")) if row.get("etf_adj_close") is not None else float("nan")
+        except (ValueError, TypeError):
+            continue
+        if close > 0 and math.isfinite(adj) and adj > 0:
+            pts.append((d0, close, adj))
+    pts.sort()
+    if len(pts) < 2:
+        return []
+    events = [(d, float(m)) for d, m in (split_events or []) if m and float(m) > 0]
+    cliffs: list[dict[str, Any]] = []
+    for i in range(1, len(pts)):
+        d_prev, c_prev, a_prev = pts[i - 1]
+        d_cur, c_cur, a_cur = pts[i]
+        adj_ret = math.log(a_cur / a_prev)
+        close_ret = math.log(c_cur / c_prev)
+        divergence = adj_ret - close_ret
+        if abs(divergence) < FABRICATED_ADJ_MIN_LOG_DIVERGENCE:
+            continue
+        # Provider back-adjustment shows up as a close jump with a smooth adj
+        # series — legitimate even when the split is missing from declared
+        # events. Only the adjusted series carrying the jump is fabricated.
+        if abs(adj_ret) <= abs(close_ret):
+            continue
+        factor = math.exp(abs(divergence))
+        explained = False
+        for eff, mult in events:
+            if abs((d_cur - eff).days) > FABRICATED_ADJ_EVENT_WINDOW_DAYS:
+                continue
+            for trial in (mult, 1.0 / mult):
+                if trial > 0 and abs(factor / max(trial, 1.0 / trial) - 1.0) <= FABRICATED_ADJ_MULT_REL_TOL:
+                    explained = True
+                    break
+            if explained:
+                break
+        if not explained:
+            cliffs.append({"date": d_cur, "factor": factor, "divergence": divergence})
+    return cliffs
+
+
+def sanitize_fabricated_adj_basis(
+    rows: list[dict[str, Any]],
+    split_events: list[tuple[dt.date, float]] | None = None,
+) -> list[dict[str, Any]]:
+    """Drop ``etf_adj_close`` for the whole ticker when it has fabricated cliffs.
+
+    The raw close/nav series is continuous and economically meaningful in these
+    cases, so falling back to it is strictly safer than consuming a corrupted
+    adjusted basis.
+    """
+    if not find_fabricated_adj_cliffs(rows, split_events):
+        return rows
+    return [
+        {**row, "etf_adj_close": None} if isinstance(row, dict) else row
+        for row in rows
+    ]
+
+
 def _close_points(rows: list[dict[str, Any]]) -> list[tuple[dt.date, float]]:
     pts: list[tuple[dt.date, float]] = []
     for row in rows:
@@ -444,6 +526,7 @@ def build_tr_series_from_metrics(
         [r for r in rows if str(r.get("date") or "")[:10]],
         key=lambda r: str(r.get("date") or ""),
     )
+    sorted_rows = sanitize_fabricated_adj_basis(sorted_rows, split_events)
     close_pts = _close_points(sorted_rows)
     adj_by_date: dict[dt.date, float] = {}
     for row in sorted_rows:
