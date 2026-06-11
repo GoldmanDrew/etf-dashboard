@@ -14,6 +14,7 @@ from realized_gross_decay import (  # noqa: E402
     compute_gross_decay_annual,
     compute_horizon_period_returns,
     compute_realized_pair_gross_60d,
+    latest_contiguous_metrics_segment,
     realized_pair_gross_60d_fields,
     _period_borrow_log,
 )
@@ -97,6 +98,45 @@ def test_compute_realized_pair_gross_60d_skips_carry_forward_rows():
     assert out["realized_pair_gross_60d_sufficient"] is False
     assert "realized_pair_gross_60d" not in out
     assert "realized_pair_gross_partial" in out
+
+
+def test_latest_contiguous_segment_cuts_ticker_reuse_gap():
+    old_rows = _flat_joint_rows(65, etf_drift=0.0, und_drift=0.001)
+    old_rows = [{**r, "source_provider": "yahoo_bootstrap"} for r in old_rows]
+    new_rows = [
+        {
+            "date": (dt.date(2026, 6, 2) + dt.timedelta(days=i)).isoformat(),
+            "close_price": 17.0 + i,
+            "etf_adj_close": 17.0 + i,
+            "underlying_adj_close": 128.0 + i,
+            "source_provider": "merged",
+        }
+        for i in range(5)
+    ]
+    segment = latest_contiguous_metrics_segment(old_rows + new_rows)
+    assert [r["date"] for r in segment] == [r["date"] for r in new_rows]
+
+
+def test_ticker_reuse_gap_makes_60d_partial_and_gross_unavailable():
+    old_rows = _flat_joint_rows(70, etf_drift=0.0, und_drift=0.002)
+    new_rows = [
+        {
+            "date": (dt.date(2026, 6, 2) + dt.timedelta(days=i)).isoformat(),
+            "close_price": 17.0 + i,
+            "etf_adj_close": 17.0 + i,
+            "underlying_adj_close": 128.0 + i,
+        }
+        for i in range(5)
+    ]
+    rows = old_rows + new_rows
+    annual = compute_gross_decay_annual(rows, beta=2.0, split_events=[], min_obs=40)
+    pair = compute_realized_pair_gross_60d(rows, beta=2.0, split_events=[], borrow_annual=0.1)
+    assert annual is None
+    assert pair is not None
+    assert pair["realized_pair_gross_60d_obs"] == 4
+    assert pair["realized_pair_gross_60d_sufficient"] is False
+    assert "realized_pair_gross_60d" not in pair
+    assert "realized_pair_gross_partial" in pair
 
 
 def test_compute_realized_pair_gross_60d_from_metrics_rows():

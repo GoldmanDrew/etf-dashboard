@@ -62,3 +62,38 @@ def test_audit_rejects_missing_expected_value_when_available():
         }
     )
     assert any("expected_decay_available=true" in msg for msg in errors)
+
+
+def test_audit_rejects_full_60d_crossing_lifecycle_gap():
+    old_rows = [
+        {
+            "date": f"2023-04-{day:02d}",
+            "close_price": 30.0,
+            "underlying_adj_close": 75.0,
+            "source_provider": "yahoo_bootstrap",
+        }
+        for day in range(1, 29)
+    ]
+    new_rows = [
+        {
+            "date": f"2026-06-{day:02d}",
+            "close_price": 15.0,
+            "underlying_adj_close": 120.0,
+            "source_provider": "merged",
+        }
+        for day in range(2, 9)
+    ]
+    errors, _warnings = audit_dashboard(
+        {
+            "records": [
+                {
+                    "symbol": "ONG",
+                    "realized_pair_gross_60d": 5.0,
+                    "realized_pair_gross_60d_obs": 30,
+                    "realized_pair_gross_60d_sufficient": True,
+                }
+            ]
+        },
+        metrics_by_symbol={"ONG": old_rows + new_rows},
+    )
+    assert any("crosses" in msg and "metrics gap" in msg for msg in errors)

@@ -2,6 +2,8 @@
 (function initRealizedDecay(globalObj) {
   const TRADING_DAYS_PER_YEAR = 252;
   const DEFAULT_HORIZONS = [5, 20, 60, 120, 251];
+  const MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45;
+  const HARD_LIFECYCLE_GAP_DAYS = 365;
 
   const PB = (typeof globalObj !== "undefined" && globalObj.PriceBasis)
     || (typeof window !== "undefined" && window.PriceBasis)
@@ -23,15 +25,78 @@
     return d.length === 10 ? d : "";
   }
 
+  function dateMs(ds) {
+    const d = parseDate(ds);
+    if (!d) return NaN;
+    const t = Date.parse(`${d}T00:00:00Z`);
+    return Number.isFinite(t) ? t : NaN;
+  }
+
+  function dateGapDays(a, b) {
+    const ta = dateMs(a);
+    const tb = dateMs(b);
+    if (!Number.isFinite(ta) || !Number.isFinite(tb)) return NaN;
+    return Math.round((tb - ta) / 86400000);
+  }
+
   function logToSimplePeriod(logRet) {
     const x = toNum(logRet);
     if (!Number.isFinite(x)) return null;
     return Math.expm1(x);
   }
 
+  function hasUsableMetricPrices(row) {
+    const date = parseDate(row && row.date);
+    const closeLike = toNum(row && row.close_price) || toNum(row && row.nav);
+    const und = toNum(row && row.underlying_adj_close);
+    const sourceUrl = String((row && row.source_url) || "");
+    const sourceProvider = String((row && row.source_provider) || "").toLowerCase();
+    const staleKind = String((row && row.stale_kind) || "").toLowerCase();
+    if (!date || !(closeLike > 0) || !(und > 0)) return false;
+    if (
+      sourceUrl.startsWith("carry_forward://")
+      || sourceProvider.startsWith("carry_forward")
+      || staleKind === "carry_forward"
+    ) return false;
+    return true;
+  }
+
+  function latestContiguousRows(rows, maxGapDays = MAX_CONTIGUOUS_METRICS_GAP_DAYS) {
+    const maxGap = Math.max(1, Math.floor(toNum(maxGapDays) || MAX_CONTIGUOUS_METRICS_GAP_DAYS));
+    const dated = (Array.isArray(rows) ? rows : [])
+      .map((row) => ({ row, date: parseDate(row && row.date) }))
+      .filter((x) => x.date)
+      .sort((a, b) => xDateCmp(a.date, b.date));
+    if (dated.length < 2) return dated.map((x) => x.row);
+    let startIdx = 0;
+    for (let i = 1; i < dated.length; i += 1) {
+      const gap = dateGapDays(dated[i - 1].date, dated[i].date);
+      const sourceKey = (x) => [
+        x && x.source_provider,
+        x && x.source_url,
+        x && x.status,
+      ].map((v) => String(v || "").trim().toLowerCase()).join("|");
+      const prevSrc = sourceKey(dated[i - 1].row);
+      const curSrc = sourceKey(dated[i].row);
+      const sourceChanged = Boolean(prevSrc || curSrc) && prevSrc !== curSrc;
+      if (
+        Number.isFinite(gap)
+        && (gap > HARD_LIFECYCLE_GAP_DAYS || (gap > maxGap && sourceChanged))
+      ) startIdx = i;
+    }
+    return dated.slice(startIdx).map((x) => x.row);
+  }
+
+  function xDateCmp(a, b) {
+    return String(a || "").localeCompare(String(b || ""));
+  }
+
   function prepareDecayTrRows(rows, splitEvents) {
     if (PB && typeof PB.buildTrSeriesFromMetrics === "function") {
-      return PB.buildTrSeriesFromMetrics(rows, splitEvents).map((r) => ({
+      const usable = latestContiguousRows(
+        (Array.isArray(rows) ? rows : []).filter(hasUsableMetricPrices),
+      );
+      return PB.buildTrSeriesFromMetrics(usable, splitEvents).map((r) => ({
         date: r.date,
         trEtfPx: r.trEtfPx,
         trUndPx: r.trUndPx,
@@ -43,7 +108,10 @@
 
   function summarizeTrCoverage(rows, splitEvents) {
     if (PB && typeof PB.summarizeTrCoverage === "function") {
-      return PB.summarizeTrCoverage(rows, splitEvents);
+      const usable = latestContiguousRows(
+        (Array.isArray(rows) ? rows : []).filter(hasUsableMetricPrices),
+      );
+      return PB.summarizeTrCoverage(usable, splitEvents);
     }
     return null;
   }
@@ -81,6 +149,8 @@
 
     const out = [];
     for (let i = 1; i < clean.length; i += 1) {
+      const gap = dateGapDays(clean[i - 1].date, clean[i].date);
+      if (Number.isFinite(gap) && gap > HARD_LIFECYCLE_GAP_DAYS) continue;
       const rU = Math.log(clean[i].undPx / clean[i - 1].undPx);
       const rL = Math.log(clean[i].etfPx / clean[i - 1].etfPx);
       if (!Number.isFinite(rU) || !Number.isFinite(rL)) continue;
@@ -200,8 +270,12 @@
   const exported = {
     TRADING_DAYS_PER_YEAR,
     DEFAULT_HORIZONS,
+    MAX_CONTIGUOUS_METRICS_GAP_DAYS,
+    HARD_LIFECYCLE_GAP_DAYS,
     parseSplitEventsFromCorp,
     prepareDecayTrRows,
+    latestContiguousRows,
+    hasUsableMetricPrices,
     summarizeTrCoverage,
     buildDailyLogDragSeries,
     computeHorizonPeriodReturns,

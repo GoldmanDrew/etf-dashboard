@@ -1612,6 +1612,8 @@ function volShapeCls(v) {
 // risk_dashboard/beta_loader.DEFAULT_WINDOW_DAYS so the same clock drives
 // betas and shape diagnostics.
 const VOL_SHAPE_PRIMARY_WINDOW = 60;
+const MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45;
+const HARD_LIFECYCLE_GAP_DAYS = 365;
 function volShapeFields(r, w = VOL_SHAPE_PRIMARY_WINDOW) {
   if (!r) return {};
   return {
@@ -1628,6 +1630,35 @@ function volShapeFields(r, w = VOL_SHAPE_PRIMARY_WINDOW) {
     trPctile: r[`und_trend_ratio_${w}d_pctile`],
   };
 }
+function dateGapDaysIso(a, b) {
+  const ta = Date.parse(`${String(a || '').slice(0, 10)}T00:00:00Z`);
+  const tb = Date.parse(`${String(b || '').slice(0, 10)}T00:00:00Z`);
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return NaN;
+  return Math.round((tb - ta) / 86400000);
+}
+function latestContiguousMetricsRows(rows, maxGapDays = MAX_CONTIGUOUS_METRICS_GAP_DAYS) {
+  const dated = (Array.isArray(rows) ? rows : [])
+    .filter((row) => String(row?.date || '').trim().slice(0, 10))
+    .sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
+  if (dated.length < 2) return dated;
+  let startIdx = 0;
+  for (let i = 1; i < dated.length; i += 1) {
+    const gap = dateGapDaysIso(dated[i - 1]?.date, dated[i]?.date);
+    const sourceKey = (row) => [
+      row?.source_provider,
+      row?.source_url,
+      row?.status,
+    ].map((v) => String(v || '').trim().toLowerCase()).join('|');
+    const prevSrc = sourceKey(dated[i - 1]);
+    const curSrc = sourceKey(dated[i]);
+    const sourceChanged = Boolean(prevSrc || curSrc) && prevSrc !== curSrc;
+    if (
+      Number.isFinite(gap)
+      && (gap > HARD_LIFECYCLE_GAP_DAYS || (gap > maxGapDays && sourceChanged))
+    ) startIdx = i;
+  }
+  return dated.slice(startIdx);
+}
 /** Joint ETF + underlying price days (same gate as pair backtest / vol-shape charts). */
 function jointMetricsRowsForVolShape(rawRows) {
   const hasBoth = (row) => {
@@ -1636,9 +1667,10 @@ function jointMetricsRowsForVolShape(rawRows) {
     const ds = String(row?.date || '').trim();
     return Boolean(ds) && Number.isFinite(pl) && pl > 0 && Number.isFinite(ps) && ps > 0;
   };
-  return (Array.isArray(rawRows) ? rawRows : [])
+  const joint = (Array.isArray(rawRows) ? rawRows : [])
     .filter(hasBoth)
     .sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
+  return latestContiguousMetricsRows(joint);
 }
 
 function volShapeHistoryFromMetricsRows(rawRows, window = VOL_SHAPE_PRIMARY_WINDOW) {
@@ -5207,7 +5239,7 @@ function buildTotalReturnBacktestSeries(rawRows, distributions) {
   const dated = Array.isArray(rawRows)
     ? rawRows.filter(hasBothLegPrices).sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')))
     : [];
-  const ok = repairEtfMetricsShareOutliers(dated);
+  const ok = repairEtfMetricsShareOutliers(latestContiguousMetricsRows(dated));
   if (!ok.length) return [];
   const dists = (Array.isArray(distributions) ? distributions : [])
     .map((d) => ({ ex_date: String(d?.ex_date || ''), amount: Number(d?.amount) }))

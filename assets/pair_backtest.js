@@ -1,5 +1,8 @@
 /* global globalThis, module */
 (function initPairBacktest(globalObj) {
+  const MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45;
+  const HARD_LIFECYCLE_GAP_DAYS = 365;
+
   function toNum(v) {
     if (typeof v === "number") return Number.isFinite(v) ? v : NaN;
     if (typeof v === "string") {
@@ -13,6 +16,31 @@
 
   function clamp(v, lo, hi) {
     return Math.max(lo, Math.min(hi, v));
+  }
+
+  function dateGapDays(a, b) {
+    const ta = Date.parse(`${String(a || "").slice(0, 10)}T00:00:00Z`);
+    const tb = Date.parse(`${String(b || "").slice(0, 10)}T00:00:00Z`);
+    if (!Number.isFinite(ta) || !Number.isFinite(tb)) return NaN;
+    return Math.round((tb - ta) / 86400000);
+  }
+
+  function keepLatestContiguousPoints(points, maxGapDays = MAX_CONTIGUOUS_METRICS_GAP_DAYS) {
+    const pts = (Array.isArray(points) ? points : [])
+      .filter((p) => String(p && p.date || "").slice(0, 10))
+      .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+    let startIdx = 0;
+    for (let i = 1; i < pts.length; i += 1) {
+      const gap = dateGapDays(pts[i - 1].date, pts[i].date);
+      const prevSrc = String(pts[i - 1].sourceKey || "").trim().toLowerCase();
+      const curSrc = String(pts[i].sourceKey || "").trim().toLowerCase();
+      const sourceChanged = Boolean(prevSrc || curSrc) && prevSrc !== curSrc;
+      if (
+        Number.isFinite(gap)
+        && (gap > HARD_LIFECYCLE_GAP_DAYS || (gap > maxGapDays && sourceChanged))
+      ) startIdx = i;
+    }
+    return pts.slice(startIdx);
   }
 
   function dailyBorrowRate(v) {
@@ -427,7 +455,7 @@
       return { ok: false, error: "Invalid rows or gross capital.", daily: [], rebalanceMarks: [], summary: {} };
     }
 
-    const pts = [];
+    let pts = [];
     for (const row of rows) {
       const pl = toNum(row && row.close_price) || toNum(row && row.nav);
       const pa = toNum(row && row.etf_adj_close);
@@ -443,8 +471,14 @@
         trPx,
         trMode: tr ? tr.trMode : null,
         ps,
+        sourceKey: [
+          row && row.source_provider,
+          row && row.source_url,
+          row && row.status,
+        ].map((v) => String(v || "").trim().toLowerCase()).join("|"),
       });
     }
+    pts = keepLatestContiguousPoints(pts);
     if (pts.length < 3) {
       return {
         ok: false,

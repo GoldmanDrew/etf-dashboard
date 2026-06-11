@@ -13,6 +13,7 @@ const {
   logToSimplePeriod,
   periodBorrowLog,
   prepareDecayTrRows,
+  latestContiguousRows,
   etfTrPrice,
   cumSplitFactor,
   filterSplitsNeedingCloseBasisFix,
@@ -79,6 +80,37 @@ test("rolling period series length", () => {
     assert.ok(Number.isFinite(r.gross_period));
     assert.ok(Number.isFinite(r.net_period));
   });
+});
+
+test("latest contiguous rows cut ticker-reuse lifecycle gap", () => {
+  const oldRows = makeFlatSeries(65, 0, 0.001).map((r) => ({
+    ...r,
+    source_provider: "yahoo_bootstrap",
+  }));
+  const newRows = [2, 3, 4, 5, 8].map((day, i) => ({
+    date: `2026-06-${String(day).padStart(2, "0")}`,
+    close_price: 17 + i,
+    etf_adj_close: 17 + i,
+    underlying_adj_close: 128 + i,
+    source_provider: "merged",
+  }));
+  const seg = latestContiguousRows(oldRows.concat(newRows));
+  assert.deepEqual(seg.map((r) => r.date), newRows.map((r) => r.date));
+});
+
+test("decay horizons do not bridge ticker-reuse lifecycle gap", () => {
+  const oldRows = makeFlatSeries(70, 0, 0.002);
+  const newRows = [2, 3, 4, 5, 8].map((day, i) => ({
+    date: `2026-06-${String(day).padStart(2, "0")}`,
+    close_price: 17 + i,
+    etf_adj_close: 17 + i,
+    underlying_adj_close: 128 + i,
+  }));
+  const daily = buildDailyLogDragSeries(prepareDecayTrRows(oldRows.concat(newRows), []), 2);
+  const h = computeHorizonPeriodReturns(daily, [60], 0.1);
+  const row = h.horizons[0];
+  assert.equal(row.obs, 4);
+  assert.equal(row.sufficient, false);
 });
 
 test("logToSimplePeriod", () => {

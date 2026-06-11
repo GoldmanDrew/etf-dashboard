@@ -22,6 +22,8 @@ from price_basis import (
 TRADING_DAYS = 252
 DEFAULT_MIN_OBS = 40
 REALIZED_PAIR_GROSS_60D_HORIZON = 60
+MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45
+HARD_LIFECYCLE_GAP_DAYS = 365
 
 
 def _log_to_simple_period(log_ret: float | None) -> float | None:
@@ -39,9 +41,59 @@ def _period_borrow_log(borrow_annual: float | None, obs_days: int) -> float:
     return float(borrow_annual) * (n / TRADING_DAYS)
 
 
+def _parse_iso_date(value: Any) -> dt.date | None:
+    ds = str(value or "")[:10]
+    if len(ds) != 10:
+        return None
+    try:
+        return dt.date.fromisoformat(ds)
+    except ValueError:
+        return None
+
+
+def latest_contiguous_metrics_segment(
+    rows: list[dict[str, Any]],
+    *,
+    max_gap_days: int = MAX_CONTIGUOUS_METRICS_GAP_DAYS,
+) -> list[dict[str, Any]]:
+    """Return the latest joint-price segment, cutting ticker-reuse/lifecycle gaps.
+
+    ETF tickers can be reused after years of no trading history. The metrics store
+    may then contain an old Yahoo bootstrap segment plus a new issuer segment under
+    the same ticker. Treating that gap as one daily return corrupts realized decay
+    and backtests, so downstream calculations only use the latest contiguous block.
+    """
+    dated: list[tuple[dt.date, dict[str, Any]]] = []
+    for row in rows or []:
+        d0 = _parse_iso_date(row.get("date") if isinstance(row, dict) else None)
+        if d0 is not None:
+            dated.append((d0, row))
+    if len(dated) < 2:
+        return [r for _d, r in dated]
+    dated.sort(key=lambda x: x[0])
+    start_idx = 0
+    max_gap = max(1, int(max_gap_days))
+    def source_key(row: dict[str, Any]) -> str:
+        return "|".join(
+            str(row.get(k) or "").strip().lower()
+            for k in ("source_provider", "source_url", "status")
+        )
+
+    for i in range(1, len(dated)):
+        gap = (dated[i][0] - dated[i - 1][0]).days
+        prev_src = source_key(dated[i - 1][1])
+        cur_src = source_key(dated[i][1])
+        source_changed = bool(prev_src or cur_src) and prev_src != cur_src
+        if gap > HARD_LIFECYCLE_GAP_DAYS or (gap > max_gap and source_changed):
+            start_idx = i
+    return [r for _d, r in dated[start_idx:]]
+
+
 def build_daily_log_drag_series(
     tr_rows: list[dict[str, Any]],
     beta: float,
+    *,
+    max_gap_days: int = MAX_CONTIGUOUS_METRICS_GAP_DAYS,
 ) -> list[dict[str, Any]]:
     """Daily log-drag: beta * log(U_t/U_{t-1}) - log(L_t/L_{t-1}) on split-aware TR."""
     if not math.isfinite(beta):
@@ -62,6 +114,10 @@ def build_daily_log_drag_series(
         return []
     out: list[dict[str, Any]] = []
     for i in range(1, len(clean)):
+        d0 = _parse_iso_date(clean[i - 1]["date"])
+        d1 = _parse_iso_date(clean[i]["date"])
+        if d0 is not None and d1 is not None and (d1 - d0).days > HARD_LIFECYCLE_GAP_DAYS:
+            continue
         u0, u1 = clean[i - 1]["und_px"], clean[i]["und_px"]
         e0, e1 = clean[i - 1]["etf_px"], clean[i]["etf_px"]
         r_u = math.log(u1 / u0)
@@ -229,6 +285,7 @@ def compute_realized_pair_gross_60d(
     if not math.isfinite(beta):
         return None
     usable_rows = [r for r in rows if _metrics_row_has_usable_prices(r)]
+    usable_rows = latest_contiguous_metrics_segment(usable_rows)
     tr = build_tr_series_from_metrics(usable_rows, split_events or [])
     daily = build_daily_log_drag_series(tr, float(beta))
     if len(daily) < min_obs:
@@ -261,6 +318,9 @@ def compute_gross_decay_annual(
     """Mean daily log-drag annualized: beta * log(R_u) - log(R_etf) on split-aware TR."""
     if not math.isfinite(beta):
         return None
+    rows = latest_contiguous_metrics_segment(
+        [r for r in rows if _metrics_row_has_usable_prices(r)]
+    )
     tr = build_tr_series_from_metrics(rows, split_events or [])
     if len(tr) < min_obs + 1:
         return None

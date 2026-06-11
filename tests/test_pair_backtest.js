@@ -66,6 +66,32 @@ test("total-return value drives PnL, not raw close", () => {
   assert.equal(Math.round(out.summary.netPnl), 5000);
 });
 
+test("simulateInversePairBacktest starts after ticker lifecycle gap", () => {
+  const oldRows = [];
+  for (let i = 0; i < 65; i += 1) {
+    oldRows.push({
+      date: `2023-04-${String((i % 28) + 1).padStart(2, "0")}`,
+      close_price: 30,
+      underlying_adj_close: 75,
+    });
+  }
+  const newRows = [2, 3, 4, 5, 8].map((day, i) => ({
+    date: `2026-06-${String(day).padStart(2, "0")}`,
+    close_price: 17 + i,
+    underlying_adj_close: 128 + i,
+  }));
+  const out = simulateInversePairBacktest(oldRows.concat(newRows), {
+    gross: 100000,
+    beta: 2,
+    rebalanceEveryDays: 99,
+    floorBps: 0,
+    impactBps: 0,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.daily[0].date, "2026-06-03");
+  assert.ok(out.daily.every((d) => String(d.date) >= "2026-06-03"));
+});
+
 test("drift rebalance hedges back to requested net/gross ratio", () => {
   const longRows = [
     row("2026-01-02", 100),
