@@ -951,6 +951,8 @@ POSITIVE_PATTERNS: dict[str, list[re.Pattern]] = {
         re.compile(r"\bdelist", re.I),
         re.compile(r"\bdelisted\b", re.I),
         re.compile(r"\bliquidat", re.I),
+        re.compile(r"\bfund\s+liquidation\b", re.I),
+        re.compile(r"\bclose\s+and\s+liquidat", re.I),
         re.compile(r"\bwind[-\s]down\b", re.I),
         re.compile(r"\bfund\s+closure\b", re.I),
         re.compile(r"\bterminat(e|es|ed|ion|ing)\b", re.I),
@@ -1387,6 +1389,8 @@ def phase_4_symbol_changes(
 GOOGLE_NEWS_QUERIES: list[tuple[str, str]] = [
     ('"ETF" "plan of liquidation"', "delisting"),
     ('"ETF" "to liquidate"', "delisting"),
+    ('"ETF" "fund liquidation"', "delisting"),
+    ('"change in ETF lineup"', "delisting"),
     # Titles often say "T-REX" without repeating the "ETF" token both times;
     # this recovers 2X crypto product liquidations (XRPK / SOLX) missed by
     # generic "ETF … liquidate" matches.
@@ -1678,6 +1682,7 @@ _HTML_WHITESPACE_RE = re.compile(r"\s+")
 # pure "rally"/"downgrade" etc. articles don't get the expensive lookup.
 _BODY_FETCH_TRIGGER_RE = re.compile(
     r"\b(?:to\s+liquidate|plan\s+of\s+liquidation|will\s+liquidate|"
+    r"fund\s+liquidation|close\s+and\s+liquidat(?:e|es|ed|ing)?|change\s+in\s+ETF\s+lineup|"
     r"wind\s+down|cease\s+trading|fund\s+(?:termination|closure)|"
     r"delisted|delisting\s+notice|exchange\s+delisting|no\s+longer\s+listed|marked\s+inactive|"
     r"ticker\s+change|symbol\s+change|changes\s+its\s+ticker|will\s+change\s+its\s+ticker|"

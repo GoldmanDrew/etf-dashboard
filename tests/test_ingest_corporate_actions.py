@@ -73,7 +73,7 @@ def test_google_news_keel_bitf_chain_still_maps_to_btfl(monkeypatch):
                 "title": "Keel Infrastructure Corp. will Change its Ticker to KEEL from BITF - marketscreener.com",
                 "description": "",
                 "link": "https://example.com/keel",
-                "pub_date": "Mon, 06 Apr 2026 07:00:00 GMT",
+                "pub_date": "Wed, 20 May 2026 07:00:00 GMT",
                 "source": "marketscreener.com",
             }
         ],
@@ -104,7 +104,7 @@ def test_google_news_trex_body_extracts_xrpk_and_solx(monkeypatch):
                 "title": "T-REX 2X XRP Daily Target ETF and T-REX 2X SOL Daily Target ETF to Liquidate",
                 "description": "",
                 "link": "https://example.com/trex",
-                "pub_date": "Mon, 21 Apr 2026 14:22:53 GMT",
+                "pub_date": "Thu, 21 May 2026 14:22:53 GMT",
                 "source": "ACCESS Newswire",
             }
         ],
@@ -330,7 +330,7 @@ def test_title_anchor_prefers_parens_bmax_in_universe(monkeypatch):
                 "title": "REX (BMAX) to Liquidate — placeholder",
                 "description": "",
                 "link": "https://example.com/bmax1",
-                "pub_date": "Tue, 1 Apr 2026 07:00:00 GMT",
+                "pub_date": "Fri, 22 May 2026 07:00:00 GMT",
                 "source": "wire",
             }
         ],
@@ -398,7 +398,7 @@ def test_gnews_structured_event_id_symbol_change_ticker_only(monkeypatch):
                 "title": "Keel Infrastructure Corp. will Change its Ticker to KEEL from BITF - marketscreener.com",
                 "description": "",
                 "link": "https://example.com/keel2",
-                "pub_date": "Mon, 06 Apr 2026 07:00:00 GMT",
+                "pub_date": "Wed, 20 May 2026 07:00:00 GMT",
                 "source": "marketscreener.com",
             }
         ],
@@ -414,3 +414,68 @@ def test_gnews_structured_event_id_symbol_change_ticker_only(monkeypatch):
     )
     sc = [e for e in ev if e.type == "symbol_change"]
     assert sc and all(e.id == "gnews_symbol_change:BTFL" for e in sc)
+
+
+def test_classify_close_and_liquidate_is_delisting():
+    cat, conf = mod.classify_text(
+        "GraniteShares announced today that it will close and liquidate the following ETFs."
+    )
+    assert cat == "delisting"
+    assert conf >= 0.7
+
+
+def test_google_news_generic_lineup_title_fetches_body_and_emits_delistings(monkeypatch):
+    bucket_map, underlying_map = _maps()
+    bmap = {
+        **dict(bucket_map),
+        "BULX": "bucket_1_high_delta",
+        "ETRL": "bucket_1_high_delta",
+        "MSDD": "bucket_4_edge",
+    }
+    umap = {
+        **dict(underlying_map),
+        "BULX": "BULL",
+        "ETRL": "ETOR",
+        "MSDD": "MSTR",
+    }
+    monkeypatch.setattr(mod, "GOOGLE_NEWS_QUERIES", [('"change in ETF lineup"', "delisting")])
+    monkeypatch.setattr(
+        mod,
+        "_fetch_google_news_rss",
+        lambda _s, _q: [
+            {
+                "title": "GraniteShares Announces Change in ETF Lineup",
+                "description": "",
+                "link": "https://example.com/granite-lineup",
+                "pub_date": "Mon, 18 May 2026 21:25:00 GMT",
+                "source": "GlobeNewswire",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        mod,
+        "_fetch_article_body",
+        lambda _s, _u: (
+            "GraniteShares announced today that it will close and liquidate the following ETFs: "
+            "BULX GraniteShares 2x Long BULL Daily ETF. "
+            "ETRL GraniteShares 2x Long ETOR Daily ETF. "
+            "MSDD GraniteShares 2x Short MSTR Daily ETF. "
+            "The last day of trading for the ETFs on NASDAQ Stock Market will be June 18, 2026. "
+            "Shares of the ETF will no longer trade after market close on June 18, 2026, "
+            "and will be subsequently delisted."
+        ),
+    )
+
+    events, news = mod.phase_5_google_news(
+        requests.Session(),
+        universe={"BULX", "ETRL", "MSDD"},
+        ever_known={"BULX", "ETRL", "MSDD"},
+        underlyings={"BULL", "ETOR", "MSTR"},
+        alias_map={},
+        bucket_map=bmap,
+        underlying_map=umap,
+    )
+    assert news
+    assert set(news[0].tickers) == {"BULX", "ETRL", "MSDD"}
+    assert news[0].category == "delisting"
+    assert {e.ticker for e in events if e.type == "delisting"} == {"BULX", "ETRL", "MSDD"}
