@@ -8,6 +8,7 @@ const {
   exposureRatio,
   slippageCost,
   simulateInversePairBacktest,
+  simulateShortFlowBacktest,
   computePairBacktestRiskSeries,
   computeEtfShortDayPnl,
   buildDistributionByDate,
@@ -608,4 +609,86 @@ test("simulateInversePairBacktest uses split-aware TR across reverse split", () 
     const dayPnl = splitDay.longPnl - prev.longPnl;
     assert.ok(dayPnl > -50000 && dayPnl < 50000, `absurd split-day ETF PnL ${dayPnl}`);
   }
+});
+
+test("simulateShortFlowBacktest starts each ETF when tradable and flows every N days", () => {
+  const out = simulateShortFlowBacktest({
+    legs: [
+      { symbol: "SDS", flowDollars: 10000 },
+      { symbol: "QID", flowDollars: 5000 },
+    ],
+    metricsBySymbol: {
+      SDS: [
+        { date: "2024-01-02", close_price: 100 },
+        { date: "2024-01-03", close_price: 90 },
+        { date: "2024-01-04", close_price: 80 },
+        { date: "2024-01-05", close_price: 70 },
+      ],
+      QID: [
+        { date: "2024-01-04", close_price: 50 },
+        { date: "2024-01-05", close_price: 45 },
+        { date: "2024-01-08", close_price: 40 },
+      ],
+    },
+    recordsBySymbol: { SDS: { borrow_current: 0 }, QID: { borrow_current: 0 } },
+    everyNDays: 2,
+    slippageBps: 0,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.bySymbol.SDS.nFlows, 2);
+  assert.equal(out.bySymbol.QID.nFlows, 2);
+  assert.equal(out.bySymbol.SDS.firstTradableDate, "2024-01-02");
+  assert.equal(out.bySymbol.QID.firstTradableDate, "2024-01-04");
+  assert.deepEqual(out.flowMarks.map((x) => `${x.date}:${x.symbol}:${x.dollars}`), [
+    "2024-01-02:SDS:10000",
+    "2024-01-04:SDS:10000",
+    "2024-01-04:QID:5000",
+    "2024-01-08:QID:5000",
+  ]);
+  assert.ok(out.summary.shortEtfPnl > 0, "falling shorted ETFs should make money before costs");
+});
+
+test("simulateShortFlowBacktest accrues borrow and slippage against flat short book", () => {
+  const metrics = [];
+  for (let d = 1; d <= 5; d += 1) {
+    metrics.push({ date: `2024-02-0${d}`, close_price: 10 });
+  }
+  const out = simulateShortFlowBacktest({
+    legs: [{ symbol: "SDS", flowDollars: 10000 }],
+    metricsBySymbol: { SDS: metrics },
+    recordsBySymbol: { SDS: { borrow_current: 0.252 } },
+    borrowHistoryBySymbol: { SDS: [{ date: "2024-02-01", borrow_current: 0.252 }] },
+    everyNDays: 1,
+    slippageBps: 10,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.summary.nFlowOrders, 5);
+  assert.equal(out.summary.cumulativeFlowAdded, 50000);
+  assert.ok(out.summary.borrowPaid > 0);
+  assert.equal(Math.round(out.summary.tCosts), 50);
+  assert.ok(out.summary.netPnl < 0);
+});
+
+test("simulateShortFlowBacktest uses adjusted close and does not double count distributions", () => {
+  const base = {
+    legs: [{ symbol: "SDS", flowDollars: 10000 }],
+    metricsBySymbol: {
+      SDS: [
+        { date: "2024-03-01", close_price: 100, etf_adj_close: 100 },
+        { date: "2024-03-04", close_price: 99, etf_adj_close: 99.5 },
+        { date: "2024-03-05", close_price: 99, etf_adj_close: 99.5 },
+      ],
+    },
+    recordsBySymbol: { SDS: { borrow_current: 0 } },
+    everyNDays: 99,
+    slippageBps: 0,
+  };
+  const withDist = simulateShortFlowBacktest({
+    ...base,
+    distributionsBySymbol: { SDS: [{ ex_date: "2024-03-04", amount: 0.5 }] },
+  });
+  const withoutDist = simulateShortFlowBacktest(base);
+  assert.equal(withDist.ok, true);
+  assert.equal(withDist.bySymbol.SDS.distributionsPaid, 0);
+  assert.ok(Math.abs(withDist.summary.shortEtfPnl - withoutDist.summary.shortEtfPnl) < 1e-9);
 });

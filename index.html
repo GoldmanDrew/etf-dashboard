@@ -6392,11 +6392,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   );
   const [activePanel, setActivePanel] = useState(
     defaultPanel === 'backtest' ? 'backtest'
-      : defaultPanel === 'flow' ? 'flow'
-        : defaultPanel === 'trade' ? 'trade'
-          : defaultPanel === 'decay' ? 'decay'
-            : defaultPanel === 'basket' ? 'basket'
-              : 'chart',
+      : defaultPanel === 'backtest-flow' ? 'backtest-flow'
+        : defaultPanel === 'flow' ? 'flow'
+          : defaultPanel === 'trade' ? 'trade'
+            : defaultPanel === 'decay' ? 'decay'
+              : defaultPanel === 'basket' ? 'basket'
+                : 'chart',
   );
   const [decayRollWindow, setDecayRollWindow] = useState(60);
   const [corpActionsPayload, setCorpActionsPayload] = useState(null);
@@ -6449,6 +6450,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [btHedgeRatio, setBtHedgeRatio] = useState(1);
   /** Backtest window start (YYYY-MM-DD); empty means full joint-price history. */
   const [btStartDate, setBtStartDate] = useState('');
+  const [btFlowEveryN, setBtFlowEveryN] = useState(5);
+  const [btFlowSlippageBps, setBtFlowSlippageBps] = useState(27);
+  const [btFlowStartDate, setBtFlowStartDate] = useState('');
+  const [btFlowEndDate, setBtFlowEndDate] = useState('');
+  const [btFlowAddSymbol, setBtFlowAddSymbol] = useState('');
+  const [btFlowLegs, setBtFlowLegs] = useState([]);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -6477,15 +6484,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
   const mapDefaultPanel = (panel) => (
     panel === 'backtest' ? 'backtest'
-      : panel === 'flow' ? 'flow'
-        : panel === 'trade' ? 'trade'
-          : panel === 'decay' ? 'decay'
-            : panel === 'basket' ? 'basket'
-              : panel === 'vrp' ? 'vrp'
-                : panel === 'borrow' ? 'borrow'
-                  : panel === 'stats' ? 'stats'
-                    : panel === 'scenarios' ? 'scenarios'
-                      : 'chart'
+      : panel === 'backtest-flow' ? 'backtest-flow'
+        : panel === 'flow' ? 'flow'
+          : panel === 'trade' ? 'trade'
+            : panel === 'decay' ? 'decay'
+              : panel === 'basket' ? 'basket'
+                : panel === 'vrp' ? 'vrp'
+                  : panel === 'borrow' ? 'borrow'
+                    : panel === 'stats' ? 'stats'
+                      : panel === 'scenarios' ? 'scenarios'
+                        : 'chart'
   );
   useEffect(() => {
     setActivePanel(mapDefaultPanel(defaultPanel));
@@ -6601,6 +6609,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   }, [showVrpPanel, activePanel]);
   useEffect(() => {
     if (!showBacktestPanel && activePanel === 'backtest') setActivePanel('chart');
+  }, [showBacktestPanel, activePanel]);
+  useEffect(() => {
+    if (!showBacktestPanel && activePanel === 'backtest-flow') setActivePanel('chart');
   }, [showBacktestPanel, activePanel]);
   useEffect(() => {
     if (!showBacktestPanel && activePanel === 'flow') setActivePanel('chart');
@@ -7345,6 +7356,89 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       : null;
     if (!fn || !pairBacktestResult?.ok || !Array.isArray(pairBacktestResult.rows)) return [];
     return fn(pairBacktestResult.rows, Number(btGross) || 0);
+  })();
+  const recordsBySymbol = useMemo(() => {
+    const out = {};
+    (Array.isArray(allRecords) ? allRecords : []).forEach((x) => {
+      const sym = String(x?.symbol || '').toUpperCase();
+      if (sym) out[sym] = x;
+    });
+    return out;
+  }, [allRecords]);
+  const inverseFlowChoices = useMemo(() => (
+    (Array.isArray(allRecords) ? allRecords : [])
+      .filter((x) => x?.bucket === 'bucket_3_inverse' || String(x?.product_class || '').toLowerCase() === 'inverse' || Number(x?.delta) < 0)
+      .map((x) => ({
+        symbol: String(x?.symbol || '').toUpperCase(),
+        underlying: String(x?.underlying || '').toUpperCase(),
+        delta: Number(x?.delta),
+      }))
+      .filter((x) => x.symbol)
+      .sort((a, b) => {
+        const ua = a.underlying || '';
+        const ub = b.underlying || '';
+        if (ua !== ub) return ua.localeCompare(ub);
+        return a.symbol.localeCompare(b.symbol);
+      })
+  ), [allRecords]);
+  const addFlowLeg = useCallback((symbol, amount = 10000) => {
+    const sym = String(symbol || '').toUpperCase();
+    if (!sym) return;
+    setBtFlowLegs((legs) => {
+      if (legs.some((leg) => String(leg.symbol || '').toUpperCase() === sym)) return legs;
+      return [...legs, { symbol: sym, flowDollars: amount, enabled: true }];
+    });
+  }, []);
+  useEffect(() => {
+    const curIsInverse = r?.bucket === 'bucket_3_inverse' || String(r?.product_class || '').toLowerCase() === 'inverse' || Number(r?.delta) < 0;
+    if (curIsInverse) {
+      setBtFlowLegs([{ symbol: etfSym, flowDollars: 10000, enabled: true }]);
+      setBtFlowAddSymbol(etfSym);
+      return;
+    }
+    const und = String(undSym || '').toUpperCase();
+    const peer = inverseFlowChoices.find((x) => x.underlying === und) || inverseFlowChoices[0];
+    setBtFlowLegs(peer ? [{ symbol: peer.symbol, flowDollars: 10000, enabled: true }] : []);
+    setBtFlowAddSymbol(peer?.symbol || '');
+  }, [etfSym]);
+  const flowSplitEventsBySymbol = useMemo(() => {
+    const out = {};
+    (btFlowLegs || []).forEach((leg) => {
+      const sym = String(leg?.symbol || '').toUpperCase();
+      if (!sym) return;
+      out[sym] = typeof RealizedDecayFns.parseSplitEventsFromCorp === 'function'
+        ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, sym)
+        : [];
+    });
+    return out;
+  }, [btFlowLegs, corpActionsPayload]);
+  const flowBacktestResult = (() => {
+    const sim = typeof window !== 'undefined' && window.PairBacktest
+      && typeof window.PairBacktest.simulateShortFlowBacktest === 'function'
+      ? window.PairBacktest.simulateShortFlowBacktest
+      : null;
+    if (!sim) return { ok: false, error: 'Flow backtest module unavailable', rows: [], flowMarks: [], bySymbol: {}, summary: {} };
+    return sim({
+      legs: btFlowLegs,
+      metricsBySymbol: etfMetricsMap,
+      recordsBySymbol,
+      borrowHistoryBySymbol: borrowHistoryMap,
+      distributionsBySymbol: etfDistributionsMap,
+      splitEventsBySymbol: flowSplitEventsBySymbol,
+      everyNDays: Number(btFlowEveryN) || 5,
+      startDate: btFlowStartDate,
+      endDate: btFlowEndDate,
+      slippageBps: Number(btFlowSlippageBps) || 0,
+    });
+  })();
+  const flowRiskSeries = (() => {
+    const fn = typeof window !== 'undefined' && window.PairBacktest
+      && typeof window.PairBacktest.computePairBacktestRiskSeries === 'function'
+      ? window.PairBacktest.computePairBacktestRiskSeries
+      : null;
+    const gross = Number(flowBacktestResult?.summary?.cumulativeFlowAdded) || 0;
+    if (!fn || !flowBacktestResult?.ok || !Array.isArray(flowBacktestResult.rows) || gross <= 0) return [];
+    return fn(flowBacktestResult.rows, gross);
   })();
   const tradeUnderlyingGroup = useMemo(() => {
     if (isYieldBoostFoF(r)) {
@@ -8095,6 +8189,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           )}
           {showBacktestPanel && (
             <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => navigateChartPanel('backtest')}>Backtest</button>
+          )}
+          {showBacktestPanel && (
+            <button className={cls('chart-view-btn', activePanel === 'backtest-flow' && 'active')} onClick={() => navigateChartPanel('backtest-flow')}>Backtest Flow</button>
           )}
           {showBacktestPanel && (
             <button className={cls('chart-view-btn', activePanel === 'flow' && 'active')} onClick={() => navigateChartPanel('flow')}>Flow</button>
@@ -9857,6 +9954,276 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                         <td>{fmtMoney(row.transactionCosts)}</td>
                         <td>{Number.isFinite(row.exposureRatio) ? `${(row.exposureRatio * 100).toFixed(2)}%` : '—'}</td>
                         <td>{row.rebalance ? row.rebalanceReason : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {activePanel === 'backtest-flow' && showBacktestPanel && (
+        <div className="chart-section">
+          <div className="scenario-title">Backtest Flow — recurring inverse ETF shorts</div>
+          <div className="scenario-sub" style={{ marginBottom: 10 }}>
+            Add a fixed short notional to selected inverse ETFs every <strong>N</strong> valid trading days.
+            Each ETF begins on its own first tradable row in <code>etf_metrics_daily</code>; no position is backfilled before that date.
+            Short PnL uses the same split-aware total-return path as the Pair Backtest. Borrow is fee-only from history when available, else dashboard borrow fallback.
+          </div>
+
+          <div className="trade-card" style={{ marginBottom: 12 }}>
+            <div className="trade-head">
+              <div className="scenario-title">Parameters</div>
+            </div>
+            <div className="backtest-controls">
+              <div className="backtest-control">
+                <label>Every N days</label>
+                <input type="number" min={1} step={1} value={btFlowEveryN} onChange={(e) => setBtFlowEveryN(Number(e.target.value) || 1)} />
+              </div>
+              <div className="backtest-control">
+                <label>Slippage (bps)</label>
+                <input type="number" min={0} step={1} value={btFlowSlippageBps} onChange={(e) => setBtFlowSlippageBps(Number(e.target.value) || 0)} />
+              </div>
+              <div className="backtest-control">
+                <label>Start date</label>
+                <input type="date" value={btFlowStartDate} onChange={(e) => setBtFlowStartDate(e.target.value)} />
+              </div>
+              <div className="backtest-control">
+                <label>End date</label>
+                <input type="date" value={btFlowEndDate} onChange={(e) => setBtFlowEndDate(e.target.value)} />
+              </div>
+              <div className="backtest-control">
+                <label>Add inverse ETF</label>
+                <select value={btFlowAddSymbol} onChange={(e) => setBtFlowAddSymbol(e.target.value)}>
+                  <option value="">Choose ETF</option>
+                  {inverseFlowChoices.map((x) => (
+                    <option key={`flow-choice-${x.symbol}`} value={x.symbol}>
+                      {x.symbol}{x.underlying ? ` / ${x.underlying}` : ''}{Number.isFinite(x.delta) ? ` / β ${x.delta.toFixed(2)}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="backtest-control" style={{ alignSelf: 'end' }}>
+                <label style={{ visibility: 'hidden' }}>Add</label>
+                <button type="button" className="chart-view-btn" onClick={() => addFlowLeg(btFlowAddSymbol, 10000)} disabled={!btFlowAddSymbol}>Add ETF</button>
+              </div>
+              <div className="backtest-control" style={{ alignSelf: 'end' }}>
+                <label style={{ visibility: 'hidden' }}>Add peers</label>
+                <button
+                  type="button"
+                  className="chart-view-btn"
+                  onClick={() => {
+                    const und = String(undSym || '').toUpperCase();
+                    inverseFlowChoices.filter((x) => x.underlying === und).forEach((x) => addFlowLeg(x.symbol, 10000));
+                  }}
+                >
+                  Add underlying peers
+                </button>
+              </div>
+              <div className="backtest-control" style={{ alignSelf: 'end' }}>
+                <label style={{ visibility: 'hidden' }}>Add all</label>
+                <button
+                  type="button"
+                  className="chart-view-btn"
+                  onClick={() => inverseFlowChoices.forEach((x) => addFlowLeg(x.symbol, 10000))}
+                >
+                  Add all inverse
+                </button>
+              </div>
+            </div>
+            <div className="scenario-table-wrap" style={{ marginTop: 10, maxHeight: 260, overflow: 'auto' }}>
+              <table className="scenario-table">
+                <thead>
+                  <tr>
+                    <th>On</th>
+                    <th>ETF</th>
+                    <th>Underlying</th>
+                    <th>β</th>
+                    <th>Flow $</th>
+                    <th>First tradable</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {btFlowLegs.map((leg) => {
+                    const sym = String(leg?.symbol || '').toUpperCase();
+                    const rec = recordsBySymbol[sym] || {};
+                    const first = flowBacktestResult?.bySymbol?.[sym]?.firstTradableDate
+                      || (Array.isArray(etfMetricsMap?.[sym]) && etfMetricsMap[sym].length ? String(etfMetricsMap[sym][0]?.date || '') : '—');
+                    return (
+                      <tr key={`bt-flow-leg-${sym}`}>
+                        <td><input type="checkbox" checked={leg.enabled !== false} onChange={(e) => setBtFlowLegs((arr) => arr.map((x) => String(x.symbol).toUpperCase() === sym ? { ...x, enabled: e.target.checked } : x))} /></td>
+                        <td>{sym}</td>
+                        <td>{String(rec?.underlying || '').toUpperCase() || '—'}</td>
+                        <td>{Number.isFinite(Number(rec?.delta)) ? Number(rec.delta).toFixed(2) : '—'}</td>
+                        <td>
+                          <input
+                            type="number"
+                            min={0}
+                            step={1000}
+                            value={leg.flowDollars}
+                            onChange={(e) => setBtFlowLegs((arr) => arr.map((x) => String(x.symbol).toUpperCase() === sym ? { ...x, flowDollars: Number(e.target.value) || 0 } : x))}
+                            style={{ width: 110 }}
+                          />
+                        </td>
+                        <td>{first || '—'}</td>
+                        <td><button type="button" className="chart-view-btn" onClick={() => setBtFlowLegs((arr) => arr.filter((x) => String(x.symbol).toUpperCase() !== sym))}>Remove</button></td>
+                      </tr>
+                    );
+                  })}
+                  {!btFlowLegs.length ? (
+                    <tr><td colSpan={7} style={{ color: 'var(--text-muted)' }}>Add at least one inverse ETF.</td></tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics for flow backtest…</div>}
+          {etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
+          {etfDistributionsError && <div className="scenario-warning">{etfDistributionsError}</div>}
+          {!etfMetricsLoading && !etfMetricsError && !flowBacktestResult?.ok && (
+            <div className="scenario-warning">{flowBacktestResult?.error || 'Flow backtest unavailable.'}</div>
+          )}
+          {!etfMetricsLoading && !etfMetricsError && flowBacktestResult?.ok && (
+            <>
+              <div className="chart-stats" style={{ marginTop: 12 }}>
+                <div className="chart-stat">
+                  <div className="cs-label">Net PnL</div>
+                  <div className="cs-value">{fmtMoney(flowBacktestResult.summary.netPnl)}</div>
+                  <div className="cs-sub">{flowBacktestResult.inception} → {flowBacktestResult.end}</div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">Total flow added</div>
+                  <div className="cs-value">{fmtMoney(flowBacktestResult.summary.cumulativeFlowAdded)}</div>
+                  <div className="cs-sub">{fmtNum(flowBacktestResult.summary.nFlowOrders)} flow orders · {fmtNum(flowBacktestResult.summary.nSymbols)} ETFs</div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">Current short MV</div>
+                  <div className="cs-value">{fmtMoney(flowBacktestResult.summary.currentShortMarketValue)}</div>
+                  <div className="cs-sub">absolute ETF short market value</div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">Short ETF PnL</div>
+                  <div className="cs-value">{fmtMoney(flowBacktestResult.summary.shortEtfPnl)}</div>
+                  <div className="cs-sub">mark-to-market before costs</div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">Borrow cost</div>
+                  <div className="cs-value">{fmtMoney(flowBacktestResult.summary.borrowPaid)}</div>
+                  <div className="cs-sub">history ffill, else avg / spot</div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">T-costs</div>
+                  <div className="cs-value">{fmtMoney(flowBacktestResult.summary.tCosts)}</div>
+                  <div className="cs-sub">slippage × new short notional</div>
+                </div>
+              </div>
+
+              <div className="trade-card" style={{ marginTop: 12 }}>
+                <div className="trade-head">
+                  <div>
+                    <div className="scenario-title">Flow portfolio — PnL breakdown</div>
+                    <div className="scenario-sub">Net = short ETF mark-to-market − borrow − transaction costs. Distribution debits only appear when total-return prices are unavailable.</div>
+                  </div>
+                </div>
+                <PairBacktestChart result={flowBacktestResult} />
+                <SimpleSeriesPlot
+                  series={flowBacktestResult.rows}
+                  valueKey="currentShortMarketValue"
+                  color="rgba(16,185,129,0.95)"
+                  label="Current short market value"
+                  formatValue={(v) => fmtMoney(v)}
+                  zeroLabel="$0"
+                  overlayValueKey="cumulativeFlowAdded"
+                  overlayColor="rgba(96,165,250,0.95)"
+                  overlayLabel="Cumulative flow added"
+                />
+                <PairBacktestRiskMetricsStats riskSeries={flowRiskSeries} pairResult={flowBacktestResult} />
+              </div>
+
+              <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 300, overflow: 'auto' }}>
+                <table className="scenario-table">
+                  <thead>
+                    <tr>
+                      <th>ETF</th>
+                      <th>Flow $</th>
+                      <th>First</th>
+                      <th>Orders</th>
+                      <th>Total flow</th>
+                      <th>Short MV</th>
+                      <th>Short PnL</th>
+                      <th>Borrow</th>
+                      <th>T-costs</th>
+                      <th>Net PnL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.values(flowBacktestResult.bySymbol || {}).sort((a, b) => Number(b.netPnl) - Number(a.netPnl)).map((row) => (
+                      <tr key={`bt-flow-sum-${row.symbol}`}>
+                        <td>{row.symbol}</td>
+                        <td>{fmtMoney(row.flowDollars)}</td>
+                        <td>{row.firstTradableDate || '—'}</td>
+                        <td>{fmtNum(row.nFlows)}</td>
+                        <td>{fmtMoney(row.cumulativeFlowAdded)}</td>
+                        <td>{fmtMoney(row.currentShortMarketValue)}</td>
+                        <td>{fmtMoney(row.shortEtfPnl)}</td>
+                        <td>{fmtMoney(row.borrowPaid)}</td>
+                        <td>{fmtMoney(row.tCosts)}</td>
+                        <td>{fmtMoney(row.netPnl)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 260, overflow: 'auto' }}>
+                <table className="scenario-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Net PnL</th>
+                      <th>Short PnL</th>
+                      <th>Borrow</th>
+                      <th>T-costs</th>
+                      <th>Flow today</th>
+                      <th>Total flow</th>
+                      <th>Short MV</th>
+                      <th>Active ETFs</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...(flowBacktestResult.rows || [])].slice(-24).reverse().map((row) => (
+                      <tr key={`bt-flow-row-${row.date}`}>
+                        <td>{row.date}</td>
+                        <td>{fmtMoney(row.netPnl)}</td>
+                        <td>{fmtMoney(row.shortEtfPnl)}</td>
+                        <td>{fmtMoney(row.borrow)}</td>
+                        <td>{fmtMoney(row.transactionCosts)}</td>
+                        <td>{fmtMoney(row.flowAddedToday)}</td>
+                        <td>{fmtMoney(row.cumulativeFlowAdded)}</td>
+                        <td>{fmtMoney(row.currentShortMarketValue)}</td>
+                        <td>{fmtNum(row.activeSymbols)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 220, overflow: 'auto' }}>
+                <table className="scenario-table">
+                  <thead><tr><th>Date</th><th>ETF</th><th>Dollars</th><th>Price</th><th>Shares</th><th>T-cost</th></tr></thead>
+                  <tbody>
+                    {[...(flowBacktestResult.flowMarks || [])].slice(-30).reverse().map((m, idx) => (
+                      <tr key={`bt-flow-mark-${m.date}-${m.symbol}-${idx}`}>
+                        <td>{m.date}</td>
+                        <td>{m.symbol}</td>
+                        <td>{fmtMoney(m.dollars)}</td>
+                        <td>{fmtUsd(m.price)}</td>
+                        <td>{fmtNum(m.shares)}</td>
+                        <td>{fmtMoney(m.transactionCost)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -12175,7 +12542,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [letfIntradayCache, setLetfIntradayCache] = useState(LETF_INTRADAY_FLOWS_CACHE);
   const [letfIntradayError, setLetfIntradayError] = useState(null);
   const [chartRecord, setChartRecord] = useState(null);
-  /** When opening a chart from the hash, optionally land on Backtest, Flow, or Trade Lab (`#/chart/SYM/trade`). */
+  /** When opening a chart from the hash, optionally land on Backtest, Backtest Flow, Flow, or Trade Lab (`#/chart/SYM/trade`). */
   const [chartDefaultPanel, setChartDefaultPanel] = useState('chart');
   /** Persisted chart timeframe (TIMEFRAMES[].range); drives TradingView embed and realized-vol diagnostics. Scenarios/default Exp. ETF return use forecast_vol_underlying_annual. */
   const [chartVolLookbackRange, setChartVolLookbackRange] = useState(TIMEFRAMES[2].range);
@@ -12347,7 +12714,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   useEffect(() => {
     const handleHash = () => {
       const hash = window.location.hash;
-      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest|flow|trade|vrp|decay))?$/i.exec(hash);
+      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest-flow|backtest|flow|trade|vrp|decay))?$/i.exec(hash);
       if (chartMatch && data) {
         const sym = decodeURIComponent(chartMatch[1]).toUpperCase();
         const rec = (data.records || []).find(r => r.symbol === sym);
@@ -12360,11 +12727,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           const panel = String(chartMatch[2] || '').toLowerCase();
           setChartDefaultPanel(
             panel === 'backtest' ? 'backtest'
-              : panel === 'flow' ? 'flow'
-                : panel === 'trade' ? 'trade'
-                  : panel === 'vrp' ? 'vrp'
-                    : panel === 'decay' ? 'decay'
-                      : 'chart',
+              : panel === 'backtest-flow' ? 'backtest-flow'
+                : panel === 'flow' ? 'flow'
+                  : panel === 'trade' ? 'trade'
+                    : panel === 'vrp' ? 'vrp'
+                      : panel === 'decay' ? 'decay'
+                        : 'chart',
           );
           return;
         }

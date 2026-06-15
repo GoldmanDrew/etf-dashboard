@@ -670,6 +670,247 @@
     };
   }
 
+  function normalizeShortFlowLeg(raw) {
+    const sym = String(raw && raw.symbol || "").trim().toUpperCase();
+    const flowDollars = Math.max(0, toNum(raw && raw.flowDollars));
+    if (!sym || !(flowDollars > 0) || raw.enabled === false) return null;
+    return { symbol: sym, flowDollars };
+  }
+
+  function prepareShortFlowPoints(rows, splitEvents) {
+    let pts = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const pl = toNum(row && row.close_price) || toNum(row && row.nav);
+      const pa = toNum(row && row.etf_adj_close);
+      const ds = String((row && row.date) || "").trim().slice(0, 10);
+      if (!ds || !Number.isFinite(pl) || pl <= 0) continue;
+      pts.push({
+        date: ds,
+        pl,
+        pa: Number.isFinite(pa) && pa > 0 ? pa : NaN,
+        trPx: NaN,
+        trMode: null,
+        sourceKey: [
+          row && row.source_provider,
+          row && row.source_url,
+          row && row.status,
+        ].map((v) => String(v || "").trim().toLowerCase()).join("|"),
+      });
+    }
+    pts = keepLatestContiguousPoints(pts);
+    const PB = globalObj.PriceBasis;
+    if (
+      pts.length
+      && Array.isArray(splitEvents)
+      && splitEvents.length > 0
+      && PB
+      && typeof PB.buildTrSeriesFromMetrics === "function"
+    ) {
+      const trRows = PB.buildTrSeriesFromMetrics(pts.map((p) => ({
+        date: p.date,
+        close_price: p.pl,
+        etf_adj_close: Number.isFinite(p.pa) ? p.pa : undefined,
+      })), splitEvents);
+      const trByDate = new Map(trRows.map((r) => [r.date, r]));
+      pts = pts.map((p) => {
+        const tr = trByDate.get(p.date);
+        return tr && Number.isFinite(tr.trEtfPx) && tr.trEtfPx > 0
+          ? { ...p, trPx: tr.trEtfPx, pa: NaN, trMode: tr.trMode || "tr_price" }
+          : p;
+      });
+    }
+    return pts;
+  }
+
+  /**
+   * Portfolio short-flow backtest. Adds a fixed short notional to each enabled
+   * ETF every N valid trading rows, starting when that ETF first has tradable
+   * prices. This is intentionally add-only; it does not hedge or cover.
+   */
+  function simulateShortFlowBacktest(opts) {
+    const everyN = Math.max(1, Math.floor(toNum(opts && opts.everyNDays) || 5));
+    const slippageBps = Math.max(0, toNum(opts && opts.slippageBps));
+    const startDate = String(opts && opts.startDate || "").trim().slice(0, 10);
+    const endDate = String(opts && opts.endDate || "").trim().slice(0, 10);
+    const metricsBySymbol = opts && opts.metricsBySymbol && typeof opts.metricsBySymbol === "object" ? opts.metricsBySymbol : {};
+    const recordsBySymbol = opts && opts.recordsBySymbol && typeof opts.recordsBySymbol === "object" ? opts.recordsBySymbol : {};
+    const borrowHistoryBySymbol = opts && opts.borrowHistoryBySymbol && typeof opts.borrowHistoryBySymbol === "object" ? opts.borrowHistoryBySymbol : {};
+    const distributionsBySymbol = opts && opts.distributionsBySymbol && typeof opts.distributionsBySymbol === "object" ? opts.distributionsBySymbol : {};
+    const splitEventsBySymbol = opts && opts.splitEventsBySymbol && typeof opts.splitEventsBySymbol === "object" ? opts.splitEventsBySymbol : {};
+    const legs = (Array.isArray(opts && opts.legs) ? opts.legs : []).map(normalizeShortFlowLeg).filter(Boolean);
+    if (!legs.length) return { ok: false, error: "Add at least one ETF with a positive flow amount.", rows: [], flowMarks: [], bySymbol: {}, summary: {} };
+
+    const states = [];
+    for (const leg of legs) {
+      const rawPts = prepareShortFlowPoints(metricsBySymbol[leg.symbol], splitEventsBySymbol[leg.symbol] || []);
+      const pts = rawPts.filter((p) => (!startDate || p.date >= startDate) && (!endDate || p.date <= endDate));
+      if (pts.length < 1) continue;
+      const rec = recordsBySymbol[leg.symbol] || {};
+      const fallbackBorrow = Number.isFinite(toNum(rec.borrow_avg_annual))
+        ? toNum(rec.borrow_avg_annual)
+        : toNum(rec.borrow_current);
+      states.push({
+        symbol: leg.symbol,
+        flowDollars: leg.flowDollars,
+        pts,
+        pointByDate: new Map(pts.map((p, idx) => [p.date, { p, idx }])),
+        borrowHist: (Array.isArray(borrowHistoryBySymbol[leg.symbol]) ? borrowHistoryBySymbol[leg.symbol] : [])
+          .map((x) => ({ d: String((x && x.date) || "").trim().slice(0, 10), b: toNum(x && x.borrow_current) }))
+          .filter((x) => x.d && Number.isFinite(x.b))
+          .sort((a, b) => a.d.localeCompare(b.d)),
+        borrowWalk: 0,
+        lastBorrowCanon: NaN,
+        fallbackBorrowAnnual: Number.isFinite(fallbackBorrow) ? fallbackBorrow : 0,
+        distByDate: buildDistributionByDate(distributionsBySymbol[leg.symbol]),
+        qShort: 0,
+        prevPoint: null,
+        cumPnl: 0,
+        cumBorrow: 0,
+        cumDist: 0,
+        cumTc: 0,
+        cumFlow: 0,
+        nFlows: 0,
+        nDaysAdjClose: 0,
+        nDaysPriceFallback: 0,
+        firstTradableDate: pts[0].date,
+        lastTradableDate: pts[pts.length - 1].date,
+      });
+    }
+    if (!states.length) return { ok: false, error: "No selected ETFs have tradable price history in this window.", rows: [], flowMarks: [], bySymbol: {}, summary: {} };
+
+    const allDates = Array.from(new Set(states.flatMap((s) => s.pts.map((p) => p.date)))).sort();
+    const rows = [];
+    const flowMarks = [];
+    let totalPnl = 0;
+    let totalBorrow = 0;
+    let totalDist = 0;
+    let totalTc = 0;
+    let totalFlow = 0;
+
+    function advanceBorrowForState(st, ds) {
+      while (st.borrowWalk < st.borrowHist.length && st.borrowHist[st.borrowWalk].d <= ds) {
+        st.lastBorrowCanon = st.borrowHist[st.borrowWalk].b;
+        st.borrowWalk += 1;
+      }
+      return Number.isFinite(st.lastBorrowCanon) ? st.lastBorrowCanon : st.fallbackBorrowAnnual;
+    }
+
+    for (const ds of allDates) {
+      let dayFlow = 0;
+      let activeSymbols = 0;
+      for (const st of states) {
+        const hit = st.pointByDate.get(ds);
+        if (!hit) continue;
+        const cur = hit.p;
+        if (st.prevPoint && st.qShort > 0) {
+          const etfDay = computeEtfShortDayPnl(st.qShort, st.prevPoint, cur, st.distByDate);
+          st.cumPnl += etfDay.pnl;
+          st.cumDist += etfDay.divDebit;
+          if (etfDay.mode === "adj_close" || etfDay.mode === "tr_price" || String(etfDay.mode || "").startsWith("pre_split")
+            || etfDay.mode === "post_split" || etfDay.mode === "continuous_adj") st.nDaysAdjClose += 1;
+          else st.nDaysPriceFallback += 1;
+
+          const canon = advanceBorrowForState(st, ds);
+          const annualDragPerShortDollar = annualBorrowCostDragPerShortDollar(canon);
+          const borrowBase = st.qShort * 0.5 * (st.prevPoint.pl + cur.pl);
+          st.cumBorrow += borrowBase * (annualDragPerShortDollar / 252);
+        } else {
+          advanceBorrowForState(st, ds);
+        }
+
+        if (hit.idx % everyN === 0) {
+          const addShares = st.flowDollars / cur.pl;
+          st.qShort += addShares;
+          st.cumFlow += st.flowDollars;
+          st.nFlows += 1;
+          const tc = st.flowDollars * (slippageBps / 10000);
+          st.cumTc += tc;
+          dayFlow += st.flowDollars;
+          flowMarks.push({ date: ds, symbol: st.symbol, dollars: st.flowDollars, price: cur.pl, shares: addShares, transactionCost: tc });
+        }
+        if (st.qShort > 0) activeSymbols += 1;
+        st.prevPoint = cur;
+      }
+
+      totalPnl = states.reduce((a, st) => a + st.cumPnl, 0);
+      totalBorrow = states.reduce((a, st) => a + st.cumBorrow, 0);
+      totalDist = states.reduce((a, st) => a + st.cumDist, 0);
+      totalTc = states.reduce((a, st) => a + st.cumTc, 0);
+      totalFlow = states.reduce((a, st) => a + st.cumFlow, 0);
+      const currentShortMarketValue = states.reduce((a, st) => {
+        const p = st.prevPoint;
+        return a + (p && st.qShort > 0 ? st.qShort * p.pl : 0);
+      }, 0);
+      rows.push({
+        date: ds,
+        netPnl: totalPnl - totalBorrow - totalTc,
+        longPnl: totalPnl,
+        shortPnl: 0,
+        shortEtfPnl: totalPnl,
+        borrow: totalBorrow,
+        distributions: totalDist,
+        transactionCosts: totalTc,
+        tCosts: totalTc,
+        cumulativeFlowAdded: totalFlow,
+        currentShortMarketValue,
+        flowAddedToday: dayFlow,
+        activeSymbols,
+        exposureRatio: totalFlow > 0 ? currentShortMarketValue / totalFlow : 0,
+        mvEtfAbs: currentShortMarketValue,
+        mvUndAbs: 0,
+        rebalance: dayFlow > 0,
+        rebalanceReason: dayFlow > 0 ? "flow" : "",
+      });
+    }
+
+    const bySymbol = {};
+    for (const st of states) {
+      const last = st.prevPoint;
+      const currentShortMarketValue = last && st.qShort > 0 ? st.qShort * last.pl : 0;
+      bySymbol[st.symbol] = {
+        symbol: st.symbol,
+        flowDollars: st.flowDollars,
+        firstTradableDate: st.firstTradableDate,
+        lastTradableDate: st.lastTradableDate,
+        nFlows: st.nFlows,
+        cumulativeFlowAdded: st.cumFlow,
+        currentShortMarketValue,
+        shortEtfPnl: st.cumPnl,
+        borrowPaid: st.cumBorrow,
+        distributionsPaid: st.cumDist,
+        tCosts: st.cumTc,
+        netPnl: st.cumPnl - st.cumBorrow - st.cumTc,
+        nDaysAdjClose: st.nDaysAdjClose,
+        nDaysPriceFallback: st.nDaysPriceFallback,
+      };
+    }
+    const last = rows[rows.length - 1];
+    return {
+      ok: true,
+      rows,
+      flowMarks,
+      bySymbol,
+      summary: {
+        observations: rows.length,
+        startDate: rows[0] && rows[0].date,
+        endDate: last && last.date,
+        netPnl: last ? last.netPnl : 0,
+        shortEtfPnl: last ? last.shortEtfPnl : 0,
+        borrowPaid: last ? last.borrow : 0,
+        distributionsPaid: last ? last.distributions : 0,
+        tCosts: last ? last.transactionCosts : 0,
+        cumulativeFlowAdded: last ? last.cumulativeFlowAdded : 0,
+        currentShortMarketValue: last ? last.currentShortMarketValue : 0,
+        nFlowOrders: flowMarks.length,
+        nSymbols: states.length,
+      },
+      inception: rows[0] && rows[0].date,
+      end: last && last.date,
+      legChartLabels: { etf: "Short ETF basket", und: "Unused" },
+      settings: { everyN, slippageBps, startDate, endDate },
+    };
+  }
+
   const exported = {
     alignPair,
     median,
@@ -680,6 +921,7 @@
     slippageCost,
     exposureRatio,
     simulateInversePairBacktest,
+    simulateShortFlowBacktest,
     computePairBacktestRiskSeries,
     MIN_TRADING_DAYS_FOR_CAGR,
     MIN_CALENDAR_YEARS_FOR_CAGR,
