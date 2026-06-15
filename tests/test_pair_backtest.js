@@ -13,6 +13,7 @@ const {
   computeEtfShortDayPnl,
   buildDistributionByDate,
   annualBorrowCostDragPerShortDollar,
+  parseShortFlowBacktestRoute,
   MIN_TRADING_DAYS_FOR_CAGR,
 } = require("../assets/pair_backtest.js");
 
@@ -24,6 +25,17 @@ function row(date, value, extra = {}) {
     shares_traded: 1_000_000,
     ...extra,
   };
+}
+
+function businessDates(startIso, count) {
+  const out = [];
+  const d = new Date(`${startIso}T00:00:00Z`);
+  while (out.length < count) {
+    const dow = d.getUTCDay();
+    if (dow !== 0 && dow !== 6) out.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return out;
 }
 
 test("flat pair accrues borrow on short leg", () => {
@@ -691,4 +703,123 @@ test("simulateShortFlowBacktest uses adjusted close and does not double count di
   assert.equal(withDist.ok, true);
   assert.equal(withDist.bySymbol.SDS.distributionsPaid, 0);
   assert.ok(Math.abs(withDist.summary.shortEtfPnl - withoutDist.summary.shortEtfPnl) < 1e-9);
+});
+
+test("parseShortFlowBacktestRoute handles global and legacy chart routes", () => {
+  assert.deepEqual(parseShortFlowBacktestRoute("#/backtest-flow"), {
+    matches: true,
+    page: "backtest-flow",
+    preloadSymbol: "",
+    compatibility: false,
+  });
+  assert.deepEqual(parseShortFlowBacktestRoute("#/backtest-flow/aplz"), {
+    matches: true,
+    page: "backtest-flow",
+    preloadSymbol: "APLZ",
+    compatibility: false,
+  });
+  assert.deepEqual(parseShortFlowBacktestRoute("#/chart/APLZ/backtest-flow"), {
+    matches: true,
+    page: "backtest-flow",
+    preloadSymbol: "APLZ",
+    compatibility: true,
+  });
+  assert.equal(parseShortFlowBacktestRoute("#/chart/APLZ/backtest").matches, false);
+});
+
+test("simulateShortFlowBacktest aggregates many ticker portfolios without a cap", () => {
+  const legs = [];
+  const metricsBySymbol = {};
+  const recordsBySymbol = {};
+  for (let i = 0; i < 30; i += 1) {
+    const sym = `INV${String(i).padStart(2, "0")}`;
+    legs.push({ symbol: sym, flowDollars: 1000 });
+    metricsBySymbol[sym] = [
+      { date: "2024-01-02", close_price: 10 },
+      { date: "2024-01-03", close_price: 9 },
+    ];
+    recordsBySymbol[sym] = { borrow_current: 0 };
+  }
+  const out = simulateShortFlowBacktest({
+    legs,
+    metricsBySymbol,
+    recordsBySymbol,
+    everyNDays: 99,
+    slippageBps: 0,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.summary.nSymbols, 30);
+  assert.equal(out.summary.nFlowOrders, 30);
+  assert.equal(out.summary.cumulativeFlowAdded, 30000);
+  assert.ok(out.summary.shortEtfPnl > 0);
+});
+
+test("simulateShortFlowBacktest prepared split-aware TR keeps reverse-split PnL and MV sane", () => {
+  const out = simulateShortFlowBacktest({
+    legs: [{ symbol: "APLZ", flowDollars: 100000 }],
+    metricsBySymbol: {
+      APLZ: [
+        { date: "2026-05-28", close_price: 4.0, trEtfPx: 24.0, trMode: "pre_split_close_scaled" },
+        { date: "2026-06-01", close_price: 23.604, trEtfPx: 23.604, trMode: "post_split_close" },
+        { date: "2026-06-02", close_price: 22.99, trEtfPx: 22.99, trMode: "post_split_close" },
+      ],
+    },
+    recordsBySymbol: { APLZ: { borrow_current: 0 } },
+    everyNDays: 99,
+    slippageBps: 0,
+  });
+  assert.equal(out.ok, true);
+  const splitTransition = out.rows.find((r) => r.date === "2026-06-01");
+  assert.ok(splitTransition, "missing split transition row");
+  assert.ok(splitTransition.shortEtfPnl > 1000 && splitTransition.shortEtfPnl < 2500, `absurd split PnL ${splitTransition.shortEtfPnl}`);
+  assert.ok(splitTransition.currentShortMarketValue > 95000 && splitTransition.currentShortMarketValue < 100000, `absurd split MV ${splitTransition.currentShortMarketValue}`);
+  assert.equal(out.bySymbol.APLZ.nDaysAdjClose, 2);
+});
+
+test("simulateShortFlowBacktest TR price suppresses distribution debit", () => {
+  const out = simulateShortFlowBacktest({
+    legs: [{ symbol: "SDS", flowDollars: 10000 }],
+    metricsBySymbol: {
+      SDS: [
+        { date: "2024-03-01", close_price: 100, trEtfPx: 100 },
+        { date: "2024-03-04", close_price: 99, trEtfPx: 99.5 },
+      ],
+    },
+    recordsBySymbol: { SDS: { borrow_current: 0 } },
+    distributionsBySymbol: { SDS: [{ ex_date: "2024-03-04", amount: 0.5 }] },
+    everyNDays: 99,
+    slippageBps: 0,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.bySymbol.SDS.distributionsPaid, 0);
+  assert.ok(out.summary.shortEtfPnl > 0 && out.summary.shortEtfPnl < 100);
+});
+
+test("simulateShortFlowBacktest raw price fallback debits distribution once", () => {
+  const out = simulateShortFlowBacktest({
+    legs: [{ symbol: "SDS", flowDollars: 10000 }],
+    metricsBySymbol: {
+      SDS: [
+        { date: "2024-03-01", close_price: 100 },
+        { date: "2024-03-04", close_price: 99 },
+      ],
+    },
+    recordsBySymbol: { SDS: { borrow_current: 0 } },
+    distributionsBySymbol: { SDS: [{ ex_date: "2024-03-04", amount: 0.5 }] },
+    everyNDays: 99,
+    slippageBps: 0,
+  });
+  assert.equal(out.ok, true);
+  assert.ok(Math.abs(out.bySymbol.SDS.distributionsPaid - 50) < 1e-9);
+  assert.ok(Math.abs(out.summary.shortEtfPnl - 50) < 1e-9);
+});
+
+test("computePairBacktestRiskSeries CAGR is finite at 20 trading days when equity is positive", () => {
+  const dates = businessDates("2024-01-02", MIN_TRADING_DAYS_FOR_CAGR);
+  const rows = dates.map((date, idx) => ({ date, netPnl: idx * 100 }));
+  const risk = computePairBacktestRiskSeries(rows, 100000);
+  assert.ok(risk.length > 0);
+  const tail = risk[risk.length - 1];
+  assert.equal(tail.date, dates[dates.length - 1]);
+  assert.ok(Number.isFinite(tail.cagr), `expected finite CAGR, got ${tail.cagr}`);
 });

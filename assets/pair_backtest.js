@@ -60,6 +60,39 @@
     return Math.max(0, n);
   }
 
+  function decodeRouteSymbol(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return "";
+    try {
+      return decodeURIComponent(s).toUpperCase();
+    } catch (_) {
+      return s.toUpperCase();
+    }
+  }
+
+  function parseShortFlowBacktestRoute(hash) {
+    const h = String(hash || "").trim();
+    const globalMatch = /^#\/backtest-flow(?:\/([^/?#]+))?$/i.exec(h);
+    if (globalMatch) {
+      return {
+        matches: true,
+        page: "backtest-flow",
+        preloadSymbol: decodeRouteSymbol(globalMatch[1]),
+        compatibility: false,
+      };
+    }
+    const chartCompat = /^#\/chart\/([^/?#]+)\/backtest-flow$/i.exec(h);
+    if (chartCompat) {
+      return {
+        matches: true,
+        page: "backtest-flow",
+        preloadSymbol: decodeRouteSymbol(chartCompat[1]),
+        compatibility: true,
+      };
+    }
+    return { matches: false, page: "", preloadSymbol: "", compatibility: false };
+  }
+
   function normalizeSeries(rows, opts) {
     const valueKey = (opts && opts.valueKey) || "total_return";
     const priceKey = (opts && opts.priceKey) || "close_price";
@@ -310,9 +343,9 @@
   }
 
   /** Minimum span before CAGR is meaningful (short windows annualize pathologically). */
-  const MIN_TRADING_DAYS_FOR_CAGR = 63;
-  /** ~one quarter; paired with MIN_TRADING_DAYS_FOR_CAGR so both must pass. */
-  const MIN_CALENDAR_YEARS_FOR_CAGR = 0.25;
+  const MIN_TRADING_DAYS_FOR_CAGR = 20;
+  /** Calendar span paired with the 20-trading-day CAGR gate. */
+  const MIN_CALENDAR_YEARS_FOR_CAGR = 20 / 365.25;
 
   /**
    * Expanding-window risk metrics on **mark-to-market equity** = gross + cumulative net PnL.
@@ -678,18 +711,22 @@
   }
 
   function prepareShortFlowPoints(rows, splitEvents) {
+    const sourceRows = Array.isArray(rows) ? rows : [];
     let pts = [];
-    for (const row of Array.isArray(rows) ? rows : []) {
+    let hasPreparedTr = false;
+    for (const row of sourceRows) {
       const pl = toNum(row && row.close_price) || toNum(row && row.nav);
       const pa = toNum(row && row.etf_adj_close);
+      const trPrepared = toNum(row && (row.trEtfPx ?? row.tr_etf_px));
+      if (Number.isFinite(trPrepared) && trPrepared > 0) hasPreparedTr = true;
       const ds = String((row && row.date) || "").trim().slice(0, 10);
       if (!ds || !Number.isFinite(pl) || pl <= 0) continue;
       pts.push({
         date: ds,
         pl,
-        pa: Number.isFinite(pa) && pa > 0 ? pa : NaN,
-        trPx: NaN,
-        trMode: null,
+        pa: Number.isFinite(trPrepared) && trPrepared > 0 ? NaN : (Number.isFinite(pa) && pa > 0 ? pa : NaN),
+        trPx: Number.isFinite(trPrepared) && trPrepared > 0 ? trPrepared : NaN,
+        trMode: Number.isFinite(trPrepared) && trPrepared > 0 ? (row.trMode || row.tr_mode || "prepared_tr") : null,
         sourceKey: [
           row && row.source_provider,
           row && row.source_url,
@@ -701,16 +738,13 @@
     const PB = globalObj.PriceBasis;
     if (
       pts.length
+      && !hasPreparedTr
       && Array.isArray(splitEvents)
       && splitEvents.length > 0
       && PB
       && typeof PB.buildTrSeriesFromMetrics === "function"
     ) {
-      const trRows = PB.buildTrSeriesFromMetrics(pts.map((p) => ({
-        date: p.date,
-        close_price: p.pl,
-        etf_adj_close: Number.isFinite(p.pa) ? p.pa : undefined,
-      })), splitEvents);
+      const trRows = PB.buildTrSeriesFromMetrics(sourceRows, splitEvents);
       const trByDate = new Map(trRows.map((r) => [r.date, r]));
       pts = pts.map((p) => {
         const tr = trByDate.get(p.date);
@@ -803,17 +837,33 @@
         if (!hit) continue;
         const cur = hit.p;
         if (st.prevPoint && st.qShort > 0) {
+          const prevShortMv = st.qShort * st.prevPoint.pl;
           const etfDay = computeEtfShortDayPnl(st.qShort, st.prevPoint, cur, st.distByDate);
           st.cumPnl += etfDay.pnl;
           st.cumDist += etfDay.divDebit;
-          if (etfDay.mode === "adj_close" || etfDay.mode === "tr_price" || String(etfDay.mode || "").startsWith("pre_split")
-            || etfDay.mode === "post_split" || etfDay.mode === "continuous_adj") st.nDaysAdjClose += 1;
+          const modeStr = String(etfDay.mode || "");
+          if (etfDay.mode === "adj_close" || etfDay.mode === "tr_price" || modeStr.startsWith("pre_split")
+            || modeStr.startsWith("post_split") || etfDay.mode === "continuous_adj") st.nDaysAdjClose += 1;
           else st.nDaysPriceFallback += 1;
 
           const canon = advanceBorrowForState(st, ds);
           const annualDragPerShortDollar = annualBorrowCostDragPerShortDollar(canon);
-          const borrowBase = st.qShort * 0.5 * (st.prevPoint.pl + cur.pl);
+          let curShortMvForBorrow = st.qShort * cur.pl;
+          const prevTr = st.prevPoint.trPx;
+          const curTr = cur.trPx;
+          if (Number.isFinite(prevTr) && prevTr > 0 && Number.isFinite(curTr) && curTr > 0) {
+            curShortMvForBorrow = prevShortMv * (curTr / prevTr);
+          }
+          const borrowBase = 0.5 * (prevShortMv + curShortMvForBorrow);
           st.cumBorrow += borrowBase * (annualDragPerShortDollar / 252);
+          if (
+            Number.isFinite(prevTr) && prevTr > 0
+            && Number.isFinite(curTr) && curTr > 0
+            && Number.isFinite(curShortMvForBorrow) && curShortMvForBorrow > 0
+            && Number.isFinite(cur.pl) && cur.pl > 0
+          ) {
+            st.qShort = curShortMvForBorrow / cur.pl;
+          }
         } else {
           advanceBorrowForState(st, ds);
         }
@@ -923,6 +973,7 @@
     simulateInversePairBacktest,
     simulateShortFlowBacktest,
     computePairBacktestRiskSeries,
+    parseShortFlowBacktestRoute,
     MIN_TRADING_DAYS_FOR_CAGR,
     MIN_CALENDAR_YEARS_FOR_CAGR,
   };
