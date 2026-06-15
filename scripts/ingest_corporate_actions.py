@@ -64,6 +64,7 @@ API-key budget.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import logging
 import math
@@ -76,6 +77,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urljoin
 
 import pandas as pd
 import requests
@@ -155,6 +157,17 @@ GOOGLE_NEWS_WINDOW_DAYS = int(os.getenv("CORP_ACTIONS_GOOGLE_NEWS_WINDOW_DAYS", 
 # resolved ticker.  Bounded at a conservative default to stay polite to
 # publishers and avoid burning the workflow budget on low-value pages.
 GOOGLE_NEWS_BODY_FETCH_BUDGET = int(os.getenv("CORP_ACTIONS_GOOGLE_NEWS_BODY_FETCH_BUDGET", "40"))
+# Direct issuer press pages are a fallback for announcements that Google News
+# exposes only through JS wrapper URLs where the article body is inaccessible.
+ENABLE_ISSUER_PRESS = os.getenv("CORP_ACTIONS_ENABLE_ISSUER_PRESS", "1") not in {"0", "false", "False", ""}
+ISSUER_PRESS_WINDOW_DAYS = int(os.getenv("CORP_ACTIONS_ISSUER_PRESS_WINDOW_DAYS", "60"))
+ISSUER_PRESS_MAX_ARTICLES = int(os.getenv("CORP_ACTIONS_ISSUER_PRESS_MAX_ARTICLES", "30"))
+ISSUER_PRESS_SOURCES: tuple[dict[str, str], ...] = (
+    {
+        "issuer": "GraniteShares",
+        "index_url": "https://graniteshares.com/press/",
+    },
+)
 # Weak inferred (bare-token underlying expansion) matches are noisy.  Only
 # admit them when classification confidence is high enough.
 GOOGLE_NEWS_WEAK_INFERRED_MIN_CONF = float(
@@ -1488,6 +1501,41 @@ def _extract_execution_date(text: str) -> str | None:
         return None
 
 
+_DELISTING_EXECUTION_DATE_RES = [
+    re.compile(
+        r"\blast\s+day\s+of\s+trading\b.{0,200}?"
+        r"(?P<month>January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+(?P<day>\d{1,2}),?\s+(?P<year>20\d{2})",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\bno\s+longer\s+trade\b.{0,200}?"
+        r"(?P<month>January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+(?P<day>\d{1,2}),?\s+(?P<year>20\d{2})",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\bmarket\s+close\s+on\s+"
+        r"(?P<month>January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+(?P<day>\d{1,2}),?\s+(?P<year>20\d{2})",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _extract_delisting_execution_date(text: str) -> str | None:
+    for regex in _DELISTING_EXECUTION_DATE_RES:
+        m = regex.search(text or "")
+        if not m:
+            continue
+        try:
+            mon = _MONTH_LOOKUP[m.group("month").lower()]
+            return f"{int(m.group('year')):04d}-{mon:02d}-{int(m.group('day')):02d}"
+        except Exception:  # noqa: BLE001
+            continue
+    return _extract_execution_date(text)
+
+
 def _extract_high_signal_tickers(text: str) -> set[str]:
     """Ticker-like tokens from issuer-style patterns (parens, exchange prefix, …)."""
     if not text:
@@ -2070,7 +2118,11 @@ def phase_5_google_news(
             # we do not stack duplicate cards for the same fund.
             if cat in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
                 if match_tier in {"explicit", "high"}:
-                    exec_date = _extract_execution_date(classify_text_src)
+                    exec_date = (
+                        _extract_delisting_execution_date(classify_text_src)
+                        if cat == "delisting"
+                        else _extract_execution_date(classify_text_src)
+                    )
                     for sym in emit_syms:
                         if cat == "delisting":
                             event_id = f"polygon_delisting:{sym}"
@@ -2108,6 +2160,199 @@ def phase_5_google_news(
         body_fetches_done,
         GOOGLE_NEWS_BODY_FETCH_BUDGET,
         dropped_low_confidence,
+        len(all_events),
+        len(all_news),
+    )
+    return all_events, all_news
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 - issuer press pages (direct source fallback)
+# ---------------------------------------------------------------------------
+
+def _parse_iso_date_like(value: object) -> str | None:
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(UTC).isoformat()
+    except Exception:  # noqa: BLE001
+        pass
+    m = re.search(r"(20\d{2})-(\d{2})-(\d{2})", s)
+    if not m:
+        return None
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}T00:00:00+00:00"
+
+
+def _issuer_press_articles_from_jsonld(index_html: str, index_url: str) -> list[dict]:
+    """Extract NewsArticle entries from issuer JSON-LD press indexes."""
+    articles: list[dict] = []
+    if not index_html:
+        return articles
+    for match in re.finditer(r"<script\b([^>]*)>(.*?)</script>", index_html, re.IGNORECASE | re.DOTALL):
+        attrs = html.unescape(match.group(1) or "")
+        if "application/ld+json" not in attrs.lower():
+            continue
+        raw = html.unescape(match.group(2)).strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        payloads = payload if isinstance(payload, list) else [payload]
+        for obj in payloads:
+            if not isinstance(obj, dict):
+                continue
+            entries = obj.get("itemListElement") or []
+            if isinstance(entries, dict):
+                entries = [entries]
+            for entry in entries:
+                item = entry.get("item") if isinstance(entry, dict) else None
+                if not isinstance(item, dict) or item.get("@type") != "NewsArticle":
+                    continue
+                url = item.get("url")
+                title = item.get("headline") or item.get("name")
+                if not url or not title:
+                    continue
+                articles.append({
+                    "title": str(title).strip(),
+                    "url": urljoin(index_url, str(url).strip()),
+                    "published_utc": _parse_iso_date_like(item.get("datePublished")),
+                })
+    return articles
+
+
+def _fetch_issuer_press_index(session: requests.Session, url: str) -> str:
+    try:
+        resp = session.get(
+            url,
+            timeout=HTTP_TIMEOUT_SEC,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/121.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("issuer-press index fetch failed %s: %s", url, e)
+        return ""
+    if resp.status_code != 200 or not resp.text:
+        LOGGER.warning("issuer-press index non-200 %s: status=%s", url, resp.status_code)
+        return ""
+    return resp.text
+
+
+def _resolve_direct_etf_tickers(text: str, etf_universe: set[str]) -> set[str]:
+    """Resolve only explicit ETF ticker tokens from trusted issuer text."""
+    candidates = _extract_high_signal_tickers(text) | _extract_bare_tickers(text)
+    return {_norm(s) for s in candidates if _norm(s) in etf_universe}
+
+
+def phase_6_issuer_press(
+    session: requests.Session,
+    universe: set[str],
+    ever_known: set[str],
+    bucket_map: dict[str, str | None],
+    underlying_map: dict[str, str | None],
+) -> tuple[list[CorporateEvent], list[NewsItem]]:
+    """Scan issuer press indexes for source pages that RSS wrappers hide."""
+    if not ENABLE_ISSUER_PRESS:
+        LOGGER.info("issuer-press phase: DISABLED via CORP_ACTIONS_ENABLE_ISSUER_PRESS=0")
+        return [], []
+
+    cutoff_iso = (datetime.now(UTC) - timedelta(days=ISSUER_PRESS_WINDOW_DAYS)).isoformat()
+    etf_universe = {_norm(t) for t in universe if t} | {_norm(t) for t in ever_known if t}
+    all_events: list[CorporateEvent] = []
+    all_news: list[NewsItem] = []
+    scanned = 0
+    kept = 0
+
+    for source in ISSUER_PRESS_SOURCES:
+        issuer = source["issuer"]
+        index_url = source["index_url"]
+        index_html = _fetch_issuer_press_index(session, index_url)
+        articles = _issuer_press_articles_from_jsonld(index_html, index_url)
+        LOGGER.info("issuer-press source=%s articles=%d", issuer, len(articles))
+        for art in articles[:ISSUER_PRESS_MAX_ARTICLES]:
+            pub_iso = art.get("published_utc")
+            if pub_iso and pub_iso < cutoff_iso:
+                continue
+            scanned += 1
+            url = art["url"]
+            title = art["title"]
+            body = _fetch_article_body(session, url)
+            if not body:
+                continue
+            text = f"{title}\n{body}"
+            cat, conf = classify_text(text)
+            if cat not in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
+                continue
+            emit_syms = sorted(_resolve_direct_etf_tickers(text, etf_universe))
+            if not emit_syms:
+                continue
+
+            exec_date = (
+                _extract_delisting_execution_date(text)
+                if cat == "delisting"
+                else _extract_execution_date(text)
+            )
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60] or "untitled"
+            news_id = f"issuer:{issuer.lower()}:{slug}:{(pub_iso or '')[:10]}:{emit_syms[0]}"
+            summary = re.sub(r"\s+", " ", body).strip()
+            summary = summary[:400] + ("..." if len(summary) > 400 else "")
+            all_news.append(
+                NewsItem(
+                    id=news_id,
+                    tickers=emit_syms,
+                    category=cat,
+                    confidence=round(max(conf, 0.78), 3),
+                    published_utc=pub_iso,
+                    title=title,
+                    summary=summary,
+                    url=url,
+                    publisher=issuer,
+                    image_url=None,
+                    bucket=bucket_map.get(emit_syms[0]),
+                    match_tier="explicit",
+                    source_count=1,
+                    source_publishers=[issuer],
+                )
+            )
+            for sym in emit_syms:
+                if cat == "delisting":
+                    event_id = f"polygon_delisting:{sym}"
+                elif cat == "symbol_change":
+                    event_id = f"issuer_symbol_change:{sym}"
+                else:
+                    event_id = f"issuer_{cat}:{sym}:{exec_date or (pub_iso or '')[:10]}"
+                all_events.append(
+                    CorporateEvent(
+                        id=event_id,
+                        type=cat,
+                        ticker=sym,
+                        execution_date=exec_date,
+                        announcement_date=(pub_iso or "")[:10] or None,
+                        status="pending",
+                        source="issuer_press",
+                        source_url=url,
+                        bucket=bucket_map.get(sym),
+                        underlying=underlying_map.get(sym),
+                        headline=title,
+                        summary=summary,
+                    )
+                )
+            kept += 1
+
+    LOGGER.info(
+        "issuer-press: sources=%d scanned=%d kept=%d -> events=%d news=%d",
+        len(ISSUER_PRESS_SOURCES),
+        scanned,
+        kept,
         len(all_events),
         len(all_news),
     )
@@ -2439,6 +2684,11 @@ def main() -> None:
         action="store_true",
         help="Skip the Google News RSS forward-looking announcements sweep (Phase 5).",
     )
+    parser.add_argument(
+        "--skip-issuer-press",
+        action="store_true",
+        help="Skip the direct issuer press-page sweep (Phase 6).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -2475,6 +2725,8 @@ def main() -> None:
     news: list[NewsItem] = []
     gnews_events: list[CorporateEvent] = []
     gnews_items: list[NewsItem] = []
+    issuer_events: list[CorporateEvent] = []
+    issuer_items: list[NewsItem] = []
     alias_map: dict[str, dict[str, str]] = {}
     # Precompute the ever-known universe once — Phase 2, Phase 4, and Phase 5
     # all need it and it's cheap-enough (a single parquet read + prior events).
@@ -2538,6 +2790,22 @@ def main() -> None:
                 ever_known,
                 underlyings_set,
                 alias_map,
+                bucket_map,
+                underlying_map,
+            )
+
+        if args.skip_issuer_press or not ENABLE_ISSUER_PRESS:
+            LOGGER.info("Phase 6: issuer_press SKIPPED")
+        else:
+            LOGGER.info(
+                "Phase 6: issuer_press (window=%dd, sources=%d)",
+                ISSUER_PRESS_WINDOW_DAYS,
+                len(ISSUER_PRESS_SOURCES),
+            )
+            issuer_events, issuer_items = phase_6_issuer_press(
+                session,
+                set(tickers),
+                ever_known,
                 bucket_map,
                 underlying_map,
             )
@@ -2614,6 +2882,7 @@ def main() -> None:
         + delisting_events
         + symbol_change_events
         + gnews_events
+        + issuer_events
     )
     events = dedupe_events(all_events)
     final_delisting_count = sum(1 for e in events if e.type == "delisting")
@@ -2629,15 +2898,15 @@ def main() -> None:
         final_symchange_count,
     )
 
-    # Merge Polygon-news + Google-news items into the headline feed.
-    news = list(news) + list(gnews_items)
+    # Merge Polygon-news + Google-news + issuer-direct items into the headline feed.
+    news = list(news) + list(gnews_items) + list(issuer_items)
     collapsed_duplicates_by_ticker = 0
     if news:
         news = dedupe_news(news)
         link_news_to_events(news, events)
         news, collapsed_duplicates_by_ticker = collapse_news_by_ticker_category(news)
     LOGGER.info(
-        "News items after classify + dedupe: %d (polygon + google-news merged, collapsed_duplicates_by_ticker=%d)",
+        "News items after classify + dedupe: %d (polygon + google-news + issuer merged, collapsed_duplicates_by_ticker=%d)",
         len(news),
         collapsed_duplicates_by_ticker,
     )

@@ -424,6 +424,13 @@ def test_classify_close_and_liquidate_is_delisting():
     assert conf >= 0.7
 
 
+def test_delisting_execution_date_prefers_last_trading_day():
+    assert mod._extract_delisting_execution_date(
+        "On May 8, 2026, the board approved the liquidation. "
+        "The last day of trading for the ETFs on NASDAQ Stock Market will be June 18, 2026."
+    ) == "2026-06-18"
+
+
 def test_google_news_generic_lineup_title_fetches_body_and_emits_delistings(monkeypatch):
     bucket_map, underlying_map = _maps()
     bmap = {
@@ -479,3 +486,93 @@ def test_google_news_generic_lineup_title_fetches_body_and_emits_delistings(monk
     assert set(news[0].tickers) == {"BULX", "ETRL", "MSDD"}
     assert news[0].category == "delisting"
     assert {e.ticker for e in events if e.type == "delisting"} == {"BULX", "ETRL", "MSDD"}
+    assert {e.execution_date for e in events if e.type == "delisting"} == {"2026-06-18"}
+
+
+def test_issuer_press_jsonld_extracts_granite_article():
+    html = """
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "ItemList",
+      "itemListElement": [
+        {
+          "@type": "ListItem",
+          "item": {
+            "@type": "NewsArticle",
+            "headline": "GraniteShares Announces Change in ETF Lineup",
+            "url": "/press/graniteshares-announces-change-in-etf-lineup/",
+            "datePublished": "2026-06-04T00:00:00Z"
+          }
+        }
+      ]
+    }
+    </script>
+    """
+    articles = mod._issuer_press_articles_from_jsonld(html, "https://graniteshares.com/press/")
+    assert articles == [
+        {
+            "title": "GraniteShares Announces Change in ETF Lineup",
+            "url": "https://graniteshares.com/press/graniteshares-announces-change-in-etf-lineup/",
+            "published_utc": "2026-06-04T00:00:00+00:00",
+        }
+    ]
+
+
+def test_issuer_press_granite_lineup_emits_delistings(monkeypatch):
+    bucket_map, underlying_map = _maps()
+    bmap = {
+        **dict(bucket_map),
+        "BULX": "bucket_1_high_delta",
+        "ETRL": "bucket_1_high_delta",
+        "MSDD": "bucket_4_edge",
+    }
+    umap = {
+        **dict(underlying_map),
+        "BULX": "BULL",
+        "ETRL": "ETOR",
+        "MSDD": "MSTR",
+    }
+    monkeypatch.setattr(
+        mod,
+        "ISSUER_PRESS_SOURCES",
+        ({"issuer": "GraniteShares", "index_url": "https://graniteshares.com/press/"},),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_fetch_issuer_press_index",
+        lambda _s, _u: """
+        <script type="application/ld+json">
+        {"@type":"ItemList","itemListElement":[{"@type":"ListItem","item":{
+          "@type":"NewsArticle",
+          "headline":"GraniteShares Announces Change in ETF Lineup",
+          "url":"https://graniteshares.com/press/graniteshares-announces-change-in-etf-lineup/",
+          "datePublished":"2026-06-04T00:00:00Z"
+        }}]}
+        </script>
+        """,
+    )
+    monkeypatch.setattr(
+        mod,
+        "_fetch_article_body",
+        lambda _s, _u: (
+            "NEW YORK, May 18, 2026 -- GraniteShares announced today that it will close "
+            "and liquidate the following ETFs: BULX GraniteShares 2x Long BULL Daily ETF. "
+            "ETRL GraniteShares 2x Long ETOR Daily ETF. MSDD GraniteShares 2x Short MSTR Daily ETF. "
+            "Investors may sell shares until market close on June 18, 2026, and shares will be delisted."
+        ),
+    )
+
+    events, news = mod.phase_6_issuer_press(
+        requests.Session(),
+        universe={"BULX", "ETRL", "MSDD"},
+        ever_known={"BULX", "ETRL", "MSDD"},
+        bucket_map=bmap,
+        underlying_map=umap,
+    )
+    assert news
+    assert news[0].publisher == "GraniteShares"
+    assert set(news[0].tickers) == {"BULX", "ETRL", "MSDD"}
+    assert {e.ticker for e in events if e.type == "delisting"} == {"BULX", "ETRL", "MSDD"}
+    assert {e.execution_date for e in events if e.type == "delisting"} == {"2026-06-18"}
+    assert all(e.source == "issuer_press" for e in events)
