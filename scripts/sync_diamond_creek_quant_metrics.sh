@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
-# Sync ETF metrics / Stats-tab plumbing from GoldmanDrew/etf-dashboard main
+# Sync ETF metrics / Stats-tab plumbing from magis-capital-partners/etf-dashboard main
 # into a local Diamond-Creek-Quant clone (no push — you commit from your machine).
 #
 # Usage:
 #   chmod +x scripts/sync_diamond_creek_quant_metrics.sh
 #   ./scripts/sync_diamond_creek_quant_metrics.sh /path/to/Diamond-Creek-Quant
 #
-# Or from anywhere (downloads this script's siblings from raw GitHub):
-#   curl -fsSL "https://raw.githubusercontent.com/GoldmanDrew/etf-dashboard/main/scripts/sync_diamond_creek_quant_metrics.sh" | bash -s -- /path/to/Diamond-Creek-Quant
+# Or from anywhere (downloads this script's siblings from raw GitHub; set
+# GITHUB_TOKEN first because the upstream repo is private):
+#   curl -H "Authorization: Bearer $GITHUB_TOKEN" -fsSL "https://raw.githubusercontent.com/magis-capital-partners/etf-dashboard/main/scripts/sync_diamond_creek_quant_metrics.sh" | bash -s -- /path/to/Diamond-Creek-Quant
 #
 set -euo pipefail
 
-UPSTREAM="${ETF_DASHBOARD_UPSTREAM:-GoldmanDrew/etf-dashboard}"
+UPSTREAM="${ETF_DASHBOARD_UPSTREAM:-magis-capital-partners/etf-dashboard}"
 BRANCH="${ETF_DASHBOARD_BRANCH:-main}"
 RAW="https://raw.githubusercontent.com/${UPSTREAM}/${BRANCH}"
+AUTH_ARGS=()
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  AUTH_ARGS=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+fi
 
 DCQ_ROOT="${1:-}"
 if [[ -z "${DCQ_ROOT}" ]] || [[ ! -d "${DCQ_ROOT}/.git" ]]; then
@@ -27,7 +32,7 @@ fetch() {
   local rel="$1"
   local dest="$2"
   mkdir -p "$(dirname "$dest")"
-  curl -fsSL "${RAW}/${rel}" -o "$dest" || die "failed to fetch ${RAW}/${rel}"
+  curl "${AUTH_ARGS[@]}" -fsSL "${RAW}/${rel}" -o "$dest" || die "failed to fetch ${RAW}/${rel}"
 }
 
 echo "==> Fetching Python + test from ${UPSTREAM} (${BRANCH})"

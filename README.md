@@ -1,6 +1,6 @@
 # ETF Borrow Dashboard
 
-Live at: **https://goldmandrew.github.io/etf-dashboard/**
+Live at: **https://magis-capital-partners.github.io/etf-dashboard/**
 
 Real-time IBKR short stock borrow rate monitoring with **distributional decay forecasts** and **product-class-aware** decay/edge routing for leveraged, inverse, volatility, and YieldBOOST income ETFs. Deployed as a static site via GitHub Pages — no server required.
 
@@ -12,7 +12,7 @@ Real-time IBKR short stock borrow rate monitoring with **distributional decay fo
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  GoldmanDrew/ls-algo  (daily GitHub Action)                          │
+│  magis-capital-partners/ls-algo  (daily GitHub Action)                          │
 │    daily_screener.py                                                 │
 │      ├─ Pulls daily prices, IBKR borrow snapshot, holdings           │
 │      ├─ Computes realized & expected gross decay                     │
@@ -21,9 +21,9 @@ Real-time IBKR short stock borrow rate monitoring with **distributional decay fo
 │      ├─ Tags product_class + expected_decay_available                │
 │      └─ Writes data/etf_screened_today.csv (~520 KB) → git push      │
 └────────────────────────────┬─────────────────────────────────────────┘
-                             │  raw.githubusercontent.com
+                             │  authenticated GitHub fetch
 ┌────────────────────────────▼─────────────────────────────────────────┐
-│  GoldmanDrew/etf-dashboard  (this repo)                              │
+│  magis-capital-partners/etf-dashboard  (this repo)                              │
 │                                                                       │
 │  scripts/build_data.py                                               │
 │    Daily full build:                                                 │
@@ -123,7 +123,7 @@ Go to **Settings → Pages** in this repo:
 git add -A && git commit -m "initial dashboard" && git push
 ```
 
-The `build-and-deploy.yml` Action runs on push, builds the data, and deploys. Your site will be live at `https://goldmandrew.github.io/etf-dashboard/` within a few minutes.
+The `build-and-deploy.yml` Action runs on push, builds the data, and deploys. Your site will be live at `https://magis-capital-partners.github.io/etf-dashboard/` within a few minutes.
 
 ## Schedule
 
@@ -252,7 +252,7 @@ etf-dashboard/
 
 ## Data Sources
 
-- **Universe**: `GoldmanDrew/ls-algo` → `data/etf_screened_today.csv` (HARQ-Log distributional decay, net-edge bootstrap, product taxonomy)
+- **Universe**: `magis-capital-partners/ls-algo` → `data/etf_screened_today.csv` (HARQ-Log distributional decay, net-edge bootstrap, product taxonomy)
 - **Borrow rates**: IBKR public FTP (`ftp2.interactivebrokers.com/usa.txt`) — fee-only borrow with shares available
 - **Spot + options**: Tradier REST (spot primary) + Polygon REST (options snapshots/contracts, spot fallback)
 - **Realized vol & price history**: Yahoo Finance via `yfinance`
@@ -264,7 +264,7 @@ etf-dashboard/
 - `python daily_screener.py --borrow-history-path ../etf-dashboard/data/borrow_history.json`, or
 - `BORROW_HISTORY_PATH` set to the same file before `daily_screener.py`.
 
-Without that file, ls-algo still **auto-detects** a sibling `../etf-dashboard/data/borrow_history.json` or `ls-algo/data/borrow_history.json` (the ls-algo GitHub Action curls the public dashboard JSON into `data/` before the screener). New CSV columns include `borrow_resample_mode`, `borrow_weight_halflife_days`, `borrow_history_points_used`, **`net_edge_p25_annual` / `net_edge_p75_annual`**, and **`net_edge_hist_json`** (compact histogram of bootstrap net draws for the dashboard).
+Without that file, ls-algo still **auto-detects** a sibling `../etf-dashboard/data/borrow_history.json` or `ls-algo/data/borrow_history.json` (the ls-algo GitHub Action downloads the private dashboard JSON into `data/` before the screener using an authenticated GitHub request). New CSV columns include `borrow_resample_mode`, `borrow_weight_halflife_days`, `borrow_history_points_used`, **`net_edge_p25_annual` / `net_edge_p75_annual`**, and **`net_edge_hist_json`** (compact histogram of bootstrap net draws for the dashboard).
 
 ## Expected Decay Calculator
 
@@ -280,7 +280,7 @@ This is the same model as the simple Itô fallback in `decay_distribution.py`. F
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `UNIVERSE_REPO` | `GoldmanDrew/ls-algo` | Source repo for universe CSV |
+| `UNIVERSE_REPO` | `magis-capital-partners/ls-algo` | Source repo for universe CSV |
 | `UNIVERSE_BRANCH` | `main` | Branch to fetch from |
 | `UNIVERSE_PATH` | `data/etf_screened_today.csv` | Source CSV path in repo |
 | `HIGH_DELTA_THRESHOLD` | `1.5` | Beta cutoff for Bucket 1 vs 2 |

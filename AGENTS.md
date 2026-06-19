@@ -48,7 +48,7 @@ The dashboard is **deployed as a fully static site** to GitHub Pages. The "backe
 There are **two repositories** that produce this site. Most code changes touch only one of them. Knowing which is which is the most important thing on this page.
 
 ```
-GoldmanDrew/ls-algo                 GoldmanDrew/etf-dashboard
+magis-capital-partners/ls-algo                 magis-capital-partners/etf-dashboard
 ─────────────────────               ──────────────────────────
 daily_screener.py                   scripts/build_data.py
 screener_v2_fields.py               index.html
@@ -107,11 +107,11 @@ Steps 4–7 are the "etf-dashboard sweep". You will do this often. There is a re
 │                                ├─ Step 5d: passive_low_delta nulling policy     │
 │                                └─ write data/etf_screened_today.csv            │
 │                                                                                │
-│   git push to GoldmanDrew/ls-algo:main                                         │
+│   git push to magis-capital-partners/ls-algo:main                                         │
 └────────────────────────────────────────────────────────────────────────────────┘
                                      │
-                                     │ ls-algo CSV is publicly fetchable from
-                                     │ raw.githubusercontent.com
+                                     │ ls-algo CSV is fetched from GitHub
+                                     │ with token auth when private
                                      ▼
 ┌────────────────────── etf-dashboard (this repo, prod) ─────────────────────────┐
 │                                                                                │
@@ -138,7 +138,7 @@ Steps 4–7 are the "etf-dashboard sweep". You will do this often. There is a re
 │   .github/workflows/update-corporate-actions.yml (every 6 h)                       │
 │   .github/workflows/deploy-pages-data.yml   (hourly Pages safety net)              │
 │                                                                                │
-│   PUBLIC SITE: https://goldmandrew.github.io/etf-dashboard/                    │
+│   PUBLIC SITE: https://magis-capital-partners.github.io/etf-dashboard/                    │
 │     ├─ fetches data/dashboard_data.json on load                                │
 │     ├─ fetches data/borrow_history.json on demand (chart page)                 │
 │     ├─ fetches data/options_cache.json on demand (chart + trade-lab)           │
@@ -1021,8 +1021,8 @@ If the Vol / VRP tab shows holdings strikes but **IV pending**, or the browser c
 Verify:
 
 ```bash
-curl -sI https://goldmandrew.github.io/etf-dashboard/data/vrp_live.json | head -1
-curl -sI https://goldmandrew.github.io/etf-dashboard/data/yieldboost_put_spreads_latest.json | head -1
+curl -sI https://magis-capital-partners.github.io/etf-dashboard/data/vrp_live.json | head -1
+curl -sI https://magis-capital-partners.github.io/etf-dashboard/data/yieldboost_put_spreads_latest.json | head -1
 ```
 
 Local gate:
@@ -1166,7 +1166,7 @@ If a single-name underlying has too thin a panel (`_HORIZON_PANEL_RATIO_MIN`), t
 
 ### 13.10 The dashboard depends on `ls-algo`'s git history (for borrow_history)
 
-The ls-algo workflow curls the public dashboard `borrow_history.json` into ls-algo's `data/` folder before running the screener (so the bootstrap can use the weighted resample). This creates a circular dependency: ls-algo reads the dashboard's borrow history, the dashboard reads ls-algo's CSV. The first run of the day breaks the circle by ls-algo running first (the screener cron is set earlier than the dashboard cron).
+The ls-algo workflow downloads the private dashboard `borrow_history.json` into ls-algo's `data/` folder before running the screener using a token with read access to `magis-capital-partners/etf-dashboard` (so the bootstrap can use the weighted resample). This creates a circular dependency: ls-algo reads the dashboard's borrow history, the dashboard reads ls-algo's CSV. The first run of the day breaks the circle by ls-algo running first (the screener cron is set earlier than the dashboard cron).
 
 ### 13.11 PowerShell ≠ bash
 

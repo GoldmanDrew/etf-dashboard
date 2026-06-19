@@ -2,7 +2,7 @@
 GitHub Universe Sync
 ====================
 Pulls the latest etf_screened_today.csv (and optionally other files) from
-the GoldmanDrew/ls-algo repo on GitHub.
+the magis-capital-partners/ls-algo repo on GitHub.
 
 Features:
   - SHA-based change detection (only reload when file actually changes)
@@ -44,7 +44,7 @@ def resolve_github_token(config: dict) -> Optional[str]:
     Resolve GitHub token from (in priority order):
       1. config.yaml → github.token
       2. Environment variable GITHUB_TOKEN
-      3. None (public repo, no auth — subject to 60 req/hr rate limit)
+      3. None (only works for public repos; private repos require a token)
     """
     gh_cfg = config.get("github", {})
 
@@ -66,7 +66,7 @@ def resolve_github_token(config: dict) -> Optional[str]:
 # ──────────────────────────────────────────────
 def sync_universe_from_github(
     *,
-    repo: str = "GoldmanDrew/ls-algo",
+    repo: str = "magis-capital-partners/ls-algo",
     branch: str = "main",
     remote_path: str = "data/etf_screened_today.csv",
     local_path: str = "data/etf_screened_today.csv",
@@ -191,7 +191,7 @@ def sync_universe_from_github(
 # ──────────────────────────────────────────────
 def get_last_commit_info(
     *,
-    repo: str = "GoldmanDrew/ls-algo",
+    repo: str = "magis-capital-partners/ls-algo",
     file_path: str = "data/etf_screened_today.csv",
     github_token: Optional[str] = None,
     timeout: int = 15,
