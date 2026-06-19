@@ -1682,7 +1682,7 @@ def _fetch_google_news_rss(session: requests.Session, query: str) -> list[dict]:
     })
     try:
         resp = session.get(url, timeout=HTTP_TIMEOUT_SEC, headers={
-            "User-Agent": "etf-dashboard-corporate-actions/1.0 (+https://goldmandrew.github.io/etf-dashboard)",
+            "User-Agent": "etf-dashboard-corporate-actions/1.0 (+https://magis-capital-partners.github.io/etf-dashboard)",
             "Accept": "application/rss+xml, application/xml, text/xml",
         })
     except Exception as e:  # noqa: BLE001

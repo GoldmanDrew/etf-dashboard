@@ -2,7 +2,7 @@
 """
 build_data.py — Static data builder for GitHub Pages deployment.
 
-Fetches etf_screened_today.csv from GoldmanDrew/ls-algo,
+Fetches etf_screened_today.csv from magis-capital-partners/ls-algo,
 reads real decay + volatility from CSV (computed by etf_analytics.py),
 fetches live IBKR borrow rates, assigns buckets, builds summary stats,
 then writes data/dashboard_data.json for the frontend to consume.
@@ -69,7 +69,7 @@ PAIR_SCENARIO_DRIFTS = (-0.50, -0.25, 0.00, 0.25, 0.50)
 # ──────────────────────────────────────────────
 # Config
 # ──────────────────────────────────────────────
-UNIVERSE_REPO = os.environ.get("UNIVERSE_REPO", "GoldmanDrew/ls-algo")
+UNIVERSE_REPO = os.environ.get("UNIVERSE_REPO", "magis-capital-partners/ls-algo")
 UNIVERSE_BRANCH = os.environ.get("UNIVERSE_BRANCH", "main")
 UNIVERSE_PATH = os.environ.get("UNIVERSE_PATH", "data/etf_screened_today.csv")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")

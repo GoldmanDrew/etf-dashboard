@@ -111,7 +111,7 @@ def sync_github_universe() -> dict:
     token = resolve_github_token(CONFIG)
 
     result = sync_universe_from_github(
-        repo=gh_cfg.get("repo", "GoldmanDrew/ls-algo"),
+        repo=gh_cfg.get("repo", "magis-capital-partners/ls-algo"),
         branch=gh_cfg.get("branch", "main"),
         remote_path=gh_cfg.get("remote_path", "data/etf_screened_today.csv"),
         local_path=CONFIG.get("universe_csv", "data/etf_screened_today.csv"),
@@ -121,7 +121,7 @@ def sync_github_universe() -> dict:
 
     # Try to get last commit info (when was the screener last run?)
     commit_info = get_last_commit_info(
-        repo=gh_cfg.get("repo", "GoldmanDrew/ls-algo"),
+        repo=gh_cfg.get("repo", "magis-capital-partners/ls-algo"),
         file_path=gh_cfg.get("remote_path", "data/etf_screened_today.csv"),
         github_token=token,
     )
