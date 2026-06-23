@@ -16,6 +16,7 @@ VOL_SHAPE_PRIMARY_WINDOW = 60
 VOL_SHAPE_HISTORY_MAX_POINTS = 252
 PRICE_BASIS_JOINT_METRICS = "joint_etf_metrics"
 PRICE_BASIS_UNDERLYING_TR = "underlying_total_return"
+TREND_ESTIMATOR_SOURCE = "heuristic_v2_persistence_cadence"
 
 
 def _vol_shape_columns_for_window(window: int) -> tuple[str, ...]:
@@ -23,6 +24,15 @@ def _vol_shape_columns_for_window(window: int) -> tuple[str, ...]:
         f"und_rv_{window}d_daily_annual",
         f"und_rv_{window}d_weekly_annual",
         f"und_trend_ratio_{window}d",
+        f"und_trend_ratio_fwd_{window}d",
+        f"und_trend_regime_prob_trend_{window}d",
+        f"und_trend_regime_prob_chop_{window}d",
+        f"und_trend_estimator_confidence_{window}d",
+        f"und_trend_efficiency_{window}d",
+        f"und_trend_consistency_{window}d",
+        f"und_trend_r2_{window}d",
+        f"und_trend_persistence_{window}d",
+        f"und_rebalance_cadence_score_{window}d",
         f"und_vcr_{window}d",
         f"und_return_{window}d",
         f"und_abs_return_{window}d_pctile",
@@ -47,6 +57,168 @@ def _percentile_of_latest(values: list[float]) -> float | None:
         return None
     latest = float(a[-1])
     return float(np.mean(a <= latest))
+
+
+def _clip(v: float, lo: float, hi: float) -> float:
+    return float(min(max(v, lo), hi))
+
+
+def _clip01(v: float) -> float:
+    return _clip(v, 0.0, 1.0)
+
+
+def _sigmoid(v: float) -> float:
+    if v >= 0:
+        z = np.exp(-v)
+        return float(1.0 / (1.0 + z))
+    z = np.exp(v)
+    return float(z / (1.0 + z))
+
+
+def _trend_r2(tail: np.ndarray) -> float:
+    y = np.cumsum(tail)
+    if y.size < 3:
+        return 0.0
+    x = np.arange(y.size, dtype=float)
+    x = x - x.mean()
+    y_centered = y - y.mean()
+    denom = float(np.dot(x, x))
+    ss_tot = float(np.dot(y_centered, y_centered))
+    if denom <= 0 or ss_tot <= 0:
+        return 0.0
+    beta = float(np.dot(x, y_centered) / denom)
+    yhat = beta * x
+    ss_res = float(np.sum((y_centered - yhat) ** 2))
+    return _clip01(1.0 - ss_res / ss_tot)
+
+
+def _regime_persistence(tail: np.ndarray) -> float:
+    """In-window regime persistence from consecutive sub-window behavior.
+
+    This intentionally uses only the current trailing window. It rewards paths
+    whose sub-window cumulative returns point the same way with similar
+    magnitudes, and penalizes alternating/reversing sub-windows.
+    """
+    n = int(tail.size)
+    if n < 10:
+        return 0.0
+    n_blocks = min(6, max(3, n // 10))
+    blocks = [b for b in np.array_split(tail, n_blocks) if b.size]
+    block_rets = np.asarray([float(np.sum(b)) for b in blocks], dtype=float)
+    block_abs = np.abs(block_rets)
+    if not np.any(np.isfinite(block_abs)) or float(np.sum(block_abs)) <= 0:
+        return 0.0
+    signs = np.sign(block_rets[np.abs(block_rets) > 1e-12])
+    sign_stability = _clip01(abs(float(np.mean(signs)))) if signs.size else 0.0
+    same_direction = (
+        float(np.mean(np.sign(block_rets[1:]) == np.sign(block_rets[:-1])))
+        if block_rets.size > 1 else 0.0
+    )
+    mag_mean = float(np.mean(block_abs))
+    mag_cv = float(np.std(block_abs) / mag_mean) if mag_mean > 0 else 2.0
+    magnitude_stability = _clip01(1.0 - mag_cv / 1.5)
+    return _clip01(0.45 * sign_stability + 0.35 * same_direction + 0.20 * magnitude_stability)
+
+
+def trend_regime_estimator_from_returns(
+    tail: np.ndarray,
+    *,
+    trend_ratio: float | None = None,
+    vcr: float | None = None,
+) -> dict[str, float | None]:
+    """Forward-looking path-regime proxy from point-in-time trailing returns.
+
+    This is intentionally a conservative heuristic: it shrinks the realized TR
+    toward 1.0 unless the path is smooth, sign-consistent, and not jump-driven.
+    It is an estimator to test, not a replacement for the realized TR field.
+    """
+    a = np.asarray(tail, dtype=float)
+    a = a[np.isfinite(a)]
+    n = int(a.size)
+    if n < 5:
+        return {
+            "trend_ratio_fwd": None,
+            "prob_trend": None,
+            "prob_chop": None,
+            "confidence": None,
+            "efficiency": None,
+            "consistency": None,
+            "r2": None,
+            "persistence": None,
+            "cadence_score": None,
+        }
+    sq = a * a
+    sum_sq = float(np.sum(sq))
+    if not np.isfinite(sum_sq) or sum_sq <= 0:
+        return {
+            "trend_ratio_fwd": None,
+            "prob_trend": None,
+            "prob_chop": None,
+            "confidence": None,
+            "efficiency": None,
+            "consistency": None,
+            "r2": None,
+            "persistence": None,
+            "cadence_score": None,
+        }
+
+    tr = float(trend_ratio) if trend_ratio is not None and np.isfinite(trend_ratio) else 1.0
+    vc = float(vcr) if vcr is not None and np.isfinite(vcr) else float(np.max(sq) / sum_sq)
+
+    efficiency = _clip01(abs(float(np.sum(a))) / np.sqrt(sum_sq * n))
+    signs = np.sign(a[np.abs(a) > 1e-12])
+    consistency = _clip01(abs(float(np.mean(signs)))) if signs.size else 0.0
+    r2 = _trend_r2(a)
+    persistence = _regime_persistence(a)
+
+    random_eff = float(np.sqrt(2.0 / np.pi) / np.sqrt(n))
+    random_consistency = random_eff
+    sample_conf = _clip01(np.sqrt(n / 60.0))
+    jump_floor = max(0.15, 3.0 / n)
+    jump_penalty = _clip01((vc - jump_floor) / 0.35)
+
+    tr_shrunk = 1.0 + (tr - 1.0) * sample_conf * (1.0 - 0.55 * jump_penalty)
+    tr_z = _clip((tr_shrunk - 1.0) / 0.18, -3.0, 3.0)
+    eff_z = _clip((efficiency - 1.5 * random_eff) / 0.25, -3.0, 3.0)
+    cons_z = _clip((consistency - 1.5 * random_consistency) / 0.25, -3.0, 3.0)
+    r2_z = _clip((r2 - 0.35) / 0.25, -3.0, 3.0)
+    persistence_z = _clip((persistence - 0.50) / 0.25, -3.0, 3.0)
+
+    evidence = (
+        0.40 * tr_z
+        + 0.22 * eff_z
+        + 0.20 * cons_z
+        + 0.20 * r2_z
+        + 0.22 * persistence_z
+        - 0.35 * jump_penalty
+    )
+    confidence = _clip01(sample_conf * (1.0 - 0.45 * jump_penalty))
+    scaled = evidence * (0.50 + 0.50 * confidence)
+    ratio_fwd = _clip(1.0 + 0.22 * float(np.tanh(scaled / 2.0)), 0.72, 1.28)
+    prob_trend = _sigmoid(1.35 * scaled)
+    prob_chop = _sigmoid(-1.35 * scaled)
+    cadence_evidence = (
+        0.45 * persistence_z
+        + 0.30 * r2_z
+        + 0.25 * eff_z
+        + 0.15 * tr_z
+        - 0.55 * jump_penalty
+        - 0.20 * max(0.0, -tr_z)
+    )
+    cadence_scaled = cadence_evidence * (0.50 + 0.50 * confidence)
+    cadence_score = _clip(1.0 + 0.30 * float(np.tanh(cadence_scaled / 2.0)), 0.70, 1.30)
+
+    return {
+        "trend_ratio_fwd": ratio_fwd,
+        "prob_trend": prob_trend,
+        "prob_chop": prob_chop,
+        "confidence": confidence,
+        "efficiency": efficiency,
+        "consistency": consistency,
+        "r2": r2,
+        "persistence": persistence,
+        "cadence_score": cadence_score,
+    }
 
 
 def vol_shape_label(
@@ -106,6 +278,15 @@ def underlying_vol_shape_from_prices(prices: pd.Series, window: int) -> dict[str
     rv_daily_hist: list[float] = []
     rv_weekly_hist: list[float] = []
     tr_hist: list[float] = []
+    tr_fwd_hist: list[float] = []
+    trend_prob_hist: list[float] = []
+    chop_prob_hist: list[float] = []
+    estimator_conf_hist: list[float] = []
+    trend_eff_hist: list[float] = []
+    trend_consistency_hist: list[float] = []
+    trend_r2_hist: list[float] = []
+    trend_persistence_hist: list[float] = []
+    cadence_score_hist: list[float] = []
     vcr_hist: list[float] = []
     ret_hist: list[float] = []
 
@@ -122,9 +303,19 @@ def underlying_vol_shape_from_prices(prices: pd.Series, window: int) -> dict[str
         rv_weekly = float(np.sqrt(np.mean(weekly**2) * (TRADING_DAYS / 5.0)))
         trend_ratio = rv_weekly / rv_daily if rv_daily > 0 else np.nan
         vcr = float(np.max(sq) / sum_sq)
+        est = trend_regime_estimator_from_returns(tail, trend_ratio=trend_ratio, vcr=vcr)
         rv_daily_hist.append(rv_daily)
         rv_weekly_hist.append(rv_weekly)
         tr_hist.append(float(trend_ratio))
+        tr_fwd_hist.append(float(est["trend_ratio_fwd"]) if est["trend_ratio_fwd"] is not None else np.nan)
+        trend_prob_hist.append(float(est["prob_trend"]) if est["prob_trend"] is not None else np.nan)
+        chop_prob_hist.append(float(est["prob_chop"]) if est["prob_chop"] is not None else np.nan)
+        estimator_conf_hist.append(float(est["confidence"]) if est["confidence"] is not None else np.nan)
+        trend_eff_hist.append(float(est["efficiency"]) if est["efficiency"] is not None else np.nan)
+        trend_consistency_hist.append(float(est["consistency"]) if est["consistency"] is not None else np.nan)
+        trend_r2_hist.append(float(est["r2"]) if est["r2"] is not None else np.nan)
+        trend_persistence_hist.append(float(est["persistence"]) if est["persistence"] is not None else np.nan)
+        cadence_score_hist.append(float(est["cadence_score"]) if est["cadence_score"] is not None else np.nan)
         vcr_hist.append(vcr)
         ret_hist.append(float(np.sum(tail)))
 
@@ -153,6 +344,15 @@ def underlying_vol_shape_from_prices(prices: pd.Series, window: int) -> dict[str
         f"und_rv_{window}d_daily_annual": _f(rv_daily_hist[-1]),
         f"und_rv_{window}d_weekly_annual": _f(rv_weekly_hist[-1]),
         f"und_trend_ratio_{window}d": _f(tr_hist[-1]),
+        f"und_trend_ratio_fwd_{window}d": _f(tr_fwd_hist[-1]),
+        f"und_trend_regime_prob_trend_{window}d": _f(trend_prob_hist[-1]),
+        f"und_trend_regime_prob_chop_{window}d": _f(chop_prob_hist[-1]),
+        f"und_trend_estimator_confidence_{window}d": _f(estimator_conf_hist[-1]),
+        f"und_trend_efficiency_{window}d": _f(trend_eff_hist[-1]),
+        f"und_trend_consistency_{window}d": _f(trend_consistency_hist[-1]),
+        f"und_trend_r2_{window}d": _f(trend_r2_hist[-1]),
+        f"und_trend_persistence_{window}d": _f(trend_persistence_hist[-1]),
+        f"und_rebalance_cadence_score_{window}d": _f(cadence_score_hist[-1]),
         f"und_vcr_{window}d": _f(vcr_hist[-1]),
         f"und_return_{window}d": _f(ret_hist[-1]),
         f"und_abs_return_{window}d_pctile": _f(abs_ret_pctile),
@@ -161,6 +361,7 @@ def underlying_vol_shape_from_prices(prices: pd.Series, window: int) -> dict[str
         f"und_vcr_{window}d_pctile": _f(vcr_pctile),
         f"und_vcr_{window}d_median": _f(vcr_median_hist),
         f"und_vol_shape_{window}d": label,
+        "und_trend_estimator_source": TREND_ESTIMATOR_SOURCE,
     }
 
 
@@ -214,12 +415,19 @@ def build_underlying_vol_shape_history(
         rv_weekly = float(np.sqrt(np.mean(weekly**2) * (TRADING_DAYS / 5.0)))
         trend_ratio = rv_weekly / rv_daily if rv_daily > 0 else None
         vcr = float(np.max(tail**2) / sum_sq)
+        est = trend_regime_estimator_from_returns(tail, trend_ratio=trend_ratio, vcr=vcr)
         out.append(
             {
                 "date": rets[end - 1][0],
                 "rv_daily": _round_hist(rv_daily),
                 "rv_weekly": _round_hist(rv_weekly),
                 "trend_ratio": _round_hist(trend_ratio),
+                "trend_ratio_fwd": _round_hist(est["trend_ratio_fwd"]),
+                "trend_prob": _round_hist(est["prob_trend"]),
+                "chop_prob": _round_hist(est["prob_chop"]),
+                "trend_estimator_confidence": _round_hist(est["confidence"]),
+                "trend_persistence": _round_hist(est["persistence"]),
+                "rebalance_cadence_score": _round_hist(est["cadence_score"]),
                 "vcr": _round_hist(vcr),
             }
         )
@@ -312,6 +520,7 @@ def load_vol_shape_from_metrics(
         if primary_tr is None:
             continue
         panel["und_vol_shape_source"] = "etf_metrics_daily"
+        panel["und_trend_estimator_source"] = TREND_ESTIMATOR_SOURCE
         panel["und_vol_shape_price_basis"] = PRICE_BASIS_JOINT_METRICS
         panel["und_vol_shape_metrics_asof"] = str(px.index[-1]) if len(px.index) else None
         panel["und_vol_shape_joint_days"] = int(len(px))
@@ -347,6 +556,7 @@ def apply_vol_shape_to_record(rec: dict[str, Any], panel: dict[str, Any] | None)
         if key in panel and panel[key] is not None:
             rec[key] = panel[key]
     rec["und_vol_shape_source"] = panel.get("und_vol_shape_source", "etf_metrics_daily")
+    rec["und_trend_estimator_source"] = panel.get("und_trend_estimator_source", TREND_ESTIMATOR_SOURCE)
     if panel.get("und_vol_shape_price_basis"):
         rec["und_vol_shape_price_basis"] = panel["und_vol_shape_price_basis"]
     if panel.get("und_vol_shape_metrics_asof"):

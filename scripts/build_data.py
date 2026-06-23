@@ -4660,6 +4660,15 @@ def build():
             "und_rv_20d_daily_annual": _safe_float(rdict, "und_rv_20d_daily_annual"),
             "und_rv_20d_weekly_annual": _safe_float(rdict, "und_rv_20d_weekly_annual"),
             "und_trend_ratio_20d": _safe_float(rdict, "und_trend_ratio_20d"),
+            "und_trend_ratio_fwd_20d": _safe_float(rdict, "und_trend_ratio_fwd_20d"),
+            "und_trend_regime_prob_trend_20d": _safe_float(rdict, "und_trend_regime_prob_trend_20d"),
+            "und_trend_regime_prob_chop_20d": _safe_float(rdict, "und_trend_regime_prob_chop_20d"),
+            "und_trend_estimator_confidence_20d": _safe_float(rdict, "und_trend_estimator_confidence_20d"),
+            "und_trend_efficiency_20d": _safe_float(rdict, "und_trend_efficiency_20d"),
+            "und_trend_consistency_20d": _safe_float(rdict, "und_trend_consistency_20d"),
+            "und_trend_r2_20d": _safe_float(rdict, "und_trend_r2_20d"),
+            "und_trend_persistence_20d": _safe_float(rdict, "und_trend_persistence_20d"),
+            "und_rebalance_cadence_score_20d": _safe_float(rdict, "und_rebalance_cadence_score_20d"),
             "und_vcr_20d": _safe_float(rdict, "und_vcr_20d"),
             "und_return_20d": _safe_float(rdict, "und_return_20d"),
             "und_abs_return_20d_pctile": _safe_float(rdict, "und_abs_return_20d_pctile"),
@@ -4676,6 +4685,15 @@ def build():
             "und_rv_60d_daily_annual": _safe_float(rdict, "und_rv_60d_daily_annual"),
             "und_rv_60d_weekly_annual": _safe_float(rdict, "und_rv_60d_weekly_annual"),
             "und_trend_ratio_60d": _safe_float(rdict, "und_trend_ratio_60d"),
+            "und_trend_ratio_fwd_60d": _safe_float(rdict, "und_trend_ratio_fwd_60d"),
+            "und_trend_regime_prob_trend_60d": _safe_float(rdict, "und_trend_regime_prob_trend_60d"),
+            "und_trend_regime_prob_chop_60d": _safe_float(rdict, "und_trend_regime_prob_chop_60d"),
+            "und_trend_estimator_confidence_60d": _safe_float(rdict, "und_trend_estimator_confidence_60d"),
+            "und_trend_efficiency_60d": _safe_float(rdict, "und_trend_efficiency_60d"),
+            "und_trend_consistency_60d": _safe_float(rdict, "und_trend_consistency_60d"),
+            "und_trend_r2_60d": _safe_float(rdict, "und_trend_r2_60d"),
+            "und_trend_persistence_60d": _safe_float(rdict, "und_trend_persistence_60d"),
+            "und_rebalance_cadence_score_60d": _safe_float(rdict, "und_rebalance_cadence_score_60d"),
             "und_vcr_60d": _safe_float(rdict, "und_vcr_60d"),
             "und_return_60d": _safe_float(rdict, "und_return_60d"),
             "und_abs_return_60d_pctile": _safe_float(rdict, "und_abs_return_60d_pctile"),
@@ -4746,6 +4764,12 @@ def build():
             "borrow_dispersion_type": (str(rdict.get("borrow_dispersion_type") or borrow_dispersion_type or "none") or "none"),
             "schema_v": _int_schema_v(rdict.get("schema_v", 2)),
             "edge_sign_convention": (str(rdict.get("edge_sign_convention", "short_favorable_positive"))),
+            "und_trend_estimator_source": (
+                str(rdict["und_trend_estimator_source"]).strip()
+                if rdict.get("und_trend_estimator_source")
+                and str(rdict.get("und_trend_estimator_source") or "").strip() not in ("", "nan", "None")
+                else None
+            ),
         }
         apply_vol_shape_to_record(rec, vol_shape_by_symbol.get(norm_sym(sym)))
         records.append(rec)
