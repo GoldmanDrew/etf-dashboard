@@ -13,6 +13,7 @@ Run in CI:     github actions calls this on a schedule
 from __future__ import annotations
 
 import argparse
+import base64
 import collections
 import datetime as dt
 import io
@@ -519,23 +520,16 @@ def load_distribution_income_yields(price_by_symbol: dict[str, float]) -> dict[s
 
 def fetch_csv_from_github() -> pd.DataFrame:
     """Download etf_screened_today.csv from the ls-algo repo."""
-    url = f"https://raw.githubusercontent.com/{UNIVERSE_REPO}/{UNIVERSE_BRANCH}/{UNIVERSE_PATH}"
-    headers = {"User-Agent": "etf-dashboard-builder/1.0"}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"token {GITHUB_TOKEN}"
-
-    print(f"Fetching {url} ...")
-    resp = requests.get(url, headers=headers, timeout=30)
-    resp.raise_for_status()
+    text, source_url = _fetch_github_file_text(UNIVERSE_BRANCH)
 
     # Write to local file for reference
     csv_path = OUTPUT_DIR / "etf_screened_today.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    csv_path.write_text(resp.text)
-    print(f"  -> {len(resp.text):,} bytes, saved to {csv_path}")
+    csv_path.write_text(text)
+    print(f"  -> {len(text):,} bytes from {source_url}, saved to {csv_path}")
 
     from io import StringIO
-    df = pd.read_csv(StringIO(resp.text))
+    df = pd.read_csv(StringIO(text))
     return df
 
 
@@ -554,11 +548,8 @@ def fetch_last_commit_info() -> dict | None:
     """Get the last commit that touched the CSV in ls-algo."""
     url = f"https://api.github.com/repos/{UNIVERSE_REPO}/commits"
     params = {"path": UNIVERSE_PATH, "per_page": 1}
-    headers = {"User-Agent": "etf-dashboard-builder/1.0"}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"token {GITHUB_TOKEN}"
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        resp = requests.get(url, headers=_github_headers(), params=params, timeout=15)
         resp.raise_for_status()
         commits = resp.json()
         if commits:
@@ -576,8 +567,46 @@ def fetch_last_commit_info() -> dict | None:
 def _github_headers() -> dict:
     headers = {"User-Agent": "etf-dashboard-builder/1.0"}
     if GITHUB_TOKEN:
-        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     return headers
+
+
+def _fetch_github_file_text(ref: str) -> tuple[str, str]:
+    """Fetch the universe CSV from GitHub, with API fallback for private repos."""
+    raw_url = f"https://raw.githubusercontent.com/{UNIVERSE_REPO}/{ref}/{UNIVERSE_PATH}"
+    headers = _github_headers()
+    print(f"Fetching {raw_url} ...")
+    resp = requests.get(raw_url, headers=headers, timeout=30)
+    if resp.ok:
+        return resp.text, raw_url
+
+    raw_error = f"HTTP {resp.status_code}"
+    if resp.text:
+        raw_error += f": {resp.text[:200].strip()}"
+
+    api_url = f"https://api.github.com/repos/{UNIVERSE_REPO}/contents/{UNIVERSE_PATH}"
+    print(f"  Raw fetch failed ({raw_error}); trying GitHub Contents API ...")
+    api_resp = requests.get(api_url, headers=headers, params={"ref": ref}, timeout=30)
+    api_resp.raise_for_status()
+    payload = api_resp.json()
+    content = payload.get("content")
+    if isinstance(content, str):
+        encoding = str(payload.get("encoding") or "").lower()
+        if encoding == "base64":
+            return base64.b64decode(content).decode("utf-8"), api_url
+        if encoding in {"", "utf-8", "utf8"}:
+            return content, api_url
+
+    download_url = payload.get("download_url")
+    if download_url:
+        dl_resp = requests.get(download_url, headers=headers, timeout=30)
+        dl_resp.raise_for_status()
+        return dl_resp.text, download_url
+
+    raise RuntimeError(
+        f"GitHub Contents API response for {UNIVERSE_REPO}/{UNIVERSE_PATH}@{ref} "
+        "did not include readable file content."
+    )
 
 
 def fetch_universe_commits(max_commits: int = BORROW_HISTORY_MAX_COMMITS) -> list[dict]:
@@ -610,12 +639,9 @@ def fetch_universe_commits(max_commits: int = BORROW_HISTORY_MAX_COMMITS) -> lis
 
 
 def _fetch_csv_at_sha(sha: str) -> pd.DataFrame | None:
-    raw_url = f"https://raw.githubusercontent.com/{UNIVERSE_REPO}/{sha}/{UNIVERSE_PATH}"
-    resp = requests.get(raw_url, headers=_github_headers(), timeout=25)
-    if not resp.ok:
-        return None
     try:
-        return pd.read_csv(io.StringIO(resp.text))
+        text, _ = _fetch_github_file_text(sha)
+        return pd.read_csv(io.StringIO(text))
     except Exception:
         return None
 
