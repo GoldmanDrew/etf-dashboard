@@ -760,6 +760,79 @@ def validate_df(df: pd.DataFrame) -> None:
             )
 
 
+def dedupe_metric_rows(df: pd.DataFrame, *, context: str) -> tuple[pd.DataFrame, int]:
+    """Collapse duplicate metric keys without letting weaker rows replace stronger rows."""
+    if df.empty or not {"date", "ticker"}.issubset(df.columns):
+        return df, 0
+    dup_mask = df.duplicated(subset=["date", "ticker"], keep=False)
+    n_dups = int(dup_mask.sum())
+    if not n_dups:
+        return df, 0
+
+    out = df.copy()
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    status_rank = out.get("status", pd.Series("", index=out.index)).astype(str).map(
+        {"missing": 0, "partial": 1, "ok": 2}
+    ).fillna(0)
+    stale_rank = (~out.get("stale", pd.Series(False, index=out.index)).fillna(False).astype(bool)).astype(int)
+    value_cols = [
+        c
+        for c in (
+            "nav",
+            "aum",
+            "shares_outstanding",
+            "shares_traded",
+            "close_price",
+            "etf_adj_close",
+            "underlying_adj_close",
+        )
+        if c in out.columns
+    ]
+    if value_cols:
+        completeness = out[value_cols].apply(pd.to_numeric, errors="coerce").notna().sum(axis=1)
+    else:
+        completeness = pd.Series(0, index=out.index)
+    ingested = pd.to_datetime(out.get("ingested_at_utc"), errors="coerce")
+
+    out["_dedupe_status_rank"] = status_rank
+    out["_dedupe_stale_rank"] = stale_rank
+    out["_dedupe_completeness"] = completeness
+    out["_dedupe_ingested_at"] = ingested
+    sample_cols = [c for c in ("date", "ticker", "status", "source_provider") if c in out.columns]
+    sample = out.loc[dup_mask, sample_cols].head(12)
+    before = len(out)
+    out = (
+        out.sort_values(
+            [
+                "date",
+                "ticker",
+                "_dedupe_status_rank",
+                "_dedupe_stale_rank",
+                "_dedupe_completeness",
+                "_dedupe_ingested_at",
+            ],
+            kind="stable",
+        )
+        .drop_duplicates(subset=["date", "ticker"], keep="last")
+        .drop(columns=[
+            "_dedupe_status_rank",
+            "_dedupe_stale_rank",
+            "_dedupe_completeness",
+            "_dedupe_ingested_at",
+        ])
+        .reset_index(drop=True)
+    )
+    removed = before - len(out)
+    LOGGER.warning(
+        "dedupe_metric_rows[%s]: collapsed %d duplicate row(s) to %d canonical row(s); sample=%s",
+        context,
+        n_dups,
+        removed,
+        sample.to_dict("records"),
+    )
+    return out, removed
+
+
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
@@ -2276,6 +2349,7 @@ def ingest(
 
     out = _records_to_df(rows, ingested_at=datetime.now(UTC))
     out = enforce_status_consistency(out)
+    out, _ = dedupe_metric_rows(out, context="incoming")
     validate_df(out)
     return out
 
@@ -2455,6 +2529,7 @@ def main() -> None:
         before = int(pd.to_numeric(existing["underlying_adj_close"], errors="coerce").notna().sum())
         after = int(pd.to_numeric(merged["underlying_adj_close"], errors="coerce").notna().sum())
         if after > before or n_vol_skip > 0:
+            merged, _ = dedupe_metric_rows(merged, context="skip_path")
             validate_df(merged)
             save_outputs(merged)
             LOGGER.info(
@@ -2630,6 +2705,7 @@ def main() -> None:
             n_cf_pruned,
             max_stale_business_days,
         )
+    merged, _ = dedupe_metric_rows(merged, context="merged")
     validate_df(merged)
     save_outputs(merged)
     LOGGER.info("Saved merged summary: %s", get_summary(merged))

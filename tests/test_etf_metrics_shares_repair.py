@@ -160,6 +160,54 @@ def test_repair_shares_decimal_shift():
     assert abs(fixed - (574_477.0 / 6.58)) < 1.0
 
 
+def test_dedupe_metric_rows_prefers_complete_ok_non_stale():
+    df = pd.DataFrame(
+        [
+            {
+                "date": "2026-06-19",
+                "ticker": "CRMU",
+                "nav": 10.0,
+                "aum": None,
+                "shares_outstanding": None,
+                "shares_traded": None,
+                "close_price": 10.0,
+                "etf_adj_close": None,
+                "underlying_adj_close": None,
+                "stale": True,
+                "stale_age_bdays": 1,
+                "stale_kind": "carry_forward",
+                "source_provider": "carry_forward",
+                "source_url": "",
+                "ingested_at_utc": "2026-06-20T00:00:00Z",
+                "status": "partial",
+            },
+            {
+                "date": "2026-06-19",
+                "ticker": "CRMU",
+                "nav": 10.1,
+                "aum": 1_010_000.0,
+                "shares_outstanding": 100_000.0,
+                "shares_traded": 1234,
+                "close_price": 10.12,
+                "etf_adj_close": 10.12,
+                "underlying_adj_close": 50.0,
+                "stale": False,
+                "stale_age_bdays": None,
+                "stale_kind": None,
+                "source_provider": "polygon",
+                "source_url": "",
+                "ingested_at_utc": "2026-06-20T00:01:00Z",
+                "status": "ok",
+            },
+        ]
+    )
+    out, removed = iem.dedupe_metric_rows(df, context="test")
+    assert removed == 1
+    assert len(out) == 1
+    assert out.iloc[0]["source_provider"] == "polygon"
+    iem.validate_df(out)
+
+
 def test_merge_close_prices_aligns_yahoo_to_rex_as_of_before_calendar_date():
     """When ``#as_of`` lags the row calendar date, Yahoo close must match that session (EOSU)."""
     df = pd.DataFrame(
