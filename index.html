@@ -1619,6 +1619,9 @@ function volShapeFields(r, w = VOL_SHAPE_PRIMARY_WINDOW) {
   return {
     label: r[`und_vol_shape_${w}d`],
     tr: r[`und_trend_ratio_${w}d`],
+    trFwd: r[`und_trend_ratio_fwd_${w}d`],
+    trPersistence: r[`und_trend_persistence_${w}d`],
+    cadenceScore: r[`und_rebalance_cadence_score_${w}d`],
     vcr: r[`und_vcr_${w}d`],
     ret: r[`und_return_${w}d`],
     rvDaily: r[`und_rv_${w}d_daily_annual`],
@@ -1658,6 +1661,108 @@ function latestContiguousMetricsRows(rows, maxGapDays = MAX_CONTIGUOUS_METRICS_G
     ) startIdx = i;
   }
   return dated.slice(startIdx);
+}
+function clamp01(v) { return Math.min(Math.max(Number(v), 0), 1); }
+function clampRange(v, lo, hi) { return Math.min(Math.max(Number(v), lo), hi); }
+function sigmoid(v) {
+  const x = Number(v);
+  if (x >= 0) {
+    const z = Math.exp(-x);
+    return 1 / (1 + z);
+  }
+  const z = Math.exp(x);
+  return z / (1 + z);
+}
+function trendR2FromReturns(tail) {
+  const y = [];
+  let acc = 0;
+  tail.forEach((r) => { acc += Number(r); y.push(acc); });
+  if (y.length < 3) return 0;
+  const xMean = (y.length - 1) / 2;
+  const yMean = y.reduce((a, v) => a + v, 0) / y.length;
+  let denom = 0;
+  let ssTot = 0;
+  let cov = 0;
+  y.forEach((yv, i) => {
+    const xc = i - xMean;
+    const yc = yv - yMean;
+    denom += xc * xc;
+    ssTot += yc * yc;
+    cov += xc * yc;
+  });
+  if (denom <= 0 || ssTot <= 0) return 0;
+  const beta = cov / denom;
+  let ssRes = 0;
+  y.forEach((yv, i) => {
+    const yc = yv - yMean;
+    const yhat = beta * (i - xMean);
+    ssRes += (yc - yhat) * (yc - yhat);
+  });
+  return clamp01(1 - ssRes / ssTot);
+}
+function regimePersistenceFromReturns(tail) {
+  const n = tail.length;
+  if (n < 10) return 0;
+  const nBlocks = Math.min(6, Math.max(3, Math.floor(n / 10)));
+  const blocks = [];
+  for (let b = 0; b < nBlocks; b += 1) {
+    const start = Math.floor((b * n) / nBlocks);
+    const end = Math.floor(((b + 1) * n) / nBlocks);
+    blocks.push(tail.slice(start, end));
+  }
+  const blockRets = blocks.map(block => block.reduce((a, r) => a + Number(r), 0));
+  const blockAbs = blockRets.map(Math.abs);
+  const absSum = blockAbs.reduce((a, v) => a + v, 0);
+  if (!(absSum > 0)) return 0;
+  const signs = blockRets.filter(v => Math.abs(v) > 1e-12).map(Math.sign);
+  const signStability = signs.length ? clamp01(Math.abs(signs.reduce((a, v) => a + v, 0) / signs.length)) : 0;
+  let same = 0;
+  for (let i = 1; i < blockRets.length; i += 1) {
+    if (Math.sign(blockRets[i]) === Math.sign(blockRets[i - 1])) same += 1;
+  }
+  const sameDirection = blockRets.length > 1 ? same / (blockRets.length - 1) : 0;
+  const magMean = absSum / blockAbs.length;
+  const magVar = blockAbs.reduce((a, v) => a + (v - magMean) * (v - magMean), 0) / blockAbs.length;
+  const magCv = magMean > 0 ? Math.sqrt(magVar) / magMean : 2;
+  return clamp01(0.45 * signStability + 0.35 * sameDirection + 0.20 * clamp01(1 - magCv / 1.5));
+}
+function trendRegimeEstimateFromReturns(tail, trendRatio, vcr) {
+  const a = tail.map(Number).filter(Number.isFinite);
+  const n = a.length;
+  if (n < 5) return {};
+  const sq = a.map(r => r * r);
+  const sumSq = sq.reduce((x, y) => x + y, 0);
+  if (!(sumSq > 0)) return {};
+  const tr = Number.isFinite(Number(trendRatio)) ? Number(trendRatio) : 1;
+  const vc = Number.isFinite(Number(vcr)) ? Number(vcr) : Math.max(...sq) / sumSq;
+  const efficiency = clamp01(Math.abs(a.reduce((x, y) => x + y, 0)) / Math.sqrt(sumSq * n));
+  const signs = a.filter(r => Math.abs(r) > 1e-12).map(Math.sign);
+  const consistency = signs.length ? clamp01(Math.abs(signs.reduce((x, y) => x + y, 0) / signs.length)) : 0;
+  const r2 = trendR2FromReturns(a);
+  const persistence = regimePersistenceFromReturns(a);
+  const randomEff = Math.sqrt(2 / Math.PI) / Math.sqrt(n);
+  const sampleConf = clamp01(Math.sqrt(n / 60));
+  const jumpFloor = Math.max(0.15, 3 / n);
+  const jumpPenalty = clamp01((vc - jumpFloor) / 0.35);
+  const trShrunk = 1 + (tr - 1) * sampleConf * (1 - 0.55 * jumpPenalty);
+  const trZ = clampRange((trShrunk - 1) / 0.18, -3, 3);
+  const effZ = clampRange((efficiency - 1.5 * randomEff) / 0.25, -3, 3);
+  const consZ = clampRange((consistency - 1.5 * randomEff) / 0.25, -3, 3);
+  const r2Z = clampRange((r2 - 0.35) / 0.25, -3, 3);
+  const persistenceZ = clampRange((persistence - 0.50) / 0.25, -3, 3);
+  const evidence = 0.40 * trZ + 0.22 * effZ + 0.20 * consZ + 0.20 * r2Z + 0.22 * persistenceZ - 0.35 * jumpPenalty;
+  const confidence = clamp01(sampleConf * (1 - 0.45 * jumpPenalty));
+  const scaled = evidence * (0.50 + 0.50 * confidence);
+  const cadenceEvidence = 0.45 * persistenceZ + 0.30 * r2Z + 0.25 * effZ + 0.15 * trZ - 0.55 * jumpPenalty - 0.20 * Math.max(0, -trZ);
+  const cadenceScaled = cadenceEvidence * (0.50 + 0.50 * confidence);
+  return {
+    trend_ratio_fwd: clampRange(1 + 0.22 * Math.tanh(scaled / 2), 0.72, 1.28),
+    trend_prob: sigmoid(1.35 * scaled),
+    chop_prob: sigmoid(-1.35 * scaled),
+    trend_estimator_confidence: confidence,
+    trend_persistence: persistence,
+    rebalance_cadence_score: clampRange(1 + 0.30 * Math.tanh(cadenceScaled / 2), 0.70, 1.30),
+  };
 }
 /** Joint ETF + underlying price days (same gate as pair backtest / vol-shape charts). */
 function jointMetricsRowsForVolShape(rawRows) {
@@ -1716,10 +1821,16 @@ function volShapeLatestFromHistory(volShapeHistory) {
   if (!Array.isArray(series) || !series.length) return null;
   const last = series[series.length - 1];
   const tr = Number(last?.trend_ratio);
+  const trFwd = Number(last?.trend_ratio_fwd);
+  const trPersistence = Number(last?.trend_persistence);
+  const cadenceScore = Number(last?.rebalance_cadence_score);
   const vcr = Number(last?.vcr);
-  if (!Number.isFinite(tr) && !Number.isFinite(vcr)) return null;
+  if (!Number.isFinite(tr) && !Number.isFinite(trFwd) && !Number.isFinite(vcr)) return null;
   return {
     tr: Number.isFinite(tr) ? tr : null,
+    trFwd: Number.isFinite(trFwd) ? trFwd : null,
+    trPersistence: Number.isFinite(trPersistence) ? trPersistence : null,
+    cadenceScore: Number.isFinite(cadenceScore) ? cadenceScore : null,
     vcr: Number.isFinite(vcr) ? vcr : null,
     date: String(last?.date || '').trim() || null,
     rvDaily: Number(last?.rv_daily),
@@ -1739,10 +1850,14 @@ function volShapeDisplay(r, opts = {}) {
       w,
       label: screener.label,
       tr: screener.tr,
+      trFwd: screener.trFwd,
+      trPersistence: screener.trPersistence,
+      cadenceScore: screener.cadenceScore,
       vcr: screener.vcr,
       source: 'etf_metrics_daily',
       asOfDate: r.und_vol_shape_metrics_asof || null,
       screenerTr: screener.tr,
+      screenerTrFwd: screener.trFwd,
       screenerVcr: screener.vcr,
       screenerDiffers: false,
       metricsBuildTime: opts.metricsBuildTime || null,
@@ -1760,6 +1875,9 @@ function volShapeDisplay(r, opts = {}) {
   const histLast = volShapeLatestFromHistory(opts.volShapeHistory);
   const useMetrics = histLast != null && Number.isFinite(Number(histLast.tr));
   const tr = useMetrics ? histLast.tr : screener.tr;
+  const trFwd = useMetrics ? histLast.trFwd : screener.trFwd;
+  const trPersistence = useMetrics ? histLast.trPersistence : screener.trPersistence;
+  const cadenceScore = useMetrics ? histLast.cadenceScore : screener.cadenceScore;
   const vcr = useMetrics ? histLast.vcr : screener.vcr;
   const trGap = Number.isFinite(Number(screener.tr)) && Number.isFinite(Number(tr))
     && Math.abs(Number(screener.tr) - Number(tr)) > 0.05;
@@ -1769,10 +1887,14 @@ function volShapeDisplay(r, opts = {}) {
     w,
     label: screener.label,
     tr,
+    trFwd,
+    trPersistence,
+    cadenceScore,
     vcr,
     source: useMetrics ? 'metrics' : 'screener',
     asOfDate: useMetrics ? histLast.date : null,
     screenerTr: screener.tr,
+    screenerTrFwd: screener.trFwd,
     screenerVcr: screener.vcr,
     screenerDiffers: useMetrics && (trGap || vcrGap),
     metricsBuildTime: opts.metricsBuildTime || null,
@@ -2051,6 +2173,9 @@ function volShapeTooltip(r, opts = {}) {
     `${w}d underlying volatility shape.`,
     volShapeSourceHint(resolved) || null,
     `TR = weekly-sampled RV / daily-sampled RV (iid≈1, perfect drift≈${Math.sqrt(5).toFixed(2)}): ${fmtRatio(resolved.tr)}`,
+    `Adjusted TR = persistence/jump-adjusted forward regime estimate: ${fmtRatio(resolved.trFwd)}`,
+    Number.isFinite(Number(resolved.trPersistence)) ? `Regime persistence: ${fmt(Number(resolved.trPersistence))}` : null,
+    Number.isFinite(Number(resolved.cadenceScore)) ? `Cadence score: ${fmtRatio(resolved.cadenceScore)}` : null,
     `VCR = max daily r² / sum daily r²: ${Number.isFinite(Number(resolved.vcr)) ? fmt(Number(resolved.vcr)) : '—'}`,
     `${w}d underlying return: ${fmt(resolved.ret)}`,
     `${w}d RV daily / weekly: ${fmt(resolved.rvDaily)} / ${fmt(resolved.rvWeekly)}`,
@@ -5365,11 +5490,18 @@ function buildUnderlyingVolShapeHistory(rows, window = VOL_SHAPE_PRIMARY_WINDOW)
     const rvWeekly = Math.sqrt(meanWeeklySq * (252 / 5));
     const trendRatio = rvDaily > 0 ? rvWeekly / rvDaily : null;
     const vcr = Math.max(...tail.map(r => r * r)) / sumSq;
+    const est = trendRegimeEstimateFromReturns(tail, trendRatio, vcr);
     out.push({
       date: rets[end - 1].date,
       rv_daily: rvDaily,
       rv_weekly: rvWeekly,
       trend_ratio: trendRatio,
+      trend_ratio_fwd: est.trend_ratio_fwd,
+      trend_prob: est.trend_prob,
+      chop_prob: est.chop_prob,
+      trend_estimator_confidence: est.trend_estimator_confidence,
+      trend_persistence: est.trend_persistence,
+      rebalance_cadence_score: est.rebalance_cadence_score,
       vcr,
     });
   }
@@ -8743,6 +8875,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   zeroLabel="0"
                   referenceValue={1}
                   referenceLabel="TR = 1 (iid baseline)"
+                  overlayValueKey="trend_ratio_fwd"
+                  overlayColor="rgba(6,182,212,0.95)"
+                  overlayLabel="Adjusted TR"
                   includeZero={false}
                 />
                 <SimpleSeriesPlot

@@ -89,6 +89,15 @@ class ETFRecord(BaseModel):
     und_rv_20d_daily_annual: Optional[float] = None
     und_rv_20d_weekly_annual: Optional[float] = None
     und_trend_ratio_20d: Optional[float] = None
+    und_trend_ratio_fwd_20d: Optional[float] = None
+    und_trend_regime_prob_trend_20d: Optional[float] = None
+    und_trend_regime_prob_chop_20d: Optional[float] = None
+    und_trend_estimator_confidence_20d: Optional[float] = None
+    und_trend_efficiency_20d: Optional[float] = None
+    und_trend_consistency_20d: Optional[float] = None
+    und_trend_r2_20d: Optional[float] = None
+    und_trend_persistence_20d: Optional[float] = None
+    und_rebalance_cadence_score_20d: Optional[float] = None
     und_vcr_20d: Optional[float] = None
     und_return_20d: Optional[float] = None
     und_abs_return_20d_pctile: Optional[float] = None
@@ -100,6 +109,15 @@ class ETFRecord(BaseModel):
     und_rv_60d_daily_annual: Optional[float] = None
     und_rv_60d_weekly_annual: Optional[float] = None
     und_trend_ratio_60d: Optional[float] = None
+    und_trend_ratio_fwd_60d: Optional[float] = None
+    und_trend_regime_prob_trend_60d: Optional[float] = None
+    und_trend_regime_prob_chop_60d: Optional[float] = None
+    und_trend_estimator_confidence_60d: Optional[float] = None
+    und_trend_efficiency_60d: Optional[float] = None
+    und_trend_consistency_60d: Optional[float] = None
+    und_trend_r2_60d: Optional[float] = None
+    und_trend_persistence_60d: Optional[float] = None
+    und_rebalance_cadence_score_60d: Optional[float] = None
     und_vcr_60d: Optional[float] = None
     und_return_60d: Optional[float] = None
     und_abs_return_60d_pctile: Optional[float] = None
@@ -108,6 +126,7 @@ class ETFRecord(BaseModel):
     und_vcr_60d_pctile: Optional[float] = None
     und_vcr_60d_median: Optional[float] = None
     und_vol_shape_60d: Optional[str] = None
+    und_trend_estimator_source: Optional[str] = None
 
     spread: Optional[float] = None  # gross_decay - borrow_net
     decay_3m: Optional[float] = None
