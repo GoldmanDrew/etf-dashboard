@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from etf_providers import prior_stale_aum_blocks_flow
 from ingest_etf_metrics import ensure_stale_kind_column, extend_metrics_session_coverage
+from market_calendar import nyse_busday_count
 
 LOGGER = logging.getLogger("letf_rebalance_flows")
 
@@ -242,11 +243,7 @@ def _apply_underlying_close_from_volume_panel(
 
 def _busday_gap(start: object, end: object) -> int | None:
     try:
-        if hasattr(start, "date"):
-            start = start.date()
-        if hasattr(end, "date"):
-            end = end.date()
-        return int(np.busday_count(str(start), str(end)))
+        return nyse_busday_count(start, end)
     except Exception:
         return None
 

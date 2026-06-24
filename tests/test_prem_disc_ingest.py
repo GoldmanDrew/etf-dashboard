@@ -88,3 +88,49 @@ def test_compute_prem_disc_health_lockstep():
     h = compute_prem_disc_health(latest, lockstep_bps=1.0)
     assert h["rows_with_nav_and_close"] == 2
     assert h["lockstep_nav_close_count"] == 1
+
+
+def test_compute_prem_disc_health_tracks_material_rex_implied_nav_divergence():
+    latest = pd.DataFrame(
+        [
+            {
+                "ticker": "DIREXION",
+                "nav": 1.0,
+                "close_price": 1.0,
+                "source_provider": "direxion",
+                "aum": 2_000.0,
+                "shares_outstanding": 1_000.0,
+            },
+            {
+                "ticker": "STALE_REX",
+                "nav": 1.0,
+                "close_price": 1.0,
+                "source_provider": "rex_shares",
+                "aum": 2_000.0,
+                "shares_outstanding": 1_000.0,
+                "stale": True,
+            },
+            {
+                "ticker": "ROUNDED",
+                "nav": 10.0,
+                "close_price": 10.0,
+                "source_provider": "rex_shares",
+                "aum": 100_400.0,
+                "shares_outstanding": 10_000.0,
+            },
+            {
+                "ticker": "MATERIAL",
+                "nav": 10.0,
+                "close_price": 10.0,
+                "source_provider": "rex_shares",
+                "aum": 99_000.0,
+                "shares_outstanding": 10_000.0,
+            },
+        ]
+    )
+
+    h = compute_prem_disc_health(latest)
+
+    assert h["rex_nav_vs_implied_div_bps_gt5"] == 2
+    assert h["rex_nav_vs_implied_div_bps_gt50"] == 1
+    assert h["rex_nav_vs_implied_div_bps_max"] > 90.0

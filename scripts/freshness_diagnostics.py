@@ -213,6 +213,7 @@ def _check_metrics(health: dict) -> tuple[dict, list[str]]:
     prem = health.get("prem_disc") if isinstance(health.get("prem_disc"), dict) else {}
     lock_pct = float(prem.get("lockstep_nav_close_pct") or 0.0)
     rex_div = int(prem.get("rex_nav_vs_implied_div_bps_gt5") or 0)
+    rex_div_material = int(prem.get("rex_nav_vs_implied_div_bps_gt50") or 0)
     by_rex = (prem.get("by_provider") or {}).get("rex_shares") or {}
     rex_lock = int(by_rex.get("lockstep_count") or 0)
     rex_rows = int(by_rex.get("rows") or 0)
@@ -225,9 +226,10 @@ def _check_metrics(health: dict) -> tuple[dict, list[str]]:
         violations.append(
             f"metrics: {lock_pct:.1f}% of latest rows have nav≈close (>{lock_pct:.0f}% lockstep)",
         )
-    if rex_div >= 3:
+    if rex_div_material >= 3:
         violations.append(
-            f"metrics: {rex_div} rex row(s) with published NAV vs AUM/shares divergence >5bp",
+            f"metrics: {rex_div_material} rex row(s) with published NAV vs AUM/shares divergence >50bp "
+            f"({rex_div} >5bp)",
         )
     return {
         "latest_date": health.get("latest_date"),

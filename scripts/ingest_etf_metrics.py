@@ -63,6 +63,7 @@ from split_adjustments import (
 
 from etf_providers import (
     ProviderResult,
+    STALE_KIND_ISSUER_EARLY,
     STALE_KIND_ISSUER_SESSION_EXTEND,
     _build_session,
     build_default_stack,
@@ -76,6 +77,13 @@ from etf_holdings_providers import (
     latest_holdings_per_etf,
 )
 from etf_metrics_format import sanitize_metrics_json_df, write_metrics_daily_json
+from market_calendar import (
+    is_nyse_session,
+    nyse_busday_count,
+    nyse_sessions,
+    previous_nyse_session,
+    require_nyse_session,
+)
 
 
 LOGGER = logging.getLogger("etf_metrics_ingest")
@@ -157,10 +165,7 @@ def load_universe_underlying_map(path: Path = UNIVERSE_CSV) -> dict[str, str]:
 
 
 def _iter_dates(start_date: date, end_date: date) -> Iterable[date]:
-    d = start_date
-    while d <= end_date:
-        yield d
-        d += timedelta(days=1)
+    yield from nyse_sessions(start_date, end_date)
 
 
 def _records_to_df(records: list[ProviderResult], ingested_at: datetime) -> pd.DataFrame:
@@ -283,6 +288,35 @@ def repair_nav_only_partial_aum(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return out, n_repaired
 
 
+def filter_metrics_to_nyse_sessions(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Remove rows stamped on weekends or NYSE full-day holidays."""
+    if df.empty or "date" not in df.columns:
+        return df, 0
+    out = df.copy()
+    dates = pd.to_datetime(out["date"], errors="coerce").dt.date
+    keep = dates.map(lambda d: bool(d and is_nyse_session(d)))
+    n = int((~keep).sum())
+    if not n:
+        return out, 0
+    return out.loc[keep].reset_index(drop=True), n
+
+
+def clear_issuer_early_market_fields(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Keep early issuer NAV rows, but do not attach incomplete market overlays."""
+    if df.empty or "stale_kind" not in df.columns:
+        return df, 0
+    out = df.copy()
+    kind = out["stale_kind"].astype(str).str.lower()
+    early = kind.eq(STALE_KIND_ISSUER_EARLY)
+    n = int(early.sum())
+    if not n:
+        return out, 0
+    for col in ("close_price", "etf_adj_close", "shares_traded", "underlying_adj_close"):
+        if col in out.columns:
+            out.loc[early, col] = None
+    return out, n
+
+
 def prune_expired_carry_forward_rows(
     df: pd.DataFrame,
     *,
@@ -332,11 +366,19 @@ def compute_prem_disc_health(
             "lockstep_nav_close_count": 0,
             "lockstep_nav_close_pct": 0.0,
             "rex_nav_vs_implied_div_bps_gt5": 0,
+            "rex_nav_vs_implied_div_bps_gt50": 0,
+            "rex_nav_vs_implied_div_bps_max": None,
             "by_provider": {},
         }
     nav = pd.to_numeric(latest.get("nav"), errors="coerce")
     close = pd.to_numeric(latest.get("close_price"), errors="coerce")
     prov = latest.get("source_provider", pd.Series(dtype=str)).astype(str).str.lower()
+    stale_raw = latest.get("stale", pd.Series(False, index=latest.index))
+    stale = stale_raw.map(
+        lambda v: v
+        if isinstance(v, bool)
+        else str(v).strip().lower() in {"1", "true", "yes"}
+    ).fillna(False)
     ok = nav.notna() & (nav > 0) & close.notna() & (close > 0)
     prem_bps = pd.Series(np.nan, index=latest.index, dtype=float)
     if ok.any():
@@ -344,8 +386,10 @@ def compute_prem_disc_health(
     lock = ok & prem_bps.abs().lt(float(lockstep_bps))
     lock_n = int(lock.sum())
     ok_n = int(ok.sum())
-    rex_mask = prov.str.contains("rex", na=False) & ok
+    rex_mask = prov.isin({"rex", "rex_shares", "rex_shares_history"}) & ok & ~stale
     rex_div = 0
+    rex_div_material = 0
+    rex_div_max: float | None = None
     if rex_mask.any():
         implied = pd.to_numeric(latest.loc[rex_mask, "aum"], errors="coerce") / pd.to_numeric(
             latest.loc[rex_mask, "shares_outstanding"], errors="coerce"
@@ -353,6 +397,8 @@ def compute_prem_disc_health(
         n0 = nav[rex_mask]
         div_bps = ((n0 - implied) / n0 * 10000.0).abs()
         rex_div = int((div_bps > float(rex_nav_div_bps)).sum())
+        rex_div_material = int((div_bps > 50.0).sum())
+        rex_div_max = float(div_bps.max()) if not div_bps.empty else None
 
     by_provider: dict[str, dict[str, float | int]] = {}
     for p in prov[ok].unique():
@@ -373,6 +419,8 @@ def compute_prem_disc_health(
         "lockstep_nav_close_count": lock_n,
         "lockstep_nav_close_pct": round(100.0 * lock_n / ok_n, 2) if ok_n else 0.0,
         "rex_nav_vs_implied_div_bps_gt5": rex_div,
+        "rex_nav_vs_implied_div_bps_gt50": rex_div_material,
+        "rex_nav_vs_implied_div_bps_max": rex_div_max,
         "by_provider": by_provider,
     }
 
@@ -635,11 +683,7 @@ def ensure_stale_kind_column(df: pd.DataFrame) -> pd.DataFrame:
 
 def _metrics_busday_gap(start: object, end: object) -> int | None:
     try:
-        if hasattr(start, "date"):
-            start = start.date()
-        if hasattr(end, "date"):
-            end = end.date()
-        return int(np.busday_count(str(start), str(end)))
+        return nyse_busday_count(start, end)
     except Exception:
         return None
 
@@ -948,6 +992,8 @@ def apply_stale_carry_forward(
 
     out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
     target = as_of_date
+    if not is_nyse_session(target):
+        return out
     upgrade_idx = out.index[(out["date"] == target) & (out["status"] != "ok")].tolist()
     for idx in upgrade_idx:
         sym = str(out.at[idx, "ticker"]).upper()
@@ -957,7 +1003,7 @@ def apply_stale_carry_forward(
         cand = cand.sort_values("date")
         last = cand.iloc[-1]
         try:
-            age_bdays = int(np.busday_count(str(last["date"]), str(target)))
+            age_bdays = nyse_busday_count(last["date"], target)
         except Exception:
             age_bdays = 999999
         if age_bdays < 1 or age_bdays > max_stale_business_days:
@@ -2081,6 +2127,12 @@ def save_yieldboost_put_spreads(
 def save_outputs(df: pd.DataFrame) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     df = ensure_stale_kind_column(df)
+    df, n_non_session = filter_metrics_to_nyse_sessions(df)
+    if n_non_session:
+        LOGGER.info("Dropped %d non-NYSE-session metrics row(s) before persistence", n_non_session)
+    df, n_early_market = clear_issuer_early_market_fields(df)
+    if n_early_market:
+        LOGGER.info("Cleared market overlays on %d issuer_early metrics row(s)", n_early_market)
     df.to_parquet(PARQUET_PATH, index=False)
     df.to_csv(CSV_PATH, index=False)
 
@@ -2092,10 +2144,17 @@ def save_outputs(df: pd.DataFrame) -> None:
     # is always represented in the latest snapshot.
     work = df.copy()
     work["date"] = pd.to_datetime(work["date"]).dt.date
-    latest_date = work["date"].max() if not work.empty else None
-    if not work.empty:
-        idx = work.groupby("ticker")["date"].idxmax()
-        latest_rows = work.loc[idx].sort_values("ticker").reset_index(drop=True)
+    latest_work = work.copy()
+    if not latest_work.empty and "stale_kind" in latest_work.columns:
+        non_early = latest_work[
+            latest_work["stale_kind"].astype(str).str.lower() != STALE_KIND_ISSUER_EARLY
+        ]
+        if not non_early.empty:
+            latest_work = non_early
+    latest_date = latest_work["date"].max() if not latest_work.empty else None
+    if not latest_work.empty:
+        idx = latest_work.groupby("ticker")["date"].idxmax()
+        latest_rows = latest_work.loc[idx].sort_values("ticker").reset_index(drop=True)
     else:
         latest_rows = work.iloc[0:0]
     off_universe_delisted: set[str] = set()
@@ -2211,7 +2270,7 @@ def _anchor(res: ProviderResult, end_date: date) -> ProviderResult:
     if res.date == end_date:
         return res
     try:
-        age = int(np.busday_count(str(res.date), str(end_date)))
+        age = nyse_busday_count(res.date, end_date)
     except Exception:
         age = None
     res.stale = True
@@ -2371,16 +2430,12 @@ def parse_date_arg(value: str | None) -> date | None:
 
 
 def previous_business_day(ref: date) -> date:
-    """Return the most recent US business day strictly earlier than ``ref``.
+    """Return the most recent NYSE session strictly earlier than ``ref``.
 
     Used when the workflow runs at T+1 06:00 ET and we want rows stamped at the actual
-    trading day (T), not the run day. Business-day calendar matches np.busday_count's
-    default (Mon-Fri, no US holiday adjustments -- good enough for market-close stamping).
+    trading day (T), not the run day.
     """
-    d = ref - timedelta(days=1)
-    while d.weekday() >= 5:  # 5=Sat, 6=Sun
-        d -= timedelta(days=1)
-    return d
+    return previous_nyse_session(ref)
 
 
 def resolve_monday_catchup_range(
@@ -2453,16 +2508,9 @@ def should_skip_scheduled_redundant_ingest(
 
 
 def resolve_ingest_end_date(ref: date | None = None) -> date:
-    """Pick the correct trading-day stamp for an automated run.
-
-    - If today is Mon-Fri (weekday 0..4): we run at T+1 06:00 ET for the PRIOR business day.
-    - If today is Sat (weekday 5): the run captures Fri EOD -> use yesterday.
-    - Sun (weekday 6) is not on the cron schedule, but if called manually we still return Fri.
-    """
+    """Pick the correct NYSE trading-day stamp for an automated T+1 run."""
     ref = ref or date.today()
-    if ref.weekday() < 5 or ref.weekday() == 5:  # Mon-Sat
-        return previous_business_day(ref)
-    return previous_business_day(ref)  # Sun -> Fri
+    return previous_business_day(ref)
 
 
 def main() -> None:
@@ -2471,6 +2519,11 @@ def main() -> None:
     parser.add_argument("--polygon-lookback-days", type=int, default=5)
     parser.add_argument("--start-date", default=None, help="YYYY-MM-DD")
     parser.add_argument("--end-date", default=None, help="YYYY-MM-DD")
+    parser.add_argument(
+        "--allow-non-session",
+        action="store_true",
+        help="allow manual non-NYSE target dates; persistence still drops non-session rows",
+    )
     parser.add_argument(
         "--monday-catchup",
         action="store_true",
@@ -2504,11 +2557,17 @@ def main() -> None:
                 "Monday catch-up range: start=%s end=%s (%d business day(s))",
                 resolved_start_date,
                 resolved_end_date,
-                int(np.busday_count(str(resolved_start_date), str(resolved_end_date))) + 1,
+                nyse_busday_count(resolved_start_date, resolved_end_date) + 1,
             )
     else:
         resolved_end_date = parse_date_arg(args.end_date) or resolve_ingest_end_date()
         resolved_start_date = parse_date_arg(args.start_date) or resolved_end_date
+    if not args.allow_non_session:
+        try:
+            require_nyse_session(resolved_start_date, label="start-date")
+            require_nyse_session(resolved_end_date, label="end-date")
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     LOGGER.info(
         "Run target dates: start=%s end=%s (today=%s, resolved_as_prev_bday=%s)",
         resolved_start_date, resolved_end_date, date.today(), parse_date_arg(args.end_date) is None,

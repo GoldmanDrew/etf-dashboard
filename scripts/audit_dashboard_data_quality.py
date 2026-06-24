@@ -16,6 +16,8 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+from market_calendar import is_nyse_session  # noqa: E402
+
 DASHBOARD_JSON = REPO / "data" / "dashboard_data.json"
 METRICS_PARQUET = REPO / "data" / "etf_metrics_daily.parquet"
 CORP_ACTIONS_JSON = REPO / "data" / "corporate_actions.json"
@@ -193,6 +195,29 @@ def audit_stale_price_feeds(
     return errors, warnings
 
 
+def audit_metrics_calendar(
+    metrics_by_symbol: dict[str, list[dict[str, Any]]],
+) -> list[str]:
+    errors: list[str] = []
+    by_date: dict[dt.date, int] = {}
+    samples: dict[dt.date, list[str]] = {}
+    for sym, rows in metrics_by_symbol.items():
+        for row in rows:
+            d = _date(row.get("date"))
+            if d is None or is_nyse_session(d):
+                continue
+            by_date[d] = by_date.get(d, 0) + 1
+            samples.setdefault(d, [])
+            if len(samples[d]) < 8:
+                samples[d].append(sym)
+    for d, n in sorted(by_date.items()):
+        errors.append(
+            f"etf_metrics_daily has {n} row(s) on non-NYSE session {d} "
+            f"(sample: {', '.join(samples.get(d, []))})"
+        )
+    return errors
+
+
 def audit_dashboard(
     payload: dict[str, Any],
     *,
@@ -296,6 +321,7 @@ def main() -> int:
             except (OSError, json.JSONDecodeError) as exc:
                 warnings.append(f"corporate_actions.json unreadable: {exc}")
         errors.extend(audit_fabricated_adj_basis(metrics_by_symbol, corp_payload))
+        errors.extend(audit_metrics_calendar(metrics_by_symbol))
         stale_errors, stale_warnings = audit_stale_price_feeds(metrics_by_symbol)
         errors.extend(stale_errors)
         warnings.extend(stale_warnings)

@@ -40,6 +40,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from market_calendar import nyse_busday_count
+
 LOGGER = logging.getLogger("etf_providers")
 
 
@@ -180,7 +182,7 @@ def issuer_valuation_stale_flags(valuation_date: date | None, as_of: date) -> tu
     if valuation_date > as_of:
         return False, None, STALE_KIND_ISSUER_EARLY
     try:
-        age_b = int(np.busday_count(str(valuation_date), str(as_of)))
+        age_b = nyse_busday_count(valuation_date, as_of)
     except Exception:
         age_b = None
     if age_b is not None and age_b <= 0:
@@ -636,7 +638,7 @@ class ProSharesProvider:
                 return ProviderResult(as_of, ticker, None, None, None, self.name, self.URL, "missing")
             row = prior.iloc[-1]
             try:
-                age_b = int(np.busday_count(str(row["Date"]), str(as_of)))
+                age_b = nyse_busday_count(row["Date"], as_of)
             except Exception:
                 age_b = None
             stale = True

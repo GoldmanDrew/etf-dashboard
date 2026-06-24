@@ -33,6 +33,39 @@ def test_fetch_underlying_adj_close_batch_chunks_yfinance_calls(monkeypatch):
     assert [len(c) for c in captured] == [2, 2, 1]
 
 
+def test_filter_metrics_to_nyse_sessions_drops_juneteenth():
+    df = pd.DataFrame(
+        [
+            {"date": date(2026, 6, 18), "ticker": "AAA"},
+            {"date": date(2026, 6, 19), "ticker": "AAA"},
+            {"date": date(2026, 6, 20), "ticker": "AAA"},
+        ]
+    )
+    out, n = iem.filter_metrics_to_nyse_sessions(df)
+    assert n == 2
+    assert out["date"].astype(str).tolist() == ["2026-06-18"]
+
+
+def test_clear_issuer_early_market_fields():
+    df = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 6, 24),
+                "ticker": "AAPU",
+                "stale_kind": "issuer_early",
+                "close_price": 37.11,
+                "etf_adj_close": 37.34,
+                "shares_traded": 123.0,
+                "underlying_adj_close": 297.1,
+            }
+        ]
+    )
+    out, n = iem.clear_issuer_early_market_fields(df)
+    assert n == 1
+    assert pd.isna(out.iloc[0]["close_price"])
+    assert pd.isna(out.iloc[0]["shares_traded"])
+
+
 def test_fetch_close_prices_batch_chunks_yfinance_calls(monkeypatch):
     """ETF close/volume batch must not rely on a single yfinance bulk download."""
     captured: list[list[str]] = []

@@ -35,6 +35,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from market_calendar import nyse_busday_count
+
 LOGGER = logging.getLogger("score_nav_forecasts")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -520,13 +522,11 @@ def _parse_iso_date(value: object) -> date | None:
 
 
 def _business_days_between(early: date, late: date) -> int | None:
-    """Valid business days in ``[early, late)``; ``None`` when unknown."""
+    """Valid NYSE sessions in ``[early, late)``; ``None`` when unknown."""
     if late < early:
         return None
     try:
-        import numpy as np
-
-        return int(np.busday_count(early.isoformat(), late.isoformat()))
+        return nyse_busday_count(early, late)
     except Exception:
         return (late - early).days
 

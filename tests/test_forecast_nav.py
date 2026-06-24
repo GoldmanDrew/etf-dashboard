@@ -334,7 +334,7 @@ def _record(model: str, nav_hat: float, *, conf="high", nav_anchor=10.0):
     return fn.ForecastRecord(
         ts="t", symbol="X", model=model, is_default=False, confidence=conf,
         product_class="letf", und_symbol="U", und_spot_t=1.0, und_spot_anchor=1.0,
-        und_anchor_date="2026-04-25", und_spot_age_sec=10.0, beta=2.0, ter_daily=0.0,
+        und_anchor_date="2026-04-25", und_spot_age_sec=10.0, delta=2.0, ter_daily=0.0,
         nav_anchor=nav_anchor, nav_anchor_date="2026-04-25", nav_hat=nav_hat,
         etf_last=None, etf_last_ts=None, premium_bp=None, notes=None,
     )

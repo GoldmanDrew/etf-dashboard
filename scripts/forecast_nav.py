@@ -58,6 +58,8 @@ from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from market_calendar import nyse_busday_count
+
 LOGGER = logging.getLogger("forecast_nav")
 
 # Feature gates -- default off so behavior matches the conservative day-clock
@@ -167,12 +169,9 @@ def _round(x: Any, n: int = 6) -> float | None:
 
 
 def _busday_diff(anchor_iso: str, today_iso: str) -> int:
-    """Business-day count, positive when today >= anchor. Falls back to a
-    rough 5/7 calendar approximation if numpy isn't available (it is, but
-    cheap to be defensive)."""
+    """NYSE session count, positive when today >= anchor."""
     try:
-        import numpy as np
-        return int(np.busday_count(anchor_iso, today_iso))
+        return nyse_busday_count(anchor_iso, today_iso)
     except Exception:
         try:
             a = datetime.fromisoformat(anchor_iso).date()

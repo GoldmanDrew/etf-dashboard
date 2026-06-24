@@ -399,7 +399,10 @@ def load_gross_decay_from_metrics(
     if corp_path.exists():
         corp_payload = json.loads(corp_path.read_text(encoding="utf-8"))
 
-    df = pd.read_parquet(metrics_path)
+    if metrics_path.suffix.lower() == ".parquet":
+        df = pd.read_parquet(metrics_path)
+    else:
+        df = pd.read_csv(metrics_path)
     df["date"] = df["date"].astype(str).str[:10]
     df["ticker"] = df["ticker"].astype(str).str.upper()
     out: dict[str, dict[str, Any]] = {}
@@ -448,7 +451,10 @@ def load_realized_pair_gross_60d_from_metrics(
     if corp_path.exists():
         corp_payload = json.loads(corp_path.read_text(encoding="utf-8"))
 
-    df = pd.read_parquet(metrics_path)
+    if metrics_path.suffix.lower() == ".parquet":
+        df = pd.read_parquet(metrics_path)
+    else:
+        df = pd.read_csv(metrics_path)
     df["date"] = df["date"].astype(str).str[:10]
     df["ticker"] = df["ticker"].astype(str).str.upper()
     out: dict[str, dict[str, Any]] = {}

@@ -11,7 +11,7 @@ _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
-from ingest_etf_metrics import resolve_monday_catchup_range  # noqa: E402
+from ingest_etf_metrics import previous_business_day, resolve_monday_catchup_range  # noqa: E402
 
 
 def test_monday_catchup_range_covers_wed_through_fri():
@@ -29,3 +29,8 @@ def test_monday_catchup_single_day_when_bdays_one():
 def test_monday_catchup_rejects_non_monday():
     with pytest.raises(ValueError):
         resolve_monday_catchup_range(date(2026, 6, 10))
+
+
+def test_previous_business_day_skips_juneteenth():
+    assert previous_business_day(date(2026, 6, 20)) == date(2026, 6, 18)
+    assert previous_business_day(date(2026, 6, 22)) == date(2026, 6, 18)

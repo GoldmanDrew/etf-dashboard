@@ -33,6 +33,7 @@ from ingest_etf_metrics import (  # noqa: E402
     save_outputs,
     validate_df,
 )
+from market_calendar import is_nyse_session  # noqa: E402
 
 LOGGER = logging.getLogger("audit_metrics_gaps")
 
@@ -43,6 +44,8 @@ MARKET_FIELDS: dict[str, str] = {
     "etf_adj_close": "yahoo_adj_close_or_close_copy",
     "underlying_adj_close": "yahoo_underlying_adj",
 }
+
+EXPECTED_MARKET_GAP_KINDS = {"issuer_early"}
 
 ISSUER_FIELDS: dict[str, str] = {
     "nav": "issuer_feed",
@@ -63,6 +66,7 @@ def audit_gaps(
     end: date | None = None,
     ticker: str | None = None,
     status: str = "ok",
+    include_expected_market_gaps: bool = False,
 ) -> dict:
     work = df.copy()
     work["date"] = pd.to_datetime(work["date"], errors="coerce").dt.date
@@ -80,19 +84,45 @@ def audit_gaps(
     for col in all_fields:
         if col not in work.columns:
             work[col] = None
+    if "stale_kind" not in work.columns:
+        work["stale_kind"] = None
 
     rows_scanned = len(work)
+    expected_market_gap_mask = work["stale_kind"].astype(str).isin(EXPECTED_MARKET_GAP_KINDS)
+    actionable_market_mask = (
+        pd.Series(True, index=work.index)
+        if include_expected_market_gaps
+        else ~expected_market_gap_mask
+    )
+    non_session_counts = {
+        str(k): int(v)
+        for k, v in (
+            work.loc[~work["date"].map(lambda d: bool(d and is_nyse_session(d)))]
+            .groupby("date")
+            .size()
+            .sort_index()
+            .items()
+        )
+    }
     by_field: dict[str, dict] = {}
     gap_rows: list[dict] = []
 
     for field, strategy in all_fields.items():
-        miss = _is_missing(work[field])
+        miss_all = _is_missing(work[field])
+        if field in MARKET_FIELDS:
+            miss = miss_all & actionable_market_mask
+            expected_missing = int((miss_all & expected_market_gap_mask).sum())
+        else:
+            miss = miss_all
+            expected_missing = 0
         n = int(miss.sum())
         by_field[field] = {
             "missing_rows": n,
             "fill_strategy": strategy,
             "missing_pct": round(n / rows_scanned, 4) if rows_scanned else 0.0,
         }
+        if expected_missing:
+            by_field[field]["expected_missing_rows"] = expected_missing
         if n:
             sub = work.loc[miss, ["date", "ticker", field]].copy()
             sub["field"] = field
@@ -105,11 +135,11 @@ def audit_gaps(
     easy: dict[str, int] = {}
     if "etf_adj_close" in work.columns:
         easy["etf_adj_close_from_close"] = int(
-            (close_ok & _is_missing(work["etf_adj_close"])).sum()
+            (close_ok & actionable_market_mask & _is_missing(work["etf_adj_close"])).sum()
         )
     if "shares_traded" in work.columns:
         easy["shares_traded_yahoo_or_polygon"] = int(
-            (close_ok & _is_missing(work["shares_traded"])).sum()
+            (close_ok & actionable_market_mask & _is_missing(work["shares_traded"])).sum()
         )
     sh = pd.to_numeric(work.get("shares_outstanding"), errors="coerce")
     nav = pd.to_numeric(work.get("nav"), errors="coerce")
@@ -127,8 +157,11 @@ def audit_gaps(
         work.assign(_any_gap=False)
     )
     miss_any = pd.Series(False, index=work.index)
+    expected_miss_any = pd.Series(False, index=work.index)
     for field in MARKET_FIELDS:
-        miss_any |= _is_missing(work[field])
+        field_missing = _is_missing(work[field])
+        miss_any |= field_missing & actionable_market_mask
+        expected_miss_any |= field_missing & expected_market_gap_mask
     by_date_counts = {
         str(k): int(v)
         for k, v in (
@@ -149,6 +182,23 @@ def audit_gaps(
         .astype(int)
         .to_dict()
     )
+    expected_by_date = {
+        str(k): int(v)
+        for k, v in (
+            work.loc[expected_miss_any]
+            .groupby("date")
+            .size()
+            .sort_index()
+            .items()
+        )
+    }
+    expected_by_kind = (
+        work.loc[expected_miss_any, "stale_kind"]
+        .astype(str)
+        .value_counts()
+        .astype(int)
+        .to_dict()
+    )
 
     return {
         "build_time": datetime.now(UTC).isoformat(),
@@ -159,6 +209,10 @@ def audit_gaps(
         },
         "ticker_filter": ticker.upper() if ticker else None,
         "status_filter": status,
+        "non_session_rows_by_date": non_session_counts,
+        "expected_market_gap_rows_by_date": expected_by_date,
+        "expected_market_gap_rows_by_kind": expected_by_kind,
+        "include_expected_market_gaps": include_expected_market_gaps,
         "by_field": by_field,
         "easy_fill_candidates": easy,
         "gap_rows_by_date": by_date_counts,
@@ -194,6 +248,11 @@ def main() -> None:
     parser.add_argument("--end", default=None, help="YYYY-MM-DD upper bound")
     parser.add_argument("--ticker", default=None, help="Single ticker filter")
     parser.add_argument("--status", default="ok", help="Row status filter (default: ok)")
+    parser.add_argument(
+        "--include-expected-market-gaps",
+        action="store_true",
+        help="Include intentional issuer-early market blanks in actionable gap counts.",
+    )
     parser.add_argument("--json-out", default=None, help="Write full report JSON here")
     parser.add_argument(
         "--apply-easy-fixes",
@@ -213,7 +272,12 @@ def main() -> None:
     end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else None
 
     report = audit_gaps(
-        df, start=start, end=end, ticker=args.ticker, status=args.status or None,
+        df,
+        start=start,
+        end=end,
+        ticker=args.ticker,
+        status=args.status or None,
+        include_expected_market_gaps=bool(args.include_expected_market_gaps),
     )
 
     print(json.dumps({k: v for k, v in report.items() if k != "sample_gaps"}, indent=2))

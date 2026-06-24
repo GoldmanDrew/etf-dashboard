@@ -10,6 +10,7 @@ sys.path.insert(0, str(SCRIPTS))
 from audit_dashboard_data_quality import (  # noqa: E402
     audit_dashboard,
     audit_fabricated_adj_basis,
+    audit_metrics_calendar,
     audit_stale_price_feeds,
 )
 
@@ -160,3 +161,14 @@ def test_audit_stale_feed_fails_on_systemic_stall():
         {"AAA": stalled, "BBB": stalled, "CCC": stalled, "DDD": fresh}
     )
     assert any("systemic ingest stall" in msg for msg in errors)
+
+
+def test_audit_metrics_calendar_rejects_juneteenth_rows():
+    rows = {
+        "AAPU": [
+            {"date": "2026-06-18", "source_provider": "direxion"},
+            {"date": "2026-06-19", "source_provider": "carry_forward"},
+        ]
+    }
+    errors = audit_metrics_calendar(rows)
+    assert any("2026-06-19" in msg and "non-NYSE session" in msg for msg in errors)
