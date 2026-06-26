@@ -518,13 +518,20 @@ def _rate_limit_polygon() -> None:
     time.sleep(wait_s)
 
 
-def _polygon_get(session: requests.Session, url: str, params: dict | None = None) -> dict | None:
+def _polygon_get(
+    session: requests.Session,
+    url: str,
+    params: dict | None = None,
+    *,
+    raise_on_rate_limit: bool = True,
+) -> dict | None:
     """GET with client-side rate limiting + Retry-After-aware 429 handling.
 
     Returns parsed JSON on success, or ``None`` on unrecoverable failure.  Raises
     :class:`RateLimitExceeded` if Polygon 429s us more than
-    ``MAX_CONSECUTIVE_RATE_LIMITS`` calls in a row -- this is the signal to bail out
-    rather than spend another hour spinning.
+    ``MAX_CONSECUTIVE_RATE_LIMITS`` calls in a row when ``raise_on_rate_limit``
+    is true.  Optional per-ticker enrichment paths pass false so they can stop
+    probing and let the run persist the authoritative bulk results.
     """
     if not POLYGON_API_KEY:
         LOGGER.error("POLYGON_API_KEY is not set; corporate-actions ingest cannot run.")
@@ -551,12 +558,16 @@ def _polygon_get(session: requests.Session, url: str, params: dict | None = None
         if resp.status_code == 429:
             _CONSECUTIVE_429_STATE["count"] += 1
             if _CONSECUTIVE_429_STATE["count"] > MAX_CONSECUTIVE_RATE_LIMITS:
-                raise RateLimitExceeded(
+                message = (
                     f"Aborting: {MAX_CONSECUTIVE_RATE_LIMITS} consecutive HTTP 429s from Polygon. "
                     f"Your plan's rate limit is lower than CORP_ACTIONS_POLYGON_REQS_PER_MIN="
                     f"{POLYGON_MAX_REQUESTS_PER_MINUTE}. Lower that env var (free tier = 5) "
                     f"and re-run."
                 )
+                if raise_on_rate_limit:
+                    raise RateLimitExceeded(message)
+                LOGGER.warning("%s Optional Polygon probe will be skipped.", message)
+                return None
             retry_after_hdr = resp.headers.get("Retry-After", "").strip()
             try:
                 wait_s = float(retry_after_hdr) if retry_after_hdr else 2.0 * (attempt + 1)
@@ -887,8 +898,19 @@ def phase_2_delistings(
     for sym in fallback_candidates:
         if fallback_calls >= DELISTING_FALLBACK_MAX_CALLS:
             break
-        payload = _polygon_get(session, f"https://api.polygon.io/v3/reference/tickers/{sym}")
+        payload = _polygon_get(
+            session,
+            f"https://api.polygon.io/v3/reference/tickers/{sym}",
+            raise_on_rate_limit=False,
+        )
         fallback_calls += 1
+        if _CONSECUTIVE_429_STATE["count"] > MAX_CONSECUTIVE_RATE_LIMITS:
+            LOGGER.warning(
+                "delistings: stopping ticker-targeted fallback after %d calls due to Polygon rate-limit wall; "
+                "prior pinned delistings will still be merged",
+                fallback_calls,
+            )
+            break
         rec = (payload or {}).get("results") or {}
         if not isinstance(rec, dict):
             continue
@@ -1191,7 +1213,7 @@ def _fetch_ticker_events(session: requests.Session, ticker: str) -> list[dict]:
     querying by either side of a rename surfaces the full chain.
     """
     url = f"https://api.polygon.io/vX/reference/tickers/{ticker}/events"
-    payload = _polygon_get(session, url, {"types": "ticker_change"})
+    payload = _polygon_get(session, url, {"types": "ticker_change"}, raise_on_rate_limit=False)
     if not payload:
         return []
     # Polygon wraps the result in results.events; be defensive about both shapes.
@@ -1312,6 +1334,14 @@ def phase_4_symbol_changes(
                 events_raw = _fetch_ticker_events(session, t)
                 cache[t] = {"fetched_at": now_iso, "events": events_raw}
                 calls_made += 1
+                if _CONSECUTIVE_429_STATE["count"] > MAX_CONSECUTIVE_RATE_LIMITS:
+                    LOGGER.warning(
+                        "symbol_changes: stopping optional ticker-event sweep after %d calls due to Polygon "
+                        "rate-limit wall; stale cached symbol changes will still be used",
+                        calls_made,
+                    )
+                    wall_clock_abort = True
+                    break
 
         # Polygon documents each event's ``ticker_change.ticker`` as the symbol
         # **after** that event's effective date.  The prior symbol is usually NOT

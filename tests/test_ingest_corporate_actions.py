@@ -140,7 +140,7 @@ def test_phase2_delisting_fallback_captures_nnex(monkeypatch):
     monkeypatch.setattr(mod, "DELISTING_FALLBACK_MAX_CALLS", 5)
     monkeypatch.setattr(mod, "DELISTING_FALLBACK_SYMBOLS", {"NNEX"})
 
-    def fake_polygon_get(_session, url, params=None):
+    def fake_polygon_get(_session, url, params=None, *, raise_on_rate_limit=True):
         if url.endswith("/NNEX"):
             return {
                 "results": {
@@ -163,6 +163,36 @@ def test_phase2_delisting_fallback_captures_nnex(monkeypatch):
         underlying_map=underlying_map,
     )
     assert any(e.ticker == "NNEX" and e.type == "delisting" for e in events)
+
+
+def test_phase2_delisting_fallback_stops_on_optional_rate_limit_wall(monkeypatch):
+    raw = [{"ticker": f"DUMMY{i}", "type": "CS"} for i in range(mod.DELISTINGS_MAX_PAGES * 1000)]
+    monkeypatch.setattr(mod, "_bulk_paginate", lambda *args, **kwargs: raw)
+    monkeypatch.setattr(mod, "_load_current_universe", lambda: {"ARMW", "NNEX"})
+    monkeypatch.setattr(mod, "DELISTING_FALLBACK_MAX_CALLS", 5)
+    monkeypatch.setattr(mod, "DELISTING_FALLBACK_SYMBOLS", set())
+    monkeypatch.setattr(mod, "MAX_CONSECUTIVE_RATE_LIMITS", 1)
+    monkeypatch.setitem(mod._CONSECUTIVE_429_STATE, "count", 0)
+
+    calls = []
+
+    def fake_polygon_get(_session, url, params=None, *, raise_on_rate_limit=True):
+        calls.append(url)
+        assert raise_on_rate_limit is False
+        mod._CONSECUTIVE_429_STATE["count"] = mod.MAX_CONSECUTIVE_RATE_LIMITS + 1
+        return None
+
+    monkeypatch.setattr(mod, "_polygon_get", fake_polygon_get)
+    bucket_map, underlying_map = _maps()
+    events = mod.phase_2_delistings(
+        requests.Session(),
+        universe={"ARMW", "NNEX"},
+        bucket_map=bucket_map,
+        underlying_map=underlying_map,
+    )
+
+    assert events == []
+    assert len(calls) == 1
 
 
 def test_collapse_news_by_ticker_category_merges_sources():
