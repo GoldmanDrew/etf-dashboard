@@ -28,9 +28,10 @@ from yieldboost_fof_basket_series import (
 )
 
 try:
-    from realized_gross_decay import realized_pair_gross_60d_fields
+    from realized_gross_decay import REALIZED_PAIR_GROSS_20D_HORIZON, realized_pair_gross_20d_fields
 except ImportError:
-    realized_pair_gross_60d_fields = None  # type: ignore[misc, assignment]
+    REALIZED_PAIR_GROSS_20D_HORIZON = 20
+    realized_pair_gross_20d_fields = None  # type: ignore[misc, assignment]
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _TRADING_DAYS = 252
@@ -373,17 +374,17 @@ def build_fof_dashboard_record(
         },
         "fof_realized_pair": realized if realized.get("ok") else {"ok": False, "error": realized.get("error")},
     }
-    if realized.get("ok") and realized_pair_gross_60d_fields is not None:
-        h60 = next(
+    if realized.get("ok") and realized_pair_gross_20d_fields is not None:
+        h20 = next(
             (
                 h
                 for h in (realized.get("horizons") or [])
-                if int(h.get("days") or h.get("horizonDays") or 0) == 60
+                if int(h.get("days") or h.get("horizonDays") or 0) == REALIZED_PAIR_GROSS_20D_HORIZON
             ),
             None,
         )
-        if h60:
-            rec.update(realized_pair_gross_60d_fields(h60, source="fof_weighted_basket"))
+        if h20:
+            rec.update(realized_pair_gross_20d_fields(h20, source="fof_weighted_basket"))
     extras = enrich_fof_dashboard_extras(
         sym,
         history_snaps=history_snaps,

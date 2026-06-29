@@ -128,6 +128,10 @@ def test_aggregate_with_adv_and_bias_adjustment():
             "underlying_dollar_adv_20d": 30_000_000_000.0,
             "underlying_dollar_median_adv_20d": 28_000_000_000.0,
             "underlying_dollar_adv_intraday_20d": 28_000_000_000.0,
+            "underlying_tradable_float_dollars": 90_000_000_000.0,
+            "underlying_tradable_float_shares": 900_000_000.0,
+            "underlying_shares_outstanding": 1_000_000_000.0,
+            "tradable_float_source": "unit_float",
             "as_of_date": "2026-05-19",
         },
     }
@@ -147,8 +151,14 @@ def test_aggregate_with_adv_and_bias_adjustment():
     )
     assert spy["bias_signed_error_pct"] == pytest.approx(0.05, rel=1e-9)
     assert spy["estimated_close_rebalance_dollars_bias_adj"] == pytest.approx(114_000_000.0, rel=1e-9)
+    assert spy["estimated_close_rebalance_pct_tradable_float"] == pytest.approx(
+        120_000_000.0 / 90_000_000_000.0, rel=1e-9,
+    )
     # model none → remaining equals full est
     assert spy["remaining_close_rebalance_dollars"] == pytest.approx(120_000_000.0, rel=1e-9)
+    assert spy["remaining_close_rebalance_pct_tradable_float"] == pytest.approx(
+        120_000_000.0 / 90_000_000_000.0, rel=1e-9,
+    )
 
 
 def test_vol_remaining_model_scales_remaining():

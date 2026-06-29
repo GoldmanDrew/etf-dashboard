@@ -21,14 +21,14 @@ def test_audit_rejects_full_60d_with_insufficient_obs():
             "records": [
                 {
                     "symbol": "CBRG",
-                    "realized_pair_gross_60d": -0.2,
-                    "realized_pair_gross_60d_obs": 13,
-                    "realized_pair_gross_60d_sufficient": False,
+                    "realized_pair_gross_20d": -0.2,
+                    "realized_pair_gross_20d_obs": 13,
+                    "realized_pair_gross_20d_sufficient": False,
                 }
             ]
         }
     )
-    assert any("full realized_pair_gross_60d" in msg for msg in errors)
+    assert any("full realized_pair_gross_20d" in msg for msg in errors)
     assert warnings == []
 
 
@@ -39,8 +39,8 @@ def test_audit_accepts_partial_60d_and_partial_vol_label():
                 {
                     "symbol": "CBRG",
                     "realized_pair_gross_partial": -0.2,
-                    "realized_pair_gross_60d_obs": 13,
-                    "realized_pair_gross_60d_sufficient": False,
+                    "realized_pair_gross_20d_obs": 13,
+                    "realized_pair_gross_20d_sufficient": False,
                     "expected_decay_available": False,
                     "vol_etf_annual_obs": 17,
                     "vol_etf_annual_effective_label": "partial 17 obs",
@@ -93,9 +93,9 @@ def test_audit_rejects_full_60d_crossing_lifecycle_gap():
             "records": [
                 {
                     "symbol": "ONG",
-                    "realized_pair_gross_60d": 5.0,
-                    "realized_pair_gross_60d_obs": 30,
-                    "realized_pair_gross_60d_sufficient": True,
+                    "realized_pair_gross_20d": 5.0,
+                    "realized_pair_gross_20d_obs": 30,
+                    "realized_pair_gross_20d_sufficient": True,
                 }
             ]
         },

@@ -138,7 +138,7 @@ Steps 4–7 are the "etf-dashboard sweep". You will do this often. There is a re
 │   .github/workflows/update-corporate-actions.yml (every 6 h)                       │
 │   .github/workflows/deploy-pages-data.yml   (hourly Pages safety net)              │
 │                                                                                │
-│   PUBLIC SITE: https://magis-capital-partners.github.io/etf-dashboard/                    │
+│   PUBLIC SITE: https://goldmandrew.github.io/etf-dashboard/                               │
 │     ├─ fetches data/dashboard_data.json on load                                │
 │     ├─ fetches data/borrow_history.json on demand (chart page)                 │
 │     ├─ fetches data/options_cache.json on demand (chart + trade-lab)           │
@@ -1021,8 +1021,8 @@ If the Vol / VRP tab shows holdings strikes but **IV pending**, or the browser c
 Verify:
 
 ```bash
-curl -sI https://magis-capital-partners.github.io/etf-dashboard/data/vrp_live.json | head -1
-curl -sI https://magis-capital-partners.github.io/etf-dashboard/data/yieldboost_put_spreads_latest.json | head -1
+curl -sI https://goldmandrew.github.io/etf-dashboard/data/vrp_live.json | head -1
+curl -sI https://goldmandrew.github.io/etf-dashboard/data/yieldboost_put_spreads_latest.json | head -1
 ```
 
 Local gate:

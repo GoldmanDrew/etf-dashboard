@@ -118,6 +118,31 @@ def test_long_and_inverse_flows_add_on_up_day():
     assert spy["n_funds"] == 2
 
 
+def test_annotate_with_adv_adds_tradable_float_ratios():
+    fund = flows.build_fund_flows(_universe(), _metrics())
+    agg = flows.build_underlying_aggregates(fund)
+    adv = pd.DataFrame([
+        {
+            "date": "2026-05-19",
+            "underlying": "SPY",
+            "underlying_dollar_adv_20d": 30_000_000_000.0,
+            "underlying_dollar_median_adv_20d": 28_000_000_000.0,
+            "tradable_float_shares": 900_000_000.0,
+            "shares_outstanding_underlying": 1_000_000_000.0,
+            "tradable_float_dollars": 90_000_000_000.0,
+            "tradable_float_source": "unit_float",
+        }
+    ])
+    fund2, agg2 = flows.annotate_with_adv(fund, agg, adv)
+    day = agg2[(agg2["date"].eq("2026-05-19")) & (agg2["underlying"].eq("SPY"))].iloc[0]
+
+    assert day["net_moc_dollars"] == pytest.approx(180_000_000.0)
+    assert day["net_moc_pct_tradable_float"] == pytest.approx(180_000_000.0 / 90_000_000_000.0)
+    assert day["underlying_tradable_float_dollars"] == pytest.approx(90_000_000_000.0)
+    upro = fund2[(fund2["date"].eq("2026-05-19")) & (fund2["ticker"].eq("UPRO"))].iloc[0]
+    assert upro["rebalance_pct_tradable_float"] == pytest.approx(60_000_000.0 / 90_000_000_000.0)
+
+
 def test_partial_gap_aum_fill_avoids_missing_prior_aum():
     metrics = _metrics()
     metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "aum"] = 1_000_000_000.0

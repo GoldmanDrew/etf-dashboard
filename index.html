@@ -2742,7 +2742,8 @@ const scenShortFavCls = v => {
 //   underlying    = 0% (flat) — same as Scenarios tab "0×" shock column.
 //   sigma_source  = shared forecast σ (50/50 model-implied variance +
 //                   robust 6M EWMA variance when both exist).
-const SCENARIO_ETF_3M_FLAT_SORT_KEY = 'scenario_etf_3m_0und_forecast_sigma';
+const SCENARIO_ETF_1M_FLAT_SORT_KEY = 'scenario_etf_1m_0und_forecast_sigma';
+const REALIZED_PAIR_GROSS_GRID_HORIZON = 20;
 
 const YIELDBOOST_INCOME_PAIRS = new Set([
   'AMYY|AMD', 'AZYY|AMZN', 'BBYY|BABA', 'COYY|COIN', 'CWY|CRWV',
@@ -2833,38 +2834,38 @@ function fmtGrossRealizedLog(r, v) {
   return fmt(v);
 }
 
-function realizedPairGross60dTooltip(r) {
-  const v = Number(r?.realized_pair_gross_60d);
+function realizedPairGross20dTooltip(r) {
+  const v = Number(r?.realized_pair_gross_20d);
   const partial = Number(r?.realized_pair_gross_partial);
-  if (!Number.isFinite(v) && !Number.isFinite(partial)) return '60 trading-day gross pair return (δ·log U − log L), period not annualized. Same as Decay tab 60d Gross. Requires joint ETF+underlying history in etf_metrics_daily.';
+  if (!Number.isFinite(v) && !Number.isFinite(partial)) return `${REALIZED_PAIR_GROSS_GRID_HORIZON} trading-day gross pair return (δ·log U − log L), period not annualized. Same as Decay tab 20d Gross. Requires joint ETF+underlying history in etf_metrics_daily.`;
   const isPartial = !Number.isFinite(v) && Number.isFinite(partial);
   const shown = isPartial ? partial : v;
   const lines = [
     isPartial
-      ? 'Partial realized pair return: fewer than 60 aligned observations, not ranked as a full 60d value.'
-      : 'Trailing 60 trading-day gross pair return (period, not annualized).',
-    'Same metric as Decay tab → 60d → Gross.',
+      ? `Partial realized pair return: fewer than ${REALIZED_PAIR_GROSS_GRID_HORIZON} aligned observations, not ranked as a full ${REALIZED_PAIR_GROSS_GRID_HORIZON}d value.`
+      : `Trailing ${REALIZED_PAIR_GROSS_GRID_HORIZON} trading-day gross pair return (period, not annualized).`,
+    'Same metric as Decay tab → 20d → Gross.',
     'Formula: Σ daily (δ·log U − log L) over the window; short-favorable +.',
     `Value: ${fmt(shown)} gross`,
   ];
-  const obs = Number(r?.realized_pair_gross_60d_obs);
-  if (Number.isFinite(obs)) lines.push(`Observations: ${obs}${isPartial || r?.realized_pair_gross_60d_sufficient === false ? ' (partial window)' : ''}`);
-  if (r?.realized_pair_gross_60d_start_date && r?.realized_pair_gross_60d_end_date) {
-    lines.push(`Window: ${r.realized_pair_gross_60d_start_date} → ${r.realized_pair_gross_60d_end_date}`);
+  const obs = Number(r?.realized_pair_gross_20d_obs);
+  if (Number.isFinite(obs)) lines.push(`Observations: ${obs}${isPartial || r?.realized_pair_gross_20d_sufficient === false ? ' (partial window)' : ''}`);
+  if (r?.realized_pair_gross_20d_start_date && r?.realized_pair_gross_20d_end_date) {
+    lines.push(`Window: ${r.realized_pair_gross_20d_start_date} → ${r.realized_pair_gross_20d_end_date}`);
   }
-  const net = Number(isPartial ? r?.realized_pair_net_partial : r?.realized_pair_net_60d);
+  const net = Number(isPartial ? r?.realized_pair_net_partial : r?.realized_pair_net_20d);
   if (Number.isFinite(net)) lines.push(`Net @ spot borrow: ${fmt(net)}`);
-  if (r?.realized_pair_gross_60d_source) lines.push(`Source: ${r.realized_pair_gross_60d_source}`);
+  if (r?.realized_pair_gross_20d_source) lines.push(`Source: ${r.realized_pair_gross_20d_source}`);
   lines.push('Not the same as Gross (realiz.) — that column is full-history annualized drag.');
   return lines.join('\n');
 }
 
-function realizedPairGross60dDisplay(r) {
-  const v = Number(r?.realized_pair_gross_60d);
+function realizedPairGross20dDisplay(r) {
+  const v = Number(r?.realized_pair_gross_20d);
   if (Number.isFinite(v)) return fmt(v);
   const partial = Number(r?.realized_pair_gross_partial);
-  const obs = Number(r?.realized_pair_gross_60d_obs);
-  if (Number.isFinite(partial) && Number.isFinite(obs)) return `partial ${obs}/60`;
+  const obs = Number(r?.realized_pair_gross_20d_obs);
+  if (Number.isFinite(partial) && Number.isFinite(obs)) return `partial ${obs}/${REALIZED_PAIR_GROSS_GRID_HORIZON}`;
   return '—';
 }
 
@@ -3497,7 +3498,7 @@ function yieldBoostExpectedNetAnnualScenario(r, chartVolLookbackRange, horizonYe
   });
 }
 
-function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel = '3M') {
+function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel = '1M') {
   if (suppressScenarioForRow(r)) return null;
   const SR = typeof window !== 'undefined' ? window.ScenarioReturns : null;
   if (!SR || typeof SR.horizonToYears !== 'function') return null;
@@ -3531,9 +3532,9 @@ function computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, horizonLabel 
   return Number.isFinite(combined) ? combined : res.value;
 }
 
-// Convenience wrapper: headline 3M return used by the main-table column.
-function computeScenarioEtf3mFlatUnd(r, chartVolLookbackRange) {
-  return computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
+// Convenience wrapper: headline 1M return used by the main-table column.
+function computeScenarioEtf1mFlatUnd(r, chartVolLookbackRange) {
+  return computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '1M');
 }
 
 function fofCashFractionFromBasket(basket) {
@@ -4348,20 +4349,20 @@ const COLS = [
     hint: 'Best estimate of annual edge after borrow, short-favorable + (log/yr). Inverse-variance Bayesian blend: posterior = w_forward × Exp. edge (fwd) p50 + (1 − w_forward) × realized history, minus borrow. YieldBOOST anchor is put-spread structural gross (weekly pair MC is diagnostic-only). Box p25–p75, whisker p5–p95, dot p50.',
   },
   {
-    key: 'realized_pair_gross_60d',
+    key: 'realized_pair_gross_20d',
     label: 'Realized decay',
-    sublabel: '60d · gross · pair',
+    sublabel: '20d · gross · pair',
     w: 118,
     numeric: true,
-    hint: 'Trailing 60 trading-day gross pair return (δ·log U − log L), period not annualized. Same as Decay tab 60d Gross. Short-favorable +. Not Gross (realiz.) annual.',
+    hint: 'Trailing 20 trading-day gross pair return (δ·log U − log L), period not annualized. Same as Decay tab 20d Gross. Short-favorable +. Not Gross (realiz.) annual.',
   },
   {
-    key: SCENARIO_ETF_3M_FLAT_SORT_KEY,
+    key: SCENARIO_ETF_1M_FLAT_SORT_KEY,
     label: 'Exp. ETF return',
-    sublabel: '3M · long · no borrow',
+    sublabel: '1M · long · no borrow',
     w: 122,
     numeric: true,
-    hint: 'Long total return ~3M if underlying is flat; borrow excluded. σ = forecast. Income: option NAV path + cash. Others: +window dividends when known. Hover: 1M/6M. Sign is long-friendly (inverse for naked shorts).',
+    hint: 'Long total return ~1M (20 trading days) if underlying is flat; borrow excluded. σ = forecast. Income: option NAV path + cash. Others: +window dividends when known. Hover: 3M/6M. Sign is long-friendly (inverse for naked shorts).',
   },
   {
     key: 'vol_underlying_annual',
@@ -8662,12 +8663,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               )}
             </div>
             {(() => {
-              const expEtf3m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
               const expEtf1m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '1M');
+              const expEtf3m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
               const expEtf6m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '6M');
               return (
                 <div
-                  className={cls('chart-stat', scenarioValueCls(r, expEtf3m))}
+                  className={cls('chart-stat', scenarioValueCls(r, expEtf1m))}
                   title={
                     isPassiveLowBetaRow(r)
                       ? PASSIVE_LOW_BETA_POLICY_TOOLTIP
@@ -8682,26 +8683,25 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                             } else {
                               lines.push('Long total return, no borrow: Itô vol path + horizon-matched cash when recurring.');
                               lines.push(`σ (forecast): ${fmt(forecastVolForScenario(r, chartVolLookbackRange).sigma)}.`);
-                              const nav3 = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
-                              const div3 = dividendCashAdditiveForHorizon(r, '3M', 3 / 12);
-                              if (Number.isFinite(nav3) && Number.isFinite(div3) && div3 !== 0) {
-                                lines.push(`3M decomposition: NAV ${fmt(nav3 - div3)} + cash ${fmt(div3)} = ${fmt(nav3)}`);
+                              const div1 = dividendCashAdditiveForHorizon(r, '1M', 1 / 12);
+                              if (Number.isFinite(expEtf1m) && Number.isFinite(div1) && div1 !== 0) {
+                                lines.push(`1M decomposition: NAV ${fmt(expEtf1m - div1)} + cash ${fmt(div1)} = ${fmt(expEtf1m)}`);
                               }
                               lines.push('Ex-dates: Scenarios tab.');
                             }
                             if (r?.forecast_vol_event_adjusted) lines.push('EWMA leg clipped a large one-day move.');
                             lines.push('');
                             lines.push('Other horizons:');
-                            lines.push(`  1M: ${expEtf1m != null && Number.isFinite(expEtf1m) ? fmt(expEtf1m) : '—'}`);
-                            lines.push(`  3M: ${expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}  (table headline)`);
+                            lines.push(`  1M: ${expEtf1m != null && Number.isFinite(expEtf1m) ? fmt(expEtf1m) : '—'}  (table headline)`);
+                            lines.push(`  3M: ${expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}`);
                             lines.push(`  6M: ${expEtf6m != null && Number.isFinite(expEtf6m) ? fmt(expEtf6m) : '—'}`);
                             return lines.join('\n');
                           })()
                   }
                 >
                   <div className="cs-label">Exp. ETF return</div>
-                  <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>3M · long · no borrow</div>
-                  <div className="cs-value">{expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}</div>
+                  <div className="cs-sub" style={{ marginBottom: 2, textTransform: 'none', letterSpacing: 0 }}>1M · long · no borrow</div>
+                  <div className="cs-value">{expEtf1m != null && Number.isFinite(expEtf1m) ? fmt(expEtf1m) : '—'}</div>
                 </div>
               );
             })()}
@@ -10595,6 +10595,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           {intradayUnderlyingRow.estimated_close_rebalance_pct_adv_20d != null
                             ? <> · {fmtPctDecimal(intradayUnderlyingRow.estimated_close_rebalance_pct_adv_20d, 2)} of 20d $ ADV</>
                             : null}
+                          {intradayUnderlyingRow.remaining_close_rebalance_pct_tradable_float != null
+                            ? <> · remaining {fmtPctDecimal(intradayUnderlyingRow.remaining_close_rebalance_pct_tradable_float, 3)} of float</>
+                            : null}
                           {intradayUnderlyingRow.bias_signed_error_pct != null
                             ? <> · bias-adj {fmtSignedMoney(intradayUnderlyingRow.estimated_close_rebalance_dollars_bias_adj)}</>
                             : null}
@@ -10636,6 +10639,17 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     {underlyingFlowLatest?.underlying_dollar_adv_20d != null
                       ? <>20d $ ADV {fmtCompactMoney(underlyingFlowLatest.underlying_dollar_adv_20d)}</>
                       : <>$ ADV unavailable</>}
+                  </div>
+                </div>
+                <div className="chart-stat" title="Net EOD rebalance divided by underlying tradable float market value. Uses public float when available, otherwise shares outstanding.">
+                  <div className="cs-label">% of {String(undSym || '').toUpperCase()} tradable float</div>
+                  <div className={cls('cs-value', flowValClass(underlyingFlowLatest?.net_moc_pct_tradable_float))}>
+                    {fmtPctDecimal(underlyingFlowLatest?.net_moc_pct_tradable_float, 3)}
+                  </div>
+                  <div className="cs-sub">
+                    {underlyingFlowLatest?.underlying_tradable_float_dollars != null
+                      ? <>float MV {fmtCompactMoney(underlyingFlowLatest.underlying_tradable_float_dollars)}{underlyingFlowLatest.tradable_float_source ? <> · {underlyingFlowLatest.tradable_float_source}</> : null}</>
+                      : <>float unavailable</>}
                   </div>
                 </div>
                 <div className="chart-stat">
@@ -12394,6 +12408,11 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
       key === 'abs_pct_adv' ? Math.abs(Number(
         mode === 'intraday' ? row.estimated_close_rebalance_pct_adv_20d : row.net_moc_pct_adv_20d,
       )) :
+      key === 'abs_pct_float' ? Math.abs(Number(
+        mode === 'intraday'
+          ? (row.remaining_close_rebalance_pct_tradable_float ?? row.estimated_close_rebalance_pct_tradable_float)
+          : row.net_moc_pct_tradable_float,
+      )) :
       key === 'abs_pct_aum' ? Math.abs(Number(
         mode === 'intraday' ? row.estimated_close_rebalance_pct_aum : row.net_moc_pct_letf_aum,
       )) :
@@ -12510,6 +12529,7 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
   }
 
   const advFieldName = mode === 'intraday' ? 'estimated_close_rebalance_pct_adv_20d' : 'net_moc_pct_adv_20d';
+  const floatFieldName = mode === 'intraday' ? 'remaining_close_rebalance_pct_tradable_float' : 'net_moc_pct_tradable_float';
   const aumFieldName = mode === 'intraday' ? 'estimated_close_rebalance_pct_aum' : 'net_moc_pct_letf_aum';
   const returnFieldName = mode === 'intraday' ? 'return_d1_so_far' : 'underlying_return_d1';
 
@@ -12579,6 +12599,9 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
             {Number.isFinite(Number(headline.topBuy?.[advFieldName]))
               ? <> · {fmtPctDecimal(headline.topBuy[advFieldName], 2)} of {mode === 'intraday' ? '20d median $ ADV' : '20d $ ADV'}</>
               : null}
+            {Number.isFinite(Number(headline.topBuy?.[floatFieldName]))
+              ? <> · {fmtPctDecimal(headline.topBuy[floatFieldName], 3)} of float</>
+              : null}
           </div>
         </div>
         <div className="chart-stat">
@@ -12590,6 +12613,9 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
             {headline.topSell?.underlying || '—'}
             {Number.isFinite(Number(headline.topSell?.[advFieldName]))
               ? <> · {fmtPctDecimal(headline.topSell[advFieldName], 2)} of {mode === 'intraday' ? '20d median $ ADV' : '20d $ ADV'}</>
+              : null}
+            {Number.isFinite(Number(headline.topSell?.[floatFieldName]))
+              ? <> · {fmtPctDecimal(headline.topSell[floatFieldName], 3)} of float</>
               : null}
           </div>
         </div>
@@ -12661,6 +12687,9 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
               <th onClick={() => handleSort('abs_pct_aum')} style={{ cursor: 'pointer' }}>% LETF AUM{sortIndicator('abs_pct_aum')}</th>
               <th onClick={() => handleSort('abs_pct_adv')} style={{ cursor: 'pointer' }}>
                 {mode === 'intraday' ? '% 20d median $ ADV' : '% 20d $ ADV'}{sortIndicator('abs_pct_adv')}
+              </th>
+              <th onClick={() => handleSort('abs_pct_float')} style={{ cursor: 'pointer' }} title={mode === 'intraday' ? 'Remaining-to-close rebalance divided by underlying tradable float market value' : 'Net MOC rebalance divided by underlying tradable float market value'}>
+                {mode === 'intraday' ? 'Remain % float' : '% float'}{sortIndicator('abs_pct_float')}
               </th>
               {mode === 'intraday' ? (
                 <th onClick={() => handleSort('abs_volume_so_far')} style={{ cursor: 'pointer' }} title="Today's cumulative share volume × spot, as % of 20d median dollar ADV">
@@ -12734,6 +12763,16 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
                   </td>
                   <td className={flowValClass(row[advFieldName])}>
                     {fmtPctDecimal(row[advFieldName], 2)}
+                  </td>
+                  <td
+                    className={flowValClass(row[floatFieldName])}
+                    title={
+                      row.underlying_tradable_float_dollars != null
+                        ? `Tradable float ${fmtCompactMoney(row.underlying_tradable_float_dollars)}${row.tradable_float_source ? ` · ${row.tradable_float_source}` : ''}`
+                        : 'Tradable float unavailable'
+                    }
+                  >
+                    {fmtPctDecimal(row[floatFieldName], 3)}
                   </td>
                   {mode === 'intraday' ? (
                     <td className={flowValClass(row.volume_so_far_pct_adv)}>
@@ -13679,8 +13718,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       d = d.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
     }
     d.sort((a, b) => {
-      let av = sortKey === SCENARIO_ETF_3M_FLAT_SORT_KEY
-        ? computeScenarioEtf3mFlatUnd(a, chartVolLookbackRange)
+      let av = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
+        ? computeScenarioEtf1mFlatUnd(a, chartVolLookbackRange)
         : sortKey === 'expected_pair_pnl_p50_annual' || sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
         ? expectedDecayHeadlineValue(a, chartVolLookbackRange)
         : sortKey === 'vol_underlying_annual'
@@ -13688,8 +13727,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         : sortKey === 'vol_etf_annual'
         ? volHeadlineValue(a, 'etf', chartVolLookbackRange)
         : a[sortKey];
-      let bv = sortKey === SCENARIO_ETF_3M_FLAT_SORT_KEY
-        ? computeScenarioEtf3mFlatUnd(b, chartVolLookbackRange)
+      let bv = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
+        ? computeScenarioEtf1mFlatUnd(b, chartVolLookbackRange)
         : sortKey === 'expected_pair_pnl_p50_annual' || sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
         ? expectedDecayHeadlineValue(b, chartVolLookbackRange)
         : sortKey === 'vol_underlying_annual'
@@ -13936,9 +13975,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             <strong>Net edge</strong> — bootstrap of past gross + borrow, level-shifted to Exp. edge fwd via inverse-variance blend; dot = p50, whisker = p5–p95. Details below.
           </p>
           <p style={{ padding: '0 24px 8px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>
-            <strong style={{ color: 'var(--text-secondary)' }}>Recent realized vs forward long (3M):</strong>{' '}
-            <strong>Realized decay (60d)</strong> — trailing 60 trading-day gross pair return (Decay tab Gross; period, not annualized; short-favorable +).{' '}
-            <strong>Exp. ETF return</strong> — long <strong>total return</strong> if the underlying is flat, <strong>borrow excluded</strong>; income names add <strong>cash payouts</strong> on top of the NAV path (+ is good for longs, bad for naked shorts). Same forecast σ as Scenarios. Hover for 1M/6M. Passive low-β (non-income): <strong>—</strong>.{' '}
+            <strong style={{ color: 'var(--text-secondary)' }}>Recent realized vs forward long (1M):</strong>{' '}
+            <strong>Realized decay (20d)</strong> — trailing 20 trading-day gross pair return (Decay tab Gross; period, not annualized; short-favorable +).{' '}
+            <strong>Exp. ETF return</strong> — long <strong>total return</strong> if the underlying is flat, <strong>borrow excluded</strong>; income names add <strong>cash payouts</strong> on top of the NAV path (+ is good for longs, bad for naked shorts). Same forecast σ as Scenarios. Hover for 3M/6M. Passive low-β (non-income): <strong>—</strong>.{' '}
             <strong>Vol Und / Vol ETF</strong> — best-estimate σ (Vol Und = forecast blend, same as Scenarios; Vol ETF = 6M robust EWMA). Hover for realized ladder.
             {data?.uncertainty_footnote && (
               <span> {data.uncertainty_footnote}</span>
@@ -13959,9 +13998,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                   <br /><br />
                   <strong>Net edge</strong>: inverse-variance Bayesian blend of Exp. edge (fwd) p50 and the realized bootstrap, minus borrow.
                   <br /><br />
-                  <strong>Realized decay (60d)</strong>: trailing 60 trading-day gross pair return (Decay tab Gross; period not annualized; short-favorable +).
+                  <strong>Realized decay (20d)</strong>: trailing 20 trading-day gross pair return (Decay tab Gross; period not annualized; short-favorable +).
                   <br /><br />
-                  <strong>Exp. ETF return (3M)</strong>: long total return at flat underlying (NAV + cash for income), borrow excluded. Long-favorable sign; different horizon and object than Exp. edge (fwd).
+                  <strong>Exp. ETF return (1M)</strong>: long total return at flat underlying (NAV + cash for income), borrow excluded. Long-favorable sign; different horizon and object than Exp. edge (fwd).
                 </p>
               </div>
               <div className="dm-block">
@@ -14063,8 +14102,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               <tbody>
                 {filtered.map(r => {
                   const expanded = expandedSym === r.symbol;
-                  const expEtf3m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
                   const expEtf1m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '1M');
+                  const expEtf3m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '3M');
                   const expEtf6m = computeExpectedEtfReturnFlatUnd(r, chartVolLookbackRange, '6M');
                   return (
                     <React.Fragment key={r.symbol}>
@@ -14102,13 +14141,13 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                           )}
                         </td>
                         <td
-                          className={grossShortFavCls(Number(r?.realized_pair_gross_60d))}
-                          title={realizedPairGross60dTooltip(r)}
+                          className={grossShortFavCls(Number(r?.realized_pair_gross_20d))}
+                          title={realizedPairGross20dTooltip(r)}
                         >
-                          {realizedPairGross60dDisplay(r)}
+                          {realizedPairGross20dDisplay(r)}
                         </td>
                         <td
-                          className={scenarioValueCls(r, expEtf3m)}
+                          className={scenarioValueCls(r, expEtf1m)}
                           title={
                             isPassiveLowBetaRow(r)
                               ? PASSIVE_LOW_BETA_POLICY_TOOLTIP
@@ -14123,23 +14162,23 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                                     } else {
                                       lines.push('Long total return, no borrow: Itô vol path + horizon-matched cash when recurring.');
                                       lines.push(`σ (forecast): ${fmt(forecastVolForScenario(r, chartVolLookbackRange).sigma)}.`);
-                                      const div3 = dividendCashAdditiveForHorizon(r, '3M', 3 / 12);
-                                      if (Number.isFinite(expEtf3m) && Number.isFinite(div3) && div3 !== 0) {
-                                        lines.push(`3M decomposition: NAV ${fmt(expEtf3m - div3)} + cash ${fmt(div3)} = ${fmt(expEtf3m)}`);
+                                      const div1 = dividendCashAdditiveForHorizon(r, '1M', 1 / 12);
+                                      if (Number.isFinite(expEtf1m) && Number.isFinite(div1) && div1 !== 0) {
+                                        lines.push(`1M decomposition: NAV ${fmt(expEtf1m - div1)} + cash ${fmt(div1)} = ${fmt(expEtf1m)}`);
                                       }
                                       lines.push('Ex-dates: Scenarios tab.');
                                     }
                                     if (r?.forecast_vol_event_adjusted) lines.push('EWMA leg clipped a large one-day move.');
                                     lines.push('');
                                     lines.push('Other horizons:');
-                                    lines.push(`  1M: ${expEtf1m != null && Number.isFinite(expEtf1m) ? fmt(expEtf1m) : '—'}`);
-                                    lines.push(`  3M: ${expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}  (table headline)`);
+                                    lines.push(`  1M: ${expEtf1m != null && Number.isFinite(expEtf1m) ? fmt(expEtf1m) : '—'}  (table headline)`);
+                                    lines.push(`  3M: ${expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}`);
                                     lines.push(`  6M: ${expEtf6m != null && Number.isFinite(expEtf6m) ? fmt(expEtf6m) : '—'}`);
                                     return lines.join('\n');
                                   })()
                           }
                         >
-                          {expEtf3m != null && Number.isFinite(expEtf3m) ? fmt(expEtf3m) : '—'}
+                          {expEtf1m != null && Number.isFinite(expEtf1m) ? fmt(expEtf1m) : '—'}
                         </td>
                         <td title={volHeadlineTooltip(r, "underlying", chartVolLookbackRange)}>{fmt(volHeadlineValue(r, 'underlying', chartVolLookbackRange))}</td>
                         <td title={volHeadlineTooltip(r, "etf", chartVolLookbackRange)}>{fmt(volHeadlineValue(r, 'etf', chartVolLookbackRange))}</td>

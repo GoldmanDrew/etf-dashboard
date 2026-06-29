@@ -57,6 +57,17 @@ def test_granite_product_id_from_catalog_table_row():
     assert GraniteSharesProvider._product_id_from_page(html, "intw", "INTW") == "1122"
 
 
+def test_granite_supports_static_new_ticker_fallback(monkeypatch):
+    provider = GraniteSharesProvider()
+    monkeypatch.setattr(provider, "_load_catalog", lambda: None)
+    provider._catalog = set()
+
+    assert provider.supports_ticker("CWY", date(2026, 6, 26)) is True
+    assert provider.supports_ticker("BBYY", date(2026, 6, 26)) is True
+    assert provider.supports_ticker("BAIG", date(2026, 6, 26)) is True
+    assert provider.supports_ticker("NOTA", date(2026, 6, 26)) is False
+
+
 def test_merge_provider_attempts_prefers_polygon_when_yfinance_nav_diverges():
     """INTW-style bug: stale yfinance totalAssets + last_price must not beat polygon close."""
     yfin = ProviderResult(

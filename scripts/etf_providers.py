@@ -1171,6 +1171,23 @@ class GraniteSharesProvider:
 
     name = "granite_shares"
     BASE = "https://www.graniteshares.com"
+    # Static fallback for issuer routing when the Granite catalog endpoint/CDN is
+    # unavailable. The dynamic catalog still wins when it loads successfully.
+    KNOWN_TICKERS: set[str] = {
+        # YieldBOOST / FoF
+        "AMYY", "AZYY", "BBYY", "COYY", "CWY", "FBYY", "HMYY", "HOYY", "IOYY",
+        "MAAY", "MTYY", "MUYY", "NUGY", "NVYY", "PLYY", "QBY", "RGYY", "RTYY",
+        "SEMY", "SMYY", "TMYY", "TQQY", "TSYY", "XBTY", "YBTY", "YBST", "YSPY",
+        # Newer Granite single-stock / thematic leveraged tickers observed in the
+        # dashboard universe. If a symbol is not actually live on Granite, fetch
+        # returns missing and the stack falls through to market-data providers.
+        "ADBU", "APHG", "ASTG", "ASTN", "AVAZ", "AVXX", "AXPG", "AXTL", "BAIG",
+        "BULG", "CDNG", "CIEG", "CIFG", "COTG", "CRCG", "CRY", "ELIL", "ENTL",
+        "FCXG", "FOMG", "FPSX", "GFSG", "GLGG", "HODU", "HONG", "HPEL", "HUTG",
+        "IREG", "KLAG", "LACG", "LMTL", "LOFF", "MCHG", "MSOO", "MUZ", "NVOX",
+        "ONDG", "OSCG", "OSCX", "PBRG", "PLTG", "QSU", "SMTG", "SPOG", "STLU",
+        "STSM", "SUIL", "TECY", "TSDD", "TSEG", "TSLO", "TTXD",
+    }
 
     def __init__(self, session: requests.Session | None = None):
         # ``session`` is ignored: GraniteShares' CDN serves full ETF markup only on the
@@ -1217,6 +1234,8 @@ class GraniteSharesProvider:
             LOGGER.warning("GraniteShares catalog load failed: %s", e)
 
     def supports_ticker(self, ticker: str, as_of: date) -> bool:
+        if ticker.upper() in self.KNOWN_TICKERS:
+            return True
         self._load_catalog()
         return ticker.upper() in (self._catalog or set())
 

@@ -1,6 +1,6 @@
 # ETF Borrow Dashboard
 
-Live at: **https://magis-capital-partners.github.io/etf-dashboard/**
+Live at: **https://goldmandrew.github.io/etf-dashboard/**
 
 Real-time IBKR short stock borrow rate monitoring with **distributional decay forecasts** and **product-class-aware** decay/edge routing for leveraged, inverse, volatility, and YieldBOOST income ETFs. Deployed as a static site via GitHub Pages — no server required.
 
@@ -123,7 +123,7 @@ Go to **Settings → Pages** in this repo:
 git add -A && git commit -m "initial dashboard" && git push
 ```
 
-The `build-and-deploy.yml` Action runs on push, builds the data, and deploys. Your site will be live at `https://magis-capital-partners.github.io/etf-dashboard/` within a few minutes.
+The `build-and-deploy.yml` Action runs on push, builds the data, and deploys. Your site will be live at `https://goldmandrew.github.io/etf-dashboard/` within a few minutes.
 
 ## Schedule
 

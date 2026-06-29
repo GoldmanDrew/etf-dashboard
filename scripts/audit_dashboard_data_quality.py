@@ -234,21 +234,21 @@ def audit_dashboard(
             continue
         sym = str(row.get("symbol") or "?")
 
-        obs = row.get("realized_pair_gross_60d_obs")
-        sufficient = row.get("realized_pair_gross_60d_sufficient")
-        if sufficient is False and row.get("realized_pair_gross_60d") is not None:
-            errors.append(f"{sym}: full realized_pair_gross_60d set despite insufficient obs={obs}")
+        obs = row.get("realized_pair_gross_20d_obs")
+        sufficient = row.get("realized_pair_gross_20d_sufficient")
+        if sufficient is False and row.get("realized_pair_gross_20d") is not None:
+            errors.append(f"{sym}: full realized_pair_gross_20d set despite insufficient obs={obs}")
         if row.get("realized_pair_gross_partial") is not None and sufficient is not False:
             errors.append(f"{sym}: partial realized pair field set without insufficient flag")
         if (
             metrics_by_symbol
-            and row.get("realized_pair_gross_60d") is not None
+            and row.get("realized_pair_gross_20d") is not None
             and isinstance(obs, (int, float))
         ):
             max_gap = _tail_window_lifecycle_gap(metrics_by_symbol.get(sym.upper(), []), int(obs))
             if max_gap is not None:
                 errors.append(
-                    f"{sym}: full realized_pair_gross_60d crosses {max_gap}d metrics gap"
+                    f"{sym}: full realized_pair_gross_20d crosses {max_gap}d metrics gap"
                 )
 
         if row.get("expected_decay_available") is True:

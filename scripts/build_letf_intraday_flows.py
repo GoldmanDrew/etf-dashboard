@@ -216,6 +216,10 @@ def load_adv_latest(path: Path = UNDERLYING_VOLUME_PARQUET) -> dict[str, dict[st
             "underlying_dollar_adv_20d": mean_adv,
             "underlying_dollar_median_adv_20d": med_adv,
             "underlying_dollar_adv_intraday_20d": adv_intraday,
+            "underlying_tradable_float_dollars": _f(r.get("tradable_float_dollars")),
+            "underlying_tradable_float_shares": _f(r.get("tradable_float_shares")),
+            "underlying_shares_outstanding": _f(r.get("shares_outstanding_underlying")),
+            "tradable_float_source": r.get("tradable_float_source"),
             "as_of_date": str(r.get("date") or ""),
         }
     return out
@@ -717,6 +721,18 @@ def aggregate_underlying(
         for u, meta in adv_latest.items()
     }
     agg["underlying_dollar_adv_intraday_20d"] = agg["underlying"].map(adv_intraday)
+    agg["underlying_tradable_float_dollars"] = agg["underlying"].map(
+        lambda u: adv_latest.get(u, {}).get("underlying_tradable_float_dollars")
+    )
+    agg["underlying_tradable_float_shares"] = agg["underlying"].map(
+        lambda u: adv_latest.get(u, {}).get("underlying_tradable_float_shares")
+    )
+    agg["underlying_shares_outstanding"] = agg["underlying"].map(
+        lambda u: adv_latest.get(u, {}).get("underlying_shares_outstanding")
+    )
+    agg["tradable_float_source"] = agg["underlying"].map(
+        lambda u: adv_latest.get(u, {}).get("tradable_float_source")
+    )
     vol_so_far = (
         eligible.groupby("underlying")["underlying_volume_so_far"].max().to_dict()
     )
@@ -732,6 +748,10 @@ def aggregate_underlying(
         agg["estimated_close_rebalance_pct_adv_20d"] = (
             agg["estimated_net_close_rebalance_dollars"] / denom
         )
+        float_denom = agg["underlying_tradable_float_dollars"].astype(float)
+        agg["estimated_close_rebalance_pct_tradable_float"] = (
+            agg["estimated_net_close_rebalance_dollars"] / float_denom
+        )
 
     model_name = str(remaining_model.get("model") or "none")
     session_minutes = int(remaining_model.get("session_minutes") or SESSION_MINUTES)
@@ -746,6 +766,10 @@ def aggregate_underlying(
     agg["remaining_close_rebalance_dollars"] = (
         remaining_share.fillna(1.0) * agg["estimated_net_close_rebalance_dollars"]
     )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        agg["remaining_close_rebalance_pct_tradable_float"] = (
+            agg["remaining_close_rebalance_dollars"] / agg["underlying_tradable_float_dollars"].astype(float)
+        )
 
     # Optional bias adjustment from G.1 reconciliations.
     def _bias(row: pd.Series) -> float | None:
@@ -886,13 +910,23 @@ def build_payloads(
                 "underlying_dollar_adv_20d": _round(row.get("underlying_dollar_adv_20d"), 2),
                 "underlying_dollar_median_adv_20d": _round(row.get("underlying_dollar_median_adv_20d"), 2),
                 "underlying_dollar_adv_intraday_20d": _round(row.get("underlying_dollar_adv_intraday_20d"), 2),
+                "underlying_tradable_float_dollars": _round(row.get("underlying_tradable_float_dollars"), 2),
+                "underlying_tradable_float_shares": _round(row.get("underlying_tradable_float_shares"), 0),
+                "underlying_shares_outstanding": _round(row.get("underlying_shares_outstanding"), 0),
+                "tradable_float_source": row.get("tradable_float_source"),
                 "underlying_volume_so_far": _round(row.get("underlying_volume_so_far"), 0),
                 "volume_so_far_dollars": _round(row.get("volume_so_far_dollars"), 2),
                 "volume_so_far_pct_adv": _round(row.get("volume_so_far_pct_adv"), 8),
                 "estimated_close_rebalance_pct_adv_20d": _round(row.get("estimated_close_rebalance_pct_adv_20d"), 8),
+                "estimated_close_rebalance_pct_tradable_float": _round(
+                    row.get("estimated_close_rebalance_pct_tradable_float"), 8,
+                ),
                 "remaining_model": row.get("remaining_model"),
                 "already_realized_share": _round(row.get("already_realized_share"), 6),
                 "remaining_close_rebalance_dollars": _round(row.get("remaining_close_rebalance_dollars"), 2),
+                "remaining_close_rebalance_pct_tradable_float": _round(
+                    row.get("remaining_close_rebalance_pct_tradable_float"), 8,
+                ),
                 "estimated_close_rebalance_dollars_bias_adj": _round(
                     row.get("estimated_close_rebalance_dollars_bias_adj"), 2,
                 ),

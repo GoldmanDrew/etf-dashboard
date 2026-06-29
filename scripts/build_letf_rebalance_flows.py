@@ -72,6 +72,14 @@ def _f(v: object) -> float | None:
     return out if math.isfinite(out) else None
 
 
+def _first_positive(*vals: object) -> float | None:
+    for v in vals:
+        f = _f(v)
+        if f is not None and f > 0:
+            return f
+    return None
+
+
 def _truthy(v: object) -> bool:
     if isinstance(v, bool):
         return v
@@ -561,7 +569,71 @@ def fetch_underlying_volume_panel(
     out = out.dropna(subset=["close", "volume", "dollar_volume"])
     out = out[(out["close"] > 0) & (out["volume"] > 0)]
     out = out.drop_duplicates(subset=["underlying", "date"], keep="last")
+    float_meta = fetch_underlying_float_metadata(syms)
+    if float_meta:
+        meta = pd.DataFrame([
+            {"underlying": k, **v}
+            for k, v in float_meta.items()
+        ])
+        out = out.merge(meta, on="underlying", how="left")
+    for col in ("tradable_float_shares", "shares_outstanding_underlying"):
+        if col not in out.columns:
+            out[col] = np.nan
+    if "tradable_float_source" not in out.columns:
+        out["tradable_float_source"] = None
+    shares = pd.to_numeric(out.get("tradable_float_shares"), errors="coerce")
+    out["tradable_float_dollars"] = out["close"].astype(float) * shares
     return out.sort_values(["underlying", "date"]).reset_index(drop=True)
+
+
+def fetch_underlying_float_metadata(
+    underlyings: list[str],
+    *,
+    max_symbols: int = 250,
+) -> dict[str, dict[str, Any]]:
+    """Best-effort public-float metadata from yfinance.
+
+    ``floatShares`` is preferred. When unavailable, shares outstanding is the
+    fallback so downstream capacity ratios remain usable but clearly labelled.
+    """
+    syms = sorted({str(u).strip().upper() for u in (underlyings or []) if str(u).strip()})
+    if not syms or max_symbols <= 0:
+        return {}
+    try:
+        import yfinance as yf  # type: ignore
+    except Exception as exc:  # pragma: no cover - import-time failure path
+        LOGGER.warning("yfinance unavailable for float metadata (%s)", exc)
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for sym in syms[: int(max_symbols)]:
+        float_shares = None
+        shares_out = None
+        try:
+            t = yf.Ticker(sym)
+            try:
+                info = t.get_info() or {}
+            except Exception:
+                info = getattr(t, "info", {}) or {}
+            float_shares = _first_positive(info.get("floatShares"), info.get("float_shares"))
+            shares_out = _first_positive(info.get("sharesOutstanding"), info.get("shares_outstanding"))
+            if shares_out is None:
+                try:
+                    fast = t.fast_info
+                    shares_out = _first_positive(getattr(fast, "shares", None), fast.get("shares") if hasattr(fast, "get") else None)
+                except Exception:
+                    shares_out = None
+        except Exception:
+            continue
+        shares = float_shares or shares_out
+        if shares is None or shares <= 0:
+            continue
+        out[sym] = {
+            "tradable_float_shares": shares,
+            "shares_outstanding_underlying": shares_out,
+            "tradable_float_source": "yfinance_float_shares" if float_shares else "yfinance_shares_outstanding",
+        }
+    return out
 
 
 def load_or_refresh_underlying_volume_panel(
@@ -583,13 +655,14 @@ def load_or_refresh_underlying_volume_panel(
 
     cache_is_fresh = False
     if not cached.empty and {"date", "underlying", "dollar_volume"}.issubset(cached.columns):
+        has_float_shape = {"tradable_float_shares", "tradable_float_dollars", "tradable_float_source"}.issubset(cached.columns)
         try:
             cache_max = pd.to_datetime(cached["date"]).max()
         except Exception:
             cache_max = pd.NaT
         if pd.notna(cache_max):
             now = pd.Timestamp.now("UTC").tz_localize(None)
-            cache_is_fresh = (now - cache_max).total_seconds() / 3600.0 <= float(fresh_hours)
+            cache_is_fresh = has_float_shape and (now - cache_max).total_seconds() / 3600.0 <= float(fresh_hours)
 
     if skip_fetch and not cached.empty:
         LOGGER.info("ADV cache reuse forced via --skip-volume-fetch (rows=%d)", len(cached))
@@ -635,6 +708,8 @@ def compute_adv_panel_with_median(
     cols = [
         "date", "underlying",
         "underlying_dollar_adv_20d", "underlying_dollar_median_adv_20d",
+        "tradable_float_shares", "shares_outstanding_underlying",
+        "tradable_float_dollars", "tradable_float_source",
     ]
     if volume_panel.empty:
         return pd.DataFrame(columns=cols)
@@ -647,6 +722,12 @@ def compute_adv_panel_with_median(
     panel["underlying_dollar_median_adv_20d"] = (
         grouped.rolling(window=window, min_periods=min_p).median().reset_index(level=0, drop=True)
     )
+    for col in ("tradable_float_shares", "shares_outstanding_underlying", "tradable_float_dollars"):
+        if col not in panel.columns:
+            panel[col] = np.nan
+        panel[col] = pd.to_numeric(panel[col], errors="coerce")
+    if "tradable_float_source" not in panel.columns:
+        panel["tradable_float_source"] = None
     return panel[cols]
 
 
@@ -661,23 +742,35 @@ def annotate_with_adv(
             fund_flows = fund_flows.copy()
             fund_flows["underlying_dollar_adv_20d"] = float("nan")
             fund_flows["rebalance_pct_adv_20d"] = float("nan")
+            fund_flows["underlying_tradable_float_dollars"] = float("nan")
+            fund_flows["rebalance_pct_tradable_float"] = float("nan")
         if not aggregates.empty:
             aggregates = aggregates.copy()
             aggregates["underlying_dollar_adv_20d"] = float("nan")
             aggregates["net_moc_pct_adv_20d"] = float("nan")
+            aggregates["underlying_tradable_float_dollars"] = float("nan")
+            aggregates["net_moc_pct_tradable_float"] = float("nan")
         return fund_flows, aggregates
 
     if not fund_flows.empty:
         fund_flows = fund_flows.merge(adv_panel, on=["date", "underlying"], how="left")
+        fund_flows = fund_flows.rename(columns={"tradable_float_dollars": "underlying_tradable_float_dollars"})
         with np.errstate(divide="ignore", invalid="ignore"):
             fund_flows["rebalance_pct_adv_20d"] = (
                 fund_flows["rebalance_signed_dollars"] / fund_flows["underlying_dollar_adv_20d"]
             )
+            fund_flows["rebalance_pct_tradable_float"] = (
+                fund_flows["rebalance_signed_dollars"] / fund_flows["underlying_tradable_float_dollars"]
+            )
     if not aggregates.empty:
         aggregates = aggregates.merge(adv_panel, on=["date", "underlying"], how="left")
+        aggregates = aggregates.rename(columns={"tradable_float_dollars": "underlying_tradable_float_dollars"})
         with np.errstate(divide="ignore", invalid="ignore"):
             aggregates["net_moc_pct_adv_20d"] = (
                 aggregates["net_moc_dollars"] / aggregates["underlying_dollar_adv_20d"]
+            )
+            aggregates["net_moc_pct_tradable_float"] = (
+                aggregates["net_moc_dollars"] / aggregates["underlying_tradable_float_dollars"]
             )
     return fund_flows, aggregates
 
@@ -747,6 +840,7 @@ def _top_contributors(fund_flows: pd.DataFrame, date_iso: str, underlying: str, 
             "rebalance_signed_dollars": _round(r.get("rebalance_signed_dollars"), 2),
             "aum_prior_close": _round(r.get("aum_prior_close"), 2),
             "rebalance_pct_adv_20d": _round(r.get("rebalance_pct_adv_20d"), 8),
+            "rebalance_pct_tradable_float": _round(r.get("rebalance_pct_tradable_float"), 8),
         }
         for _, r in rows.iterrows()
     ]
@@ -870,6 +964,11 @@ def write_outputs(
                     "net_moc_pct_letf_aum": _round(row.get("net_moc_pct_letf_aum"), 8),
                     "underlying_dollar_adv_20d": _round(row.get("underlying_dollar_adv_20d"), 2),
                     "net_moc_pct_adv_20d": _round(row.get("net_moc_pct_adv_20d"), 8),
+                    "underlying_tradable_float_dollars": _round(row.get("underlying_tradable_float_dollars"), 2),
+                    "underlying_tradable_float_shares": _round(row.get("tradable_float_shares"), 0),
+                    "underlying_shares_outstanding": _round(row.get("shares_outstanding_underlying"), 0),
+                    "tradable_float_source": row.get("tradable_float_source"),
+                    "net_moc_pct_tradable_float": _round(row.get("net_moc_pct_tradable_float"), 8),
                     "underlying_return_d1": _round(row.get("underlying_return_d1"), 8),
                     "n_funds": int(row.get("n_funds") or 0),
                     "net_moc_5d_dollars": _round(row.get("net_moc_5d_dollars"), 2),

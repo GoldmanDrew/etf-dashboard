@@ -22,7 +22,7 @@ from price_basis import (
 
 TRADING_DAYS = 252
 DEFAULT_MIN_OBS = 40
-REALIZED_PAIR_GROSS_60D_HORIZON = 60
+REALIZED_PAIR_GROSS_20D_HORIZON = 20
 MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45
 HARD_LIFECYCLE_GAP_DAYS = 365
 
@@ -189,7 +189,7 @@ def compute_horizon_period_returns(
     borrow_annual: float | None = None,
 ) -> dict[str, Any]:
     """Mirror assets/realized_decay.js::computeHorizonPeriodReturns."""
-    hs = horizons or [REALIZED_PAIR_GROSS_60D_HORIZON]
+    hs = horizons or [REALIZED_PAIR_GROSS_20D_HORIZON]
     series = daily_series or []
     drags = [float(x["drag"]) for x in series]
     n = len(series)
@@ -212,12 +212,39 @@ def compute_horizon_period_returns(
     return {"horizons": rows, "n_days": n, "end_date": end_date, "borrow_annual": borrow_annual}
 
 
-def realized_pair_gross_60d_fields(
+def _normalize_horizon_row(horizon_row: dict[str, Any]) -> dict[str, Any]:
+    """Accept Decay-tab snake_case and FoF camelCase horizon payloads."""
+    if horizon_row.get("gross_simple") is not None:
+        return horizon_row
+    gross_simple = horizon_row.get("grossSimple")
+    if gross_simple is None:
+        return horizon_row
+    gross_log = horizon_row.get("gross_log")
+    if gross_log is None:
+        gross_log = horizon_row.get("grossLog")
+    net_simple = horizon_row.get("net_simple")
+    if net_simple is None:
+        net_simple = horizon_row.get("netSimple")
+    return {
+        **horizon_row,
+        "gross_simple": gross_simple,
+        "gross_log": gross_log,
+        "net_simple": net_simple,
+        "obs": horizon_row.get("obs") if horizon_row.get("obs") is not None else horizon_row.get("days"),
+        "start_date": horizon_row.get("start_date") or horizon_row.get("startDate"),
+        "end_date": horizon_row.get("end_date") or horizon_row.get("endDate"),
+    }
+
+
+def realized_pair_gross_20d_fields(
     horizon_row: dict[str, Any] | None,
     *,
     source: str = "etf_metrics_daily",
 ) -> dict[str, Any]:
-    if not horizon_row or horizon_row.get("gross_simple") is None:
+    if not horizon_row:
+        return {}
+    horizon_row = _normalize_horizon_row(horizon_row)
+    if horizon_row.get("gross_simple") is None:
         return {}
     gross_simple = horizon_row.get("gross_simple")
     if gross_simple is None or not math.isfinite(float(gross_simple)):
@@ -229,22 +256,22 @@ def realized_pair_gross_60d_fields(
         else None
     )
     out: dict[str, Any] = {
-        "realized_pair_gross_60d_obs": int(horizon_row.get("obs") or 0),
-        "realized_pair_gross_60d_sufficient": sufficient,
-        "realized_pair_gross_60d_start_date": horizon_row.get("start_date"),
-        "realized_pair_gross_60d_end_date": horizon_row.get("end_date"),
-        "realized_pair_gross_60d_source": source,
+        "realized_pair_gross_20d_obs": int(horizon_row.get("obs") or 0),
+        "realized_pair_gross_20d_sufficient": sufficient,
+        "realized_pair_gross_20d_start_date": horizon_row.get("start_date"),
+        "realized_pair_gross_20d_end_date": horizon_row.get("end_date"),
+        "realized_pair_gross_20d_source": source,
     }
     net_simple = horizon_row.get("net_simple")
     if sufficient:
-        out["realized_pair_gross_60d"] = round(float(gross_simple), 6)
-        out["realized_pair_gross_60d_log"] = gross_log
+        out["realized_pair_gross_20d"] = round(float(gross_simple), 6)
+        out["realized_pair_gross_20d_log"] = gross_log
         if net_simple is not None and math.isfinite(float(net_simple)):
-            out["realized_pair_net_60d"] = round(float(net_simple), 6)
+            out["realized_pair_net_20d"] = round(float(net_simple), 6)
     else:
         out["realized_pair_gross_partial"] = round(float(gross_simple), 6)
         out["realized_pair_gross_partial_log"] = gross_log
-        out["realized_pair_gross_partial_horizon_days"] = REALIZED_PAIR_GROSS_60D_HORIZON
+        out["realized_pair_gross_partial_horizon_days"] = REALIZED_PAIR_GROSS_20D_HORIZON
         if net_simple is not None and math.isfinite(float(net_simple)):
             out["realized_pair_net_partial"] = round(float(net_simple), 6)
     return out
@@ -274,7 +301,7 @@ def _metrics_row_has_usable_prices(row: dict[str, Any]) -> bool:
     return True
 
 
-def compute_realized_pair_gross_60d(
+def compute_realized_pair_gross_20d(
     rows: list[dict[str, Any]],
     beta: float,
     split_events: list[tuple[dt.date, float]] | None = None,
@@ -282,7 +309,7 @@ def compute_realized_pair_gross_60d(
     borrow_annual: float | None = None,
     min_obs: int = 2,
 ) -> dict[str, Any] | None:
-    """60d gross pair decay from joint metrics rows (Decay tab parity)."""
+    """20 trading-day gross pair decay from joint metrics rows (main-grid headline)."""
     if not math.isfinite(beta):
         return None
     usable_rows = [r for r in rows if _metrics_row_has_usable_prices(r)]
@@ -293,16 +320,16 @@ def compute_realized_pair_gross_60d(
         return None
     result = compute_horizon_period_returns(
         daily,
-        horizons=[REALIZED_PAIR_GROSS_60D_HORIZON],
+        horizons=[REALIZED_PAIR_GROSS_20D_HORIZON],
         borrow_annual=borrow_annual,
     )
-    h60 = next(
-        (h for h in result.get("horizons") or [] if int(h.get("horizon_days") or 0) == REALIZED_PAIR_GROSS_60D_HORIZON),
+    h20 = next(
+        (h for h in result.get("horizons") or [] if int(h.get("horizon_days") or 0) == REALIZED_PAIR_GROSS_20D_HORIZON),
         None,
     )
-    if not h60:
+    if not h20:
         return None
-    fields = realized_pair_gross_60d_fields(h60, source="etf_metrics_daily")
+    fields = realized_pair_gross_20d_fields(h20, source="etf_metrics_daily")
     if not fields:
         return None
     fields["n_days"] = result.get("n_days")
@@ -434,7 +461,7 @@ def load_gross_decay_from_metrics(
     return out
 
 
-def load_realized_pair_gross_60d_from_metrics(
+def load_realized_pair_gross_20d_from_metrics(
     metrics_path: Path,
     universe_symbols: set[str],
     *,
@@ -443,7 +470,7 @@ def load_realized_pair_gross_60d_from_metrics(
     borrow_by_symbol: dict[str, float] | None = None,
     min_obs: int = 2,
 ) -> dict[str, dict[str, Any]]:
-    """Build per-symbol 60d gross pair decay from joint ETF metrics rows."""
+    """Build per-symbol 20d gross pair decay from joint ETF metrics rows."""
     if not metrics_path.exists():
         return {}
     corp_path = corp_actions_path or Path(__file__).resolve().parent.parent / "data" / "corporate_actions.json"
@@ -480,7 +507,7 @@ def load_realized_pair_gross_60d_from_metrics(
             continue
         borrow = (borrow_by_symbol or {}).get(sym_u)
         events = parse_split_events_from_corp(corp_payload, sym_u)
-        result = compute_realized_pair_gross_60d(
+        result = compute_realized_pair_gross_20d(
             joint,
             float(beta),
             events,

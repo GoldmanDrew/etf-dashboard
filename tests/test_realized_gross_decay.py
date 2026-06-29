@@ -9,13 +9,13 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from realized_gross_decay import (  # noqa: E402
-    REALIZED_PAIR_GROSS_60D_HORIZON,
+    REALIZED_PAIR_GROSS_20D_HORIZON,
     build_daily_log_drag_series,
     compute_gross_decay_annual,
     compute_horizon_period_returns,
-    compute_realized_pair_gross_60d,
+    compute_realized_pair_gross_20d,
     latest_contiguous_metrics_segment,
-    realized_pair_gross_60d_fields,
+    realized_pair_gross_20d_fields,
     _period_borrow_log,
 )
 from price_basis import build_tr_series_from_metrics  # noqa: E402
@@ -54,8 +54,8 @@ def test_compute_horizon_period_returns_60d():
     assert abs(h60["net_log"] - (h60["gross_log"] - _period_borrow_log(0.252, 60))) < 1e-12
 
 
-def test_realized_pair_gross_60d_fields():
-    fields = realized_pair_gross_60d_fields(
+def test_realized_pair_gross_20d_fields():
+    fields = realized_pair_gross_20d_fields(
         {
             "gross_simple": 0.05,
             "gross_log": 0.04879,
@@ -66,13 +66,13 @@ def test_realized_pair_gross_60d_fields():
             "end_date": "2026-06-01",
         }
     )
-    assert fields["realized_pair_gross_60d"] == 0.05
-    assert fields["realized_pair_gross_60d_sufficient"] is True
-    assert fields["realized_pair_net_60d"] == 0.04
+    assert fields["realized_pair_gross_20d"] == 0.05
+    assert fields["realized_pair_gross_20d_sufficient"] is True
+    assert fields["realized_pair_net_20d"] == 0.04
 
 
-def test_realized_pair_gross_60d_fields_partial_window_not_full_metric():
-    fields = realized_pair_gross_60d_fields(
+def test_realized_pair_gross_20d_fields_partial_window_not_full_metric():
+    fields = realized_pair_gross_20d_fields(
         {
             "gross_simple": -0.2056,
             "gross_log": -0.2299,
@@ -83,20 +83,20 @@ def test_realized_pair_gross_60d_fields_partial_window_not_full_metric():
             "end_date": "2026-06-09",
         }
     )
-    assert "realized_pair_gross_60d" not in fields
+    assert "realized_pair_gross_20d" not in fields
     assert fields["realized_pair_gross_partial"] == -0.2056
-    assert fields["realized_pair_gross_60d_obs"] == 13
-    assert fields["realized_pair_gross_60d_sufficient"] is False
+    assert fields["realized_pair_gross_20d_obs"] == 13
+    assert fields["realized_pair_gross_20d_sufficient"] is False
 
 
-def test_compute_realized_pair_gross_60d_skips_carry_forward_rows():
+def test_compute_realized_pair_gross_20d_skips_carry_forward_rows():
     joint = _flat_joint_rows(15)
     joint[-1] = {**joint[-1], "source_url": "carry_forward://stale-etf-row"}
-    out = compute_realized_pair_gross_60d(joint, 2.0, [], borrow_annual=0.1)
+    out = compute_realized_pair_gross_20d(joint, 2.0, [], borrow_annual=0.1)
     assert out is not None
-    assert out["realized_pair_gross_60d_obs"] == 13
-    assert out["realized_pair_gross_60d_sufficient"] is False
-    assert "realized_pair_gross_60d" not in out
+    assert out["realized_pair_gross_20d_obs"] == 13
+    assert out["realized_pair_gross_20d_sufficient"] is False
+    assert "realized_pair_gross_20d" not in out
     assert "realized_pair_gross_partial" in out
 
 
@@ -130,21 +130,21 @@ def test_ticker_reuse_gap_makes_60d_partial_and_gross_unavailable():
     ]
     rows = old_rows + new_rows
     annual = compute_gross_decay_annual(rows, beta=2.0, split_events=[], min_obs=40)
-    pair = compute_realized_pair_gross_60d(rows, beta=2.0, split_events=[], borrow_annual=0.1)
+    pair = compute_realized_pair_gross_20d(rows, beta=2.0, split_events=[], borrow_annual=0.1)
     assert annual is None
     assert pair is not None
-    assert pair["realized_pair_gross_60d_obs"] == 4
-    assert pair["realized_pair_gross_60d_sufficient"] is False
-    assert "realized_pair_gross_60d" not in pair
+    assert pair["realized_pair_gross_20d_obs"] == 4
+    assert pair["realized_pair_gross_20d_sufficient"] is False
+    assert "realized_pair_gross_20d" not in pair
     assert "realized_pair_gross_partial" in pair
 
 
-def test_compute_realized_pair_gross_60d_from_metrics_rows():
-    joint = _flat_joint_rows(REALIZED_PAIR_GROSS_60D_HORIZON + 5)
-    out = compute_realized_pair_gross_60d(joint, 2.0, [], borrow_annual=0.1)
+def test_compute_realized_pair_gross_20d_from_metrics_rows():
+    joint = _flat_joint_rows(REALIZED_PAIR_GROSS_20D_HORIZON + 5)
+    out = compute_realized_pair_gross_20d(joint, 2.0, [], borrow_annual=0.1)
     assert out is not None
-    assert out["realized_pair_gross_60d"] is not None
-    assert out["realized_pair_gross_60d_obs"] == REALIZED_PAIR_GROSS_60D_HORIZON
+    assert out["realized_pair_gross_20d"] is not None
+    assert out["realized_pair_gross_20d_obs"] == REALIZED_PAIR_GROSS_20D_HORIZON
 
 
 def test_compute_gross_decay_aplx_fixture():
