@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CI diagnostics for YieldBOOST FoF (YBTY/YBST) pipeline readiness."""
+"""CI gate: YieldBOOST FoF (YBTY/YBST) metrics coverage."""
 from __future__ import annotations
 
 import argparse
@@ -7,96 +7,94 @@ import json
 import sys
 from pathlib import Path
 
-_SCRIPTS = Path(__file__).resolve().parent
-_REPO = _SCRIPTS.parent
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+import pandas as pd
 
-from yieldboost_fof_constants import FOF_HOLDINGS_LATEST_JSON, YIELDBOOST_FOF_SYMBOLS
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DATA = REPO_ROOT / "data"
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-DATA_DIR = _REPO / "data"
-METRICS_CSV = DATA_DIR / "etf_metrics_daily.csv"
-DASHBOARD_JSON = DATA_DIR / "dashboard_data.json"
-MIN_METRICS_ROWS = 20
+from product_taxonomy import yieldboost_fof_symbols  # noqa: E402
+
+MIN_NAV_ROWS = 20
 
 
-def run_diagnostics(
-    *,
-    require_dashboard: bool = False,
-    min_rows: int = MIN_METRICS_ROWS,
-) -> dict:
-    issues: list[str] = []
-    report: dict = {"symbols": {}, "ok": True}
-
-    # Metrics store
-    metrics_rows: dict[str, int] = {s: 0 for s in YIELDBOOST_FOF_SYMBOLS}
-    if METRICS_CSV.exists():
-        import pandas as pd
-
-        df = pd.read_csv(METRICS_CSV, usecols=["ticker"])
-        for sym in YIELDBOOST_FOF_SYMBOLS:
-            metrics_rows[sym] = int((df["ticker"].astype(str).str.upper() == sym).sum())
+def _load_metrics(path: Path) -> pd.DataFrame:
+    if path.suffix.lower() == ".parquet" and path.exists():
+        df = pd.read_parquet(path)
+    elif (DATA / "etf_metrics_daily.csv").exists():
+        df = pd.read_csv(DATA / "etf_metrics_daily.csv")
     else:
-        issues.append(f"missing metrics file: {METRICS_CSV}")
+        return pd.DataFrame()
+    if "ticker" not in df.columns:
+        return pd.DataFrame()
+    df["ticker"] = df["ticker"].astype(str).str.upper()
+    if "date" in df.columns:
+        df["date"] = df["date"].astype(str).str.slice(0, 10)
+    return df
 
-    for sym, n in metrics_rows.items():
-        entry = {"metrics_rows": n}
-        if n < min_rows:
-            issues.append(f"{sym}: only {n} metrics rows (need >= {min_rows})")
-            entry["metrics_ok"] = False
+
+def check_fof_metrics(metrics_path: Path, *, min_rows: int) -> tuple[list[str], dict]:
+    errors: list[str] = []
+    report: dict[str, object] = {"symbols": {}, "min_rows": min_rows}
+    df = _load_metrics(metrics_path)
+    if df.empty:
+        return [f"FoF diagnostics: no metrics at {metrics_path.name}"], report
+
+    for sym in sorted(yieldboost_fof_symbols()):
+        sub = df[df["ticker"] == sym]
+        nav_col = None
+        for col in ("nav", "etf_adj_close", "close_price"):
+            if col in sub.columns and sub[col].notna().any():
+                nav_col = col
+                break
+        if nav_col:
+            nav_rows = int(sub[sub[nav_col].notna() & (pd.to_numeric(sub[nav_col], errors="coerce") > 0)].shape[0])
         else:
-            entry["metrics_ok"] = True
-        report["symbols"][sym] = entry
+            nav_rows = 0
+        latest_date = str(sub["date"].max()) if not sub.empty and "date" in sub.columns else None
+        report["symbols"][sym] = {"nav_rows": nav_rows, "latest_date": latest_date, "nav_column": nav_col}
+        if nav_rows < min_rows:
+            errors.append(f"FoF {sym}: only {nav_rows} NAV rows (need >={min_rows})")
 
-    # Holdings latest
-    hold_path = DATA_DIR / Path(FOF_HOLDINGS_LATEST_JSON).name
-    if hold_path.exists():
-        payload = json.loads(hold_path.read_text(encoding="utf-8"))
-        latest = payload.get("latest") or {}
-        for sym in YIELDBOOST_FOF_SYMBOLS:
-            snap = latest.get(sym)
-            report["symbols"].setdefault(sym, {})["holdings_ok"] = bool(snap and snap.get("n_children"))
-            if not snap:
-                issues.append(f"{sym}: missing from yieldboost_fof_holdings_latest.json")
-    else:
-        issues.append(f"missing {hold_path}")
+    dash_path = DATA / "dashboard_data.json"
+    if dash_path.exists():
+        try:
+            dash = json.loads(dash_path.read_text(encoding="utf-8"))
+            for row in dash.get("records") or []:
+                if str(row.get("symbol") or "").upper() not in yieldboost_fof_symbols():
+                    continue
+                sym = str(row["symbol"]).upper()
+                fof_pair = (row.get("fof_realized_pair") or {})
+                if isinstance(fof_pair, dict) and fof_pair.get("ok") is not True:
+                    errors.append(f"FoF {sym}: fof_realized_pair not ok in dashboard_data.json")
+                gd = row.get("gross_decay_annual")
+                if gd is None or not isinstance(gd, (int, float)):
+                    errors.append(f"FoF {sym}: gross_decay_annual missing in dashboard")
+        except Exception as exc:
+            errors.append(f"FoF dashboard read failed: {exc}")
 
-    # Dashboard synthetic rows
-    if DASHBOARD_JSON.exists():
-        payload = json.loads(DASHBOARD_JSON.read_text(encoding="utf-8"))
-        records = payload.get("records") or []
-        for sym in YIELDBOOST_FOF_SYMBOLS:
-            rec = next((r for r in records if str(r.get("symbol")).upper() == sym), None)
-            if not rec:
-                issues.append(f"{sym}: missing dashboard record")
-                continue
-            rp = rec.get("fof_realized_pair") or {}
-            ok = bool(rp.get("ok"))
-            report["symbols"].setdefault(sym, {})["fof_realized_pair_ok"] = ok
-            report["symbols"][sym]["gross_decay_annual"] = rec.get("gross_decay_annual")
-            if require_dashboard and not ok:
-                issues.append(f"{sym}: fof_realized_pair not ok ({rp.get('error')})")
-            if require_dashboard and rec.get("gross_decay_annual") is None:
-                issues.append(f"{sym}: gross_decay_annual null on dashboard")
-    elif require_dashboard:
-        issues.append(f"missing {DASHBOARD_JSON}")
-
-    report["issues"] = issues
-    report["ok"] = len(issues) == 0
-    return report
+    return errors, report
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="FoF pipeline diagnostics")
-    parser.add_argument("--require-dashboard", action="store_true")
-    parser.add_argument("--fail", action="store_true", help="Exit 1 when issues found")
-    parser.add_argument("--min-rows", type=int, default=MIN_METRICS_ROWS)
+    parser.add_argument("--metrics", type=Path, default=DATA / "etf_metrics_daily.parquet")
+    parser.add_argument("--min-rows", type=int, default=MIN_NAV_ROWS)
+    parser.add_argument("--report", type=Path, default=None)
     args = parser.parse_args()
 
-    report = run_diagnostics(require_dashboard=args.require_dashboard, min_rows=args.min_rows)
-    print(json.dumps(report, indent=2))
-    if args.fail and not report["ok"]:
+    errors, report = check_fof_metrics(args.metrics, min_rows=args.min_rows)
+    report["ok"] = not errors
+    report["errors"] = errors
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    if errors:
+        for e in errors:
+            print(f"[FAIL] {e}", file=sys.stderr)
         return 1
+    print("FoF pipeline OK")
     return 0
 
 

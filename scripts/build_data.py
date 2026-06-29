@@ -32,6 +32,8 @@ import requests
 
 from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_metrics
 from realized_gross_decay import load_gross_decay_from_metrics, load_realized_pair_gross_20d_from_metrics
+from product_taxonomy import volatility_etp_symbols, yieldboost_income_pairs, write_spa_export
+from operational_signals import enrich_records_with_operational_signals
 from split_adjustments import (
     MAX_WINDOW_DIVIDEND_YIELD_FRAC,
     adjust_window_dividend_for_split,
@@ -194,41 +196,10 @@ INVERSE_ETFS = {
 
 VOL_WINDOWS = ("1M", "3M", "6M", "YTD", "12M", "ALL")
 
-VOLATILITY_ETP_SYMBOLS = {
-    "UVIX", "SVIX", "UVXY", "SVXY", "VXX", "VIXY", "VIXM",
-    "VIX", "VIX1D", "VIX3M",
-}
+VOLATILITY_ETP_SYMBOLS = volatility_etp_symbols()
 
 # Dashboard-side fallback until ls-algo emits a first-class `is_yieldboost` flag.
-# Pairs are kept explicit so generic low-beta covered-call funds do not inherit
-# income-style scenario math by accident.
-YIELDBOOST_BUCKET2_PAIRS = {
-    ("AMYY", "AMD"),
-    ("AZYY", "AMZN"),
-    ("BBYY", "BABA"),
-    ("COYY", "COIN"),
-    ("CWY", "CRWV"),
-    ("HMYY", "HIMS"),
-    ("HOYY", "HOOD"),
-    ("IOYY", "IONQ"),
-    ("MAAY", "MARA"),
-    ("FBYY", "META"),
-    ("MTYY", "MSTR"),
-    ("MUYY", "MU"),
-    ("NUGY", "GDX"),
-    ("NVYY", "NVDA"),
-    ("PLYY", "PLTR"),
-    ("QBY", "QBTS"),
-    ("RGYY", "RGTI"),
-    ("RTYY", "RIOT"),
-    ("SEMY", "SOXX"),
-    ("SMYY", "SMCI"),
-    ("TMYY", "TSM"),
-    ("TQQY", "QQQ"),
-    ("TSYY", "TSLA"),
-    ("XBTY", "IBIT"),
-    ("YSPY", "SPY"),
-}
+YIELDBOOST_BUCKET2_PAIRS = yieldboost_income_pairs()
 
 
 # ──────────────────────────────────────────────
@@ -5351,17 +5322,25 @@ def build():
     except Exception as exc:
         print(f"  Warning: FoF dashboard build failed: {exc}")
 
+    write_spa_export(OUTPUT_DIR / "product_taxonomy.json")
+
+    borrow_spike_risk = build_borrow_spike_risk_payload(
+        borrow_history_symbols=borrow_history_symbols,
+        as_of_date=today_utc,
+        horizon_days=5,
+    )
+    enrich_records_with_operational_signals(
+        records,
+        borrow_spike_risk=borrow_spike_risk,
+        data_dir=OUTPUT_DIR,
+    )
+
     # 6. Compute summary
     summary = _calc_summary(records)
 
     build_time = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
     vol_shape_history_payload["build_time"] = build_time
     vol_shape_history_payload["source_file"] = ETF_METRICS_DAILY_FILE.name
-    borrow_spike_risk = build_borrow_spike_risk_payload(
-        borrow_history_symbols=borrow_history_symbols,
-        as_of_date=today_utc,
-        horizon_days=5,
-    )
 
     output = {
         "build_time": build_time,
@@ -5402,6 +5381,8 @@ def build():
         "decay_method": "linear_daily_pnl_1_over_delta_hedge",
         "borrow_history_file": "data/borrow_history.json",
         "borrow_spike_risk_file": "data/borrow_spike_risk.json",
+        "product_taxonomy_file": "data/product_taxonomy.json",
+        "freshness_summary_file": "data/freshness_summary.json",
         "vol_shape_history_file": "data/vol_shape_history.json",
         "polygon_api_configured": bool(POLYGON_API_KEY),
         "tradier_api_configured": bool(TRADIER_TOKEN),

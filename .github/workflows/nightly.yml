@@ -167,7 +167,40 @@ jobs:
 
       - name: Freshness diagnostics
         continue-on-error: true
-        run: python scripts/freshness_diagnostics.py --max-underlying-hours 48 --max-flow-stale-pct 25
+        run: python scripts/freshness_diagnostics.py --max-underlying-hours 48 --max-flow-stale-pct 25 --fail-on-violations
+
+      - name: Alert on freshness violations
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/alert_freshness.py
+
+      - name: Repair REX NAV when freshness flags divergence
+        continue-on-error: true
+        run: |
+          python -c "
+          import json, subprocess
+          from pathlib import Path
+          p = Path('data/freshness_summary.json')
+          if not p.exists():
+              raise SystemExit(0)
+          v = json.loads(p.read_text()).get('violations') or []
+          if any('rex' in str(x).lower() for x in v):
+              subprocess.check_call(['python', 'scripts/repair_rex_session_nav_close.py', '--lookback-days', '45', '--apply'])
+          "
+
+      - name: FoF pipeline diagnostics
+        continue-on-error: true
+        run: python scripts/fof_pipeline_diagnostics.py --report data/fof_pipeline_report.json
+
+      - name: Earnings seed audit
+        continue-on-error: true
+        run: python scripts/refresh_earnings_seed.py --report data/earnings_seed_audit.json
+
+      - name: Backfill FoF NAV history
+        continue-on-error: true
+        run: python scripts/backfill_fof_metrics.py
 
       - name: Score intraday LETF flow estimates vs realised
         continue-on-error: true
@@ -275,6 +308,20 @@ jobs:
         continue-on-error: true
         run: python scripts/audit_exp_etf_scenario_alignment.py --strict-only --warn
 
+      - name: Dashboard data quality audit
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/audit_dashboard_data_quality.py --report "${{ runner.temp }}/dashboard_audit.json"
+
+      - name: Upload dashboard audit artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-audit-${{ github.run_id }}
+          path: ${{ runner.temp }}/dashboard_audit.json
+          if-no-files-found: ignore
+
       - name: Commit dashboard build artifacts
         if: steps.build_data.outcome == 'success'
         id: commit_dashboard
@@ -298,6 +345,9 @@ jobs:
             data/event_calendar_inferred.json
             data/event_calendar_combined.json
             data/ci_state.json
+            data/product_taxonomy.json
+            data/fof_pipeline_report.json
+            data/earnings_seed_audit.json
           commit_message: "${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday dashboard catch-up build' || 'chore: nightly dashboard build' }}"
 
       - name: Deploy Pages

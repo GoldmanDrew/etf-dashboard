@@ -70,6 +70,13 @@ jobs:
           python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-low-iv-coverage || true
           python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-low-mid-coverage || true
 
+      - name: Freshness diagnostics (market tick)
+        if: steps.tick.outputs.skipped != 'true'
+        continue-on-error: true
+        run: |
+          python scripts/freshness_diagnostics.py --quiet
+          python scripts/alert_freshness.py || true
+
       - name: Commit data if changed
         if: steps.tick.outputs.skipped != 'true' && steps.tick.outputs.files != ''
         id: commit

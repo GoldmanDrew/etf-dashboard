@@ -280,6 +280,11 @@ def main() -> int:
     parser.add_argument("--max-flow-stale-pct", type=float, default=25.0)
     parser.add_argument("--write", type=Path, default=DATA / "freshness_summary.json")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--fail-on-violations",
+        action="store_true",
+        help="Alias for default exit code 1 when violations exist (explicit CI gate).",
+    )
     args = parser.parse_args()
 
     summary = build_summary(

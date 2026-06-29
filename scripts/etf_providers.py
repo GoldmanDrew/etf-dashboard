@@ -717,6 +717,7 @@ class DirexionProvider:
         "BITU","BITX","BTCZ","BTCL","BTFL",
         "ETHT","ETHU","ETHD",
         "CRWG","CRWU","CRWL",
+        "GOU","GOOX","GOOY","GOOW","TSLO","TSLS","MULL","MSTU","MSTX","MSTZ",
         "BOEG","BOEU","UECG","VALG","UNHG","UNHU","UNHW",
     }
 

@@ -279,6 +279,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Audit dashboard JSON data quality.")
     parser.add_argument("--dashboard", type=Path, default=DASHBOARD_JSON)
     parser.add_argument("--fail-on-warnings", action="store_true")
+    parser.add_argument("--report", type=Path, default=None, help="Write JSON audit report (CI artifact)")
     args = parser.parse_args()
 
     errors: list[str] = []
@@ -340,9 +341,18 @@ def main() -> int:
             print(f"  ... {len(warnings) - 40} more")
 
     if errors or (warnings and args.fail_on_warnings):
-        return 1
-    print("Dashboard data quality OK")
-    return 0
+        code = 1
+    else:
+        print("Dashboard data quality OK")
+        code = 0
+
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(
+            json.dumps({"errors": errors, "warnings": warnings, "ok": code == 0}, indent=2),
+            encoding="utf-8",
+        )
+    return code
 
 
 if __name__ == "__main__":

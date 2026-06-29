@@ -58,16 +58,29 @@ START_TIME = time.monotonic()
 ERRORS: list[str] = []
 GITHUB_SYNC_STATUS: dict = {}  # last sync result
 
-YIELDBOOST_BUCKET2_PAIRS = {
-    ("AMYY", "AMD"), ("AZYY", "AMZN"), ("BBYY", "BABA"), ("COYY", "COIN"),
-    ("CWY", "CRWV"), ("HMYY", "HIMS"), ("HOYY", "HOOD"), ("IOYY", "IONQ"),
-    ("MAAY", "MARA"), ("FBYY", "META"), ("MTYY", "MSTR"), ("MUYY", "MU"),
-    ("NUGY", "GDX"), ("NVYY", "NVDA"), ("PLYY", "PLTR"), ("QBY", "QBTS"),
-    ("RGYY", "RGTI"), ("RTYY", "RIOT"), ("SEMY", "SOXX"), ("SMYY", "SMCI"),
-    ("TMYY", "TSM"), ("TQQY", "QQQ"), ("TSYY", "TSLA"), ("XBTY", "IBIT"),
-    ("YSPY", "SPY"),
+import json as _json
+
+_TAXONOMY_PATH = Path(__file__).resolve().parent.parent / "config" / "product_taxonomy.json"
+
+
+def _load_product_taxonomy() -> dict:
+    if not _TAXONOMY_PATH.exists():
+        return {}
+    try:
+        return _json.loads(_TAXONOMY_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+_tax = _load_product_taxonomy()
+VOLATILITY_ETP_SYMBOLS = {
+    str(s).upper() for s in (_tax.get("volatility_etp_symbols") or [
+        "UVIX", "SVIX", "UVXY", "SVXY", "VXX", "VIXY", "VIXM", "VIX", "VIX1D", "VIX3M",
+    ])
 }
-YIELDBOOST_FOF_SYMBOLS = frozenset({"YBTY", "YBST"})
+YIELDBOOST_FOF_SYMBOLS = frozenset(
+    str(s).upper() for s in (_tax.get("yieldboost_fof_symbols") or ["YBTY", "YBST"])
+)
 
 
 def _bucket_2_ui_visible(
@@ -83,11 +96,6 @@ def _bucket_2_ui_visible(
     if product_class == "income_yieldboost_fof" or ns in YIELDBOOST_FOF_SYMBOLS:
         return True
     return bool(is_yieldboost)
-
-VOLATILITY_ETP_SYMBOLS = {
-    "UVIX", "SVIX", "UVXY", "SVXY", "VXX", "VIXY", "VIXM",
-    "VIX", "VIX1D", "VIX3M",
-}
 
 
 def load_config(path: str = "config/config.yaml") -> dict:

@@ -1480,7 +1480,86 @@ const LETF_INTRADAY_METRICS_URL = "data/letf_intraday_flow_metrics.json";
 const VOL_SHAPE_HISTORY_URL = "data/vol_shape_history.json";
 const VRP_LIVE_URL = "data/vrp_live.json";
 const VRP_HEALTH_URL = "data/vrp_health.json";
+function borrowSpikeBadge(r) {
+  const p = Number(r?.borrow_spike_p_5d);
+  const band = String(r?.borrow_spike_risk_band || '').toLowerCase();
+  if (!Number.isFinite(p) || r?.borrow_spike_scoring_eligible === false) return null;
+  if (band === 'high' || p >= 0.25) return { label: 'SPIKE', cls: 'badge-stale', title: `P(borrow spike 5d)=${fmt(p)} (${band || 'high'})` };
+  if (band === 'medium' || p >= 0.12) return { label: '↑', cls: 'badge-warn', title: `P(borrow spike 5d)=${fmt(p)}` };
+  return null;
+}
+
+function mocFlowHeadline(r) {
+  const pct = Number(r?.moc_flow_remaining_pct_adv ?? r?.moc_flow_est_rebalance_pct_adv);
+  if (!Number.isFinite(pct)) return null;
+  return pct;
+}
+
+function mocFlowTooltip(r) {
+  const lines = ['Intraday MOC rebalance estimate (LETF bucket).'];
+  const est = Number(r?.moc_flow_est_rebalance_dollars);
+  const rem = Number(r?.moc_flow_remaining_pct_adv);
+  const fl = Number(r?.moc_flow_remaining_pct_float);
+  if (Number.isFinite(est)) lines.push(`Est close rebalance: ${fmtSignedMoney(est)}`);
+  if (Number.isFinite(rem)) lines.push(`Remaining vs 20d ADV: ${fmtPctDecimal(rem, 2)}`);
+  if (Number.isFinite(fl)) lines.push(`Remaining vs tradable float: ${fmtPctDecimal(fl, 3)}`);
+  if (r?.moc_flow_as_of) lines.push(`As of: ${r.moc_flow_as_of}`);
+  return lines.join('\n');
+}
+
+function OpsPage({ data, freshnessSummary, vrpHealth, onBack }) {
+  const fs = freshnessSummary || {};
+  const ok = fs.ok !== false;
+  const violations = fs.violations || [];
+  const opt = fs.options || {};
+  const vrp = fs.vrp || {};
+  const flow = fs.flow || {};
+  const met = fs.metrics || {};
+  const prem = met.prem_disc || {};
+  return (
+    <div className="info-page" style={{ padding: '24px 32px', maxWidth: 960 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <button type="button" className="topbar-btn" onClick={onBack}>← Dashboard</button>
+        <h2 style={{ margin: 0, fontSize: 20 }}>Data Health</h2>
+        <span className={cls('badge', ok ? 'badge-ok' : 'badge-stale')}>{ok ? 'OK' : `${violations.length} violation(s)`}</span>
+      </div>
+      <p style={{ color: 'var(--text-muted)', fontSize: 13, lineHeight: 1.5 }}>
+        Operator view of pipeline freshness. Source: <code>freshness_summary.json</code>
+        {fs.build_time ? ` · checked ${fs.build_time}` : ''}.
+        Dashboard build: {data?.build_time || '—'}.
+      </p>
+      {!ok && (
+        <div className="error-banner" style={{ marginBottom: 16 }}>
+          {violations.map((v, i) => <div key={i}>{v}</div>)}
+        </div>
+      )}
+      <div className="summary-strip" style={{ marginBottom: 20 }}>
+        <SummaryCard label="Options cache" value={opt.build_time ? 'live' : '—'} sub={opt.oldest_symbol_age_minutes != null ? `oldest ${opt.oldest_symbol_age_minutes}m` : ''} color={opt.stale_enforced_symbols?.length ? 'var(--warning)' : 'var(--positive)'} />
+        <SummaryCard label="VRP IV coverage" value={vrp.iv_coverage_front_pct != null ? `${Number(vrp.iv_coverage_front_pct).toFixed(1)}%` : '—'} sub={vrp.worst_underlying_symbol ? `worst ${vrp.worst_underlying_symbol}` : ''} />
+        <SummaryCard label="Flow latest" value={flow.latest_date || '—'} sub={flow.actionable_stale_pct != null ? `${Number(flow.actionable_stale_pct).toFixed(1)}% stale` : ''} />
+        <SummaryCard label="Metrics session" value={met.latest_date || '—'} sub={met.latest_ok === false ? 'stale' : 'ok'} color={met.latest_ok === false ? 'var(--warning)' : 'var(--positive)'} />
+        <SummaryCard label="REX NAV div >50bp" value={prem.rex_nav_vs_implied_div_bps_gt50 ?? '—'} sub={`lockstep ${prem.lockstep_nav_close_pct != null ? `${Number(prem.lockstep_nav_close_pct).toFixed(0)}%` : '—'}`} color={(prem.rex_nav_vs_implied_div_bps_gt50 || 0) > 0 ? 'var(--warning)' : undefined} />
+      </div>
+      <details open className="decay-methodology">
+        <summary>Raw freshness blocks</summary>
+        <div className="dm-body">
+          <pre style={{ fontSize: 11, overflow: 'auto', maxHeight: 420 }}>{JSON.stringify(fs, null, 2)}</pre>
+        </div>
+      </details>
+      {vrpHealth && (
+        <details className="decay-methodology" style={{ marginTop: 12 }}>
+          <summary>VRP health</summary>
+          <div className="dm-body">
+            <pre style={{ fontSize: 11, overflow: 'auto', maxHeight: 280 }}>{JSON.stringify(vrpHealth, null, 2)}</pre>
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 const FRESHNESS_SUMMARY_URL = "data/freshness_summary.json";
+const PRODUCT_TAXONOMY_URL = "data/product_taxonomy.json";
 const VRP_FIELD_DICT_URL = "data/vrp_field_dictionary.json";
 const YIELDBOOST_PUT_SPREADS_URL = "data/yieldboost_put_spreads_latest.json";
 /** @type {{ symbols: Record<string, { series: object[], vcrMedian: number|null, window: number }>, buildTime: string|null }|null} */
@@ -4377,6 +4456,14 @@ const COLS = [
     sublabel: '6M · robust',
     w: 88,
     hint: 'Best-estimate σ: forecast_vol_etf_annual (6M robust EWMA on ETF returns). Hover for ladder and 12M realized headline.',
+  },
+  {
+    key: 'moc_flow_remaining_pct_adv',
+    label: 'MOC flow',
+    sublabel: 'intraday · % ADV',
+    w: 92,
+    numeric: true,
+    hint: 'LETF bucket only: estimated remaining close rebalance as % of underlying 20d $ ADV (intraday flow model). Hover for $ estimate and float %. Blank for B2/B3.',
   },
 ];
 
@@ -11458,10 +11545,10 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
   // edge of shorting the fund.
   const [sortKey, setSortKey] = useState('net_edge_p50_annual');
   const [sortDesc, setSortDesc] = useState(true);
-  // Filters: default to A/B grade only (tradeable today). C is monitor-only;
-  // D is display-only and hidden unless the operator opens the full view.
-  const [includeGradeC, setIncludeGradeC] = useState(true);
+  // Filters: default actionable today = A/B only, no event in held horizon.
+  const [includeGradeC, setIncludeGradeC] = useState(false);
   const [includeGradeD, setIncludeGradeD] = useState(false);
+  const [actionableOnly, setActionableOnly] = useState(true);
   const [filterEarningsOnly, setFilterEarningsOnly] = useState(false);
   const [shortableOnly, setShortableOnly] = useState(false);
   // Column-group collapse: nothing is removed — tiers ② (carry decomposition)
@@ -11588,8 +11675,17 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
     if (shortableOnly) {
       out = out.filter((r) => r.short_directly_shortable !== false);
     }
+    if (actionableOnly) {
+      out = out.filter((r) => {
+        const g = String(r.data_grade || '').toUpperCase();
+        if (g !== 'A' && g !== 'B') return false;
+        if (r.event_in_held_window) return false;
+        if (r._block_signal) return false;
+        return true;
+      });
+    }
     return out;
-  }, [enriched, includeGradeC, includeGradeD, filterEarningsOnly, shortableOnly]);
+  }, [enriched, includeGradeC, includeGradeD, filterEarningsOnly, shortableOnly, actionableOnly]);
 
   // Resolve derived (non-numeric-field) sort keys to a comparable number so the
   // tiered headers can all sort. Everything else falls back to the raw field.
@@ -11717,7 +11813,11 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
       </div>
 
       {/* Filters */}
-      <div style={{ display: 'flex', gap: 14, alignItems: 'center', marginBottom: 12, fontSize: 13 }}>
+      <div style={{ display: 'flex', gap: 14, alignItems: 'center', marginBottom: 12, fontSize: 13, flexWrap: 'wrap' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="A/B grade, no event in held expiry, quotes OK">
+          <input type="checkbox" checked={actionableOnly} onChange={(e) => setActionableOnly(e.target.checked)} />
+          Actionable today
+        </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
           <input type="checkbox" checked={includeGradeC} onChange={(e) => setIncludeGradeC(e.target.checked)} />
           Show C (watch)
@@ -11747,6 +11847,28 @@ function YbEdgePage({ onNavigateToChart, onBack, eventCalendar = null, vrpFieldD
           onClick={() => setCollapseOverlay((c) => !c)}
           title="Granite front put spread — context only"
         >{collapseOverlay ? '▸' : '▾'} Fund hedge</button>
+        <button
+          type="button"
+          className="topbar-btn"
+          style={{ fontSize: 12, padding: '2px 8px' }}
+          onClick={() => {
+            const cols = ['symbol', 'underlying', 'data_grade', 'net_edge_p50_annual', 'edge_pp_of_max_loss', 'model_fair', 'expected_weekly_carry_usd'];
+            const esc = (v) => {
+              const s = v == null ? '' : String(v);
+              return s.includes(',') || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s;
+            };
+            const lines = [cols.join(',')];
+            sorted.forEach((r) => lines.push(cols.map((c) => esc(r[c])).join(',')));
+            const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `yb_edge_${new Date().toISOString().slice(0, 10)}.csv`;
+            a.click();
+            URL.revokeObjectURL(a.href);
+          }}
+        >
+          Export CSV
+        </button>
         <div style={{ color: 'var(--text-muted)', marginLeft: 'auto' }}>
           Showing {sorted.length} of {enriched.length} sleeves · click column headers to sort
         </div>
@@ -13381,6 +13503,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [showNews, setShowNews] = useState(false);
   const [showFlow, setShowFlow] = useState(false);
   const [showYbEdge, setShowYbEdge] = useState(false);
+  const [showOps, setShowOps] = useState(false);
   const [showBacktestFlow, setShowBacktestFlow] = useState(false);
   const [backtestFlowPreloadSymbol, setBacktestFlowPreloadSymbol] = useState('');
   const [eventCalendar, setEventCalendar] = useState(null);
@@ -13569,6 +13692,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowNews(false);
         setShowFlow(false);
         setShowYbEdge(false);
+        setShowOps(false);
         setShowBacktestFlow(true);
         setBacktestFlowPreloadSymbol(String(flowRoute.preloadSymbol || '').toUpperCase());
         setChartDefaultPanel('chart');
@@ -13584,6 +13708,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           setShowNews(false);
           setShowFlow(false);
           setShowYbEdge(false);
+          setShowOps(false);
           setShowBacktestFlow(false);
           setBacktestFlowPreloadSymbol('');
           const panel = String(chartMatch[2] || '').toLowerCase();
@@ -13604,6 +13729,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowNews(true);
         setShowFlow(false);
         setShowYbEdge(false);
+        setShowOps(false);
         setShowBacktestFlow(false);
         setBacktestFlowPreloadSymbol('');
         return;
@@ -13614,6 +13740,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowNews(false);
         setShowFlow(true);
         setShowYbEdge(false);
+        setShowOps(false);
         setShowBacktestFlow(false);
         setBacktestFlowPreloadSymbol('');
         return;
@@ -13624,6 +13751,18 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowNews(false);
         setShowFlow(false);
         setShowYbEdge(true);
+        setShowOps(false);
+        setShowBacktestFlow(false);
+        setBacktestFlowPreloadSymbol('');
+        return;
+      }
+      if (hash === '#/ops') {
+        setChartRecord(null);
+        setShowInfo(false);
+        setShowNews(false);
+        setShowFlow(false);
+        setShowYbEdge(false);
+        setShowOps(true);
         setShowBacktestFlow(false);
         setBacktestFlowPreloadSymbol('');
         return;
@@ -13636,6 +13775,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       setShowNews(false);
       setShowFlow(false);
       setShowYbEdge(false);
+      setShowOps(false);
       setShowBacktestFlow(false);
       setBacktestFlowPreloadSymbol('');
       setChartDefaultPanel('chart');
@@ -13663,6 +13803,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
   const navigateToYbEdge = useCallback(() => {
     window.location.hash = '/yb-edge';
+  }, []);
+
+  const navigateToOps = useCallback(() => {
+    window.location.hash = '/ops';
   }, []);
 
   const navigateToBacktestFlow = useCallback((symbol = '') => {
@@ -13720,6 +13864,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
     d.sort((a, b) => {
       let av = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
         ? computeScenarioEtf1mFlatUnd(a, chartVolLookbackRange)
+        : sortKey === 'moc_flow_remaining_pct_adv'
+        ? mocFlowHeadline(a)
         : sortKey === 'expected_pair_pnl_p50_annual' || sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
         ? expectedDecayHeadlineValue(a, chartVolLookbackRange)
         : sortKey === 'vol_underlying_annual'
@@ -13729,6 +13875,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         : a[sortKey];
       let bv = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
         ? computeScenarioEtf1mFlatUnd(b, chartVolLookbackRange)
+        : sortKey === 'moc_flow_remaining_pct_adv'
+        ? mocFlowHeadline(b)
         : sortKey === 'expected_pair_pnl_p50_annual' || sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
         ? expectedDecayHeadlineValue(b, chartVolLookbackRange)
         : sortKey === 'vol_underlying_annual'
@@ -13814,6 +13962,13 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             </>
           )}
           <button
+            className={cls('topbar-btn', showOps && !chartRecord && 'active')}
+            onClick={() => { if (showOps) navigateBack(); else navigateToOps(); }}
+            title="Pipeline freshness / data health"
+          >
+            Health
+          </button>
+          <button
             className={cls('topbar-btn', showYbEdge && !chartRecord && 'active')}
             onClick={() => { if (showYbEdge) navigateBack(); else navigateToYbEdge(); }}
             title="YieldBOOST σ-space edge ranking + earnings overlay"
@@ -13861,6 +14016,13 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           intradayFlows={letfIntradayCache}
           intradayFlowsError={letfIntradayError}
           vrpFieldDict={vrpFieldDict}
+        />
+      ) : showOps ? (
+        <OpsPage
+          data={data}
+          freshnessSummary={freshnessSummary}
+          vrpHealth={vrpHealth}
+          onBack={navigateBack}
         />
       ) : showYbEdge ? (
         <YbEdgePage
@@ -14125,6 +14287,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         <td>{r.delta?.toFixed(2) ?? '—'}</td>
                         <td className={borrowCls(getBorrowRate(r))} title={borrowSourceHint(borrowDisplay(r, borrowHistoryMap?.[r.symbol], { dashboardBuildTime: data.build_time }))}>
                           {fmt(getBorrowRate(r))} {borrowBadge(getBorrowRate(r))}
+                          {(() => {
+                            const sb = borrowSpikeBadge(r);
+                            return sb ? <span className={cls('badge', sb.cls)} style={{ marginLeft: 6, fontSize: 9 }} title={sb.title}>{sb.label}</span> : null;
+                          })()}
                         </td>
                         <td>{fmtNum(r.shares_available)}</td>
                         <td title="Realized trailing hedge drag (ls-algo screener)">{fmtGrossRealizedLog(r, r.gross_decay_annual)}</td>
@@ -14182,6 +14348,14 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         </td>
                         <td title={volHeadlineTooltip(r, "underlying", chartVolLookbackRange)}>{fmt(volHeadlineValue(r, 'underlying', chartVolLookbackRange))}</td>
                         <td title={volHeadlineTooltip(r, "etf", chartVolLookbackRange)}>{fmt(volHeadlineValue(r, 'etf', chartVolLookbackRange))}</td>
+                        <td
+                          className={flowValClass(mocFlowHeadline(r))}
+                          title={r.bucket === 'bucket_1_high_beta' ? mocFlowTooltip(r) : 'MOC flow column is LETF (bucket 1) only'}
+                        >
+                          {r.bucket === 'bucket_1_high_beta' && mocFlowHeadline(r) != null
+                            ? fmtPctDecimal(mocFlowHeadline(r), 2)
+                            : '—'}
+                        </td>
                       </tr>
                       {expanded && <DetailRow r={r} chartVolLookbackRange={chartVolLookbackRange} dashboardBuildTime={data.build_time} metricsCacheTick={metricsCacheTick} borrowHistoryMap={borrowHistoryMap} />}
                     </React.Fragment>
