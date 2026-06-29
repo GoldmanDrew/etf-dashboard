@@ -535,6 +535,24 @@ def test_find_fabricated_adj_cliffs_accepts_legit_back_adjustment():
     assert find_fabricated_adj_cliffs(rows, events) == []
 
 
+def test_delayed_reverse_split_adj_reset_with_nav_tr_is_not_fabricated():
+    rows = [
+        {"date": "2026-06-01", "close_price": 3.934, "etf_adj_close": 0.655667, "nav_total_return": 293.12, "underlying_adj_close": 149.78},
+        {"date": "2026-06-02", "close_price": 22.99, "etf_adj_close": 3.831667, "nav_total_return": 1716.90, "underlying_adj_close": 136.08},
+        {"date": "2026-06-03", "close_price": 22.905, "etf_adj_close": 3.8175, "nav_total_return": 1702.10, "underlying_adj_close": 126.55},
+        {"date": "2026-06-11", "close_price": 21.83, "etf_adj_close": 21.83, "nav_total_return": 1654.27, "underlying_adj_close": 120.15},
+        {"date": "2026-06-12", "close_price": 21.70, "etf_adj_close": 21.70, "nav_total_return": 1669.27, "underlying_adj_close": 123.97},
+    ]
+    events = [(dt.date(2026, 6, 2), 6.0)]
+    assert find_fabricated_adj_cliffs(rows, events) == []
+    tr = build_tr_series_from_metrics(rows, events)
+    by_date = {r["date"]: r for r in tr}
+    assert by_date["2026-06-02"]["tr_etf_px"] == pytest.approx(22.99, abs=0.01)
+    assert by_date["2026-06-11"]["tr_etf_px"] == pytest.approx(21.83, abs=0.01)
+    max_lr, at = max_abs_log_return(tr, "tr_etf_px")
+    assert max_lr < 0.35, f"delayed reset leaked nav TR at {at}: {max_lr}"
+
+
 def test_find_fabricated_adj_cliffs_accepts_undeclared_back_adjustment():
     # Provider back-adjusted a split we have no declared event for: close jumps,
     # adj stays smooth. The adjusted series is the trustworthy one here.

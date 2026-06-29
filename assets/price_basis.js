@@ -703,7 +703,7 @@
   }
 
   const FABRICATED_ADJ_MIN_LOG_DIVERGENCE = Math.log(1.8);
-  const FABRICATED_ADJ_EVENT_WINDOW_DAYS = 7;
+  const FABRICATED_ADJ_EVENT_WINDOW_DAYS = 21;
   const FABRICATED_ADJ_MULT_REL_TOL = 0.25;
 
   function daysBetween(isoA, isoB) {
@@ -898,6 +898,27 @@
     return { maxAbsLogReturn: maxJump, maxJumpDate: at };
   }
 
+  function maxUnexplainedEtfLogReturn(series) {
+    let maxJump = 0;
+    let at = null;
+    for (let i = 1; i < series.length; i += 1) {
+      const e0 = toNum(series[i - 1].trEtfPx);
+      const e1 = toNum(series[i].trEtfPx);
+      const u0 = toNum(series[i - 1].trUndPx);
+      const u1 = toNum(series[i].trUndPx);
+      if (!(e0 > 0 && e1 > 0 && u0 > 0 && u1 > 0)) continue;
+      const lrE = Math.abs(Math.log(e1 / e0));
+      const lrU = Math.abs(Math.log(u1 / u0));
+      if (lrE <= 0.35) continue;
+      if (lrE <= Math.max(0.35, 3.5 * lrU + 0.10)) continue;
+      if (lrE > maxJump) {
+        maxJump = lrE;
+        at = series[i].date;
+      }
+    }
+    return { maxUnexplainedEtfLogReturn: maxJump, maxUnexplainedJumpDate: at };
+  }
+
   /**
    * Coverage summary for Decay / Backtest TR badges.
    */
@@ -930,6 +951,7 @@
 
     const etfJump = maxAbsLogReturn(trSeries, "trEtfPx");
     const undJump = maxAbsLogReturn(trSeries, "trUndPx");
+    const unexplainedEtfJump = maxUnexplainedEtfLogReturn(trSeries);
 
     const warnings = [];
     if (droppedDays > 0) {
@@ -941,8 +963,8 @@
     if (undAdjDays < rawInputDays * 0.85) {
       warnings.push(`Underlying adj close missing on ${rawInputDays - undAdjDays} of ${rawInputDays} rows.`);
     }
-    if (etfJump.maxAbsLogReturn > 0.35) {
-      warnings.push(`Large ETF TR daily move (${(Math.expm1(etfJump.maxAbsLogReturn) * 100).toFixed(0)}%) on ${etfJump.maxJumpDate || "?"}.`);
+    if (unexplainedEtfJump.maxUnexplainedEtfLogReturn > 0.35) {
+      warnings.push(`Large unexplained ETF TR daily move (${(Math.expm1(unexplainedEtfJump.maxUnexplainedEtfLogReturn) * 100).toFixed(0)}%) on ${unexplainedEtfJump.maxUnexplainedJumpDate || "?"}.`);
     }
     if (
       ctx.mode === "adj_basis_switch"
@@ -953,8 +975,8 @@
     }
 
     let quality = "good";
-    if (etfJump.maxAbsLogReturn > 0.35 || droppedDays > bothLegDays * 0.1) quality = "degraded";
-    if (trJointDays < 20 || etfJump.maxAbsLogReturn > 0.75) quality = "poor";
+    if (unexplainedEtfJump.maxUnexplainedEtfLogReturn > 0.35 || droppedDays > bothLegDays * 0.1) quality = "degraded";
+    if (trJointDays < 20 || unexplainedEtfJump.maxUnexplainedEtfLogReturn > 0.75) quality = "poor";
 
     const primaryEtfBasis = (() => {
       if (ctx.mode === "staggered_reverse_adj_first") return "yahoo_adj_mapped";
@@ -990,6 +1012,8 @@
       maxEtfDailyLogReturn: etfJump.maxAbsLogReturn,
       maxUndDailyLogReturn: undJump.maxAbsLogReturn,
       maxJumpDate: etfJump.maxJumpDate,
+      maxUnexplainedEtfDailyLogReturn: unexplainedEtfJump.maxUnexplainedEtfLogReturn,
+      maxUnexplainedJumpDate: unexplainedEtfJump.maxUnexplainedJumpDate,
       quality,
       warnings,
     };
