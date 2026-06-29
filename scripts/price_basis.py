@@ -46,7 +46,7 @@ def parse_split_events_from_corp(payload: dict | None, ticker: str) -> list[tupl
 
 
 FABRICATED_ADJ_MIN_LOG_DIVERGENCE = math.log(1.8)
-FABRICATED_ADJ_EVENT_WINDOW_DAYS = 7
+FABRICATED_ADJ_EVENT_WINDOW_DAYS = 21
 FABRICATED_ADJ_MULT_REL_TOL = 0.25
 
 

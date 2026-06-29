@@ -235,6 +235,27 @@ test("legit back-adjusted reverse split is not treated as fabricated", () => {
   assert.deepEqual(PB.findFabricatedAdjCliffs(points, [{ date: "2026-05-05", mult: 10 }]), []);
 });
 
+test("delayed reverse-split adj reset is attributed to declared split", () => {
+  const rows = [
+    { date: "2026-06-01", close_price: 3.934, etf_adj_close: 0.655667, nav_total_return: 293.12, underlying_adj_close: 149.78 },
+    { date: "2026-06-02", close_price: 22.99, etf_adj_close: 3.831667, nav_total_return: 1716.90, underlying_adj_close: 136.08 },
+    { date: "2026-06-03", close_price: 22.905, etf_adj_close: 3.8175, nav_total_return: 1702.10, underlying_adj_close: 126.55 },
+    { date: "2026-06-11", close_price: 21.83, etf_adj_close: 21.83, nav_total_return: 1654.27, underlying_adj_close: 120.15 },
+    { date: "2026-06-12", close_price: 21.70, etf_adj_close: 21.70, nav_total_return: 1669.27, underlying_adj_close: 123.97 },
+  ];
+  const events = [{ date: "2026-06-02", mult: 6 }];
+  assert.deepEqual(
+    PB.findFabricatedAdjCliffs(rows.map((r) => ({ date: r.date, close: r.close_price, adj: r.etf_adj_close })), events),
+    [],
+  );
+  const tr = PB.buildTrSeriesFromMetrics(rows, events);
+  const byDate = Object.fromEntries(tr.map((r) => [r.date, r]));
+  assert.ok(Math.abs(byDate["2026-06-02"].trEtfPx - 22.99) < 0.01, byDate["2026-06-02"].trEtfPx);
+  assert.ok(Math.abs(byDate["2026-06-11"].trEtfPx - 21.83) < 0.01, byDate["2026-06-11"].trEtfPx);
+  const { maxJump, at } = maxEtfJump(tr);
+  assert.ok(maxJump < 0.35, `delayed reset leaked nav TR on ${at}: ${maxJump}`);
+});
+
 test("undeclared back-adjustment (close jump, smooth adj) is not fabricated", () => {
   const points = [
     { date: "2024-01-01", close: 100, adj: 100 },
@@ -258,4 +279,26 @@ test("future split does not rewrite old split-sized market move", () => {
   assert.equal(ctx.mode, "continuous");
   const tr = PB.buildTrSeriesFromMetrics(rows, events);
   assert.ok(Math.abs(tr[0].trEtfPx - 430.208099) < 1e-6, tr[0].trEtfPx);
+});
+
+test("coverage does not warn on underlying-explained leveraged move", () => {
+  const rows = [];
+  let etf = 10;
+  let und = 1000;
+  for (let i = 0; i < 23; i += 1) {
+    const d = new Date(Date.parse("2026-05-20T00:00:00Z") + i * 86400000).toISOString().slice(0, 10);
+    rows.push({ date: d, close_price: etf, etf_adj_close: etf, underlying_adj_close: und });
+    etf *= 0.995;
+    und *= 1.002;
+  }
+  rows.push(
+    { date: "2026-06-24", close_price: 3.52, etf_adj_close: 3.52, underlying_adj_close: 1914.46 },
+    { date: "2026-06-25", close_price: 1.98, etf_adj_close: 1.98, underlying_adj_close: 2335.00 },
+    { date: "2026-06-26", close_price: 2.39, etf_adj_close: 2.39, underlying_adj_close: 2090.71 },
+  );
+  const cov = PB.summarizeTrCoverage(rows, []);
+  assert.equal(cov.quality, "good");
+  assert.equal(cov.warnings.some((w) => w.includes("Large unexplained ETF TR daily move")), false);
+  assert.ok(cov.maxEtfDailyLogReturn > 0.35);
+  assert.equal(cov.maxUnexplainedEtfDailyLogReturn, 0);
 });
