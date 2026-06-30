@@ -129,6 +129,75 @@
     return `tradeLab:${und}:${etf}`;
   }
 
+  function resolveLegEntry(leg, spotBySymbol) {
+    const entry = toNum(leg && leg.entry);
+    if (Number.isFinite(entry) && entry > 0) return entry;
+    const sym = String((leg && leg.symbol) || "").toUpperCase();
+    return toNum(spotBySymbol && spotBySymbol[sym]);
+  }
+
+  function normalizeBaseLegs(baseLegs, spotBySymbol) {
+    const legs = Array.isArray(baseLegs) ? baseLegs : [];
+    let changed = false;
+    const out = legs.map((leg) => {
+      const cur = toNum(leg && leg.entry);
+      if (Number.isFinite(cur) && cur > 0) return leg;
+      const entry = resolveLegEntry(leg, spotBySymbol);
+      if (!Number.isFinite(entry) || entry <= 0) return leg;
+      changed = true;
+      return { ...leg, entry };
+    });
+    return changed ? out : legs;
+  }
+
+  function computeTradeExposure(params) {
+    const baseLegs = Array.isArray(params && params.baseLegs) ? params.baseLegs : [];
+    const optionLegs = Array.isArray(params && params.optionLegs) ? params.optionLegs : [];
+    const spotBySymbol = (params && params.spotBySymbol) || {};
+    const resolvePremium = typeof (params && params.resolvePremium) === "function"
+      ? params.resolvePremium
+      : (leg) => Math.max(0, toNum(leg && leg.premium));
+
+    let grossLongEq = 0;
+    let grossShortEq = 0;
+    for (const leg of baseLegs) {
+      const qty = Math.max(0, toNum(leg && leg.quantity));
+      const entry = resolveLegEntry(leg, spotBySymbol);
+      if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(entry) || entry <= 0) continue;
+      const notional = qty * entry;
+      if (String((leg && leg.side) || "").toLowerCase() === "short") grossShortEq += notional;
+      else grossLongEq += notional;
+    }
+
+    let optionStrikeNotional = 0;
+    let optionPremiumLong = 0;
+    let optionPremiumShort = 0;
+    let optionContracts = 0;
+    for (const leg of optionLegs) {
+      const contracts = Math.max(0, toNum(leg && leg.contracts));
+      const strike = toNum(leg && leg.strike);
+      if (!Number.isFinite(contracts) || contracts <= 0) continue;
+      optionContracts += contracts;
+      if (Number.isFinite(strike) && strike > 0) optionStrikeNotional += contracts * 100 * strike;
+      const premium = resolvePremium(leg);
+      const premNotional = contracts * 100 * Math.max(0, toNum(premium));
+      if (String((leg && leg.side) || "").toLowerCase() === "sell") optionPremiumShort += premNotional;
+      else optionPremiumLong += premNotional;
+    }
+
+    return {
+      grossLongEq,
+      grossShortEq,
+      grossEq: grossLongEq + grossShortEq,
+      netEq: grossLongEq - grossShortEq,
+      optionContracts,
+      optionStrikeNotional,
+      optionPremiumLong,
+      optionPremiumShort,
+      optionPremiumNet: optionPremiumLong - optionPremiumShort,
+    };
+  }
+
   function optionLegPnl(leg, spotNow, spotFinal, ttxDaysRemaining, volFallback, rate) {
     const contracts = Math.max(0, toNum(leg && leg.contracts));
     const multiplier = Math.max(1, toNum((leg && leg.multiplier) ?? 100));
@@ -173,7 +242,7 @@
     for (const leg of baseLegs) {
       const sym = String((leg && leg.symbol) || "").toUpperCase();
       if (!sym) continue;
-      const entry = Number.isFinite(toNum(leg && leg.entry)) ? toNum(leg.entry) : toNum(priceNow[sym]);
+      const entry = resolveLegEntry(leg, priceNow);
       const finalSpot = toNum(priceFinal[sym]);
       const pnl = equityLegPnl(leg, entry, finalSpot);
       let financingPnl = 0;
@@ -506,6 +575,9 @@
     calendarDteFromExpiry,
     minOptionDteFromLegs,
     tradeLabStorageKey,
+    resolveLegEntry,
+    normalizeBaseLegs,
+    computeTradeExposure,
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = exported;

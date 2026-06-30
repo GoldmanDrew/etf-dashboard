@@ -14,6 +14,9 @@ const {
   remainingOptionDte,
   calendarDteFromExpiry,
   tradeLabStorageKey,
+  resolveLegEntry,
+  normalizeBaseLegs,
+  computeTradeExposure,
 } = require("../assets/trade_lab.js");
 
 test("equity leg pnl long/short sign", () => {
@@ -327,4 +330,51 @@ test("calendar DTE from expiry is non-negative", () => {
   const dte = calendarDteFromExpiry("2099-12-31", new Date("2026-01-01T12:00:00Z"));
   assert.ok(dte > 0);
   assert.equal(tradeLabStorageKey("apld", "aplx"), "tradeLab:APLD:APLX");
+});
+
+test("resolveLegEntry prefers explicit entry then spot fallback", () => {
+  assert.equal(resolveLegEntry({ symbol: "APLD", entry: 40 }, { APLD: 37.77 }), 40);
+  assert.equal(resolveLegEntry({ symbol: "APLD", entry: 0 }, { APLD: 37.77 }), 37.77);
+  assert.equal(resolveLegEntry({ symbol: "APLD" }, { APLD: 37.77 }), 37.77);
+});
+
+test("normalizeBaseLegs backfills missing entry from spot map", () => {
+  const legs = [{ id: 1, symbol: "APLD", side: "long", quantity: 100 }];
+  const norm = normalizeBaseLegs(legs, { APLD: 37.77 });
+  assert.equal(norm.length, 1);
+  assert.equal(norm[0].entry, 37.77);
+  const kept = normalizeBaseLegs([{ id: 1, symbol: "APLD", entry: 40 }], { APLD: 37.77 });
+  assert.equal(kept[0].entry, 40);
+});
+
+test("computeTradeExposure aggregates equity notionals with spot fallback", () => {
+  const exposure = computeTradeExposure({
+    baseLegs: [
+      { symbol: "APLD", side: "long", quantity: 21000, entry: 0 },
+      { symbol: "APLX", side: "short", quantity: 3000 },
+    ],
+    optionLegs: [],
+    spotBySymbol: { APLD: 37.77, APLX: 21.17 },
+  });
+  assert.equal(exposure.grossLongEq, 21000 * 37.77);
+  assert.equal(exposure.grossShortEq, 3000 * 21.17);
+  assert.equal(exposure.grossEq, exposure.grossLongEq + exposure.grossShortEq);
+  assert.equal(exposure.netEq, exposure.grossLongEq - exposure.grossShortEq);
+  assert.equal(exposure.optionContracts, 0);
+});
+
+test("computeTradeExposure option premium paid vs received", () => {
+  const exposure = computeTradeExposure({
+    baseLegs: [],
+    optionLegs: [
+      { symbol: "APLD", side: "buy", contracts: 2, strike: 40, premium: 1.5 },
+      { symbol: "APLD", side: "sell", contracts: 1, strike: 45, premium: 0.75 },
+    ],
+    spotBySymbol: { APLD: 37.77 },
+  });
+  assert.equal(exposure.optionContracts, 3);
+  assert.equal(exposure.optionStrikeNotional, 2 * 100 * 40 + 1 * 100 * 45);
+  assert.equal(exposure.optionPremiumLong, 2 * 100 * 1.5);
+  assert.equal(exposure.optionPremiumShort, 1 * 100 * 0.75);
+  assert.equal(exposure.optionPremiumNet, exposure.optionPremiumLong - exposure.optionPremiumShort);
 });

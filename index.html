@@ -1451,7 +1451,7 @@
 <script src="assets/price_basis.js?v=pb-v3"></script>
 <script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab_spots.js?v=tl-spots-v1"></script>
-<script src="assets/trade_lab.js?v=tl-v3"></script>
+<script src="assets/trade_lab.js?v=tl-v4"></script>
 <script src="assets/pair_backtest.js?v=pb-v9"></script>
 <script src="assets/realized_decay.js?v=rd-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
@@ -8269,7 +8269,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         if (raw) {
           const draft = JSON.parse(raw);
           if (Array.isArray(draft.baseLegs) && draft.baseLegs.length) {
-            setTradeBaseLegs(draft.baseLegs);
+            setTradeBaseLegs(typeof tradeFns.normalizeBaseLegs === 'function'
+              ? tradeFns.normalizeBaseLegs(draft.baseLegs, tradeSpotBySymbol)
+              : draft.baseLegs);
             setTradeOptionLegs(Array.isArray(draft.optionLegs) ? draft.optionLegs : []);
             if (draft.valuationHorizon) setTradeValuationHorizon(String(draft.valuationHorizon));
             if (Number.isFinite(Number(draft.optionDteDays))) {
@@ -8286,7 +8288,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     }
     if (!restored) resetTradeLabToDefaults();
     tradeLabRestoredRef.current = true;
-  }, [undSym, etfSym, tradeFns, resetTradeLabToDefaults]);
+  }, [undSym, etfSym, tradeFns, resetTradeLabToDefaults, tradeSpotBySymbol]);
+
+  useEffect(() => {
+    if (!tradeLabRestoredRef.current || !tradeBaseLegs.length) return;
+    if (typeof tradeFns.normalizeBaseLegs !== 'function') return;
+    const norm = tradeFns.normalizeBaseLegs(tradeBaseLegs, tradeSpotBySymbol);
+    if (norm !== tradeBaseLegs) setTradeBaseLegs(norm);
+  }, [tradeSpotBySymbol, tradeFns, tradeBaseLegs]);
 
   useEffect(() => {
     const storageKey = typeof tradeFns.tradeLabStorageKey === 'function'
@@ -8357,44 +8366,29 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       && Math.abs(Number(x.strike_price) - Number(strike)) < 1e-9) || null;
   }, [optionsForSymbol]);
   const tradeExposure = useMemo(() => {
-    let grossLongEq = 0;
-    let grossShortEq = 0;
-    for (const leg of tradeBaseLegs) {
-      const qty = Math.max(0, Number(leg?.quantity));
-      const entry = Number(leg?.entry);
-      if (!Number.isFinite(qty) || !Number.isFinite(entry) || qty <= 0 || entry <= 0) continue;
-      const notional = qty * entry;
-      if (String(leg?.side || '').toLowerCase() === 'short') grossShortEq += notional;
-      else grossLongEq += notional;
+    if (typeof tradeFns.computeTradeExposure !== 'function') {
+      return {
+        grossLongEq: 0,
+        grossShortEq: 0,
+        grossEq: 0,
+        netEq: 0,
+        optionContracts: 0,
+        optionStrikeNotional: 0,
+        optionPremiumLong: 0,
+        optionPremiumShort: 0,
+        optionPremiumNet: 0,
+      };
     }
-    let optionStrikeNotional = 0;
-    let optionPremiumLong = 0;
-    let optionPremiumShort = 0;
-    let optionContracts = 0;
-    for (const leg of tradeOptionLegs) {
-      const contracts = Math.max(0, Number(leg?.contracts));
-      const strike = Number(leg?.strike);
-      if (!Number.isFinite(contracts) || contracts <= 0) continue;
-      optionContracts += contracts;
-      if (Number.isFinite(strike) && strike > 0) optionStrikeNotional += contracts * 100 * strike;
-      const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
-      const premium = resolveLegPremium(leg, c);
-      const premNotional = contracts * 100 * Math.max(0, Number(premium) || 0);
-      if (String(leg?.side || '').toLowerCase() === 'sell') optionPremiumShort += premNotional;
-      else optionPremiumLong += premNotional;
-    }
-    return {
-      grossLongEq,
-      grossShortEq,
-      grossEq: grossLongEq + grossShortEq,
-      netEq: grossLongEq - grossShortEq,
-      optionContracts,
-      optionStrikeNotional,
-      optionPremiumLong,
-      optionPremiumShort,
-      optionPremiumNet: optionPremiumLong - optionPremiumShort,
-    };
-  }, [tradeBaseLegs, tradeOptionLegs, findContract, resolveLegPremium]);
+    return tradeFns.computeTradeExposure({
+      baseLegs: tradeBaseLegs,
+      optionLegs: tradeOptionLegs,
+      spotBySymbol: tradeSpotBySymbol,
+      resolvePremium: (leg) => {
+        const c = findContract(leg.symbol, leg.expiry, leg.type, leg.strike);
+        return resolveLegPremium(leg, c);
+      },
+    });
+  }, [tradeFns, tradeBaseLegs, tradeOptionLegs, tradeSpotBySymbol, findContract, resolveLegPremium]);
 
   const tradeScenarioInputGrid = useMemo(() => {
     if (typeof scenarioFns.buildScenarioGrid !== 'function') return { ok: false, error: 'Scenario utility unavailable.' };
