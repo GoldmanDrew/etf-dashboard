@@ -159,7 +159,11 @@ def audit_underlying_adj_cliffs(
 ) -> list[str]:
     """Fail when underlying_adj_close has a split cliff no declared underlying split explains."""
     try:
-        from price_basis import find_underlying_adj_cliffs, parse_split_events_from_corp
+        from price_basis import (
+            find_underlying_adj_cliffs,
+            infer_underlying_split_events_from_rows,
+            parse_split_events_from_corp,
+        )
     except ImportError as exc:
         return [f"price_basis import failed for underlying-cliff audit: {exc}"]
     errors: list[str] = []
@@ -173,6 +177,8 @@ def audit_underlying_adj_cliffs(
             {"date": r.get("date"), "underlying_adj_close": r.get("underlying_adj_close")}
             for r in rows
         ]
+        if not und_events:
+            und_events = infer_underlying_split_events_from_rows(cliff_rows, und_events)
         cliffs = find_underlying_adj_cliffs(cliff_rows, und_events)
         for cliff in cliffs[:2]:
             errors.append(

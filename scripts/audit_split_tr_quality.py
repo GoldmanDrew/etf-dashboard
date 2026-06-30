@@ -253,6 +253,10 @@ def audit_underlying_cliffs(
         {"date": r.get("date"), "underlying_adj_close": r.get("underlying_adj_close")}
         for r in rows
     ]
+    if not und_events:
+        from price_basis import infer_underlying_split_events_from_rows
+
+        und_events = infer_underlying_split_events_from_rows(cliff_rows, und_events)
     cliffs = find_underlying_adj_cliffs(cliff_rows, und_events)
     for cliff in cliffs[:2]:
         failures.append(

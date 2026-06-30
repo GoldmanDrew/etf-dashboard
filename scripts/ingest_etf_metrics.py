@@ -1665,7 +1665,7 @@ def repair_underlying_adj_close_split_basis(
     """
     if df.empty or "underlying_adj_close" not in df.columns or not etf_to_underlying:
         return df, 0
-    from price_basis import find_underlying_adj_cliffs
+    from price_basis import find_underlying_adj_cliffs, infer_underlying_split_events_from_rows
     from split_adjustments import match_split_to_price_jump
 
     out = df.copy()
@@ -1697,12 +1697,21 @@ def repair_underlying_adj_close_split_basis(
         ]
         cliffs = find_underlying_adj_cliffs(cliff_rows, declared)
         if cliffs and not declared:
-            LOGGER.warning(
-                "underlying_adj_close split cliff(s) for %s without corp metadata: %s",
-                und_sym,
-                ", ".join(str(c["date"]) for c in cliffs[:3]),
-            )
-            continue
+            inferred = infer_underlying_split_events_from_rows(cliff_rows, declared)
+            if inferred:
+                declared = inferred
+                LOGGER.warning(
+                    "inferred underlying split(s) for %s from adj cliffs: %s",
+                    und_sym,
+                    ", ".join(f"{d} x{m:g}" for d, m in inferred[:3]),
+                )
+            else:
+                LOGGER.warning(
+                    "underlying_adj_close split cliff(s) for %s without corp metadata: %s",
+                    und_sym,
+                    ", ".join(str(c["date"]) for c in cliffs[:3]),
+                )
+                continue
         if not declared:
             continue
 

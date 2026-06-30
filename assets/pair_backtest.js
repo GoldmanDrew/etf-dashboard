@@ -146,6 +146,80 @@
     return out;
   }
 
+  function normalizeSplitEventList(events) {
+    return (Array.isArray(events) ? events : [])
+      .map((ev) => {
+        const date = String((ev && ev.date) || "").trim().slice(0, 10);
+        const mult = toNum(ev && ev.mult);
+        return date && mult > 0 ? { date, mult } : null;
+      })
+      .filter(Boolean);
+  }
+
+  function splitEventWindowDays(a, b) {
+    const da = new Date(`${a}T00:00:00Z`);
+    const db = new Date(`${b}T00:00:00Z`);
+    if (Number.isNaN(da.getTime()) || Number.isNaN(db.getTime())) return Infinity;
+    return Math.abs((db - da) / 86400000);
+  }
+
+  function matchDeclaredSplitJump(events, rowDate, jump, windowDays = 5) {
+    if (!(jump > 0) || !Number.isFinite(jump)) return null;
+    const PB = globalObj.PriceBasis;
+    const absJump = jump >= 1 ? jump : 1 / jump;
+    for (const ev of events) {
+      if (splitEventWindowDays(ev.date, rowDate) > windowDays) continue;
+      const mRaw = ev.mult >= 1 ? ev.mult : 1 / ev.mult;
+      if (PB && typeof PB.matchSplitToPriceJump === "function") {
+        if (PB.matchSplitToPriceJump(absJump, mRaw) != null) return jump;
+      } else if (Math.abs(absJump / mRaw - 1) <= 0.18) {
+        return jump;
+      }
+    }
+    return null;
+  }
+
+  function inferSplitJumpRatio(jump) {
+    if (!(jump > 0) || !Number.isFinite(jump)) return null;
+    const absJump = jump >= 1 ? jump : 1 / jump;
+    if (absJump < 1.45) return null;
+    const PB = globalObj.PriceBasis;
+    if (PB && typeof PB.nearestSplitRatio === "function") {
+      const matched = PB.nearestSplitRatio(absJump, 0.18);
+      if (matched != null) return jump;
+    }
+    return jump;
+  }
+
+  /**
+   * Scale carried share quantities when raw tradeable prices jump on a split.
+   * PnL uses split-aware TR prices; exposure/borrow must not multiply stale qty by post-split close.
+   */
+  function applyCrossSplitQuantityAdjust(qE, qU, prev, cur, etfEvents, undEvents) {
+    let nextE = qE;
+    let nextU = qU;
+    if (prev && cur && prev.pl > 0 && cur.pl > 0) {
+      const etfJump = cur.pl / prev.pl;
+      if (matchDeclaredSplitJump(etfEvents, cur.date, etfJump) || inferSplitJumpRatio(etfJump)) {
+        nextE = qE * (prev.pl / cur.pl);
+      }
+    }
+    if (prev && cur && prev.ps > 0 && cur.ps > 0) {
+      const undJump = cur.ps / prev.ps;
+      if (matchDeclaredSplitJump(undEvents, cur.date, undJump) || inferSplitJumpRatio(undJump)) {
+        nextU = qU * (prev.ps / cur.ps);
+      }
+    }
+    return { qE: nextE, qU: nextU };
+  }
+
+  function underlyingPxForPoint(pt) {
+    if (!pt) return NaN;
+    const trUnd = toNum(pt.trUndPx);
+    if (trUnd > 0) return trUnd;
+    return toNum(pt.ps);
+  }
+
   /**
    * Short ETF daily PnL on one leg.
    * Primary: -MV × (TR_t/TR_{t-1} - 1) on split-aware TR prices when available.
@@ -473,17 +547,15 @@
       : [];
     const distByDate = buildDistributionByDate(opts && opts.distributions);
     const PB = globalObj.PriceBasis;
-    const splitEvents = Array.isArray(opts && opts.splitEvents) ? opts.splitEvents : [];
-    const underlyingSplitEvents = Array.isArray(opts && opts.underlyingSplitEvents)
-      ? opts.underlyingSplitEvents
-      : [];
+    const etfSplitEvents = normalizeSplitEventList(opts && opts.splitEvents);
+    const undSplitEvents = normalizeSplitEventList(opts && opts.underlyingSplitEvents);
     let trByDate = null;
     if (
-      (splitEvents.length > 0 || underlyingSplitEvents.length > 0)
+      (etfSplitEvents.length > 0 || undSplitEvents.length > 0)
       && PB
       && typeof PB.buildTrSeriesFromMetrics === "function"
     ) {
-      const trRows = PB.buildTrSeriesFromMetrics(rows, splitEvents, underlyingSplitEvents);
+      const trRows = PB.buildTrSeriesFromMetrics(rows, etfSplitEvents, undSplitEvents);
       if (trRows.length) trByDate = new Map(trRows.map((r) => [r.date, r]));
     }
 
@@ -500,11 +572,13 @@
       if (!ds || !Number.isFinite(pl) || pl <= 0 || !Number.isFinite(ps) || ps <= 0) continue;
       const tr = trByDate ? trByDate.get(ds) : null;
       const trPx = tr && Number.isFinite(tr.trEtfPx) && tr.trEtfPx > 0 ? tr.trEtfPx : NaN;
+      const trUndPx = tr && Number.isFinite(tr.trUndPx) && tr.trUndPx > 0 ? tr.trUndPx : NaN;
       pts.push({
         date: ds,
         pl,
         pa: trPx > 0 ? NaN : (Number.isFinite(pa) && pa > 0 ? pa : NaN),
         trPx,
+        trUndPx,
         trMode: tr ? tr.trMode : null,
         ps,
         sourceKey: [
@@ -595,7 +669,6 @@
     for (let i = 1; i < pts.length; i += 1) {
       const cur = pts[i];
       const prev = pts[i - 1];
-      const dps = cur.ps - prev.ps;
       const etfDay = computeEtfShortDayPnl(qE, prev, cur, distByDate);
       const dEtf = etfDay.pnl;
       cumEtf += dEtf;
@@ -603,8 +676,15 @@
       if (etfDay.mode === "adj_close" || etfDay.mode === "tr_price" || String(etfDay.mode || "").startsWith("pre_split")
         || etfDay.mode === "post_split" || etfDay.mode === "continuous_adj") nDaysAdjClose += 1;
       else nDaysPriceFallback += 1;
+      const prevUndPx = underlyingPxForPoint(prev);
+      const curUndPx = underlyingPxForPoint(cur);
+      const dps = Number.isFinite(prevUndPx) && Number.isFinite(curUndPx) ? curUndPx - prevUndPx : cur.ps - prev.ps;
       const dUnd = shortEtfLongUnd ? qU * dps : -qU * dps;
       cumUnd += dUnd;
+
+      const splitAdj = applyCrossSplitQuantityAdjust(qE, qU, prev, cur, etfSplitEvents, undSplitEvents);
+      qE = splitAdj.qE;
+      qU = splitAdj.qU;
 
       advanceBorrowForDate(cur.date);
       const canon = Number.isFinite(lastBorrowCanon) ? lastBorrowCanon : borrowAnnualFallback;
@@ -613,16 +693,16 @@
       const borrowDay = borrowBase * (annualDragPerShortDollar / 252);
       cumBorrow += borrowDay;
 
-      const mvEtfAbs = qE * cur.pl;
-      const mvUndAbs = qU * cur.ps;
-      const mvEtfBetaAdj = mvEtfAbs * betaAbs;
-      const grossBeta = mvEtfBetaAdj + mvUndAbs;
-      const netBeta = Math.abs(mvEtfBetaAdj - mvUndAbs);
-      const netGrossBeta = grossBeta > 1e-12 ? netBeta / grossBeta : 0;
-      const grossMvRaw = mvEtfAbs + mvUndAbs;
-      const netMvRaw = Math.abs(mvEtfAbs - mvUndAbs);
-      const netGrossRaw = grossMvRaw > 1e-12 ? netMvRaw / grossMvRaw : 0;
-      const wEtfInGross = grossMvRaw > 1e-9 ? mvEtfAbs / grossMvRaw : 0;
+      let mvEtfAbs = qE * cur.pl;
+      let mvUndAbs = qU * cur.ps;
+      let mvEtfBetaAdj = mvEtfAbs * betaAbs;
+      let grossBeta = mvEtfBetaAdj + mvUndAbs;
+      let netBeta = Math.abs(mvEtfBetaAdj - mvUndAbs);
+      let netGrossBeta = grossBeta > 1e-12 ? netBeta / grossBeta : 0;
+      let grossMvRaw = mvEtfAbs + mvUndAbs;
+      let netMvRaw = Math.abs(mvEtfAbs - mvUndAbs);
+      let netGrossRaw = grossMvRaw > 1e-12 ? netMvRaw / grossMvRaw : 0;
+      let wEtfInGross = grossMvRaw > 1e-9 ? mvEtfAbs / grossMvRaw : 0;
       const wTarget = targetEtfWeightInGross(hedgeRatioH);
       daysSinceRebal += 1;
 
@@ -631,6 +711,16 @@
         if (Math.abs(netGrossBeta - anchorBetaNetGross) > tolerance) {
           rebalReason = "beta_net_gross";
           rebalanceAt(i, rebalReason);
+          mvEtfAbs = qE * cur.pl;
+          mvUndAbs = qU * cur.ps;
+          mvEtfBetaAdj = mvEtfAbs * betaAbs;
+          grossBeta = mvEtfBetaAdj + mvUndAbs;
+          netBeta = Math.abs(mvEtfBetaAdj - mvUndAbs);
+          netGrossBeta = grossBeta > 1e-12 ? netBeta / grossBeta : 0;
+          grossMvRaw = mvEtfAbs + mvUndAbs;
+          netMvRaw = Math.abs(mvEtfAbs - mvUndAbs);
+          netGrossRaw = grossMvRaw > 1e-12 ? netMvRaw / grossMvRaw : 0;
+          wEtfInGross = grossMvRaw > 1e-9 ? mvEtfAbs / grossMvRaw : 0;
         } else {
           daysSinceRebal = 0;
         }

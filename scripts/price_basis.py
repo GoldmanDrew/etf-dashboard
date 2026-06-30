@@ -160,6 +160,68 @@ def find_underlying_adj_cliffs(
     return cliffs
 
 
+def infer_underlying_split_events_from_rows(
+    rows: list[dict[str, Any]],
+    declared: list[tuple[dt.date, float]] | None = None,
+) -> list[tuple[dt.date, float]]:
+    """Infer underlying split events from split-sized ``underlying_adj_close`` cliffs.
+
+    Used when Polygon/corp metadata is missing but Yahoo prints a mixed basis
+    (e.g. KLAC 10-for-1 into KLAG rows). Only emits events for cliffs that remain
+    unexplained after ``declared`` metadata is applied.
+    """
+    from split_adjustments import dedupe_split_events, match_split_to_price_jump
+
+    unexplained = find_underlying_adj_cliffs(rows, declared or [])
+    if not unexplained:
+        return []
+    pts: list[tuple[dt.date, float]] = []
+    for row in rows or []:
+        ds = str(row.get("date") or "")[:10]
+        if len(ds) != 10:
+            continue
+        try:
+            d0 = dt.date.fromisoformat(ds)
+            und = float(row.get("underlying_adj_close"))
+        except (ValueError, TypeError):
+            continue
+        if math.isfinite(und) and und > 0:
+            pts.append((d0, und))
+    pts.sort()
+    by_date = {d: px for d, px in pts}
+    out: list[tuple[dt.date, float]] = []
+    for cliff in unexplained:
+        d_cur = cliff["date"]
+        if isinstance(d_cur, str):
+            try:
+                d_cur = dt.date.fromisoformat(d_cur[:10])
+            except ValueError:
+                continue
+        idx = next((i for i, (d, _px) in enumerate(pts) if d == d_cur), None)
+        if idx is None or idx < 1:
+            continue
+        _d_prev, u_prev = pts[idx - 1]
+        u_cur = by_date.get(d_cur)
+        if u_prev <= 0 or u_cur is None or u_cur <= 0:
+            continue
+        jump = float(u_cur / u_prev)
+        matched = match_split_to_price_jump(
+            abs(jump) if jump >= 1 else 1 / abs(jump),
+            cliff.get("factor"),
+            rel_tol=0.22,
+        )
+        if matched is None:
+            matched = match_split_to_price_jump(
+                abs(jump) if jump >= 1 else 1 / abs(jump),
+                cliff.get("factor"),
+                rel_tol=0.30,
+            )
+        if matched is None:
+            continue
+        out.append((d_cur, jump))
+    return dedupe_split_events(out)
+
+
 def underlying_tr_price_for_row(
     row: dict[str, Any],
     split_events: list[tuple[dt.date, float]] | None,

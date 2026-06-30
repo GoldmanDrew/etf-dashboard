@@ -623,6 +623,48 @@ test("simulateInversePairBacktest uses split-aware TR across reverse split", () 
   }
 });
 
+test("MTYY-style reverse split: exposure stays within 2x of target notionals", () => {
+  const rows = [
+    { date: "2026-05-26", close_price: 4.2, underlying_adj_close: 155 },
+    { date: "2026-05-27", close_price: 4.1, underlying_adj_close: 154 },
+    { date: "2026-05-28", close_price: 4.0, underlying_adj_close: 151.64 },
+    { date: "2026-06-01", close_price: 23.604, etf_adj_close: 23.604, underlying_adj_close: 136.08 },
+    { date: "2026-06-02", close_price: 22.99, etf_adj_close: 22.99, underlying_adj_close: 136.08 },
+    { date: "2026-06-03", close_price: 23.5, etf_adj_close: 23.5, underlying_adj_close: 137.0 },
+  ];
+  const gross = 100000;
+  const h = 1;
+  const targetEtfMv = (gross * h) / (1 + h);
+  const targetUndMv = gross / (1 + h);
+  const out = simulateInversePairBacktest(rows, {
+    gross,
+    hedgeRatio: h,
+    beta: 0.5,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0,
+    splitEvents: [{ date: "2026-06-02", mult: 6 }],
+  });
+  assert.equal(out.ok, true);
+  for (const d of out.daily) {
+    assert.ok(
+      d.mvEtfAbs <= targetEtfMv * 2.01,
+      `${d.date}: ETF exposure ${d.mvEtfAbs} >> target ${targetEtfMv}`,
+    );
+    assert.ok(
+      d.mvUndAbs <= targetUndMv * 2.01,
+      `${d.date}: underlying exposure ${d.mvUndAbs} >> target ${targetUndMv}`,
+    );
+  }
+  const splitTransition = out.rows.find((r) => r.date === "2026-06-01");
+  assert.ok(splitTransition, "missing split transition chart row");
+  assert.ok(
+    splitTransition.mvEtfAbs <= targetEtfMv * 2.01,
+    `split-day ETF MV spike ${splitTransition.mvEtfAbs}`,
+  );
+});
+
 test("simulateShortFlowBacktest starts each ETF when tradable and flows every N days", () => {
   const out = simulateShortFlowBacktest({
     legs: [

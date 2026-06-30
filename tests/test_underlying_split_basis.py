@@ -17,6 +17,7 @@ from ingest_etf_metrics import repair_underlying_adj_close_split_basis  # noqa: 
 from price_basis import (  # noqa: E402
     build_tr_series_from_metrics,
     find_underlying_adj_cliffs,
+    infer_underlying_split_events_from_rows,
     underlying_tr_price_for_row,
 )
 from realized_gross_decay import compute_gross_decay_annual  # noqa: E402
@@ -94,6 +95,14 @@ def test_gross_decay_not_poisoned_by_klac_cliff_when_split_known():
     assert bad is not None and good is not None
     assert bad["gross_decay_annual"] < -1.0
     assert good["gross_decay_annual"] > bad["gross_decay_annual"]
+
+
+def test_infer_underlying_split_events_from_klac_cliff_rows():
+    inferred = infer_underlying_split_events_from_rows(_klag_cliff_rows(), [])
+    assert len(inferred) >= 1
+    d, mult = inferred[0]
+    assert str(d) == "2026-06-11"
+    assert abs(mult - 0.1) < 0.02
 
 
 def test_repair_underlying_adj_close_split_basis_scales_store(tmp_path: Path):
