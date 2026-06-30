@@ -139,6 +139,29 @@ def test_ticker_reuse_gap_makes_60d_partial_and_gross_unavailable():
     assert "realized_pair_gross_partial" in pair
 
 
+def test_build_daily_log_drag_skips_orphan_leg_jumps():
+    """Bad underlying backfill (~2×) or pre-split ETF prints must not dominate 20d decay."""
+    tr = [
+        {"date": "2026-06-20", "tr_etf_px": 16.0, "tr_und_px": 228.0},
+        {"date": "2026-06-22", "tr_etf_px": 15.9, "tr_und_px": 228.11},
+        {"date": "2026-06-24", "tr_etf_px": 15.78, "tr_und_px": 454.84},
+        {"date": "2026-06-25", "tr_etf_px": 16.31, "tr_und_px": 462.48},
+    ]
+    daily = build_daily_log_drag_series(tr, 2.0)
+    assert len(daily) == 2
+    assert [d["date"] for d in daily] == ["2026-06-22", "2026-06-25"]
+    assert all(abs(d["drag"]) < 0.05 for d in daily)
+
+    tr_etf_cliff = [
+        {"date": "2026-06-21", "tr_etf_px": 100.0, "tr_und_px": 300.0},
+        {"date": "2026-06-22", "tr_etf_px": 33.33, "tr_und_px": 301.0},
+        {"date": "2026-06-23", "tr_etf_px": 32.0, "tr_und_px": 299.0},
+    ]
+    daily2 = build_daily_log_drag_series(tr_etf_cliff, 2.0)
+    assert len(daily2) == 1
+    assert daily2[0]["date"] == "2026-06-23"
+
+
 def test_compute_realized_pair_gross_20d_from_metrics_rows():
     joint = _flat_joint_rows(REALIZED_PAIR_GROSS_20D_HORIZON + 5)
     out = compute_realized_pair_gross_20d(joint, 2.0, [], borrow_annual=0.1)

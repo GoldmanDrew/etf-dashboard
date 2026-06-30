@@ -2546,8 +2546,30 @@ const optionMidFromContract = (c) => {
   if (ask != null && ask > 0) return ask;
   return null;
 };
-/** Canonical short_favorable_positive: negative = borrow fee (cost to short); positive = rebate / short-favorable. */
+/**
+ * Spot fee-only borrow rate (annualized, decimal). NOTE on sign: unlike the edge
+ * columns (which are short_favorable_positive), `borrow_current` is stored as a
+ * POSITIVE cost magnitude (e.g. 0.05 = 5%/yr fee to short; ~0 = general collateral;
+ * negative only in the rare rebate case). All net math subtracts it: net = gross − borrow.
+ */
 const getBorrowRate = r => (r?.borrow_current ?? r?.borrow_net_annual ?? null);
+/**
+ * Borrow fees accrue Act/360 on collateral market value. Confirmed conventions:
+ *   IBKR:        daily Borrow Fee = (Collateral Value × Fee Rate) / 360, accrued every
+ *                calendar day (Collateral = 102% of prior settle, rounded up × shares).
+ *   Clear Street: securities-lending stock loan, annualized rate × market value, /360
+ *                daily accrual, billed monthly.
+ * A short held a full calendar year (~365 days) therefore costs rate × 365/360 ≈ 1.0139.
+ * Keep in sync with assets/realized_decay.js::BORROW_ACT360_FACTOR,
+ * scripts/yieldboost_fof_pair_pnl.py::_BORROW_ACT360_FACTOR, and
+ * scripts/build_data.py::BORROW_ACT360_FACTOR.
+ */
+const BORROW_ACT360_FACTOR = 365 / 360;
+/** Annual borrow drag (Act/360) for a 1-year hold at the quoted annual fee. */
+const annualBorrowDrag = (borrowAnnual) => {
+  const b = Number(borrowAnnual);
+  return Number.isFinite(b) ? b * BORROW_ACT360_FACTOR : NaN;
+};
 function annualBorrowForRecord(r) {
   if (!r) return 0;
   const avg = Number(r.borrow_avg_annual);
@@ -4378,7 +4400,7 @@ function RealizedDecayHorizonsBarChart({ horizons, beta, borrowAnnual, etfLabel,
             `Gross: ${fmtPeriod(p.grossSimple)} (${fmtLogYr(p.grossLog)} log)`,
             `Net: ${fmtPeriod(p.netSimple)} (${fmtLogYr(p.netLog)} log, after borrow)`,
             Number.isFinite(Number(borrowAnnual))
-              ? `Borrow drag: ${fmt(Number(borrowAnnual) * (p.obs / 252))} over period`
+              ? `Borrow drag: ${fmt(Number(borrowAnnual) * (p.obs / 252) * BORROW_ACT360_FACTOR)} over period (Act/360)`
               : null,
             !p.sufficient ? '(partial window — history shorter than horizon)' : null,
           ].filter(Boolean).join('\n');
@@ -4404,7 +4426,7 @@ function RealizedDecayHorizonsBarChart({ horizons, beta, borrowAnnual, etfLabel,
       <div className="scenario-sub" style={{ marginTop: 8 }}>
         β = {Number.isFinite(Number(beta)) ? Number(beta).toFixed(3) : '—'} · short-favorable + ·{' '}
         <span style={{ color: 'rgba(59,130,246,0.95)' }}>■</span> gross ·{' '}
-        <span style={{ color: 'rgba(6,182,212,0.95)' }}>■</span> net (expm1 of gross<sub>log</sub> − borrow × N/252) ·{' '}
+        <span style={{ color: 'rgba(6,182,212,0.95)' }}>■</span> net (expm1 of gross<sub>log</sub> − borrow × N/252 × 365/360, Act/360) ·{' '}
         borrow {Number.isFinite(Number(borrowAnnual)) ? fmt(borrowAnnual) : '—'} avg
       </div>
     </div>
@@ -4456,14 +4478,6 @@ const COLS = [
     sublabel: '6M · robust',
     w: 88,
     hint: 'Best-estimate σ: forecast_vol_etf_annual (6M robust EWMA on ETF returns). Hover for ladder and 12M realized headline.',
-  },
-  {
-    key: 'moc_flow_remaining_pct_adv',
-    label: 'MOC flow',
-    sublabel: 'intraday · % ADV',
-    w: 92,
-    numeric: true,
-    hint: 'LETF bucket only: estimated remaining close rebalance as % of underlying 20d $ ADV (intraday flow model). Hover for $ estimate and float %. Blank for B2/B3.',
   },
 ];
 
@@ -4565,7 +4579,7 @@ function GrossDecayComparisonStrip({ r }) {
   const gE = gHead != null && Number.isFinite(Number(gHead)) ? Number(gHead) : NaN;
 
   const bAvg = Number(r?.borrow_avg_annual);
-  const netVsAvg = Number.isFinite(gR) && Number.isFinite(bAvg) ? gR - bAvg : NaN;
+  const netVsAvg = Number.isFinite(gR) && Number.isFinite(bAvg) ? gR - annualBorrowDrag(bAvg) : NaN;
   const netSpot = Number(r.net_decay);
   const netP50 = Number(r.net_edge_p50_annual);
 
@@ -4599,7 +4613,7 @@ function GrossDecayComparisonStrip({ r }) {
       v: netVsAvg,
       kind: 'bar',
       cls: 'net-realized',
-      legShort: 'Realized net decay (gross − hist. avg borrow)',
+      legShort: 'Realized net decay (gross − hist. avg borrow, Act/360)',
     });
   }
   if (Number.isFinite(netSpot)) {
@@ -4610,7 +4624,7 @@ function GrossDecayComparisonStrip({ r }) {
         v: netSpot,
         kind: 'bar',
         cls: 'net-spot',
-        legShort: 'Net (gross − spot borrow)',
+        legShort: 'Net (gross − spot borrow, Act/360)',
       });
     }
   }
@@ -4922,7 +4936,7 @@ function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheT
   const gR = Number(r?.gross_decay_annual);
   const bAvg = Number(r?.borrow_avg_annual);
   const realizedNetVsAvgBorrow = Number.isFinite(gR) && Number.isFinite(bAvg)
-    ? gR - bAvg
+    ? gR - annualBorrowDrag(bAvg)
     : null;
   const volShapeHistGrid = useMemo(() => {
     void metricsCacheTick;
@@ -4965,7 +4979,7 @@ function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheT
               <div className="detail-item-hint">
                 vs spot borrow: {fmt(r.net_decay)}
                 <br />
-                (= gross − <em>current</em> borrow)
+                (gross − borrow, Act/360 ×365/360)
               </div>
             ) : (
               <div className="detail-item-hint">No hist. avg → gross − spot borrow only.</div>
@@ -13864,8 +13878,6 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
     d.sort((a, b) => {
       let av = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
         ? computeScenarioEtf1mFlatUnd(a, chartVolLookbackRange)
-        : sortKey === 'moc_flow_remaining_pct_adv'
-        ? mocFlowHeadline(a)
         : sortKey === 'expected_pair_pnl_p50_annual' || sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
         ? expectedDecayHeadlineValue(a, chartVolLookbackRange)
         : sortKey === 'vol_underlying_annual'
@@ -13875,8 +13887,6 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         : a[sortKey];
       let bv = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
         ? computeScenarioEtf1mFlatUnd(b, chartVolLookbackRange)
-        : sortKey === 'moc_flow_remaining_pct_adv'
-        ? mocFlowHeadline(b)
         : sortKey === 'expected_pair_pnl_p50_annual' || sortKey === 'expected_gross_decay_p50_annual' || sortKey === 'expected_gross_decay_annual'
         ? expectedDecayHeadlineValue(b, chartVolLookbackRange)
         : sortKey === 'vol_underlying_annual'
@@ -14227,8 +14237,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               <div className="dm-block">
                 <div className="dm-title">Net (gross−borrow) — expanded row</div>
                 <p style={{ margin: '0 0 8px', lineHeight: 1.5 }}>
-                  <code className="dm-formula">net_decay ≈ gross_decay_annual − borrow_current</code>
-                  — one-line realized bookkeeping; not the bootstrap median.
+                  <code className="dm-formula">net_decay ≈ gross_decay_annual − borrow_current × 365/360</code>
+                  — one-line realized bookkeeping; not the bootstrap median. Borrow accrues
+                  Act/360 on collateral value (IBKR <code>(Value×FeeRate)/360</code>; Clear Street
+                  same securities-lending /360), so a 1-year hold costs the quoted fee × 365/360.
                 </p>
               </div>
               <div className="dm-block">
@@ -14348,14 +14360,6 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                         </td>
                         <td title={volHeadlineTooltip(r, "underlying", chartVolLookbackRange)}>{fmt(volHeadlineValue(r, 'underlying', chartVolLookbackRange))}</td>
                         <td title={volHeadlineTooltip(r, "etf", chartVolLookbackRange)}>{fmt(volHeadlineValue(r, 'etf', chartVolLookbackRange))}</td>
-                        <td
-                          className={flowValClass(mocFlowHeadline(r))}
-                          title={r.bucket === 'bucket_1_high_beta' ? mocFlowTooltip(r) : 'MOC flow column is LETF (bucket 1) only'}
-                        >
-                          {r.bucket === 'bucket_1_high_beta' && mocFlowHeadline(r) != null
-                            ? fmtPctDecimal(mocFlowHeadline(r), 2)
-                            : '—'}
-                        </td>
                       </tr>
                       {expanded && <DetailRow r={r} chartVolLookbackRange={chartVolLookbackRange} dashboardBuildTime={data.build_time} metricsCacheTick={metricsCacheTick} borrowHistoryMap={borrowHistoryMap} />}
                     </React.Fragment>

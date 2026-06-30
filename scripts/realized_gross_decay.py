@@ -25,6 +25,20 @@ DEFAULT_MIN_OBS = 40
 REALIZED_PAIR_GROSS_20D_HORIZON = 20
 MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45
 HARD_LIFECYCLE_GAP_DAYS = 365
+# Skip daily pair-drag when one leg jumps and the other is flat — bad underlying
+# backfill (HON ~2× discontinuity) or pre-split ETF prints (VRTL adj vs close).
+ORPHAN_LEG_LOG_THRESHOLD = 0.35
+ORPHAN_LEG_COMPANION_MAX = 0.15
+
+
+def _is_orphan_leg_jump(r_u: float, r_l: float) -> bool:
+    if not math.isfinite(r_u) or not math.isfinite(r_l):
+        return False
+    if abs(r_u) > ORPHAN_LEG_LOG_THRESHOLD and abs(r_l) < ORPHAN_LEG_COMPANION_MAX:
+        return True
+    if abs(r_l) > ORPHAN_LEG_LOG_THRESHOLD and abs(r_u) < ORPHAN_LEG_COMPANION_MAX:
+        return True
+    return False
 
 
 def _log_to_simple_period(log_ret: float | None) -> float | None:
@@ -124,6 +138,8 @@ def build_daily_log_drag_series(
         r_u = math.log(u1 / u0)
         r_l = math.log(e1 / e0)
         if not math.isfinite(r_u) or not math.isfinite(r_l):
+            continue
+        if _is_orphan_leg_jump(r_u, r_l):
             continue
         out.append(
             {

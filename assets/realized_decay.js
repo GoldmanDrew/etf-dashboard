@@ -1,9 +1,26 @@
 /* global window, module */
 (function initRealizedDecay(globalObj) {
   const TRADING_DAYS_PER_YEAR = 252;
+  // Borrow fees accrue Act/360 on collateral market value. Confirmed conventions:
+  //   IBKR:        daily Borrow Fee = (Collateral Value x Fee Rate) / 360, accrued every
+  //                calendar day (Collateral = 102% of prior settle, rounded up x shares).
+  //   Clear Street: securities-lending stock loan, annualized rate x market value, daily
+  //                accrual on the standard /360 day-count, billed monthly.
+  // We count realized drag in trading days (252/yr ~ 365 calendar days held), so converting
+  // the quoted annual fee to a held-period drag needs the Act/360 surcharge 365/360 ~ 1.0139.
+  const BORROW_ACT360_FACTOR = 365 / 360;
   const DEFAULT_HORIZONS = [5, 20, 60, 120, 251];
   const MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45;
   const HARD_LIFECYCLE_GAP_DAYS = 365;
+  const ORPHAN_LEG_LOG_THRESHOLD = 0.35;
+  const ORPHAN_LEG_COMPANION_MAX = 0.15;
+
+  function isOrphanLegJump(rU, rL) {
+    if (!Number.isFinite(rU) || !Number.isFinite(rL)) return false;
+    if (Math.abs(rU) > ORPHAN_LEG_LOG_THRESHOLD && Math.abs(rL) < ORPHAN_LEG_COMPANION_MAX) return true;
+    if (Math.abs(rL) > ORPHAN_LEG_LOG_THRESHOLD && Math.abs(rU) < ORPHAN_LEG_COMPANION_MAX) return true;
+    return false;
+  }
 
   const PB = (typeof globalObj !== "undefined" && globalObj.PriceBasis)
     || (typeof window !== "undefined" && window.PriceBasis)
@@ -154,6 +171,7 @@
       const rU = Math.log(clean[i].undPx / clean[i - 1].undPx);
       const rL = Math.log(clean[i].etfPx / clean[i - 1].etfPx);
       if (!Number.isFinite(rU) || !Number.isFinite(rL)) continue;
+      if (isOrphanLegJump(rU, rL)) continue;
       out.push({
         date: clean[i].date,
         drag: b * rU - rL,
@@ -172,7 +190,8 @@
     const b = toNum(borrowAnnual);
     const n = Math.max(0, Math.floor(toNum(obsDays) || 0));
     if (!Number.isFinite(b) || n <= 0) return 0;
-    return b * (n / TRADING_DAYS_PER_YEAR);
+    // Act/360 borrow drag for a held window of n trading days (IBKR / Clear Street).
+    return b * (n / TRADING_DAYS_PER_YEAR) * BORROW_ACT360_FACTOR;
   }
 
   function slicePeriodMetrics(drags, dailySeries, startIdx, endIdx, borrowAnnual) {
@@ -269,6 +288,7 @@
 
   const exported = {
     TRADING_DAYS_PER_YEAR,
+    BORROW_ACT360_FACTOR,
     DEFAULT_HORIZONS,
     MAX_CONTIGUOUS_METRICS_GAP_DAYS,
     HARD_LIFECYCLE_GAP_DAYS,

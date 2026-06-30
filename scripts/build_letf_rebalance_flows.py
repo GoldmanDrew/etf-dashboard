@@ -754,7 +754,10 @@ def annotate_with_adv(
 
     if not fund_flows.empty:
         fund_flows = fund_flows.merge(adv_panel, on=["date", "underlying"], how="left")
-        fund_flows = fund_flows.rename(columns={"tradable_float_dollars": "underlying_tradable_float_dollars"})
+        if "tradable_float_dollars" in fund_flows.columns:
+            fund_flows = fund_flows.rename(columns={"tradable_float_dollars": "underlying_tradable_float_dollars"})
+        elif "underlying_tradable_float_dollars" not in fund_flows.columns:
+            fund_flows["underlying_tradable_float_dollars"] = float("nan")
         with np.errstate(divide="ignore", invalid="ignore"):
             fund_flows["rebalance_pct_adv_20d"] = (
                 fund_flows["rebalance_signed_dollars"] / fund_flows["underlying_dollar_adv_20d"]
@@ -764,7 +767,10 @@ def annotate_with_adv(
             )
     if not aggregates.empty:
         aggregates = aggregates.merge(adv_panel, on=["date", "underlying"], how="left")
-        aggregates = aggregates.rename(columns={"tradable_float_dollars": "underlying_tradable_float_dollars"})
+        if "tradable_float_dollars" in aggregates.columns:
+            aggregates = aggregates.rename(columns={"tradable_float_dollars": "underlying_tradable_float_dollars"})
+        elif "underlying_tradable_float_dollars" not in aggregates.columns:
+            aggregates["underlying_tradable_float_dollars"] = float("nan")
         with np.errstate(divide="ignore", invalid="ignore"):
             aggregates["net_moc_pct_adv_20d"] = (
                 aggregates["net_moc_dollars"] / aggregates["underlying_dollar_adv_20d"]
@@ -1027,7 +1033,7 @@ def build_all(
     fund_flows = build_fund_flows(universe, metrics, stale_bdays=stale_bdays)
     aggregates = build_underlying_aggregates(fund_flows)
 
-    adv_panel = compute_adv_panel(volume_panel, window=adv_window)
+    adv_panel = compute_adv_panel_with_median(volume_panel, window=adv_window)
     fund_flows, aggregates = annotate_with_adv(fund_flows, aggregates, adv_panel)
     return fund_flows, aggregates
 
