@@ -20,6 +20,7 @@ from market_calendar import is_nyse_session  # noqa: E402
 
 DASHBOARD_JSON = REPO / "data" / "dashboard_data.json"
 METRICS_PARQUET = REPO / "data" / "etf_metrics_daily.parquet"
+UNIVERSE_CSV = REPO / "data" / "etf_screened_today.csv"
 CORP_ACTIONS_JSON = REPO / "data" / "corporate_actions.json"
 DEFAULT_JSON_GLOBS = ("data/*.json", "data/**/*.json")
 MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45
@@ -146,6 +147,37 @@ def audit_fabricated_adj_basis(
             errors.append(
                 f"{sym}: fabricated etf_adj_close cliff on {cliff['date']} "
                 f"(x{cliff['factor']:.2f} vs close; no matching split)"
+            )
+    return errors
+
+
+def audit_underlying_adj_cliffs(
+    metrics_by_symbol: dict[str, list[dict[str, Any]]],
+    corp_payload: dict[str, Any] | None,
+    *,
+    etf_to_underlying: dict[str, str] | None = None,
+) -> list[str]:
+    """Fail when underlying_adj_close has a split cliff no declared underlying split explains."""
+    try:
+        from price_basis import find_underlying_adj_cliffs, parse_split_events_from_corp
+    except ImportError as exc:
+        return [f"price_basis import failed for underlying-cliff audit: {exc}"]
+    errors: list[str] = []
+    und_map = etf_to_underlying or {}
+    for sym, rows in sorted(metrics_by_symbol.items()):
+        und = str(und_map.get(sym) or "").strip().upper()
+        if not und:
+            continue
+        und_events = parse_split_events_from_corp(corp_payload or {"events": []}, und)
+        cliff_rows = [
+            {"date": r.get("date"), "underlying_adj_close": r.get("underlying_adj_close")}
+            for r in rows
+        ]
+        cliffs = find_underlying_adj_cliffs(cliff_rows, und_events)
+        for cliff in cliffs[:2]:
+            errors.append(
+                f"{sym}/{und}: unexplained underlying_adj_close cliff on {cliff['date']} "
+                f"(x{cliff['factor']:.2f}; no {und} split metadata)"
             )
     return errors
 
@@ -322,6 +354,29 @@ def main() -> int:
             except (OSError, json.JSONDecodeError) as exc:
                 warnings.append(f"corporate_actions.json unreadable: {exc}")
         errors.extend(audit_fabricated_adj_basis(metrics_by_symbol, corp_payload))
+        etf_to_underlying: dict[str, str] = {}
+        if UNIVERSE_CSV.exists():
+            try:
+                import pandas as pd
+
+                udf = pd.read_csv(UNIVERSE_CSV)
+                sym_col = "ETF" if "ETF" in udf.columns else "ticker"
+                und_col = "Underlying" if "Underlying" in udf.columns else "underlying"
+                if sym_col in udf.columns and und_col in udf.columns:
+                    for _, urow in udf.iterrows():
+                        s = str(urow.get(sym_col) or "").strip().upper()
+                        u = str(urow.get(und_col) or "").strip().upper()
+                        if s and u and u != "NAN":
+                            etf_to_underlying[s] = u
+            except Exception as exc:
+                warnings.append(f"Could not load universe for underlying-cliff audit: {exc}")
+        errors.extend(
+            audit_underlying_adj_cliffs(
+                metrics_by_symbol,
+                corp_payload,
+                etf_to_underlying=etf_to_underlying,
+            )
+        )
         errors.extend(audit_metrics_calendar(metrics_by_symbol))
         stale_errors, stale_warnings = audit_stale_price_feeds(metrics_by_symbol)
         errors.extend(stale_errors)

@@ -15,6 +15,7 @@ import pandas as pd
 
 from price_basis import (
     build_tr_series_from_metrics,
+    find_underlying_adj_cliffs,
     parse_split_events_from_corp,
     resolve_split_context,
     sanitize_fabricated_adj_basis,
@@ -322,6 +323,7 @@ def compute_realized_pair_gross_20d(
     beta: float,
     split_events: list[tuple[dt.date, float]] | None = None,
     *,
+    underlying_split_events: list[tuple[dt.date, float]] | None = None,
     borrow_annual: float | None = None,
     min_obs: int = 2,
 ) -> dict[str, Any] | None:
@@ -330,7 +332,11 @@ def compute_realized_pair_gross_20d(
         return None
     usable_rows = [r for r in rows if _metrics_row_has_usable_prices(r)]
     usable_rows = latest_contiguous_metrics_segment(usable_rows)
-    tr = build_tr_series_from_metrics(usable_rows, split_events or [])
+    tr = build_tr_series_from_metrics(
+        usable_rows,
+        split_events or [],
+        underlying_split_events=underlying_split_events or [],
+    )
     daily = build_daily_log_drag_series(tr, float(beta))
     if len(daily) < min_obs:
         return None
@@ -357,6 +363,7 @@ def compute_gross_decay_annual(
     beta: float,
     split_events: list[tuple[dt.date, float]] | None = None,
     *,
+    underlying_split_events: list[tuple[dt.date, float]] | None = None,
     min_obs: int = DEFAULT_MIN_OBS,
 ) -> dict[str, Any] | None:
     """Mean daily log-drag annualized: beta * log(R_u) - log(R_etf) on split-aware TR."""
@@ -366,7 +373,11 @@ def compute_gross_decay_annual(
         [r for r in rows if _metrics_row_has_usable_prices(r)]
     )
     rows = sanitize_fabricated_adj_basis(rows, split_events or [])
-    tr = build_tr_series_from_metrics(rows, split_events or [])
+    tr = build_tr_series_from_metrics(
+        rows,
+        split_events or [],
+        underlying_split_events=underlying_split_events or [],
+    )
     if len(tr) < min_obs + 1:
         return None
 
@@ -432,6 +443,7 @@ def load_gross_decay_from_metrics(
     *,
     corp_actions_path: Path | None = None,
     beta_by_symbol: dict[str, float] | None = None,
+    underlying_by_symbol: dict[str, str] | None = None,
     min_obs: int = DEFAULT_MIN_OBS,
 ) -> dict[str, dict[str, Any]]:
     """Build per-symbol realized gross decay from joint ETF metrics rows."""
@@ -469,10 +481,28 @@ def load_gross_decay_from_metrics(
                 beta = float("nan")
         if not math.isfinite(float(beta)):
             continue
-        events = parse_split_events_from_corp(corp_payload, sym_u)
-        result = compute_gross_decay_annual(joint, float(beta), events, min_obs=min_obs)
+        und_sym = str((underlying_by_symbol or {}).get(sym_u) or "").strip().upper()
+        etf_events = parse_split_events_from_corp(corp_payload, sym_u)
+        und_events = parse_split_events_from_corp(corp_payload, und_sym) if und_sym else []
+        und_cliff_rows = [
+            {"date": r.get("date"), "underlying_adj_close": r.get("underlying_adj_close")}
+            for r in joint
+        ]
+        und_cliffs = find_underlying_adj_cliffs(und_cliff_rows, und_events) if und_sym else []
+        result = compute_gross_decay_annual(
+            joint,
+            float(beta),
+            etf_events,
+            underlying_split_events=und_events,
+            min_obs=min_obs,
+        )
         if result:
             result["source"] = "etf_metrics_daily"
+            if und_cliffs:
+                result["underlying_split_suspect"] = True
+                result["underlying_split_cliff_dates"] = [
+                    str(c["date"]) for c in und_cliffs[:4]
+                ]
             out[sym_u] = result
     return out
 
@@ -484,6 +514,7 @@ def load_realized_pair_gross_20d_from_metrics(
     corp_actions_path: Path | None = None,
     beta_by_symbol: dict[str, float] | None = None,
     borrow_by_symbol: dict[str, float] | None = None,
+    underlying_by_symbol: dict[str, str] | None = None,
     min_obs: int = 2,
 ) -> dict[str, dict[str, Any]]:
     """Build per-symbol 20d gross pair decay from joint ETF metrics rows."""
@@ -522,14 +553,25 @@ def load_realized_pair_gross_20d_from_metrics(
         if not math.isfinite(float(beta)):
             continue
         borrow = (borrow_by_symbol or {}).get(sym_u)
-        events = parse_split_events_from_corp(corp_payload, sym_u)
+        und_sym = str((underlying_by_symbol or {}).get(sym_u) or "").strip().upper()
+        etf_events = parse_split_events_from_corp(corp_payload, sym_u)
+        und_events = parse_split_events_from_corp(corp_payload, und_sym) if und_sym else []
+        und_cliff_rows = [
+            {"date": r.get("date"), "underlying_adj_close": r.get("underlying_adj_close")}
+            for r in joint
+        ]
+        und_cliffs = find_underlying_adj_cliffs(und_cliff_rows, und_events) if und_sym else []
         result = compute_realized_pair_gross_20d(
             joint,
             float(beta),
-            events,
+            etf_events,
+            underlying_split_events=und_events,
             borrow_annual=borrow,
             min_obs=min_obs,
         )
         if result:
+            if und_cliffs:
+                result["underlying_split_suspect"] = True
+                result["suppressed"] = True
             out[sym_u] = result
     return out

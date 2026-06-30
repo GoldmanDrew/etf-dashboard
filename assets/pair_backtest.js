@@ -474,13 +474,16 @@
     const distByDate = buildDistributionByDate(opts && opts.distributions);
     const PB = globalObj.PriceBasis;
     const splitEvents = Array.isArray(opts && opts.splitEvents) ? opts.splitEvents : [];
+    const underlyingSplitEvents = Array.isArray(opts && opts.underlyingSplitEvents)
+      ? opts.underlyingSplitEvents
+      : [];
     let trByDate = null;
     if (
-      splitEvents.length > 0
+      (splitEvents.length > 0 || underlyingSplitEvents.length > 0)
       && PB
       && typeof PB.buildTrSeriesFromMetrics === "function"
     ) {
-      const trRows = PB.buildTrSeriesFromMetrics(rows, splitEvents);
+      const trRows = PB.buildTrSeriesFromMetrics(rows, splitEvents, underlyingSplitEvents);
       if (trRows.length) trByDate = new Map(trRows.map((r) => [r.date, r]));
     }
 
@@ -710,7 +713,19 @@
     return { symbol: sym, flowDollars };
   }
 
+  function resolveSplitEventPair(splitEvents) {
+    if (Array.isArray(splitEvents)) return { etf: splitEvents, und: [] };
+    if (splitEvents && typeof splitEvents === "object") {
+      return {
+        etf: Array.isArray(splitEvents.etf) ? splitEvents.etf : [],
+        und: Array.isArray(splitEvents.und) ? splitEvents.und : [],
+      };
+    }
+    return { etf: [], und: [] };
+  }
+
   function prepareShortFlowPoints(rows, splitEvents) {
+    const { etf: etfSplitEvents, und: undSplitEvents } = resolveSplitEventPair(splitEvents);
     const sourceRows = Array.isArray(rows) ? rows : [];
     let pts = [];
     let hasPreparedTr = false;
@@ -739,12 +754,11 @@
     if (
       pts.length
       && !hasPreparedTr
-      && Array.isArray(splitEvents)
-      && splitEvents.length > 0
+      && (etfSplitEvents.length > 0 || undSplitEvents.length > 0)
       && PB
       && typeof PB.buildTrSeriesFromMetrics === "function"
     ) {
-      const trRows = PB.buildTrSeriesFromMetrics(sourceRows, splitEvents);
+      const trRows = PB.buildTrSeriesFromMetrics(sourceRows, etfSplitEvents, undSplitEvents);
       const trByDate = new Map(trRows.map((r) => [r.date, r]));
       pts = pts.map((p) => {
         const tr = trByDate.get(p.date);

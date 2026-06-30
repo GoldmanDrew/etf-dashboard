@@ -108,12 +108,13 @@
     return String(a || "").localeCompare(String(b || ""));
   }
 
-  function prepareDecayTrRows(rows, splitEvents) {
+  function prepareDecayTrRows(rows, etfSplitEvents, undSplitEvents) {
     if (PB && typeof PB.buildTrSeriesFromMetrics === "function") {
       const usable = latestContiguousRows(
         (Array.isArray(rows) ? rows : []).filter(hasUsableMetricPrices),
       );
-      return PB.buildTrSeriesFromMetrics(usable, splitEvents).map((r) => ({
+      const undEv = Array.isArray(undSplitEvents) ? undSplitEvents : [];
+      return PB.buildTrSeriesFromMetrics(usable, etfSplitEvents, undEv).map((r) => ({
         date: r.date,
         trEtfPx: r.trEtfPx,
         trUndPx: r.trUndPx,
@@ -123,12 +124,13 @@
     return [];
   }
 
-  function summarizeTrCoverage(rows, splitEvents) {
+  function summarizeTrCoverage(rows, etfSplitEvents, undSplitEvents) {
     if (PB && typeof PB.summarizeTrCoverage === "function") {
       const usable = latestContiguousRows(
         (Array.isArray(rows) ? rows : []).filter(hasUsableMetricPrices),
       );
-      return PB.summarizeTrCoverage(usable, splitEvents);
+      const undEv = Array.isArray(undSplitEvents) ? undSplitEvents : [];
+      return PB.summarizeTrCoverage(usable, etfSplitEvents, undEv);
     }
     return null;
   }
@@ -136,6 +138,13 @@
   function parseSplitEventsFromCorp(corpPayload, ticker) {
     if (PB && PB.parseSplitEventsFromCorp) return PB.parseSplitEventsFromCorp(corpPayload, ticker);
     return [];
+  }
+
+  function parseDecaySplitEvents(corpPayload, etfSym, undSym) {
+    const etf = parseSplitEventsFromCorp(corpPayload, etfSym);
+    const undTicker = String(undSym || "").trim().toUpperCase();
+    const und = undTicker ? parseSplitEventsFromCorp(corpPayload, undTicker) : [];
+    return { etf, und };
   }
 
   function etfTrPrice(row, splitEvents) {
@@ -293,6 +302,7 @@
     MAX_CONTIGUOUS_METRICS_GAP_DAYS,
     HARD_LIFECYCLE_GAP_DAYS,
     parseSplitEventsFromCorp,
+    parseDecaySplitEvents,
     prepareDecayTrRows,
     latestContiguousRows,
     hasUsableMetricPrices,

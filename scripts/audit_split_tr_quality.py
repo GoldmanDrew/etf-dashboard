@@ -17,6 +17,7 @@ if str(_SCRIPTS) not in sys.path:
 
 from price_basis import (  # noqa: E402
     build_tr_series_from_metrics,
+    find_underlying_adj_cliffs,
     max_abs_log_return,
     parse_split_events_from_corp,
     resolve_split_context,
@@ -237,6 +238,48 @@ def audit_ticker(
     return failures
 
 
+def audit_underlying_cliffs(
+    etf_sym: str,
+    und_sym: str,
+    rows: list[dict],
+    corp_payload: dict,
+) -> list[str]:
+    """Flag split-sized underlying_adj_close cliffs without declared underlying split."""
+    failures: list[str] = []
+    if not rows or not und_sym:
+        return failures
+    und_events = parse_split_events_from_corp(corp_payload, und_sym)
+    cliff_rows = [
+        {"date": r.get("date"), "underlying_adj_close": r.get("underlying_adj_close")}
+        for r in rows
+    ]
+    cliffs = find_underlying_adj_cliffs(cliff_rows, und_events)
+    for cliff in cliffs[:2]:
+        failures.append(
+            f"{etf_sym}/{und_sym}: unexplained underlying_adj_close cliff on "
+            f"{cliff['date']} (x{cliff['factor']:.2f}; no {und_sym} split metadata)"
+        )
+    return failures
+
+
+def _load_etf_underlying_map() -> dict[str, str]:
+    csv_path = REPO / "data" / "etf_screened_today.csv"
+    if not csv_path.exists():
+        return {}
+    df = pd.read_csv(csv_path)
+    sym_col = "ETF" if "ETF" in df.columns else "ticker"
+    und_col = "Underlying" if "Underlying" in df.columns else "underlying"
+    if sym_col not in df.columns or und_col not in df.columns:
+        return {}
+    out: dict[str, str] = {}
+    for _, row in df.iterrows():
+        sym = str(row.get(sym_col) or "").strip().upper()
+        und = str(row.get(und_col) or "").strip().upper()
+        if sym and und and und != "NAN":
+            out[sym] = und
+    return out
+
+
 def _bucket_by_ticker(payload: dict) -> dict[str, str]:
     out: dict[str, str] = {}
     for ev in payload.get("events") or []:
@@ -262,6 +305,11 @@ def main() -> int:
         "--strict-bucket-1",
         action="store_true",
         help="Exit 1 only when bucket_1_high_delta tickers fail; other failures warn.",
+    )
+    parser.add_argument(
+        "--audit-underlying-cliffs",
+        action="store_true",
+        help="Also scan joint metrics for unexplained underlying_adj_close cliffs.",
     )
     args = parser.parse_args()
 
@@ -307,15 +355,38 @@ def main() -> int:
             )
         )
 
+    if args.audit_underlying_cliffs:
+        etf_und = _load_etf_underlying_map()
+        scanned = wanted or set(etf_und.keys())
+        for sym in sorted(scanned):
+            und = etf_und.get(sym)
+            if not und:
+                continue
+            sub = df[df["ticker"] == sym].sort_values("date")
+            if sub.empty:
+                continue
+            all_failures.extend(
+                audit_underlying_cliffs(
+                    sym,
+                    und,
+                    sub.to_dict("records"),
+                    payload,
+                )
+            )
+
     if all_failures:
         print("Split TR quality failures:")
         for msg in all_failures:
             print(f"  - {msg}")
         if args.strict_bucket_1:
+            def _etf_from_failure(msg: str) -> str:
+                head = msg.split(":", 1)[0].strip()
+                return head.split("/", 1)[0].strip()
+
             blocking = [
                 msg
                 for msg in all_failures
-                if bucket_by_ticker.get(msg.split(":", 1)[0].strip()) == "bucket_1_high_delta"
+                if bucket_by_ticker.get(_etf_from_failure(msg)) == "bucket_1_high_delta"
             ]
             if blocking:
                 print(f"\nBlocking ({len(blocking)} bucket_1_high_delta failure(s))")

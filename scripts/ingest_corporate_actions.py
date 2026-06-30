@@ -244,6 +244,7 @@ class CorporateEvent:
     headline: str | None = None
     summary: str | None = None
     prior_ticker: str | None = None
+    linked_etfs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -687,6 +688,17 @@ def _bulk_paginate(
 # Phase 1 - splits (forward + reverse), bulk
 # ---------------------------------------------------------------------------
 
+def _etfs_by_underlying(underlying_map: dict[str, str | None]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for etf, und in underlying_map.items():
+        u = _norm(und) if und is not None and not pd.isna(und) else ""
+        if u:
+            out.setdefault(u, []).append(_norm(etf))
+    for u in out:
+        out[u] = sorted(set(out[u]))
+    return out
+
+
 def phase_1_splits(
     session: requests.Session,
     tickers: list[str],
@@ -696,7 +708,10 @@ def phase_1_splits(
     """Fetch the market-wide split history over our lookback window in one sweep,
     then filter client-side to our universe.  On a 5-req/min plan this costs ~1-3
     calls vs ~440 calls for the per-ticker variant."""
-    universe = set(tickers)
+    etf_universe = {_norm(t) for t in tickers}
+    und_universe = _underlying_symbols_as_set(underlying_map.values())
+    universe = etf_universe | und_universe
+    etfs_by_underlying = _etfs_by_underlying(underlying_map)
     cutoff = (datetime.now(UTC) - timedelta(days=SPLITS_LOOKBACK_DAYS)).date().isoformat()
     raw = _bulk_paginate(
         session,
@@ -737,6 +752,13 @@ def phase_1_splits(
             ratio_n = split_to / split_from
             ratio_label = f"{ratio_n:g}-for-1"
         headline = f"{sym} {ratio_label} {'reverse split' if is_reverse else 'stock split'} effective {execution_date}"
+        linked = etfs_by_underlying.get(sym, []) if sym in und_universe else []
+        if sym in etf_universe:
+            bucket = bucket_map.get(sym)
+            underlying = underlying_map.get(sym)
+        else:
+            bucket = bucket_map.get(linked[0]) if linked else None
+            underlying = None
         events.append(
             CorporateEvent(
                 id=f"polygon_split:{sym}:{execution_date}",
@@ -749,13 +771,15 @@ def phase_1_splits(
                 status="executed",
                 source="polygon",
                 source_url=f"https://polygon.io/stocks/{sym}",
-                bucket=bucket_map.get(sym),
-                underlying=underlying_map.get(sym),
+                bucket=bucket,
+                underlying=underlying,
+                linked_etfs=linked,
                 headline=headline,
                 summary=(
                     f"Polygon reference feed reports a {ratio_label} "
                     f"{'reverse split (share consolidation)' if is_reverse else 'stock split'} "
                     f"for {sym} with execution date {execution_date}."
+                    + (f" Linked ETF(s): {', '.join(linked)}." if linked else "")
                 ),
             )
         )

@@ -1652,6 +1652,152 @@ def repair_fabricated_etf_adj_basis(
     return out, n_repaired
 
 
+def repair_underlying_adj_close_split_basis(
+    df: pd.DataFrame,
+    etf_to_underlying: dict[str, str],
+    *,
+    corporate_actions_path: Path | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """Scale pre-split ``underlying_adj_close`` onto the latest basis per underlying.
+
+    Yahoo sometimes serves a mixed basis (recent bars pre-split, older bars already
+    restated). Only rows clearly on the *high* pre-split segment are scaled.
+    """
+    if df.empty or "underlying_adj_close" not in df.columns or not etf_to_underlying:
+        return df, 0
+    from price_basis import find_underlying_adj_cliffs
+    from split_adjustments import match_split_to_price_jump
+
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+
+    und_to_etfs: dict[str, set[str]] = {}
+    for etf, und in etf_to_underlying.items():
+        u = _normalize_symbol(und) if und is not None and str(und).strip() else ""
+        if u:
+            und_to_etfs.setdefault(u, set()).add(_normalize_symbol(etf))
+
+    n_scaled = 0
+    for und_sym in sorted(und_to_etfs.keys()):
+        declared = load_split_execution_events_for_ticker(und_sym, corporate_actions_path)
+        etf_syms = und_to_etfs[und_sym]
+        mask = out["ticker"].isin(etf_syms)
+        if not bool(mask.any()):
+            continue
+
+        by_date: dict[date, float] = {}
+        for _, row in out.loc[mask].sort_values("date").iterrows():
+            uadj = pd.to_numeric(row.get("underlying_adj_close"), errors="coerce")
+            if math.isfinite(float(uadj)) and float(uadj) > 0:
+                by_date[row["date"]] = float(uadj)
+        cliff_rows = [
+            {"date": d, "underlying_adj_close": px}
+            for d, px in sorted(by_date.items())
+        ]
+        cliffs = find_underlying_adj_cliffs(cliff_rows, declared)
+        if cliffs and not declared:
+            LOGGER.warning(
+                "underlying_adj_close split cliff(s) for %s without corp metadata: %s",
+                und_sym,
+                ", ".join(str(c["date"]) for c in cliffs[:3]),
+            )
+            continue
+        if not declared:
+            continue
+
+        pts = sorted(by_date.items())
+        post_vals: list[float] = []
+        for eff, mult in sorted(declared):
+            boundary = eff
+            for i in range(1, len(pts)):
+                d_prev, u_prev = pts[i - 1]
+                d_cur, u_cur = pts[i]
+                if d_cur < eff:
+                    continue
+                if u_prev <= 0 or u_cur <= 0:
+                    continue
+                jump = u_cur / u_prev
+                matched = match_split_to_price_jump(jump, mult, rel_tol=0.22)
+                if matched is not None:
+                    boundary = d_cur
+                    post_vals = [u for d, u in pts if d >= boundary]
+                    break
+            if not post_vals:
+                post_vals = [u for d, u in pts if d >= eff]
+            if not post_vals:
+                continue
+            post_med = sorted(post_vals)[len(post_vals) // 2]
+            high_threshold = post_med * 2.5
+
+            for ix, row in out.loc[mask].iterrows():
+                uadj = pd.to_numeric(row.get("underlying_adj_close"), errors="coerce")
+                if not (math.isfinite(float(uadj)) and float(uadj) > 0):
+                    continue
+                if row["date"] >= boundary:
+                    continue
+                if float(uadj) < high_threshold:
+                    continue
+                factor = cum_split_factor_to_latest(row["date"], [(eff, mult)])
+                if abs(factor - 1.0) <= 1e-9:
+                    continue
+                scaled = float(uadj) * factor
+                if abs(scaled - float(uadj)) > 1e-9:
+                    out.loc[ix, "underlying_adj_close"] = scaled
+                    n_scaled += 1
+    if n_scaled > 0:
+        LOGGER.info(
+            "repaired underlying_adj_close split basis on %d row(s) across %d underlying(s)",
+            n_scaled,
+            len(und_to_etfs),
+        )
+    return out, n_scaled
+
+
+def repair_underlying_adj_close_orphan_spikes(
+    df: pd.DataFrame,
+    etf_to_underlying: dict[str, str],
+    *,
+    min_und_log_jump: float = 0.55,
+    max_etf_log_jump: float = 0.12,
+) -> tuple[pd.DataFrame, int]:
+    """Replace isolated bad ``underlying_adj_close`` prints when ETF leg is calm."""
+    if df.empty or "underlying_adj_close" not in df.columns or "close_price" not in df.columns:
+        return df, 0
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    n_fixed = 0
+    for ticker in out["ticker"].unique():
+        g = out[out["ticker"] == ticker].sort_values("date")
+        if len(g) < 3:
+            continue
+        dates = g["date"].tolist()
+        unds = pd.to_numeric(g["underlying_adj_close"], errors="coerce").tolist()
+        closes = pd.to_numeric(g["close_price"], errors="coerce").tolist()
+        for i in range(1, len(dates) - 1):
+            u0, u1, u2 = unds[i - 1], unds[i], unds[i + 1]
+            c0, c1, c2 = closes[i - 1], closes[i], closes[i + 1]
+            if not all(
+                math.isfinite(float(x)) and float(x) > 0
+                for x in (u0, u1, u2, c0, c1, c2)
+            ):
+                continue
+            lr_u = abs(math.log(float(u1) / float(u0)))
+            lr_u2 = abs(math.log(float(u2) / float(u1)))
+            lr_e = max(abs(math.log(float(c1) / float(c0))), abs(math.log(float(c2) / float(c1))))
+            if lr_u >= min_und_log_jump and lr_u2 >= min_und_log_jump and lr_e < max_etf_log_jump:
+                repaired = math.sqrt(float(u0) * float(u2))
+                ix = g.index[i]
+                if abs(repaired - float(u1)) > 1e-9:
+                    out.loc[ix, "underlying_adj_close"] = repaired
+                    unds[i] = repaired
+                    n_fixed += 1
+    if n_fixed > 0:
+        LOGGER.info("repaired orphan underlying_adj_close spike(s) on %d row(s)", n_fixed)
+    return out, n_fixed
+
+
 def yahoo_join_dates_series(dates: pd.Series, urls: pd.Series | None) -> pd.Series:
     """Yahoo session date for (ETF close, underlying close) joins vs issuer ``#as_of=`` / carry-forward.
 
@@ -2724,6 +2870,12 @@ def main() -> None:
     # Must run on full merged history: ``incoming`` is usually one trading day,
     # so an earlier backfill never saw legacy null rows in the parquet store.
     merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
+    merged, n_und_split = repair_underlying_adj_close_split_basis(merged, underlying_map)
+    if n_und_split:
+        LOGGER.info("Repaired underlying_adj_close split basis on %d row(s)", n_und_split)
+    merged, n_und_spike = repair_underlying_adj_close_orphan_spikes(merged, underlying_map)
+    if n_und_spike:
+        LOGGER.info("Repaired orphan underlying_adj_close spikes on %d row(s)", n_und_spike)
     merged = backfill_etf_adj_close_gaps(merged)
     merged, n_adj_close = backfill_etf_adj_close_from_close_gaps(merged)
     if n_adj_close:

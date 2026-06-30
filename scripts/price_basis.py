@@ -109,6 +109,82 @@ def find_fabricated_adj_cliffs(
     return cliffs
 
 
+UNDERLYING_CLIFF_MIN_LOG = math.log(1.8)
+UNDERLYING_CLIFF_EVENT_WINDOW_DAYS = 21
+UNDERLYING_CLIFF_MULT_REL_TOL = 0.25
+
+
+def find_underlying_adj_cliffs(
+    rows: list[dict[str, Any]],
+    split_events: list[tuple[dt.date, float]] | None = None,
+) -> list[dict[str, Any]]:
+    """Split-sized jumps in ``underlying_adj_close`` with no matching declared split."""
+    pts: list[tuple[dt.date, float]] = []
+    for row in rows or []:
+        ds = str(row.get("date") or "")[:10]
+        if len(ds) != 10:
+            continue
+        try:
+            d0 = dt.date.fromisoformat(ds)
+            und = float(row.get("underlying_adj_close"))
+        except (ValueError, TypeError):
+            continue
+        if math.isfinite(und) and und > 0:
+            pts.append((d0, und))
+    pts.sort()
+    if len(pts) < 2:
+        return []
+    events = [(d, float(m)) for d, m in (split_events or []) if m and float(m) > 0]
+    cliffs: list[dict[str, Any]] = []
+    for i in range(1, len(pts)):
+        d_prev, u_prev = pts[i - 1]
+        d_cur, u_cur = pts[i]
+        lr = abs(math.log(u_cur / u_prev))
+        if lr < UNDERLYING_CLIFF_MIN_LOG:
+            continue
+        factor = math.exp(lr)
+        explained = False
+        for eff, mult in events:
+            if abs((d_cur - eff).days) > UNDERLYING_CLIFF_EVENT_WINDOW_DAYS:
+                continue
+            for trial in (mult, 1.0 / mult):
+                if trial > 0:
+                    cand = trial if trial >= 1.0 else 1.0 / trial
+                    if abs(factor / cand - 1.0) <= UNDERLYING_CLIFF_MULT_REL_TOL:
+                        explained = True
+                        break
+            if explained:
+                break
+        if not explained:
+            cliffs.append({"date": d_cur, "factor": factor, "log_jump": lr})
+    return cliffs
+
+
+def underlying_tr_price_for_row(
+    row: dict[str, Any],
+    split_events: list[tuple[dt.date, float]] | None,
+) -> float:
+    """Map ``underlying_adj_close`` onto the latest split-adjusted TR basis."""
+    try:
+        und = float(row.get("underlying_adj_close"))
+    except (TypeError, ValueError):
+        return float("nan")
+    if not (math.isfinite(und) and und > 0):
+        return float("nan")
+    if not split_events:
+        return und
+    ds = str(row.get("date") or "")[:10]
+    if len(ds) != 10:
+        return und
+    try:
+        d0 = dt.date.fromisoformat(ds)
+    except ValueError:
+        return und
+    from split_adjustments import cum_split_factor_to_latest
+
+    return und * cum_split_factor_to_latest(d0, split_events)
+
+
 def sanitize_fabricated_adj_basis(
     rows: list[dict[str, Any]],
     split_events: list[tuple[dt.date, float]] | None = None,
@@ -520,8 +596,11 @@ def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | No
 def build_tr_series_from_metrics(
     rows: list[dict[str, Any]],
     split_events: list[tuple[dt.date, float]] | None = None,
+    *,
+    underlying_split_events: list[tuple[dt.date, float]] | None = None,
 ) -> list[dict[str, Any]]:
     split_events = split_events or []
+    underlying_split_events = underlying_split_events or []
     sorted_rows = sorted(
         [r for r in rows if str(r.get("date") or "")[:10]],
         key=lambda r: str(r.get("date") or ""),
@@ -549,22 +628,20 @@ def build_tr_series_from_metrics(
     out: list[dict[str, Any]] = []
     for row in sorted_rows:
         tr_etf = etf_tr_price_for_row(row, ctx)
-        try:
-            und = float(row.get("underlying_adj_close"))
-        except (TypeError, ValueError):
-            und = float("nan")
-        if tr_etf and tr_etf > 0 and und > 0:
+        tr_und = underlying_tr_price_for_row(row, underlying_split_events)
+        if tr_etf and tr_etf > 0 and tr_und > 0:
             out.append(
                 {
                     "date": str(row.get("date") or "")[:10],
                     "tr_etf_px": tr_etf,
-                    "tr_und_px": und,
+                    "tr_und_px": tr_und,
                     "trade_close": float(row.get("close_price") or row.get("nav") or 0),
                     "tr_mode": _tr_mode_for_row(row, ctx),
                 }
             )
     repaired = _repair_split_outlier_bars(out, ctx, split_events)
-    return _normalize_split_sized_basis_jumps(repaired, split_events)
+    etf_norm = _normalize_split_sized_basis_jumps(repaired, split_events)
+    return _normalize_underlying_split_sized_basis_jumps(etf_norm, underlying_split_events)
 
 
 def _known_split_multipliers(split_events: list[tuple[dt.date, float]]) -> list[float]:
@@ -659,6 +736,60 @@ def _normalize_split_sized_basis_jumps(
         if abs(px / float(out[i]["tr_etf_px"]) - 1.0) > 1e-9:
             out[i]["tr_etf_px"] = px
             out[i]["tr_mode"] = f"{out[i].get('tr_mode') or 'unknown'}{mode_suffix[i] or '|basis_jump_scaled'}"
+    return out
+
+
+def _normalize_underlying_split_sized_basis_jumps(
+    tr: list[dict[str, Any]],
+    split_events: list[tuple[dt.date, float]],
+    *,
+    max_etf_log_move: float = 0.25,
+    min_und_log_jump: float = 0.55,
+) -> list[dict[str, Any]]:
+    """Scale pre-split underlying TR segments when ETF leg is calm (mirror of ETF repair)."""
+    if len(tr) < 2:
+        return tr
+    multipliers = _known_split_multipliers(split_events)
+    if not multipliers:
+        return tr
+
+    out = [dict(row) for row in tr]
+    scale = 1.0
+    adjusted: list[float | None] = [None] * len(out)
+    adjusted[-1] = float(out[-1]["tr_und_px"])
+    mode_suffix: list[str] = [""] * len(out)
+
+    for i in range(len(out) - 2, -1, -1):
+        try:
+            prev_raw = float(out[i]["tr_und_px"])
+            cur_adj = float(adjusted[i + 1])
+            e0 = float(out[i]["tr_etf_px"])
+            e1 = float(out[i + 1]["tr_etf_px"])
+        except (TypeError, ValueError, KeyError):
+            adjusted[i] = None
+            continue
+        if min(prev_raw, cur_adj, e0, e1) <= 0:
+            adjusted[i] = prev_raw * scale if prev_raw > 0 else None
+            continue
+
+        prev_adj = prev_raw * scale
+        lr_u = math.log(prev_adj / cur_adj)
+        lr_e = abs(math.log(e1 / e0))
+        if abs(lr_u) >= min_und_log_jump and lr_e < max_etf_log_move:
+            matched = _match_known_split_jump(math.exp(abs(lr_u)), multipliers)
+            if matched is not None:
+                scale = scale / matched if lr_u > 0 else scale * matched
+                prev_adj = prev_raw * scale
+                mode_suffix[i] = f"|und_basis_jump_scaled({matched:g})"
+
+        adjusted[i] = prev_adj
+
+    for i, px in enumerate(adjusted):
+        if px is None or not math.isfinite(px) or px <= 0:
+            continue
+        if abs(px / float(out[i]["tr_und_px"]) - 1.0) > 1e-9:
+            out[i]["tr_und_px"] = px
+            out[i]["tr_mode"] = f"{out[i].get('tr_mode') or 'unknown'}{mode_suffix[i] or '|und_basis_jump_scaled'}"
     return out
 
 

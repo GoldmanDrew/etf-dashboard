@@ -750,6 +750,62 @@
     return cliffs;
   }
 
+  const UNDERLYING_CLIFF_MIN_LOG = Math.log(1.8);
+  const UNDERLYING_CLIFF_EVENT_WINDOW_DAYS = 21;
+  const UNDERLYING_CLIFF_MULT_REL_TOL = 0.25;
+
+  function findUnderlyingAdjCliffs(rows, splitEvents) {
+    const pts = (Array.isArray(rows) ? rows : [])
+      .map((row) => ({
+        date: parseDate(row && row.date),
+        und: toNum(row && row.underlying_adj_close),
+      }))
+      .filter((p) => p.date && p.und > 0)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    if (pts.length < 2) return [];
+    const events = (Array.isArray(splitEvents) ? splitEvents : [])
+      .map((ev) => ({ date: parseDate(ev && ev.date), mult: toNum(ev && ev.mult) }))
+      .filter((ev) => ev.date && ev.mult > 0);
+    const cliffs = [];
+    for (let i = 1; i < pts.length; i += 1) {
+      const lr = Math.abs(Math.log(pts[i].und / pts[i - 1].und));
+      if (lr < UNDERLYING_CLIFF_MIN_LOG) continue;
+      const factor = Math.exp(lr);
+      let explained = false;
+      for (const ev of events) {
+        if (daysBetween(pts[i].date, ev.date) > UNDERLYING_CLIFF_EVENT_WINDOW_DAYS) continue;
+        for (const trial of [ev.mult, 1 / ev.mult]) {
+          if (!(trial > 0)) continue;
+          const cand = trial >= 1 ? trial : 1 / trial;
+          if (Math.abs(factor / cand - 1) <= UNDERLYING_CLIFF_MULT_REL_TOL) {
+            explained = true;
+            break;
+          }
+        }
+        if (explained) break;
+      }
+      if (!explained) cliffs.push({ date: pts[i].date, factor, logJump: lr });
+    }
+    return cliffs;
+  }
+
+  function cumSplitFactorToLatest(rowDate, events) {
+    const d = parseDate(rowDate);
+    if (!d || !Array.isArray(events) || !events.length) return 1;
+    let mult = 1;
+    for (const ev of events) {
+      if (d < ev.date) mult *= ev.mult;
+    }
+    return mult > 0 ? mult : 1;
+  }
+
+  function underlyingTrPriceForPoint(point, splitEvents) {
+    const und = toNum(point && point.row && point.row.underlying_adj_close);
+    if (!(und > 0)) return NaN;
+    if (!Array.isArray(splitEvents) || !splitEvents.length) return und;
+    return und * cumSplitFactorToLatest(point.date, splitEvents);
+  }
+
   function repairSplitOutlierBars(tr, ctx) {
     const boundary = parseDate(ctx?.boundary);
     if (!boundary || !Array.isArray(tr) || tr.length < 3) return tr;
@@ -848,27 +904,76 @@
     return out;
   }
 
+  function normalizeUnderlyingSplitSizedBasisJumps(tr, splitEvents, maxEtfLogMove = 0.25, minUndLogJump = 0.55) {
+    if (!Array.isArray(tr) || tr.length < 2) return tr;
+    const multipliers = knownSplitMultipliers(splitEvents);
+    if (!multipliers.length) return tr;
+
+    const out = tr.map((row) => ({ ...row }));
+    const adjusted = Array(out.length).fill(null);
+    const suffix = Array(out.length).fill("");
+    let scale = 1;
+    adjusted[out.length - 1] = toNum(out[out.length - 1].trUndPx);
+
+    for (let i = out.length - 2; i >= 0; i -= 1) {
+      const prevRaw = toNum(out[i].trUndPx);
+      const curAdj = toNum(adjusted[i + 1]);
+      const e0 = toNum(out[i].trEtfPx);
+      const e1 = toNum(out[i + 1].trEtfPx);
+      if (!(prevRaw > 0 && curAdj > 0 && e0 > 0 && e1 > 0)) {
+        adjusted[i] = prevRaw > 0 ? prevRaw * scale : null;
+        continue;
+      }
+
+      let prevAdj = prevRaw * scale;
+      const lrU = Math.log(prevAdj / curAdj);
+      const lrE = Math.abs(Math.log(e1 / e0));
+      if (Math.abs(lrU) >= minUndLogJump && lrE < maxEtfLogMove) {
+        const matched = matchKnownSplitJump(Math.exp(Math.abs(lrU)), multipliers);
+        if (matched != null) {
+          scale = lrU > 0 ? scale / matched : scale * matched;
+          prevAdj = prevRaw * scale;
+          suffix[i] = `|und_basis_jump_scaled(${matched})`;
+        }
+      }
+      adjusted[i] = prevAdj;
+    }
+
+    for (let i = 0; i < out.length; i += 1) {
+      const px = toNum(adjusted[i]);
+      if (!(px > 0)) continue;
+      const oldPx = toNum(out[i].trUndPx);
+      if (oldPx > 0 && Math.abs(px / oldPx - 1) > 1e-9) {
+        out[i].trUndPx = px;
+        out[i].trMode = `${out[i].trMode || "unknown"}${suffix[i] || "|und_basis_jump_scaled"}`;
+      }
+    }
+    return out;
+  }
+
   /**
    * Build split-aware TR prices for decay, backtest, and charts.
    * @returns {Array<{date, trEtfPx, trUndPx, tradeClose, trMode, row}>}
    */
-  function buildTrSeriesFromMetrics(rows, splitEvents) {
+  function buildTrSeriesFromMetrics(rows, splitEvents, underlyingSplitEvents) {
+    const etfEvents = Array.isArray(splitEvents) ? splitEvents : [];
+    const undEvents = Array.isArray(underlyingSplitEvents) ? underlyingSplitEvents : [];
     const sorted = (Array.isArray(rows) ? rows : [])
       .filter((row) => parseDate(row && row.date))
       .sort((a, b) => parseDate(a.date).localeCompare(parseDate(b.date)));
     let points = sorted.map(metricsRowToPoint).filter((p) => p.date && p.close > 0);
     if (!points.length) return [];
-    if (findFabricatedAdjCliffs(points, splitEvents || []).length) {
+    if (findFabricatedAdjCliffs(points, etfEvents).length) {
       points = points.map((p) => ({ ...p, adj: NaN }));
     }
     const closePoints = points.map((p) => ({ date: p.date, close: p.close, adj: p.adj }));
-    const ctx = resolveSplitContext(closePoints, splitEvents || [], sorted);
+    const ctx = resolveSplitContext(closePoints, etfEvents, sorted);
     if (ctx.mode === "adj_basis_switch") {
       ctx._flatCloseTr = adjBasisSwitchUsesFlatClose(sorted, ctx);
     }
     const built = points.map((p) => {
       const trEtfPx = etfTrPriceForPoint(p, ctx);
-      const trUndPx = toNum(p.row && p.row.underlying_adj_close);
+      const trUndPx = underlyingTrPriceForPoint(p, undEvents);
       return {
         date: p.date,
         trEtfPx,
@@ -879,7 +984,10 @@
       };
     }).filter((x) => x.date && x.trEtfPx > 0 && x.trUndPx > 0);
     const repaired = repairSplitOutlierBars(built, ctx);
-    return normalizeSplitSizedBasisJumps(repaired, splitEvents || []);
+    return normalizeUnderlyingSplitSizedBasisJumps(
+      normalizeSplitSizedBasisJumps(repaired, etfEvents),
+      undEvents,
+    );
   }
 
   function maxAbsLogReturn(series, valueKey) {
@@ -922,7 +1030,9 @@
   /**
    * Coverage summary for Decay / Backtest TR badges.
    */
-  function summarizeTrCoverage(rows, splitEvents) {
+  function summarizeTrCoverage(rows, splitEvents, underlyingSplitEvents) {
+    const etfEvents = Array.isArray(splitEvents) ? splitEvents : [];
+    const undEvents = Array.isArray(underlyingSplitEvents) ? underlyingSplitEvents : [];
     const sorted = (Array.isArray(rows) ? rows : [])
       .filter((row) => parseDate(row && row.date));
     const rawInputDays = sorted.length;
@@ -938,8 +1048,8 @@
       .map(metricsRowToPoint)
       .filter((p) => p.date && p.close > 0)
       .map((p) => ({ date: p.date, close: p.close, adj: p.adj }));
-    const ctx = resolveSplitContext(closePoints, splitEvents || [], sorted);
-    const trSeries = buildTrSeriesFromMetrics(rows, splitEvents);
+    const ctx = resolveSplitContext(closePoints, etfEvents, sorted);
+    const trSeries = buildTrSeriesFromMetrics(rows, etfEvents, undEvents);
     const trJointDays = trSeries.length;
     const droppedDays = Math.max(0, bothLegDays - trJointDays);
 
@@ -1043,7 +1153,11 @@
     summarizeTrCoverage,
     metricsRowToPoint,
     normalizeSplitSizedBasisJumps,
+    normalizeUnderlyingSplitSizedBasisJumps,
     findFabricatedAdjCliffs,
+    findUnderlyingAdjCliffs,
+    underlyingTrPriceForPoint,
+    cumSplitFactorToLatest,
   };
 
   if (typeof module !== "undefined" && module.exports) {
