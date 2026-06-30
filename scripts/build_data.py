@@ -75,7 +75,11 @@ PAIR_SCENARIO_DRIFTS = (-0.50, -0.25, 0.00, 0.25, 0.50)
 UNIVERSE_REPO = os.environ.get("UNIVERSE_REPO", "GoldmanDrew/ls-algo")
 UNIVERSE_BRANCH = os.environ.get("UNIVERSE_BRANCH", "main")
 UNIVERSE_PATH = os.environ.get("UNIVERSE_PATH", "data/etf_screened_today.csv")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+# LS_ALGO_TOKEN (PAT with ls-algo read) preferred for commit-history walks; fall back to GITHUB_TOKEN.
+GITHUB_TOKEN = (
+    os.environ.get("LS_ALGO_TOKEN", "")
+    or os.environ.get("GITHUB_TOKEN", "")
+).strip()
 POLYGON_API_KEY = (
     os.environ.get("POLYGON_API_KEY", "")
     or os.environ.get("POLYGON_IO_API_KEY", "")
@@ -235,6 +239,157 @@ _BORROW_NEAR_ZERO_EPS = 1e-9
 # Keep this in sync with assets/realized_decay.js::BORROW_ACT360_FACTOR and
 # scripts/yieldboost_fof_pair_pnl.py::_BORROW_ACT360_FACTOR.
 BORROW_ACT360_FACTOR = 365.0 / 360.0
+# Refuse to overwrite borrow_history.json when median depth collapses vs the on-disk file.
+BORROW_HISTORY_MIN_MEDIAN_DAYS = int(os.environ.get("BORROW_HISTORY_MIN_MEDIAN_DAYS", "5"))
+BORROW_HISTORY_MAX_DEPTH_DROP_RATIO = float(os.environ.get("BORROW_HISTORY_MAX_DEPTH_DROP_RATIO", "0.5"))
+
+
+def _load_existing_borrow_history_payload() -> tuple[dict[str, list[dict]], dict]:
+    """Return (symbols, meta) from data/borrow_history.json when present."""
+    if not BORROW_HISTORY_FILE.exists():
+        return {}, {}
+    try:
+        with open(BORROW_HISTORY_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f) or {}
+    except Exception:
+        return {}, {}
+    symbols_raw = payload.get("symbols", {}) if isinstance(payload, dict) else {}
+    if not isinstance(symbols_raw, dict):
+        return {}, {}
+    symbols: dict[str, list[dict]] = {}
+    for sym, rows in symbols_raw.items():
+        key = norm_sym(sym)
+        if not key or not isinstance(rows, list):
+            continue
+        cleaned = [
+            {
+                "date": str(r.get("date", ""))[:10],
+                "borrow_current": r.get("borrow_current"),
+                "shares_available": r.get("shares_available"),
+            }
+            for r in rows
+            if isinstance(r, dict) and r.get("date")
+        ]
+        if cleaned:
+            symbols[key] = sorted(cleaned, key=lambda x: x["date"])
+    meta = payload.get("meta", {}) if isinstance(payload.get("meta"), dict) else {}
+    return symbols, meta
+
+
+def _borrow_history_depth_stats(symbols: dict[str, list]) -> dict[str, float | int]:
+    lens = [len(v) for v in symbols.values() if isinstance(v, list) and v]
+    if not lens:
+        return {"median_days": 0.0, "symbols": 0, "deep_30": 0, "max_days": 0}
+    return {
+        "median_days": float(np.median(lens)),
+        "symbols": len(lens),
+        "deep_30": sum(1 for n in lens if n >= 30),
+        "max_days": max(lens),
+    }
+
+
+def _seed_by_symbol_day_from_history(
+    existing: dict[str, list[dict]],
+    universe_symbols: set[str],
+) -> dict[str, dict[str, dict]]:
+    """Seed commit-walk accumulator from a prior borrow_history.json snapshot."""
+    by_symbol_day: dict[str, dict[str, dict]] = {
+        norm_sym(s): {} for s in universe_symbols if str(s).strip()
+    }
+    for sym, rows in (existing or {}).items():
+        key = norm_sym(sym)
+        if key not in by_symbol_day:
+            continue
+        for row in rows or []:
+            day = str(row.get("date", ""))[:10]
+            if not day:
+                continue
+            by_symbol_day[key][day] = {
+                "date": day,
+                "borrow_current": row.get("borrow_current"),
+                "shares_available": row.get("shares_available"),
+                "_commit_ts": "",
+                "_sha": "existing_file",
+            }
+    return by_symbol_day
+
+
+def _merge_borrow_history_symbols(
+    rebuilt: dict[str, list[dict]],
+    existing: dict[str, list[dict]],
+    universe_symbols: set[str],
+) -> dict[str, list[dict]]:
+    """Merge rebuilt git-walk rows with on-disk history; rebuilt wins on same day."""
+    out: dict[str, list[dict]] = {}
+    for sym in universe_symbols:
+        key = norm_sym(sym)
+        by_day: dict[str, dict] = {}
+        for row in existing.get(key, []) or []:
+            day = str(row.get("date", ""))[:10]
+            if day:
+                by_day[day] = dict(row)
+        for row in rebuilt.get(key, []) or []:
+            day = str(row.get("date", ""))[:10]
+            if day:
+                by_day[day] = dict(row)
+        if by_day:
+            out[key] = sorted(by_day.values(), key=lambda x: str(x.get("date", "")))
+    return out
+
+
+def _assert_borrow_history_not_regressed(
+    prior: dict[str, list],
+    new: dict[str, list],
+    *,
+    context: str,
+) -> None:
+    prior_stats = _borrow_history_depth_stats(prior)
+    new_stats = _borrow_history_depth_stats(new)
+    if prior_stats["median_days"] < BORROW_HISTORY_MIN_MEDIAN_DAYS:
+        return
+    if new_stats["median_days"] >= prior_stats["median_days"] * BORROW_HISTORY_MAX_DEPTH_DROP_RATIO:
+        return
+    raise RuntimeError(
+        f"Borrow history depth regression blocked ({context}): "
+        f"median {prior_stats['median_days']:.1f} -> {new_stats['median_days']:.1f} days, "
+        f"deep_30 {prior_stats['deep_30']} -> {new_stats['deep_30']}"
+    )
+
+
+def _write_borrow_history_payload(payload: dict, *, context: str) -> None:
+    """Write borrow_history.json with depth-regression guard."""
+    prior_symbols, _ = _load_existing_borrow_history_payload()
+    new_symbols = payload.get("symbols", {}) if isinstance(payload, dict) else {}
+    if isinstance(new_symbols, dict) and prior_symbols:
+        _assert_borrow_history_not_regressed(prior_symbols, new_symbols, context=context)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=None, separators=(",", ":"))
+
+
+def _borrow_stats_from_history_rows(hist_rows: list[dict]) -> dict[str, float | int | None]:
+    hist_borrows = [
+        float(x["borrow_current"])
+        for x in hist_rows
+        if _borrow_history_point_for_avg(x)
+    ]
+    borrow_avg_annual = round(float(np.mean(hist_borrows)), 6) if hist_borrows else None
+    last60 = hist_borrows[-60:] if hist_borrows else []
+    borrow_median_60d = round(float(np.median(last60)), 6) if last60 else None
+    sigma_b_annual = None
+    borrow_dispersion_type = "none"
+    if len(last60) >= 5:
+        q = np.subtract(*np.percentile(last60, [75, 25]))
+        if q > 0 and np.isfinite(q):
+            sigma_b_annual = round(float(q / 1.35), 6)
+            borrow_dispersion_type = "iqr_over_1_35"
+    return {
+        "borrow_avg_annual": borrow_avg_annual,
+        "borrow_median_60d": borrow_median_60d,
+        "borrow_history_points_used": len(hist_borrows) if hist_borrows else 0,
+        "sigma_b_annual": sigma_b_annual,
+        "borrow_dispersion_type": borrow_dispersion_type,
+    }
 
 
 def _borrow_history_point_for_avg(row: dict) -> bool:
@@ -662,13 +817,23 @@ def build_borrow_history_from_commits(universe_symbols: set[str]) -> dict:
     """
     print("Building historical borrow/shares database from screener history ...")
     symbols = {norm_sym(s) for s in universe_symbols if str(s).strip()}
-    by_symbol_day: dict[str, dict[str, dict]] = {s: {} for s in symbols}
+    existing_symbols, existing_meta = _load_existing_borrow_history_payload()
+    by_symbol_day = _seed_by_symbol_day_from_history(existing_symbols, symbols)
+    commit_fetch_error: str | None = None
+    commits: list[dict] = []
 
     try:
         commits = fetch_universe_commits()
     except Exception as e:
+        commit_fetch_error = str(e)
         print(f"  Warning: could not fetch commit history for borrow DB: {e}")
-        return {"symbols": {}, "meta": {"error": str(e)}}
+        if existing_symbols:
+            print(
+                f"  Using existing borrow_history.json as base "
+                f"(median {_borrow_history_depth_stats(existing_symbols)['median_days']:.0f} days)"
+            )
+        else:
+            return {"symbols": {}, "meta": {"error": commit_fetch_error}}
 
     print(f"  Commit snapshots discovered: {len(commits)}")
     processed = 0
@@ -780,6 +945,15 @@ def build_borrow_history_from_commits(universe_symbols: set[str]) -> dict:
         "symbols_with_history": sum(1 for v in cleaned_symbols.values() if v),
         "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
     }
+    if commit_fetch_error:
+        meta["error"] = commit_fetch_error
+        meta["fallback"] = "existing_file" if existing_symbols else "none"
+    elif existing_symbols:
+        meta["seeded_from_existing_file"] = True
+        meta["existing_median_days"] = _borrow_history_depth_stats(existing_symbols)["median_days"]
+    depth = _borrow_history_depth_stats(cleaned_symbols)
+    meta["median_history_days"] = depth["median_days"]
+    meta["symbols_deep_30d"] = depth["deep_30"]
     return {"symbols": cleaned_symbols, "meta": meta}
 
 
@@ -4192,23 +4366,91 @@ def refresh_borrow_only() -> None:
             "shares_available": int(sh) if sh is not None else None,
         }
         hist_symbols[sym] = sorted(by_day.values(), key=lambda x: str(x.get("date", "")))
+        stats = _borrow_stats_from_history_rows(hist_symbols[sym])
+        rec["borrow_avg_annual"] = stats["borrow_avg_annual"]
+        rec["borrow_median_60d"] = stats["borrow_median_60d"]
+        rec["borrow_history_points_used"] = stats["borrow_history_points_used"]
+        if stats["sigma_b_annual"] is not None:
+            rec["sigma_b_annual"] = stats["sigma_b_annual"]
+            rec["borrow_dispersion_type"] = stats["borrow_dispersion_type"]
+        _normalize_borrow_fields(rec)
+
     hist_payload["symbols"] = hist_symbols
+    depth = _borrow_history_depth_stats(hist_symbols)
     hist_payload["meta"] = {
         **(hist_payload.get("meta", {}) if isinstance(hist_payload, dict) else {}),
         "build_time": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         "refresh_type": "borrow_only",
+        "median_history_days": depth["median_days"],
+        "symbols_deep_30d": depth["deep_30"],
     }
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=None, separators=(",", ":"))
-    with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(hist_payload, f, indent=None, separators=(",", ":"))
+    _write_borrow_history_payload(hist_payload, context="borrow_only")
 
     print(f"[OK] Borrow-only refresh wrote {OUTPUT_FILE}")
     print(f"[OK] Borrow-only refresh wrote {BORROW_HISTORY_FILE}")
     print(f"  Updated from IBKR FTP: {updated}/{len(records)} symbols")
     print(f"  Updated from latest CSV fallback: {updated_csv}/{len(records)} symbols")
+
+
+def rebuild_borrow_stats_from_history() -> None:
+    """Recompute dashboard borrow fields + spike risk from data/borrow_history.json."""
+    if not OUTPUT_FILE.exists():
+        raise FileNotFoundError(f"Missing {OUTPUT_FILE}; run a full build first.")
+    if not BORROW_HISTORY_FILE.exists():
+        raise FileNotFoundError(f"Missing {BORROW_HISTORY_FILE}")
+
+    hist_symbols, hist_meta = _load_existing_borrow_history_payload()
+    if not hist_symbols:
+        raise RuntimeError(f"{BORROW_HISTORY_FILE} has no symbol history")
+
+    with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+        output = json.load(f)
+    records = output.get("records", [])
+    if not isinstance(records, list):
+        raise ValueError("dashboard_data.json is malformed: missing records list")
+
+    for rec in records:
+        sym = norm_sym(rec.get("symbol", ""))
+        if not sym:
+            continue
+        hist_rows = hist_symbols.get(sym, [])
+        stats = _borrow_stats_from_history_rows(hist_rows)
+        rec["borrow_avg_annual"] = stats["borrow_avg_annual"]
+        rec["borrow_median_60d"] = stats["borrow_median_60d"]
+        rec["borrow_history_points_used"] = stats["borrow_history_points_used"]
+        if stats["sigma_b_annual"] is not None:
+            rec["sigma_b_annual"] = stats["sigma_b_annual"]
+            rec["borrow_dispersion_type"] = stats["borrow_dispersion_type"]
+        _normalize_borrow_fields(rec)
+
+    output["summary"] = _calc_summary(records)
+    output["build_time"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+    output["refresh_type"] = "borrow_restore_stats"
+    today_utc = dt.datetime.now(dt.UTC).date().isoformat()
+
+    borrow_spike_risk = build_borrow_spike_risk_payload(hist_symbols, today_utc)
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=None, separators=(",", ":"))
+    with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
+        json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
+    _bp = write_borrow_spike_predictions_snapshot(
+        borrow_spike_risk, pred_dir=BORROW_SPIKE_PREDICTIONS_DIR, as_of_date=today_utc,
+    )
+
+    depth = _borrow_history_depth_stats(hist_symbols)
+    print(f"[OK] Rebuilt borrow stats from history ({depth['median_days']:.0f}d median, {depth['deep_30']} deep_30)")
+    print(f"[OK] Wrote {OUTPUT_FILE}")
+    print(f"[OK] Wrote {BORROW_SPIKE_RISK_FILE}")
+    if _bp:
+        print(f"[OK] Borrow spike predictions snapshot -> {_bp}")
+    if hist_meta.get("error"):
+        print(f"  Note: borrow_history meta.error={hist_meta.get('error')}")
 
 
 def refresh_options_only() -> None:
@@ -4483,10 +4725,16 @@ def build():
         for _, r in df.iterrows()
         if pd.notna(r.get("Delta"))
     }
+    underlying_by_symbol = {
+        norm_sym(str(r["symbol"])): norm_sym(str(r["Underlying"]))
+        for _, r in df.iterrows()
+        if pd.notna(r.get("Underlying")) and str(r.get("Underlying") or "").strip()
+    }
     gross_decay_by_symbol = load_gross_decay_from_metrics(
         ETF_METRICS_PARQUET_FILE,
         universe_symbols,
         beta_by_symbol=beta_by_symbol,
+        underlying_by_symbol=underlying_by_symbol,
     )
     print(
         f"Gross decay from etf_metrics_daily (split-aware TR): "
@@ -4510,6 +4758,7 @@ def build():
         universe_symbols,
         beta_by_symbol=beta_by_symbol,
         borrow_by_symbol=borrow_by_symbol,
+        underlying_by_symbol=underlying_by_symbol,
     )
     print(
         f"Realized pair gross 20d from etf_metrics_daily: "
@@ -4679,21 +4928,12 @@ def build():
             }
         hist_rows = sorted(by_day.values(), key=lambda x: x["date"])
         borrow_history_symbols[sym] = hist_rows
-        hist_borrows = [
-            float(x["borrow_current"])
-            for x in hist_rows
-            if _borrow_history_point_for_avg(x)
-        ]
-        borrow_avg_annual = round(float(np.mean(hist_borrows)), 6) if hist_borrows else None
-        last60 = hist_borrows[-60:] if len(hist_borrows) > 0 else []
-        borrow_median_60d = round(float(np.median(last60)), 6) if last60 else None
-        sigma_b_annual = None
-        borrow_dispersion_type = "none"
-        if len(last60) >= 5:
-            q = np.subtract(*np.percentile(last60, [75, 25]))
-            if q > 0 and np.isfinite(q):
-                sigma_b_annual = round(float(q / 1.35), 6)
-                borrow_dispersion_type = "iqr_over_1_35"
+        bstats = _borrow_stats_from_history_rows(hist_rows)
+        borrow_avg_annual = bstats["borrow_avg_annual"]
+        borrow_median_60d = bstats["borrow_median_60d"]
+        sigma_b_annual = bstats["sigma_b_annual"]
+        borrow_dispersion_type = bstats["borrow_dispersion_type"]
+        borrow_history_points_used = bstats["borrow_history_points_used"]
 
         if gross_decay is not None:
             decay_count += 1
@@ -4956,7 +5196,7 @@ def build():
             "copula_note": (str(rdict["copula_note"]).strip() if rdict.get("copula_note") and str(rdict.get("copula_note") or "").strip() not in ("", "nan") else None),
             "copula_type": (str(rdict["copula_type"]).strip() if rdict.get("copula_type") and str(rdict.get("copula_type") or "").strip() not in ("", "nan") else None),
             "borrow_weight_halflife_days": _safe_float(rdict, "borrow_weight_halflife_days"),
-            "borrow_history_points_used": _safe_float(rdict, "borrow_history_points_used"),
+            "borrow_history_points_used": borrow_history_points_used,
             "borrow_resample_mode": (
                 str(rdict["borrow_resample_mode"]).strip()
                 if rdict.get("borrow_resample_mode")
@@ -4978,14 +5218,26 @@ def build():
         if _gd and _gd.get("gross_decay_annual") is not None:
             metrics_gross = float(_gd["gross_decay_annual"])
             screener_gross = _safe_float(rdict, "blended_gross_decay")
-            if (
-                screener_gross is not None
-                and metrics_gross > 1.5
-                and screener_gross < metrics_gross * 0.45
-            ):
+            split_suspect = bool(_gd.get("underlying_split_suspect"))
+            use_screener = False
+            if screener_gross is not None:
+                if split_suspect:
+                    use_screener = True
+                elif metrics_gross > 1.5 and screener_gross < metrics_gross * 0.45:
+                    use_screener = True
+                elif metrics_gross < -0.5 and screener_gross > metrics_gross * 0.45:
+                    use_screener = True
+                elif (
+                    metrics_gross * screener_gross < 0
+                    and abs(metrics_gross - screener_gross) > 0.5
+                ):
+                    use_screener = True
+            if use_screener and screener_gross is not None:
                 rec["gross_decay_annual"] = screener_gross
                 rec["gross_decay_annual_source"] = "screener_fallback"
                 rec["gross_decay_n_obs"] = _gd.get("n_obs")
+                if split_suspect:
+                    rec["gross_decay_split_suspect"] = True
             else:
                 rec["gross_decay_annual"] = metrics_gross
                 rec["gross_decay_annual_source"] = "etf_metrics_daily"
@@ -4998,10 +5250,12 @@ def build():
                     6,
                 )
         _rp20 = realized_pair_gross_20d_by_symbol.get(norm_sym(sym))
-        if _rp20:
+        if _rp20 and not _rp20.get("suppressed"):
             for _k, _v in _rp20.items():
-                if _k != "n_days" and _v is not None:
+                if _k not in ("n_days", "suppressed", "underlying_split_suspect") and _v is not None:
                     rec[_k] = _v
+        elif _rp20 and _rp20.get("underlying_split_suspect"):
+            rec["realized_pair_gross_20d_split_suspect"] = True
         quality_flags: list[str] = []
         if rec.get("realized_pair_gross_20d_sufficient") is False:
             quality_flags.append("partial_realized_pair_20d")
@@ -5424,8 +5678,7 @@ def build():
         json.dump(output, f, indent=None, separators=(",", ":"))
     with open(VOL_SHAPE_HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(vol_shape_history_payload, f, indent=None, separators=(",", ":"))
-    with open(BORROW_HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(borrow_history, f, indent=None, separators=(",", ":"))
+    _write_borrow_history_payload(borrow_history, context="full_build")
     with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
         json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
     _bp = write_borrow_spike_predictions_snapshot(
@@ -5479,13 +5732,28 @@ if __name__ == "__main__":
         action="store_true",
         help="Refresh YieldBOOST sleeve options slice + vrp_live.json + vrp_health.json",
     )
+    parser.add_argument(
+        "--borrow-restore-stats",
+        action="store_true",
+        help="Recompute dashboard borrow avg/median + spike risk from data/borrow_history.json",
+    )
     args = parser.parse_args()
 
-    modes = sum([args.borrow_only, args.options_only, args.yieldboost_vrp_only])
+    modes = sum([
+        args.borrow_only,
+        args.options_only,
+        args.yieldboost_vrp_only,
+        args.borrow_restore_stats,
+    ])
     if modes > 1:
-        raise SystemExit("Use only one of --borrow-only, --options-only, --yieldboost-vrp-only.")
+        raise SystemExit(
+            "Use only one of --borrow-only, --borrow-restore-stats, "
+            "--options-only, --yieldboost-vrp-only."
+        )
     if args.borrow_only:
         refresh_borrow_only()
+    elif args.borrow_restore_stats:
+        rebuild_borrow_stats_from_history()
     elif args.options_only:
         refresh_options_only()
     elif args.yieldboost_vrp_only:

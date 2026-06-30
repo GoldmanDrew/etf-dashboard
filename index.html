@@ -1573,6 +1573,7 @@ const NAV_FORECAST_METRICS_URL = "data/nav_forecasts/_metrics_daily.json";
 const NAV_FORECAST_HISTORY_URL = "data/nav_forecasts/_history_panel.json";
 let BORROW_HISTORY_CACHE = null;
 let BORROW_HISTORY_BUILD_TIME = null;
+let BORROW_HISTORY_META = null;
 let BORROW_SPIKE_RISK_CACHE = null;
 /** @type {{ bySymbol: Record<string, object[]>, buildTime: string|null }|null} */
 let ETF_METRICS_CACHE = null;
@@ -1961,7 +1962,24 @@ async function loadBorrowHistoryCache() {
   const symbols = payload?.symbols && typeof payload.symbols === 'object' ? payload.symbols : {};
   BORROW_HISTORY_CACHE = symbols;
   BORROW_HISTORY_BUILD_TIME = payload?.meta?.build_time || null;
+  BORROW_HISTORY_META = payload?.meta && typeof payload.meta === 'object' ? payload.meta : null;
   return BORROW_HISTORY_CACHE;
+}
+
+function borrowHistoryHealthWarning(meta, seriesLen) {
+  const m = meta && typeof meta === 'object' ? meta : {};
+  const parts = [];
+  if (m.error) {
+    parts.push(`History rebuild issue: ${String(m.error)}`);
+    if (m.fallback === 'existing_file') parts.push('Showing last good on-disk snapshot.');
+  }
+  const median = Number(m.median_history_days);
+  if (Number.isFinite(median) && median > 0 && median < 5) {
+    parts.push(`Median depth ${median.toFixed(1)} days — charts may be spot-only.`);
+  } else if (Number.isFinite(seriesLen) && seriesLen > 0 && seriesLen <= 2 && !m.error) {
+    parts.push(`Only ${seriesLen} day(s) of borrow history on file — trailing avg equals spot.`);
+  }
+  return parts.length ? parts.join(' ') : null;
 }
 
 /** Prefer CI-built history JSON; fall back to client recompute from metrics rows. */
@@ -5612,7 +5630,7 @@ function buildTotalReturnShortFlowSeries(rawRows, distributions) {
   });
 }
 
-function prepareSplitAwareShortFlowSeries(rawRows, distributions, splitEvents) {
+function prepareSplitAwareShortFlowSeries(rawRows, distributions, splitEvents, underlyingSplitEvents) {
   const withNavTr = buildTotalReturnShortFlowSeries(rawRows, distributions);
   const PB = window.PriceBasis;
   if (!withNavTr.length || !PB || typeof PB.buildTrSeriesFromMetrics !== 'function') return withNavTr;
@@ -5620,7 +5638,8 @@ function prepareSplitAwareShortFlowSeries(rawRows, distributions, splitEvents) {
     const und = Number(row?.underlying_adj_close);
     return Number.isFinite(und) && und > 0 ? row : { ...row, underlying_adj_close: 1 };
   });
-  const trRows = PB.buildTrSeriesFromMetrics(trInputRows, Array.isArray(splitEvents) ? splitEvents : []);
+  const undEv = Array.isArray(underlyingSplitEvents) ? underlyingSplitEvents : [];
+  const trRows = PB.buildTrSeriesFromMetrics(trInputRows, Array.isArray(splitEvents) ? splitEvents : [], undEv);
   const trByDate = new Map(trRows.map((row) => [String(row?.date || '').slice(0, 10), row]));
   return withNavTr.map((row) => {
     const ds = String(row?.date || '').slice(0, 10);
@@ -7357,12 +7376,18 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, etfSym)
       : []
   ), [corpActionsPayload, etfSym]);
+  const undSym = String(r?.underlying || '').toUpperCase();
+  const undSplitEvents = useMemo(() => (
+    undSym && typeof RealizedDecayFns.parseSplitEventsFromCorp === 'function'
+      ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, undSym)
+      : []
+  ), [corpActionsPayload, undSym]);
   const etfMetricsSeries = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     const withNavTr = buildTotalReturnMetricsSeries(raw, etfDistributionsSeries);
     const PB = window.PriceBasis;
     if (PB && typeof PB.buildTrSeriesFromMetrics === 'function') {
-      const tr = PB.buildTrSeriesFromMetrics(withNavTr, etfSplitEvents);
+      const tr = PB.buildTrSeriesFromMetrics(withNavTr, etfSplitEvents, undSplitEvents);
       const trByDate = new Map(tr.map((row) => [String(row.date || '').slice(0, 10), row.trEtfPx]));
       return withNavTr.map((row) => {
         const ds = String(row?.date || '').slice(0, 10);
@@ -7371,7 +7396,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       });
     }
     return withNavTr;
-  }, [etfMetricsMap, etfSym, etfDistributionsSeries, etfSplitEvents]);
+  }, [etfMetricsMap, etfSym, etfDistributionsSeries, etfSplitEvents, undSplitEvents]);
   const etfMetricsChartSeries = useMemo(() => (
     etfMetricsSeries.map((m) => {
       const nav = Number(m.nav);
@@ -7396,20 +7421,21 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return Number.isFinite(b) ? b : NaN;
   }, [r]);
   const decaySplitEvents = etfSplitEvents;
+  const decayUndSplitEvents = undSplitEvents;
   const decayTrInputRows = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     const withNavTr = buildTotalReturnBacktestSeries(raw, etfDistributionsSeries);
     return typeof RealizedDecayFns.prepareDecayTrRows === 'function'
-      ? RealizedDecayFns.prepareDecayTrRows(withNavTr, decaySplitEvents)
+      ? RealizedDecayFns.prepareDecayTrRows(withNavTr, decaySplitEvents, decayUndSplitEvents)
       : [];
-  }, [etfMetricsMap, etfSym, etfDistributionsSeries, decaySplitEvents]);
+  }, [etfMetricsMap, etfSym, etfDistributionsSeries, decaySplitEvents, decayUndSplitEvents]);
   const decayTrCoverage = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     const withNavTr = buildTotalReturnBacktestSeries(raw, etfDistributionsSeries);
     return typeof RealizedDecayFns.summarizeTrCoverage === 'function'
-      ? RealizedDecayFns.summarizeTrCoverage(withNavTr, decaySplitEvents)
+      ? RealizedDecayFns.summarizeTrCoverage(withNavTr, decaySplitEvents, decayUndSplitEvents)
       : null;
-  }, [etfMetricsMap, etfSym, etfDistributionsSeries, decaySplitEvents]);
+  }, [etfMetricsMap, etfSym, etfDistributionsSeries, decaySplitEvents, decayUndSplitEvents]);
   const realizedDailyDragSeries = useMemo(() => (
     typeof RealizedDecayFns.buildDailyLogDragSeries === 'function'
       ? RealizedDecayFns.buildDailyLogDragSeries(decayTrInputRows, decayBeta)
@@ -7712,6 +7738,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       borrowHistory: etfBorrowSeries,
       distributions: etfDistributionsSeries,
       splitEvents: decaySplitEvents,
+      underlyingSplitEvents: decayUndSplitEvents,
     });
   })();
   const pairRiskSeries = (() => {
@@ -7771,12 +7798,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     (btFlowLegs || []).forEach((leg) => {
       const sym = String(leg?.symbol || '').toUpperCase();
       if (!sym) return;
-      out[sym] = typeof RealizedDecayFns.parseSplitEventsFromCorp === 'function'
-        ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, sym)
-        : [];
+      const rec = recordsBySymbol[sym];
+      const und = String(rec?.underlying || '').toUpperCase();
+      const parse = RealizedDecayFns.parseSplitEventsFromCorp;
+      out[sym] = {
+        etf: typeof parse === 'function' ? parse(corpActionsPayload, sym) : [],
+        und: und && typeof parse === 'function' ? parse(corpActionsPayload, und) : [],
+      };
     });
     return out;
-  }, [btFlowLegs, corpActionsPayload]);
+  }, [btFlowLegs, corpActionsPayload, recordsBySymbol]);
   const flowBacktestResult = (() => {
     const sim = typeof window !== 'undefined' && window.PairBacktest
       && typeof window.PairBacktest.simulateShortFlowBacktest === 'function'
@@ -11193,6 +11224,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   : <> · no clean history → avg = dashboard field</>}
                 {' '}→ <strong>{fmt(displayAvgBorrowForMeta)}</strong> avg borrow
               </div>
+              {borrowHistoryHealthWarning(BORROW_HISTORY_META, avgBorrowFromHistoryStats.total) ? (
+                <div className="scenario-warning" style={{ marginBottom: 8 }}>
+                  {borrowHistoryHealthWarning(BORROW_HISTORY_META, avgBorrowFromHistoryStats.total)}
+                </div>
+              ) : null}
               {borrowHistoryLoading ? (
                 <div className="scenario-warning">Loading borrow history…</div>
               ) : borrowHistoryError ? (
@@ -13150,12 +13186,16 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
     (btFlowLegs || []).forEach((leg) => {
       const sym = String(leg?.symbol || '').toUpperCase();
       if (!sym) return;
-      out[sym] = typeof RealizedDecayFns.parseSplitEventsFromCorp === 'function'
-        ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, sym)
-        : [];
+      const rec = recordsBySymbol[sym];
+      const und = String(rec?.underlying || '').toUpperCase();
+      const parse = RealizedDecayFns.parseSplitEventsFromCorp;
+      out[sym] = {
+        etf: typeof parse === 'function' ? parse(corpActionsPayload, sym) : [],
+        und: und && typeof parse === 'function' ? parse(corpActionsPayload, und) : [],
+      };
     });
     return out;
-  }, [btFlowLegs, corpActionsPayload]);
+  }, [btFlowLegs, corpActionsPayload, recordsBySymbol]);
 
   const preparedMetricsBySymbol = useMemo(() => {
     const out = {};
