@@ -226,6 +226,16 @@ def _shares_available_int(row: dict) -> int | None:
 # Fee at or below this (annual, decimal) is treated as a "zero" for placeholder gating.
 _BORROW_NEAR_ZERO_EPS = 1e-9
 
+# Borrow fees accrue Act/360 on collateral market value. Confirmed conventions:
+#   IBKR:        daily Borrow Fee = (Collateral Value x Fee Rate) / 360, accrued every
+#                calendar day (Collateral = 102% of prior settle, rounded up x shares).
+#   Clear Street: securities-lending stock loan, annualized rate x market value, /360 daily
+#                accrual, billed monthly.
+# A short held for a full calendar year (~365 days) therefore costs rate x 365/360 ~ 1.0139.
+# Keep this in sync with assets/realized_decay.js::BORROW_ACT360_FACTOR and
+# scripts/yieldboost_fof_pair_pnl.py::_BORROW_ACT360_FACTOR.
+BORROW_ACT360_FACTOR = 365.0 / 360.0
+
 
 def _borrow_history_point_for_avg(row: dict) -> bool:
     """Include in borrow mean/median only for economically meaningful fee quotes.
@@ -4075,7 +4085,10 @@ def _normalize_borrow_fields(rec: dict) -> None:
 
     gross = rec.get("gross_decay_annual")
     if gross is not None and rec["borrow_current"] is not None:
-        rec["net_decay"] = round(float(gross) - float(rec["borrow_current"]), 6)
+        # Act/360: a 1-year hold at the quoted annual fee costs rate x 365/360.
+        rec["net_decay"] = round(
+            float(gross) - float(rec["borrow_current"]) * BORROW_ACT360_FACTOR, 6
+        )
 
 
 def refresh_borrow_only() -> None:
@@ -4548,7 +4561,8 @@ def build():
         gross_decay = _safe_float(row, "gross_decay_annual")
         net_decay = _safe_float(row, "net_decay_annual")
         if gross_decay is not None and borrow_current is not None:
-            net_decay = round(gross_decay - borrow_current, 6)
+            # Act/360: a 1-year hold at the quoted annual fee costs rate x 365/360.
+            net_decay = round(gross_decay - borrow_current * BORROW_ACT360_FACTOR, 6)
         etf_realized = realized_vol_map.get(sym, {})
         und_realized = realized_vol_map.get(row["underlying_sym"], {})
         realized_vol = {}
@@ -4977,8 +4991,11 @@ def build():
                 rec["gross_decay_annual_source"] = "etf_metrics_daily"
                 rec["gross_decay_n_obs"] = _gd.get("n_obs")
             if rec.get("borrow_current") is not None:
+                # Act/360: a 1-year hold at the quoted annual fee costs rate x 365/360.
                 rec["net_decay_annual"] = round(
-                    float(rec["gross_decay_annual"]) - float(rec["borrow_current"]), 6,
+                    float(rec["gross_decay_annual"])
+                    - float(rec["borrow_current"]) * BORROW_ACT360_FACTOR,
+                    6,
                 )
         _rp20 = realized_pair_gross_20d_by_symbol.get(norm_sym(sym))
         if _rp20:

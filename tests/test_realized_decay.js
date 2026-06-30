@@ -48,12 +48,15 @@ test("flat prices → zero period return", () => {
 
 test("net subtracts borrow over the period", () => {
   const daily = buildDailyLogDragSeries(prepareDecayTrRows(makeFlatSeries(20, -0.005, 0), []), 2);
-  const borrow = 0.252; // 100% annual → 20/252 ≈ 7.9% over 20d log borrow drag
+  const borrow = 0.252; // 25.2% annual; Act/360 drag over the held window = borrow × obs/252 × 365/360
   const h = computeHorizonPeriodReturns(daily, [20], borrow);
   const row = h.horizons[0];
   assert.ok(row.grossLog > 0);
   assert.ok(Math.abs(row.netLog - (row.grossLog - periodBorrowLog(borrow, row.obs))) < 1e-12);
   assert.ok(row.netSimple < row.grossSimple);
+  // Act/360 (IBKR / Clear Street): drag = borrow × obs/252 × 365/360.
+  assert.ok(Math.abs(periodBorrowLog(borrow, row.obs) - borrow * (row.obs / 252) * (365 / 360)) < 1e-12);
+  assert.equal(RD.BORROW_ACT360_FACTOR, 365 / 360);
 });
 
 test("period gross equals endpoint log drag", () => {

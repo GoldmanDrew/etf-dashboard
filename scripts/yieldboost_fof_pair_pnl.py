@@ -35,6 +35,10 @@ except ImportError:
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _TRADING_DAYS = 252
+# Borrow fees accrue Act/360 on collateral market value (IBKR: (Value x FeeRate)/360;
+# Clear Street: same securities-lending /360 convention). 252 trading days held ~ 365
+# calendar days, so a quoted annual fee maps to a held-period drag with surcharge 365/360.
+_BORROW_ACT360_FACTOR = 365.0 / 360.0
 _HORIZON_DAYS = {
     "5D": 5,
     "20D": 20,
@@ -213,7 +217,7 @@ def compute_fof_realized_pair_metrics(
         gross_h = float(np.sum(window))
         borrow_h = 0.0
         if borrow_annual is not None and math.isfinite(borrow_annual):
-            borrow_h = float(borrow_annual) * (n / _TRADING_DAYS)
+            borrow_h = float(borrow_annual) * (n / _TRADING_DAYS) * _BORROW_ACT360_FACTOR
         net_h = gross_h - borrow_h
         horizons.append({
             "label": label,

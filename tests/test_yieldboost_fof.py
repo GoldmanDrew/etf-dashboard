@@ -212,7 +212,7 @@ def test_fof_horizon_net_simple_matches_expm1_of_log_net():
         n = h["days"]
         gross_log = h["grossLog"]
         borrow_log = h["borrowLog"]
-        assert borrow_log == pytest.approx(borrow * n / 252, abs=1e-6)
+        assert borrow_log == pytest.approx(borrow * n / 252 * (365 / 360), abs=1e-6)
         assert h["netLog"] == pytest.approx(gross_log - borrow_log, abs=1e-6)
         assert h["netSimple"] == pytest.approx(math.expm1(h["netLog"]), abs=1e-6)
         assert h["start_date"] <= h["end_date"]
