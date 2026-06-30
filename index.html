@@ -7376,12 +7376,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, etfSym)
       : []
   ), [corpActionsPayload, etfSym]);
-  const undSym = String(r?.underlying || '').toUpperCase();
-  const undSplitEvents = useMemo(() => (
-    undSym && typeof RealizedDecayFns.parseSplitEventsFromCorp === 'function'
-      ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, undSym)
-      : []
-  ), [corpActionsPayload, undSym]);
+  const undSplitEvents = useMemo(() => {
+    const und = String(undSym || '').toUpperCase();
+    return und && typeof RealizedDecayFns.parseSplitEventsFromCorp === 'function'
+      ? RealizedDecayFns.parseSplitEventsFromCorp(corpActionsPayload, und)
+      : [];
+  }, [corpActionsPayload, undSym]);
   const etfMetricsSeries = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     const withNavTr = buildTotalReturnMetricsSeries(raw, etfDistributionsSeries);
