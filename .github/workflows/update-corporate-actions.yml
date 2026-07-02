@@ -37,20 +37,20 @@ jobs:
       ETF_METRICS_HTTP_TIMEOUT_SEC: "30"
       ETF_METRICS_HTTP_RETRY_TOTAL: "4"
       CORP_ACTIONS_NEWS_WINDOW_DAYS: "60"
-      # Conservative CI request rate. Some Polygon plans still 429 at the
-      # nominal free-tier limit when GitHub runners burst; keep this below 5.
-      CORP_ACTIONS_POLYGON_REQS_PER_MIN: "3"
+      # Match Polygon free-tier nominal rate (5 req/min).  Call budgets below keep
+      # total usage ~55 calls/run (~11 min) so we stay well under the 30-min timeout.
+      CORP_ACTIONS_POLYGON_REQS_PER_MIN: "5"
       CORP_ACTIONS_MAX_CONSEC_429: "8"
-      # Bulk pagination caps.  Defaults chosen for ~25 news calls + ~3 splits + ~10 delistings
-      # = ~40 calls total, which costs ~13 min on the free tier and seconds on paid tiers.
+      # Bulk pagination caps.  ~25 news + ~2 splits + ~3 delistings bulk + ~10 fallback
+      # + ~15 symbol-change = ~55 calls total on the free tier.
       CORP_ACTIONS_NEWS_MAX_PAGES: "25"
       CORP_ACTIONS_SPLITS_MAX_PAGES: "10"
-      CORP_ACTIONS_DELISTINGS_MAX_PAGES: "10"
+      CORP_ACTIONS_DELISTINGS_MAX_PAGES: "3"
       # Phase-2 optional per-ticker probes (skipped_live + explicit symbols + capped
       # truncation sample).  Keep well below universe size so a truncated inactive
       # sweep cannot burn the Polygon budget before news runs.
-      CORP_ACTIONS_DELISTING_FALLBACK_MAX_CALLS: "15"
-      CORP_ACTIONS_DELISTING_TRUNCATION_PROBE_MAX: "10"
+      CORP_ACTIONS_DELISTING_FALLBACK_MAX_CALLS: "10"
+      CORP_ACTIONS_DELISTING_TRUNCATION_PROBE_MAX: "5"
       # Phase 4 (symbol changes) — per-ticker Polygon events with disk cache.
       # The cache lives in data/polygon_ticker_events_cache.json (committed) so
       # that the call budget (see below) can backfill the ~480-ticker
