@@ -266,6 +266,23 @@ jobs:
           TRADIER_CHAIN_SYMBOLS: "MSTU,MULL,TECL,TSLL"
         run: python scripts/build_data.py
 
+      - name: Checkout ls-algo (Bucket 5 insurance backtest)
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: GoldmanDrew/ls-algo
+          ref: main
+          path: ls-algo
+          token: ${{ secrets.LS_ALGO_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Build Bucket 5 insurance backtest panel
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: |
+          pip install -r ls-algo/requirements.txt
+          python scripts/build_bucket5_insurance_backtest.py --copy-ls-algo-panel
+
       - name: Refresh YieldBOOST VRP (sleeves + Tradier OCC)
         if: steps.build_data.outcome == 'success'
         continue-on-error: true

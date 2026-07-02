@@ -1453,6 +1453,7 @@
 <script src="assets/trade_lab_spots.js?v=tl-spots-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v4"></script>
 <script src="assets/pair_backtest.js?v=pb-v9"></script>
+<script src="assets/bucket5_insurance_backtest.js?v=b5-v1"></script>
 <script src="assets/realized_decay.js?v=rd-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
@@ -13553,6 +13554,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [showYbEdge, setShowYbEdge] = useState(false);
   const [showOps, setShowOps] = useState(false);
   const [showBacktestFlow, setShowBacktestFlow] = useState(false);
+  const [showBucket5, setShowBucket5] = useState(false);
   const [backtestFlowPreloadSymbol, setBacktestFlowPreloadSymbol] = useState('');
   const [eventCalendar, setEventCalendar] = useState(null);
   const [letfFlowsCache, setLetfFlowsCache] = useState(LETF_REBALANCE_FLOWS_CACHE);
@@ -13742,6 +13744,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(false);
         setShowOps(false);
         setShowBacktestFlow(true);
+        setShowBucket5(false);
         setBacktestFlowPreloadSymbol(String(flowRoute.preloadSymbol || '').toUpperCase());
         setChartDefaultPanel('chart');
         return;
@@ -13758,6 +13761,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           setShowYbEdge(false);
           setShowOps(false);
           setShowBacktestFlow(false);
+          setShowBucket5(false);
           setBacktestFlowPreloadSymbol('');
           const panel = String(chartMatch[2] || '').toLowerCase();
           setChartDefaultPanel(
@@ -13771,6 +13775,18 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           return;
         }
       }
+      if (hash === '#/bucket5') {
+        setChartRecord(null);
+        setShowInfo(false);
+        setShowNews(false);
+        setShowFlow(false);
+        setShowYbEdge(false);
+        setShowOps(false);
+        setShowBacktestFlow(false);
+        setShowBucket5(true);
+        setBacktestFlowPreloadSymbol('');
+        return;
+      }
       if (hash === '#/news') {
         setChartRecord(null);
         setShowInfo(false);
@@ -13779,6 +13795,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(false);
         setShowOps(false);
         setShowBacktestFlow(false);
+        setShowBucket5(false);
         setBacktestFlowPreloadSymbol('');
         return;
       }
@@ -13790,6 +13807,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(false);
         setShowOps(false);
         setShowBacktestFlow(false);
+        setShowBucket5(false);
         setBacktestFlowPreloadSymbol('');
         return;
       }
@@ -13801,6 +13819,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(true);
         setShowOps(false);
         setShowBacktestFlow(false);
+        setShowBucket5(false);
         setBacktestFlowPreloadSymbol('');
         return;
       }
@@ -13812,6 +13831,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(false);
         setShowOps(true);
         setShowBacktestFlow(false);
+        setShowBucket5(false);
         setBacktestFlowPreloadSymbol('');
         return;
       }
@@ -13825,6 +13845,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       setShowYbEdge(false);
       setShowOps(false);
       setShowBacktestFlow(false);
+      setShowBucket5(false);
       setBacktestFlowPreloadSymbol('');
       setChartDefaultPanel('chart');
     };
@@ -13855,6 +13876,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
   const navigateToOps = useCallback(() => {
     window.location.hash = '/ops';
+  }, []);
+
+  const navigateToBucket5 = useCallback(() => {
+    window.location.hash = '/bucket5';
   }, []);
 
   const navigateToBacktestFlow = useCallback((symbol = '') => {
@@ -14034,6 +14059,13 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             Backtest Flow
           </button>
           <button
+            className={cls('topbar-btn', showBucket5 && !chartRecord && 'active')}
+            onClick={() => { if (showBucket5) navigateBack(); else navigateToBucket5(); }}
+            title="UVIX/SVIX insurance product backtest (carry + SPX puts)"
+          >
+            B5 Insurance
+          </button>
+          <button
             className={cls('topbar-btn', showNews && !chartRecord && 'active')}
             onClick={() => { if (showNews) navigateBack(); else navigateToNews(); }}
           >
@@ -14083,6 +14115,15 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           bucketOf={bucketOf}
           onNavigateToChart={navigateToChart}
         />
+      ) : showBucket5 ? (
+        window.Bucket5InsuranceBacktest && window.Bucket5InsuranceBacktest.Bucket5InsurancePage ? (
+          React.createElement(window.Bucket5InsuranceBacktest.Bucket5InsurancePage, {
+            onBack: navigateBack,
+            onNavigateToChart: navigateToChart,
+          })
+        ) : (
+          <div className="backtest-page"><p style={{ padding: 24, color: 'var(--text-muted)' }}>Bucket 5 module not loaded.</p></div>
+        )
       ) : showBacktestFlow ? (
         <BacktestFlowPage
           records={records}
