@@ -84,7 +84,12 @@ jobs:
     needs: resolve-slot
     if: needs.resolve-slot.outputs.run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    # Compute-only budget (ingest + repairs + build_data). Deploy runs in its own
+    # isolated job so a slow/queued Pages deploy can never consume this budget.
+    timeout-minutes: 350
+    outputs:
+      metrics_changed: ${{ steps.commit_metrics.outputs.changed }}
+      dashboard_changed: ${{ steps.commit_dashboard.outputs.changed }}
     env:
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
       TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
@@ -95,6 +100,9 @@ jobs:
       ETF_METRICS_MAX_STALE_BUSINESS_DAYS: "3"
       ETF_METRICS_SKIP_IF_RECENT_HOURS: ${{ github.event_name == 'schedule' && '8' || '0' }}
       ETF_METRICS_MONDAY_CATCHUP_BDAYS: "3"
+      # Parallel single-day ticker ingest (default off in script; enabled in CI).
+      ETF_METRICS_INGEST_WORKERS: "8"
+      ETF_METRICS_INGEST_MIN_INTERVAL_SEC: "0.05"
 
     steps:
       - name: Checkout
@@ -132,7 +140,13 @@ jobs:
 
       - name: Repair REX issuer NAV vs market close (tail)
         continue-on-error: true
-        run: python scripts/repair_rex_session_nav_close.py --lookback-days 45 --apply
+        run: |
+          # 45-day window only on the Monday catch-up run; 21 is enough to catch
+          # recent issuer NAV/close divergences on a daily cadence and roughly
+          # halves the per-ticker REX scrape cost.
+          LB=21
+          if [ "${{ needs.resolve-slot.outputs.monday_catchup }}" = "true" ]; then LB=45; fi
+          python scripts/repair_rex_session_nav_close.py --lookback-days "$LB" --apply
 
       - name: Backfill underlying adj. close gaps
         continue-on-error: true
@@ -180,16 +194,19 @@ jobs:
       - name: Repair REX NAV when freshness flags divergence
         continue-on-error: true
         run: |
-          python -c "
-          import json, subprocess
+          LB=21
+          if [ "${{ needs.resolve-slot.outputs.monday_catchup }}" = "true" ]; then LB=45; fi
+          python - "$LB" <<'PY'
+          import json, subprocess, sys
           from pathlib import Path
+          lb = sys.argv[1]
           p = Path('data/freshness_summary.json')
           if not p.exists():
               raise SystemExit(0)
           v = json.loads(p.read_text()).get('violations') or []
           if any('rex' in str(x).lower() for x in v):
-              subprocess.check_call(['python', 'scripts/repair_rex_session_nav_close.py', '--lookback-days', '45', '--apply'])
-          "
+              subprocess.check_call(['python', 'scripts/repair_rex_session_nav_close.py', '--lookback-days', lb, '--apply'])
+          PY
 
       - name: FoF pipeline diagnostics
         continue-on-error: true
@@ -306,25 +323,9 @@ jobs:
         continue-on-error: true
         run: python scripts/score_borrow_spikes.py
 
-      - name: Options / VRP diagnostics
-        continue-on-error: true
-        run: |
-          python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero || true
-          python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads || true
-
       - name: Split TR quality audit
         if: steps.build_data.outcome == 'success'
         run: python scripts/audit_split_tr_quality.py --strict-bucket-1 --audit-underlying-cliffs
-
-      - name: Distribution split basis audit
-        if: steps.build_data.outcome == 'success'
-        continue-on-error: true
-        run: python scripts/audit_distribution_split_basis.py
-
-      - name: Exp ETF return / Scenarios alignment audit
-        if: steps.build_data.outcome == 'success'
-        continue-on-error: true
-        run: python scripts/audit_exp_etf_scenario_alignment.py --strict-only --warn
 
       - name: Dashboard data quality audit
         if: steps.build_data.outcome == 'success'
@@ -368,6 +369,83 @@ jobs:
             data/earnings_seed_audit.json
           commit_message: "${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday dashboard catch-up build' || 'chore: nightly dashboard build' }}"
 
+  # Read-only, non-gating diagnostics run in parallel with the Pages deploy so
+  # they no longer sit on the critical path before publishing. Hard quality
+  # gates (Split TR + Dashboard data quality) stay inside the compute job.
+  audits:
+    needs: nightly
+    if: needs.nightly.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
+      TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.LS_ALGO_TOKEN || secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: options-vrp
+            run: |
+              python scripts/options_cache_diagnostics.py --path data/options_cache.json --fail-when-both-zero || true
+              python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads || true
+          - name: distribution-split-basis
+            run: python scripts/audit_distribution_split_basis.py
+          - name: exp-etf-scenario-alignment
+            run: python scripts/audit_exp_etf_scenario_alignment.py --strict-only --warn
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pull latest main
+        run: git pull --ff-only origin main
+
+      - name: Run diagnostic (${{ matrix.name }})
+        continue-on-error: true
+        run: ${{ matrix.run }}
+
+  # Isolated Pages deploy. Runs on its own runner/budget so a queued or
+  # superseded Pages deployment can never eat the compute job's time limit
+  # (the failure mode that timed out both nightly runs). The shared
+  # "pages-deploy" concurrency group serializes this against the hourly
+  # safety net + build-and-deploy so deployments never supersede each other,
+  # and fail-soft leaves the hourly net (deploy-pages-data.yml) as backstop.
+  deploy:
+    needs: nightly
+    if: needs.nightly.result == 'success' && (needs.nightly.outputs.metrics_changed == '1' || needs.nightly.outputs.dashboard_changed == '1')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: "pages-deploy"
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          lfs: true
+
+      - name: Pull latest main
+        run: git pull --ff-only origin main
+
       - name: Deploy Pages
-        if: steps.commit_dashboard.outputs.changed == '1' || steps.commit_metrics.outputs.changed == '1'
         uses: ./.github/actions/deploy-pages
+        with:
+          fail-soft: "true"

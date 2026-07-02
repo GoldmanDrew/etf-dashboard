@@ -38,8 +38,10 @@ import argparse
 import json
 import logging
 import math
+import threading
 import time
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
@@ -2420,6 +2422,42 @@ def save_outputs(df: pd.DataFrame) -> None:
 # Core ingest loop
 # ---------------------------------------------------------------------------
 
+_INGEST_WORKERS = max(1, int(os.getenv("ETF_METRICS_INGEST_WORKERS", "1")))
+_INGEST_MIN_INTERVAL_SEC = max(0.0, float(os.getenv("ETF_METRICS_INGEST_MIN_INTERVAL_SEC", "0")))
+_thread_local = threading.local()
+_ingest_slot_lock = threading.Lock()
+_ingest_last_slot = 0.0
+
+
+def ingest_worker_count() -> int:
+    """Parallel ticker workers for single-day ingest (default 1 = sequential)."""
+    return _INGEST_WORKERS
+
+
+def _ingest_rate_limit_wait() -> None:
+    """Optional global pacing across parallel ingest workers."""
+    if _INGEST_MIN_INTERVAL_SEC <= 0:
+        return
+    global _ingest_last_slot
+    with _ingest_slot_lock:
+        now = time.monotonic()
+        wait = _INGEST_MIN_INTERVAL_SEC - (now - _ingest_last_slot)
+        if wait > 0:
+            time.sleep(wait)
+        _ingest_last_slot = time.monotonic()
+
+
+def _thread_providers(shared: list | None) -> list:
+    """Return a provider stack safe for the current thread."""
+    if shared is not None and ingest_worker_count() <= 1:
+        return shared
+    stack = getattr(_thread_local, "providers", None)
+    if stack is None:
+        stack = build_default_stack()
+        _thread_local.providers = stack
+    return stack
+
+
 def _anchor(res: ProviderResult, end_date: date) -> ProviderResult:
     """Stamp the result at end_date; mark stale if sourced from a prior day."""
     if res.date == end_date:
@@ -2433,6 +2471,162 @@ def _anchor(res: ProviderResult, end_date: date) -> ProviderResult:
     res.stale_kind = "anchor_lag"
     res.date = end_date
     return res
+
+
+def _ingest_single_day_ticker(
+    ticker: str,
+    end_date: date,
+    *,
+    lookback_days: int,
+    polygon_probe_days: int,
+    providers: list | None = None,
+) -> ProviderResult:
+    """Fetch one ticker's metrics for a single target session date."""
+    from etf_providers import (
+        TradrAxsProvider,
+        ProSharesProvider,
+        DirexionProvider,
+        RoundhillProvider,
+        YieldMaxProvider,
+        REXSharesProvider,
+        GraniteSharesProvider,
+        DefianceProvider,
+        YFinanceProvider,
+        PolygonProvider,
+        SKIP_SESSION_DATE_ANCHOR_PROVIDERS,
+    )
+
+    single_shot_types = (
+        ProSharesProvider,
+        DirexionProvider,
+        RoundhillProvider,
+        YieldMaxProvider,
+        REXSharesProvider,
+        GraniteSharesProvider,
+        DefianceProvider,
+        YFinanceProvider,
+    )
+
+    stack = _thread_providers(providers)
+    t = ticker
+    attempts: list[ProviderResult] = []
+    best: ProviderResult | None = None
+
+    for provider in stack:
+        try:
+            if isinstance(provider, TradrAxsProvider):
+                probe_dates = [end_date - timedelta(days=i) for i in range(max(1, lookback_days))]
+                picked = None
+                for d in probe_dates:
+                    if not provider.supports_ticker(t, d):
+                        continue
+                    _ingest_rate_limit_wait()
+                    r = provider.fetch_for_date(t, d)
+                    if r.status in ("ok", "partial"):
+                        picked = r
+                        break
+                if picked:
+                    picked = _anchor(picked, end_date)
+                    attempts.append(picked)
+                    if picked.status == "ok":
+                        best = picked
+                        break
+
+            elif isinstance(provider, PolygonProvider):
+                if provider.supports_ticker(t, end_date):
+                    picked = None
+                    for i in range(polygon_probe_days):
+                        d = end_date - timedelta(days=i)
+                        _ingest_rate_limit_wait()
+                        r = provider.fetch_for_date(t, d)
+                        if r.status in ("ok", "partial"):
+                            picked = r
+                            break
+                    if picked is None:
+                        _ingest_rate_limit_wait()
+                        picked = provider.fetch_for_date(t, end_date)
+                    picked = _anchor(picked, end_date)
+                    attempts.append(picked)
+                    if picked.status == "ok":
+                        best = picked
+                        break
+
+            elif isinstance(provider, single_shot_types):
+                if provider.supports_ticker(t, end_date):
+                    _ingest_rate_limit_wait()
+                    r = provider.fetch_for_date(t, end_date)
+                    if r.source_provider not in SKIP_SESSION_DATE_ANCHOR_PROVIDERS:
+                        r = _anchor(r, end_date)
+                    attempts.append(r)
+                    if r.status == "ok":
+                        best = r
+                        break
+
+            else:
+                if provider.supports_ticker(t, end_date):
+                    _ingest_rate_limit_wait()
+                    r = provider.fetch_for_date(t, end_date)
+                    r = _anchor(r, end_date)
+                    attempts.append(r)
+                    if r.status == "ok":
+                        best = r
+                        break
+        except Exception as e:
+            LOGGER.warning("provider=%s ticker=%s error=%s", type(provider).__name__, t, e)
+            continue
+
+    return best or merge_provider_attempts(attempts, t, end_date)
+
+
+def _ingest_single_day_tickers(
+    tickers: list[str],
+    end_date: date,
+    *,
+    lookback_days: int,
+    polygon_probe_days: int,
+    providers: list | None,
+) -> list[ProviderResult]:
+    workers = ingest_worker_count()
+    if workers <= 1 or len(tickers) <= 1:
+        return [
+            _ingest_single_day_ticker(
+                t,
+                end_date,
+                lookback_days=lookback_days,
+                polygon_probe_days=polygon_probe_days,
+                providers=providers,
+            )
+            for t in tickers
+        ]
+
+    LOGGER.info(
+        "Parallel single-day ingest: workers=%d min_interval=%ss tickers=%d",
+        workers,
+        _INGEST_MIN_INTERVAL_SEC,
+        len(tickers),
+    )
+    results: dict[int, ProviderResult] = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                _ingest_single_day_ticker,
+                t,
+                end_date,
+                lookback_days=lookback_days,
+                polygon_probe_days=polygon_probe_days,
+                providers=None,
+            ): i
+            for i, t in enumerate(tickers)
+        }
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            ticker = tickers[idx]
+            try:
+                results[idx] = fut.result()
+            except Exception as exc:
+                LOGGER.warning("parallel ingest failed ticker=%s: %s", ticker, exc)
+                results[idx] = merge_provider_attempts([], ticker, end_date)
+    return [results[i] for i in range(len(tickers))]
 
 
 def ingest(
@@ -2451,97 +2645,29 @@ def ingest(
     if providers is None:
         providers = build_default_stack()
 
-    from etf_providers import (
-        TradrAxsProvider, ProSharesProvider, DirexionProvider,
-        RoundhillProvider, YieldMaxProvider, REXSharesProvider,
-        GraniteSharesProvider,
-        DefianceProvider,
-        YFinanceProvider, PolygonProvider,
-        SKIP_SESSION_DATE_ANCHOR_PROVIDERS,
-    )
-
     rows: list[ProviderResult] = []
 
     if start_date == end_date:
         polygon_probe_days = max(1, min(int(polygon_lookback_days), int(lookback_days)))
+        stack_for_log = _thread_providers(providers)
         LOGGER.info(
-            "Single-day ingest: end=%s tradr_lookback=%d polygon_lookback=%d providers=%s",
-            end_date, int(lookback_days), int(polygon_probe_days),
-            [type(p).__name__ for p in providers],
+            "Single-day ingest: end=%s tradr_lookback=%d polygon_lookback=%d workers=%d providers=%s",
+            end_date,
+            int(lookback_days),
+            int(polygon_probe_days),
+            ingest_worker_count(),
+            [type(p).__name__ for p in stack_for_log],
         )
 
-        # Providers that simply try end_date directly (bulk feeds or per-ticker HTML scrapes).
-        single_shot_types = (
-            ProSharesProvider, DirexionProvider,
-            RoundhillProvider, YieldMaxProvider, REXSharesProvider,
-            GraniteSharesProvider,
-            DefianceProvider,
-            YFinanceProvider,
+        rows.extend(
+            _ingest_single_day_tickers(
+                tickers,
+                end_date,
+                lookback_days=int(lookback_days),
+                polygon_probe_days=polygon_probe_days,
+                providers=providers,
+            )
         )
-
-        for t in tickers:
-            attempts: list[ProviderResult] = []
-            best: ProviderResult | None = None
-
-            for provider in providers:
-                try:
-                    if isinstance(provider, TradrAxsProvider):
-                        probe_dates = [end_date - timedelta(days=i) for i in range(max(1, lookback_days))]
-                        picked = None
-                        for d in probe_dates:
-                            if not provider.supports_ticker(t, d):
-                                continue
-                            r = provider.fetch_for_date(t, d)
-                            if r.status in ("ok", "partial"):
-                                picked = r
-                                break
-                        if picked:
-                            picked = _anchor(picked, end_date)
-                            attempts.append(picked)
-                            if picked.status == "ok":
-                                best = picked
-                                break
-
-                    elif isinstance(provider, PolygonProvider):
-                        if provider.supports_ticker(t, end_date):
-                            picked = None
-                            for i in range(polygon_probe_days):
-                                d = end_date - timedelta(days=i)
-                                r = provider.fetch_for_date(t, d)
-                                if r.status in ("ok", "partial"):
-                                    picked = r
-                                    break
-                            if picked is None:
-                                picked = provider.fetch_for_date(t, end_date)
-                            picked = _anchor(picked, end_date)
-                            attempts.append(picked)
-                            if picked.status == "ok":
-                                best = picked
-                                break
-
-                    elif isinstance(provider, single_shot_types):
-                        if provider.supports_ticker(t, end_date):
-                            r = provider.fetch_for_date(t, end_date)
-                            if r.source_provider not in SKIP_SESSION_DATE_ANCHOR_PROVIDERS:
-                                r = _anchor(r, end_date)
-                            attempts.append(r)
-                            if r.status == "ok":
-                                best = r
-                                break
-
-                    else:
-                        if provider.supports_ticker(t, end_date):
-                            r = provider.fetch_for_date(t, end_date)
-                            r = _anchor(r, end_date)
-                            attempts.append(r)
-                            if r.status == "ok":
-                                best = r
-                                break
-                except Exception as e:
-                    LOGGER.warning("provider=%s ticker=%s error=%s", type(provider).__name__, t, e)
-                    continue
-
-            rows.append(best or merge_provider_attempts(attempts, t, end_date))
 
     else:
         # Multi-day range: replay per-date using the same stack. Used rarely; keep simple.
