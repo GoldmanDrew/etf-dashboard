@@ -15,8 +15,9 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,27 @@ _ADV_WINDOW_DAYS = 20
 _ADV_LOOKBACK_DAYS = 35
 _ADV_BATCH_SIZE = 50
 _ADV_MIN_PERIODS = 5
+
+# ── Additional-stat assumptions (overridable via env for experiments) ────────
+# Closing single-price auction (MOC/LOC) is typically a single-digit % of the
+# day's total volume. Mechanical LETF hedges concentrate into that auction, so
+# "% of auction" is a far more honest impact denominator than full-day ADV.
+_AUCTION_SHARE_OF_ADV = float(os.environ.get("LETF_AUCTION_SHARE_OF_ADV", "0.08") or 0.08)
+# Most issuer hedging is done via total-return swaps with dealers, not on the
+# lit tape. ``physical`` = the slice that plausibly prints in the underlying.
+_SWAP_HEDGE_SHARE = float(os.environ.get("LETF_SWAP_HEDGE_SHARE", "0.85") or 0.85)
+
+# ── Float sanity-gate thresholds ─────────────────────────────────────────────
+# yfinance ``floatShares`` is frequently broken (e.g. BRK-B returns ~1.16M vs a
+# real ~1.4B float). Reject a float-share value that is implausibly small vs
+# shares outstanding, or larger than shares outstanding.
+_FLOAT_MIN_FRACTION_OF_SHARES = 0.05
+# A name cannot routinely trade more than its entire float in a day; if 20d $ADV
+# exceeds the float MV the float input is unreliable (stale split, ETF, etc.).
+_FLOAT_RELIABLE_MIN_ADV_COVER = 1.0
+# Minutes after the cash close before we treat the session's underlying close as
+# final (issuer/print settling buffer).
+_SESSION_FINAL_BUFFER_MIN = 10
 
 INCLUDED_PRODUCT_CLASSES = {"letf", "inverse", "volatility_etp"}
 EXCLUDED_PRODUCT_CLASSES = {
@@ -94,6 +116,129 @@ def rebalance_notional(aum_prior_close: float, leverage: float, underlying_retur
     Positive means buy pressure; negative means sell pressure.
     """
     return float(leverage) * (float(leverage) - 1.0) * float(aum_prior_close) * float(underlying_return)
+
+
+def _market_close_utc(d: date, *, now: datetime | None = None) -> datetime:
+    """~16:00 ET for date ``d`` expressed in UTC (approximate US DST window)."""
+    march_dst_start = date(d.year, 3, 9)
+    november_dst_end = date(d.year, 11, 2)
+    is_edt = march_dst_start <= d <= november_dst_end
+    close_utc_hour = 20 if is_edt else 21
+    return datetime(d.year, d.month, d.day, close_utc_hour, 0, 0, tzinfo=UTC)
+
+
+def session_state_for_date(date_iso: str, *, now: datetime | None = None) -> str:
+    """Classify a session as ``final`` (close settled) or ``forming`` (intraday).
+
+    ``final`` once we are at least ``_SESSION_FINAL_BUFFER_MIN`` past the cash
+    close for that date; ``forming`` otherwise. This is what lets the EOD view
+    stop stamping a still-forming session as a realised "latest" aggregate.
+    """
+    now = now or datetime.now(UTC)
+    try:
+        d = datetime.strptime(str(date_iso), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return "final"
+    close_utc = _market_close_utc(d)
+    return "final" if now >= close_utc.replace(tzinfo=UTC) + _td_min(_SESSION_FINAL_BUFFER_MIN) else "forming"
+
+
+def _td_min(minutes: int):
+    from datetime import timedelta
+    return timedelta(minutes=int(minutes))
+
+
+def resolve_float_quality(
+    *,
+    float_shares_raw: float | None,
+    shares_out: float | None,
+    chosen_shares: float | None,
+    float_dollars: float | None,
+    adv: float | None,
+    is_etf: bool,
+    source: str | None,
+) -> dict[str, Any]:
+    """Sanity-gate the underlying float used for ``% of float`` ratios.
+
+    Returns a dict with the *resolved* ``shares`` / ``dollars`` / ``source`` plus
+    a ``reliable`` flag and a ``quality`` reason. When ``reliable`` is False the
+    caller should suppress the ``% of float`` ratio (it is misleading).
+    """
+    price = None
+    if chosen_shares and float_dollars and float(chosen_shares) > 0:
+        price = float(float_dollars) / float(chosen_shares)
+
+    shares = _f(chosen_shares)
+    dollars = _f(float_dollars)
+    src = source or None
+
+    # ETF underlyings have an elastic share count (AP creation/redemption), so a
+    # fixed "float" is not a real constraint -- never present a % of float.
+    if is_etf:
+        return {"shares": shares, "dollars": dollars, "source": "etf_shares_outstanding_elastic",
+                "reliable": False, "quality": "etf_elastic"}
+
+    if shares is None or shares <= 0 or dollars is None or dollars <= 0:
+        return {"shares": shares, "dollars": dollars, "source": src,
+                "reliable": False, "quality": "missing"}
+
+    # If yfinance floatShares was used but is implausible vs shares outstanding
+    # (BRK-B 1.16M vs 1.4B), fall back to shares outstanding.
+    fsr = _f(float_shares_raw)
+    so = _f(shares_out)
+    if str(src or "").startswith("yfinance_float_shares") and so and so > 0 and price:
+        too_small = fsr is not None and fsr < so * _FLOAT_MIN_FRACTION_OF_SHARES
+        too_big = fsr is not None and fsr > so * 1.01
+        if too_small or too_big:
+            shares = so
+            dollars = price * so
+            src = "yfinance_shares_outstanding_fallback"
+
+    # A name can't routinely trade more than its whole float in a day.
+    if adv and float(adv) > 0 and dollars < float(adv) * _FLOAT_RELIABLE_MIN_ADV_COVER:
+        return {"shares": shares, "dollars": dollars, "source": src,
+                "reliable": False, "quality": "adv_exceeds_float"}
+
+    return {"shares": shares, "dollars": dollars, "source": src,
+            "reliable": True, "quality": "ok"}
+
+
+def _apply_float_quality(df: pd.DataFrame, *, pct_col: str) -> pd.DataFrame:
+    """Resolve float quality row-wise; suppress ``pct_col`` when unreliable."""
+    if df.empty:
+        return df
+    out = df.copy()
+    for col, default in (
+        ("underlying_tradable_float_dollars", np.nan),
+        ("tradable_float_shares", np.nan),
+        ("shares_outstanding_underlying", np.nan),
+        ("float_shares_raw", np.nan),
+        ("is_etf", False),
+        ("tradable_float_source", None),
+    ):
+        if col not in out.columns:
+            out[col] = default
+
+    resolved = out.apply(
+        lambda r: resolve_float_quality(
+            float_shares_raw=r.get("float_shares_raw"),
+            shares_out=r.get("shares_outstanding_underlying"),
+            chosen_shares=r.get("tradable_float_shares"),
+            float_dollars=r.get("underlying_tradable_float_dollars"),
+            adv=r.get("underlying_dollar_adv_20d"),
+            is_etf=bool(r.get("is_etf")),
+            source=r.get("tradable_float_source"),
+        ),
+        axis=1,
+    )
+    out["tradable_float_shares"] = resolved.map(lambda d: d["shares"])
+    out["underlying_tradable_float_dollars"] = resolved.map(lambda d: d["dollars"])
+    out["tradable_float_source"] = resolved.map(lambda d: d["source"])
+    out["tradable_float_reliable"] = resolved.map(lambda d: bool(d["reliable"]))
+    out["tradable_float_quality"] = resolved.map(lambda d: d["quality"])
+    if pct_col in out.columns:
+        out[pct_col] = out[pct_col].where(out["tradable_float_reliable"], np.nan)
+    return out
 
 
 def _leverage_from_row(row: pd.Series) -> float | None:
@@ -576,11 +721,16 @@ def fetch_underlying_volume_panel(
             for k, v in float_meta.items()
         ])
         out = out.merge(meta, on="underlying", how="left")
-    for col in ("tradable_float_shares", "shares_outstanding_underlying"):
+    for col in ("tradable_float_shares", "shares_outstanding_underlying", "float_shares_raw"):
         if col not in out.columns:
             out[col] = np.nan
     if "tradable_float_source" not in out.columns:
         out["tradable_float_source"] = None
+    if "quote_type" not in out.columns:
+        out["quote_type"] = None
+    if "is_etf" not in out.columns:
+        out["is_etf"] = False
+    out["is_etf"] = out["is_etf"].fillna(False).astype(bool)
     shares = pd.to_numeric(out.get("tradable_float_shares"), errors="coerce")
     out["tradable_float_dollars"] = out["close"].astype(float) * shares
     return out.sort_values(["underlying", "date"]).reset_index(drop=True)
@@ -609,6 +759,7 @@ def fetch_underlying_float_metadata(
     for sym in syms[: int(max_symbols)]:
         float_shares = None
         shares_out = None
+        quote_type = None
         try:
             t = yf.Ticker(sym)
             try:
@@ -617,6 +768,7 @@ def fetch_underlying_float_metadata(
                 info = getattr(t, "info", {}) or {}
             float_shares = _first_positive(info.get("floatShares"), info.get("float_shares"))
             shares_out = _first_positive(info.get("sharesOutstanding"), info.get("shares_outstanding"))
+            quote_type = str(info.get("quoteType") or info.get("quote_type") or "").upper() or None
             if shares_out is None:
                 try:
                     fast = t.fast_info
@@ -628,10 +780,14 @@ def fetch_underlying_float_metadata(
         shares = float_shares or shares_out
         if shares is None or shares <= 0:
             continue
+        is_etf = quote_type in {"ETF", "MUTUALFUND"}
         out[sym] = {
             "tradable_float_shares": shares,
+            "float_shares_raw": float_shares,
             "shares_outstanding_underlying": shares_out,
             "tradable_float_source": "yfinance_float_shares" if float_shares else "yfinance_shares_outstanding",
+            "quote_type": quote_type,
+            "is_etf": bool(is_etf),
         }
     return out
 
@@ -708,8 +864,8 @@ def compute_adv_panel_with_median(
     cols = [
         "date", "underlying",
         "underlying_dollar_adv_20d", "underlying_dollar_median_adv_20d",
-        "tradable_float_shares", "shares_outstanding_underlying",
-        "tradable_float_dollars", "tradable_float_source",
+        "tradable_float_shares", "shares_outstanding_underlying", "float_shares_raw",
+        "tradable_float_dollars", "tradable_float_source", "is_etf",
     ]
     if volume_panel.empty:
         return pd.DataFrame(columns=cols)
@@ -722,12 +878,15 @@ def compute_adv_panel_with_median(
     panel["underlying_dollar_median_adv_20d"] = (
         grouped.rolling(window=window, min_periods=min_p).median().reset_index(level=0, drop=True)
     )
-    for col in ("tradable_float_shares", "shares_outstanding_underlying", "tradable_float_dollars"):
+    for col in ("tradable_float_shares", "shares_outstanding_underlying", "float_shares_raw", "tradable_float_dollars"):
         if col not in panel.columns:
             panel[col] = np.nan
         panel[col] = pd.to_numeric(panel[col], errors="coerce")
     if "tradable_float_source" not in panel.columns:
         panel["tradable_float_source"] = None
+    if "is_etf" not in panel.columns:
+        panel["is_etf"] = False
+    panel["is_etf"] = panel["is_etf"].fillna(False).astype(bool)
     return panel[cols]
 
 
@@ -765,6 +924,7 @@ def annotate_with_adv(
             fund_flows["rebalance_pct_tradable_float"] = (
                 fund_flows["rebalance_signed_dollars"] / fund_flows["underlying_tradable_float_dollars"]
             )
+        fund_flows = _apply_float_quality(fund_flows, pct_col="rebalance_pct_tradable_float")
     if not aggregates.empty:
         aggregates = aggregates.merge(adv_panel, on=["date", "underlying"], how="left")
         if "tradable_float_dollars" in aggregates.columns:
@@ -778,6 +938,15 @@ def annotate_with_adv(
             aggregates["net_moc_pct_tradable_float"] = (
                 aggregates["net_moc_dollars"] / aggregates["underlying_tradable_float_dollars"]
             )
+            # Additional impact lenses (see AGENTS §LETF rebalance flow).
+            auction_dollars = aggregates["underlying_dollar_adv_20d"].astype(float) * _AUCTION_SHARE_OF_ADV
+            aggregates["underlying_dollar_auction_est"] = auction_dollars
+            aggregates["net_moc_pct_auction_volume"] = aggregates["net_moc_dollars"] / auction_dollars
+            aggregates["net_moc_physical_dollars"] = aggregates["net_moc_dollars"] * (1.0 - _SWAP_HEDGE_SHARE)
+            aggregates["net_moc_pct_adv_physical"] = (
+                aggregates["net_moc_physical_dollars"] / aggregates["underlying_dollar_adv_20d"]
+            )
+        aggregates = _apply_float_quality(aggregates, pct_col="net_moc_pct_tradable_float")
     return fund_flows, aggregates
 
 
@@ -826,6 +995,28 @@ def build_underlying_aggregates(fund_flows: pd.DataFrame) -> pd.DataFrame:
         .reset_index(level=0, drop=True)
     )
     agg["net_moc_z_60d"] = (agg["net_moc_dollars"] - roll_mean) / roll_std.replace(0.0, np.nan)
+
+    # Percentile rank of today's net flow within its trailing-60d history (0..1).
+    # Answers "is today unusually large?" without assuming normality (z can be
+    # misleading on the fat-tailed flow distribution).
+    def _last_pctile(s: pd.Series) -> float:
+        if s.empty:
+            return float("nan")
+        return float(s.rank(pct=True).iloc[-1])
+
+    agg["net_moc_pctile_60d"] = (
+        agg.groupby("underlying")["net_moc_dollars"]
+        .rolling(60, min_periods=20)
+        .apply(_last_pctile, raw=False)
+        .reset_index(level=0, drop=True)
+    )
+    agg["abs_net_moc_pctile_60d"] = (
+        agg.assign(_abs=agg["net_moc_dollars"].abs())
+        .groupby("underlying")["_abs"]
+        .rolling(60, min_periods=20)
+        .apply(_last_pctile, raw=False)
+        .reset_index(level=0, drop=True)
+    )
     return agg
 
 
@@ -901,6 +1092,25 @@ def _flow_quality_summary(fund_flows: pd.DataFrame, latest_date: str) -> dict[st
     }
 
 
+def _float_quality_summary(by_underlying: dict[str, Any]) -> dict[str, Any]:
+    """Rollup of float-input reliability across the latest by-underlying view."""
+    counts: dict[str, int] = {}
+    reliable = 0
+    total = 0
+    for meta in by_underlying.values():
+        total += 1
+        q = str(meta.get("tradable_float_quality") or "unknown")
+        counts[q] = counts.get(q, 0) + 1
+        if meta.get("tradable_float_reliable"):
+            reliable += 1
+    return {
+        "underlyings_total": total,
+        "float_reliable": reliable,
+        "float_unreliable": total - reliable,
+        "by_quality": counts,
+    }
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -934,7 +1144,9 @@ def write_outputs(
         if aggregates.empty:
             latest_payload = {"build_time": daily_payload["build_time"], "latest_date": dates[-1], "by_underlying": {}}
         else:
+            now = datetime.now(UTC)
             global_latest_date = str(aggregates["date"].max())
+            global_session_state = session_state_for_date(global_latest_date, now=now)
             # Per-underlying latest aggregate row -- different underlyings have different
             # publish cadences (issuer feed lag, weekend gaps), so a single global filter
             # would silently drop hundreds of underlyings. See AGENTS notes for context.
@@ -956,11 +1168,18 @@ def write_outputs(
                     fund_rows_on_global=int(len(und_day)),
                     ok_funds_on_global=ok_funds,
                 )
+                # A lagging underlying's own (prior) session is already closed =>
+                # complete; only the global-latest session can still be forming.
+                row_session_state = (
+                    "final" if row_date != global_latest_date else global_session_state
+                )
                 by_underlying[und] = {
                     "date": row_date,
                     "is_latest_global": row_date == global_latest_date,
                     "session_lag_bdays": int(session_lag),
                     "aggregate_stale_reason": stale_reason,
+                    "session_state": row_session_state,
+                    "data_complete": bool(row_session_state == "final"),
                     "underlying": und,
                     "net_moc_dollars": _round(row.get("net_moc_dollars"), 2),
                     "gross_moc_dollars": _round(row.get("gross_moc_dollars"), 2),
@@ -970,10 +1189,19 @@ def write_outputs(
                     "net_moc_pct_letf_aum": _round(row.get("net_moc_pct_letf_aum"), 8),
                     "underlying_dollar_adv_20d": _round(row.get("underlying_dollar_adv_20d"), 2),
                     "net_moc_pct_adv_20d": _round(row.get("net_moc_pct_adv_20d"), 8),
+                    # Additional impact lenses.
+                    "underlying_dollar_auction_est": _round(row.get("underlying_dollar_auction_est"), 2),
+                    "net_moc_pct_auction_volume": _round(row.get("net_moc_pct_auction_volume"), 8),
+                    "net_moc_physical_dollars": _round(row.get("net_moc_physical_dollars"), 2),
+                    "net_moc_pct_adv_physical": _round(row.get("net_moc_pct_adv_physical"), 8),
+                    "net_moc_pctile_60d": _round(row.get("net_moc_pctile_60d"), 4),
+                    "abs_net_moc_pctile_60d": _round(row.get("abs_net_moc_pctile_60d"), 4),
                     "underlying_tradable_float_dollars": _round(row.get("underlying_tradable_float_dollars"), 2),
                     "underlying_tradable_float_shares": _round(row.get("tradable_float_shares"), 0),
                     "underlying_shares_outstanding": _round(row.get("shares_outstanding_underlying"), 0),
                     "tradable_float_source": row.get("tradable_float_source"),
+                    "tradable_float_reliable": bool(row.get("tradable_float_reliable")) if row.get("tradable_float_reliable") is not None else None,
+                    "tradable_float_quality": row.get("tradable_float_quality"),
                     "net_moc_pct_tradable_float": _round(row.get("net_moc_pct_tradable_float"), 8),
                     "underlying_return_d1": _round(row.get("underlying_return_d1"), 8),
                     "n_funds": int(row.get("n_funds") or 0),
@@ -986,14 +1214,21 @@ def write_outputs(
             latest_payload = {
                 "build_time": daily_payload["build_time"],
                 "latest_date": global_latest_date,
+                # Honest "as of": the underlying close the realised flow is built
+                # on, plus whether that session has settled.
+                "as_of_underlying_close": global_latest_date,
+                "session_state": global_session_state,
                 "method": "L*(L-1)*prior_close_aum*underlying_return",
                 "adv_window_days": _ADV_WINDOW_DAYS,
+                "auction_share_of_adv_assumption": _AUCTION_SHARE_OF_ADV,
+                "swap_hedge_share_assumption": _SWAP_HEDGE_SHARE,
                 "flow_quality_on_latest_date": _flow_quality_summary(fund_flows, global_latest_date),
                 "flow_stale_summary": _flow_stale_summary(
                     by_underlying,
                     global_latest_date=global_latest_date,
                     fund_flows=fund_flows,
                 ),
+                "float_quality_summary": _float_quality_summary(by_underlying),
                 "by_underlying": by_underlying,
             }
 
@@ -1033,7 +1268,19 @@ def build_all(
     fund_flows = build_fund_flows(universe, metrics, stale_bdays=stale_bdays)
     aggregates = build_underlying_aggregates(fund_flows)
 
-    adv_panel = compute_adv_panel_with_median(volume_panel, window=adv_window)
+    # Exclude a still-forming session's partial volume from the trailing ADV so
+    # %ADV / %float don't drift during the day. The session is "forming" until
+    # ~10 min past the cash close (see session_state_for_date).
+    adv_volume_panel = volume_panel
+    if not volume_panel.empty and "date" in volume_panel.columns:
+        latest_vol_date = str(pd.to_datetime(volume_panel["date"], errors="coerce").max().date())
+        if session_state_for_date(latest_vol_date) == "forming":
+            adv_volume_panel = volume_panel.copy()
+            forming_mask = adv_volume_panel["date"].astype(str).eq(latest_vol_date)
+            adv_volume_panel.loc[forming_mask, "dollar_volume"] = np.nan
+            LOGGER.info("ADV excludes forming session %s (partial volume)", latest_vol_date)
+
+    adv_panel = compute_adv_panel_with_median(adv_volume_panel, window=adv_window)
     fund_flows, aggregates = annotate_with_adv(fund_flows, aggregates, adv_panel)
     return fund_flows, aggregates
 

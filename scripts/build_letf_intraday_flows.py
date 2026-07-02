@@ -45,13 +45,16 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from build_letf_rebalance_flows import (  # noqa: E402
-    UNDERLYING_VOLUME_PARQUET,
     _ADV_WINDOW_DAYS,
+    _AUCTION_SHARE_OF_ADV,
+    _SWAP_HEDGE_SHARE,
+    UNDERLYING_VOLUME_PARQUET,
     _f,
     compute_adv_panel_with_median,
     load_metrics,
     load_universe,
     norm_sym,
+    resolve_float_quality,
 )
 
 LOGGER = logging.getLogger("letf_intraday_flows")
@@ -219,6 +222,8 @@ def load_adv_latest(path: Path = UNDERLYING_VOLUME_PARQUET) -> dict[str, dict[st
             "underlying_tradable_float_dollars": _f(r.get("tradable_float_dollars")),
             "underlying_tradable_float_shares": _f(r.get("tradable_float_shares")),
             "underlying_shares_outstanding": _f(r.get("shares_outstanding_underlying")),
+            "float_shares_raw": _f(r.get("float_shares_raw")),
+            "is_etf": bool(r.get("is_etf")) if r.get("is_etf") is not None else False,
             "tradable_float_source": r.get("tradable_float_source"),
             "as_of_date": str(r.get("date") or ""),
         }
@@ -291,7 +296,11 @@ def load_intraday_bias(path: Path = INTRADAY_BIAS_JSON) -> dict[str, dict[str, A
         bias = _f(row.get("mean_signed_error_pct"))
         if n is None or bias is None or n < MIN_BIAS_OBSERVATIONS:
             continue
-        out[norm_sym(sym)] = {"mean_signed_error_pct": bias, "n": int(n)}
+        out[norm_sym(sym)] = {
+            "mean_signed_error_pct": bias,
+            "mean_abs_error_pct": _f(row.get("mean_abs_error_pct")),
+            "n": int(n),
+        }
     return out
 
 
@@ -730,6 +739,12 @@ def aggregate_underlying(
     agg["underlying_shares_outstanding"] = agg["underlying"].map(
         lambda u: adv_latest.get(u, {}).get("underlying_shares_outstanding")
     )
+    agg["float_shares_raw"] = agg["underlying"].map(
+        lambda u: adv_latest.get(u, {}).get("float_shares_raw")
+    )
+    agg["is_etf"] = agg["underlying"].map(
+        lambda u: bool(adv_latest.get(u, {}).get("is_etf"))
+    )
     agg["tradable_float_source"] = agg["underlying"].map(
         lambda u: adv_latest.get(u, {}).get("tradable_float_source")
     )
@@ -752,6 +767,39 @@ def aggregate_underlying(
         agg["estimated_close_rebalance_pct_tradable_float"] = (
             agg["estimated_net_close_rebalance_dollars"] / float_denom
         )
+        # Additional impact lenses (mirror EOD): auction-size + swap-adjusted.
+        auction_dollars = denom * _AUCTION_SHARE_OF_ADV
+        agg["underlying_dollar_auction_est"] = auction_dollars
+        agg["estimated_close_rebalance_pct_auction_volume"] = (
+            agg["estimated_net_close_rebalance_dollars"] / auction_dollars
+        )
+        agg["estimated_close_rebalance_physical_dollars"] = (
+            agg["estimated_net_close_rebalance_dollars"] * (1.0 - _SWAP_HEDGE_SHARE)
+        )
+        agg["estimated_close_rebalance_pct_adv_physical"] = (
+            agg["estimated_close_rebalance_physical_dollars"] / denom
+        )
+
+    # Float sanity-gate: switch broken floatShares to shares outstanding and
+    # suppress the % of float ratio for ETF / ADV-exceeds-float / missing rows.
+    float_res = agg.apply(
+        lambda r: resolve_float_quality(
+            float_shares_raw=r.get("float_shares_raw"),
+            shares_out=r.get("underlying_shares_outstanding"),
+            chosen_shares=r.get("underlying_tradable_float_shares"),
+            float_dollars=r.get("underlying_tradable_float_dollars"),
+            adv=r.get("underlying_dollar_adv_20d"),
+            is_etf=bool(r.get("is_etf")),
+            source=r.get("tradable_float_source"),
+        ),
+        axis=1,
+    )
+    agg["underlying_tradable_float_shares"] = float_res.map(lambda d: d["shares"])
+    agg["underlying_tradable_float_dollars"] = float_res.map(lambda d: d["dollars"])
+    agg["tradable_float_source"] = float_res.map(lambda d: d["source"])
+    agg["tradable_float_reliable"] = float_res.map(lambda d: bool(d["reliable"]))
+    agg["tradable_float_quality"] = float_res.map(lambda d: d["quality"])
+    agg.loc[~agg["tradable_float_reliable"], "estimated_close_rebalance_pct_tradable_float"] = np.nan
 
     model_name = str(remaining_model.get("model") or "none")
     session_minutes = int(remaining_model.get("session_minutes") or SESSION_MINUTES)
@@ -770,13 +818,24 @@ def aggregate_underlying(
         agg["remaining_close_rebalance_pct_tradable_float"] = (
             agg["remaining_close_rebalance_dollars"] / agg["underlying_tradable_float_dollars"].astype(float)
         )
+    agg.loc[~agg["tradable_float_reliable"], "remaining_close_rebalance_pct_tradable_float"] = np.nan
 
-    # Optional bias adjustment from G.1 reconciliations.
+    # Optional bias adjustment + forecast-error band from G.1 reconciliations.
     def _bias(row: pd.Series) -> float | None:
         b = bias_map.get(str(row["underlying"]).upper())
         return b["mean_signed_error_pct"] if b else None
 
+    def _abs_err(row: pd.Series) -> float | None:
+        b = bias_map.get(str(row["underlying"]).upper())
+        return b.get("mean_abs_error_pct") if b else None
+
+    def _err_n(row: pd.Series) -> int | None:
+        b = bias_map.get(str(row["underlying"]).upper())
+        return int(b["n"]) if b else None
+
     agg["bias_signed_error_pct"] = agg.apply(_bias, axis=1)
+    agg["forecast_abs_error_pct"] = agg.apply(_abs_err, axis=1)
+    agg["forecast_error_n_obs"] = agg.apply(_err_n, axis=1)
     agg["estimated_close_rebalance_dollars_bias_adj"] = agg.apply(
         lambda r: (
             float(r["estimated_net_close_rebalance_dollars"]) * (1.0 - float(r["bias_signed_error_pct"]))
@@ -786,6 +845,20 @@ def aggregate_underlying(
         ),
         axis=1,
     )
+
+    # Symmetric forecast band around the bias-adjusted point estimate using the
+    # reconciled mean absolute error (|estimate − realised| / |realised|).
+    def _band(row: pd.Series, sign: int) -> float | None:
+        base = row.get("estimated_close_rebalance_dollars_bias_adj")
+        if base is None or pd.isna(base):
+            base = row.get("estimated_net_close_rebalance_dollars")
+        ape = row.get("forecast_abs_error_pct")
+        if base is None or pd.isna(base) or ape is None or pd.isna(ape):
+            return None
+        return float(base) * (1.0 + sign * float(ape))
+
+    agg["estimated_close_rebalance_dollars_lo"] = agg.apply(lambda r: _band(r, -1), axis=1)
+    agg["estimated_close_rebalance_dollars_hi"] = agg.apply(lambda r: _band(r, +1), axis=1)
     return agg
 
 
@@ -910,10 +983,22 @@ def build_payloads(
                 "underlying_dollar_adv_20d": _round(row.get("underlying_dollar_adv_20d"), 2),
                 "underlying_dollar_median_adv_20d": _round(row.get("underlying_dollar_median_adv_20d"), 2),
                 "underlying_dollar_adv_intraday_20d": _round(row.get("underlying_dollar_adv_intraday_20d"), 2),
+                "underlying_dollar_auction_est": _round(row.get("underlying_dollar_auction_est"), 2),
+                "estimated_close_rebalance_pct_auction_volume": _round(
+                    row.get("estimated_close_rebalance_pct_auction_volume"), 8,
+                ),
+                "estimated_close_rebalance_physical_dollars": _round(
+                    row.get("estimated_close_rebalance_physical_dollars"), 2,
+                ),
+                "estimated_close_rebalance_pct_adv_physical": _round(
+                    row.get("estimated_close_rebalance_pct_adv_physical"), 8,
+                ),
                 "underlying_tradable_float_dollars": _round(row.get("underlying_tradable_float_dollars"), 2),
                 "underlying_tradable_float_shares": _round(row.get("underlying_tradable_float_shares"), 0),
                 "underlying_shares_outstanding": _round(row.get("underlying_shares_outstanding"), 0),
                 "tradable_float_source": row.get("tradable_float_source"),
+                "tradable_float_reliable": bool(row.get("tradable_float_reliable")) if row.get("tradable_float_reliable") is not None else None,
+                "tradable_float_quality": row.get("tradable_float_quality"),
                 "underlying_volume_so_far": _round(row.get("underlying_volume_so_far"), 0),
                 "volume_so_far_dollars": _round(row.get("volume_so_far_dollars"), 2),
                 "volume_so_far_pct_adv": _round(row.get("volume_so_far_pct_adv"), 8),
@@ -930,7 +1015,11 @@ def build_payloads(
                 "estimated_close_rebalance_dollars_bias_adj": _round(
                     row.get("estimated_close_rebalance_dollars_bias_adj"), 2,
                 ),
+                "estimated_close_rebalance_dollars_lo": _round(row.get("estimated_close_rebalance_dollars_lo"), 2),
+                "estimated_close_rebalance_dollars_hi": _round(row.get("estimated_close_rebalance_dollars_hi"), 2),
                 "bias_signed_error_pct": _round(row.get("bias_signed_error_pct"), 6),
+                "forecast_abs_error_pct": _round(row.get("forecast_abs_error_pct"), 6),
+                "forecast_error_n_obs": int(row.get("forecast_error_n_obs")) if pd.notna(row.get("forecast_error_n_obs")) else None,
                 "top_contributors": _top_contributors(fund_df, und),
             }
 
@@ -948,6 +1037,8 @@ def build_payloads(
         "volume_priced_count": volume_meta.get("n_underlyings_with_volume"),
         "remaining_model": remaining_model.get("model"),
         "remaining_model_source": remaining_model.get("source"),
+        "auction_share_of_adv_assumption": _AUCTION_SHARE_OF_ADV,
+        "swap_hedge_share_assumption": _SWAP_HEDGE_SHARE,
         "nav_forecast_build_time": nav_meta.get("build_time"),
         "nav_forecast_anchor_date": nav_meta.get("anchor_date"),
         "nav_forecast_default_models_count": nav_meta.get("default_models_count"),

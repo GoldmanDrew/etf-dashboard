@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from datetime import date
+from datetime import UTC, date, datetime
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS) not in sys.path:
@@ -466,6 +466,109 @@ def test_extract_yf_close_volume_long_flat_single_ticker():
     assert out["underlying"].tolist() == ["SPY", "SPY"]
     assert out.iloc[-1]["date"] == "2026-05-19"
     assert out.iloc[-1]["close"] == pytest.approx(505.0)
+
+
+def test_resolve_float_quality_etf_is_unreliable():
+    res = flows.resolve_float_quality(
+        float_shares_raw=None, shares_out=7_650_000.0, chosen_shares=7_650_000.0,
+        float_dollars=4_848_000_000.0, adv=6_841_000_000.0, is_etf=True,
+        source="yfinance_shares_outstanding",
+    )
+    assert res["reliable"] is False
+    assert res["quality"] == "etf_elastic"
+
+
+def test_resolve_float_quality_adv_exceeds_float_is_unreliable():
+    # SOXX-like: ADV ($6.84B) > float MV ($4.85B) => cannot be a real free float.
+    res = flows.resolve_float_quality(
+        float_shares_raw=None, shares_out=7_650_000.0, chosen_shares=7_650_000.0,
+        float_dollars=4_848_000_000.0, adv=6_841_000_000.0, is_etf=False,
+        source="yfinance_shares_outstanding",
+    )
+    assert res["reliable"] is False
+    assert res["quality"] == "adv_exceeds_float"
+
+
+def test_resolve_float_quality_falls_back_when_floatshares_too_small():
+    # BRK-B-like: floatShares 1.16M is implausibly small vs 1.4B shares out.
+    res = flows.resolve_float_quality(
+        float_shares_raw=1_158_277.0, shares_out=1_398_308_677.0,
+        chosen_shares=1_158_277.0, float_dollars=575_513_087.0,
+        adv=2_705_628_116.0, is_etf=False, source="yfinance_float_shares",
+    )
+    assert res["source"] == "yfinance_shares_outstanding_fallback"
+    assert res["shares"] == pytest.approx(1_398_308_677.0)
+    # price ~ $497 * 1.4B shares = ~$695B float MV, well above ADV => reliable.
+    assert res["reliable"] is True
+    assert res["dollars"] > 6.0e11
+
+
+def test_resolve_float_quality_ok_single_name():
+    res = flows.resolve_float_quality(
+        float_shares_raw=2_625_438_772.0, shares_out=3_755_723_871.0,
+        chosen_shares=2_625_438_772.0, float_dollars=1_088_231_230_980.0,
+        adv=18_519_027_070.0, is_etf=False, source="yfinance_float_shares",
+    )
+    assert res["reliable"] is True
+    assert res["quality"] == "ok"
+
+
+def test_resolve_float_quality_missing():
+    res = flows.resolve_float_quality(
+        float_shares_raw=None, shares_out=None, chosen_shares=None,
+        float_dollars=None, adv=2_676_000_000.0, is_etf=False, source=None,
+    )
+    assert res["reliable"] is False
+    assert res["quality"] == "missing"
+
+
+def test_session_state_for_date_past_is_final_future_is_forming():
+    now = datetime(2026, 6, 30, 14, 56, tzinfo=UTC)  # 10:56 ET, before close
+    assert flows.session_state_for_date("2026-06-29", now=now) == "final"
+    assert flows.session_state_for_date("2026-06-30", now=now) == "forming"
+    after_close = datetime(2026, 6, 30, 21, 0, tzinfo=UTC)  # ~17:00 ET (EDT)
+    assert flows.session_state_for_date("2026-06-30", now=after_close) == "final"
+
+
+def test_apply_float_quality_suppresses_unreliable_pct():
+    df = pd.DataFrame([
+        {  # ETF underlying -> suppressed
+            "underlying": "SOXX", "net_moc_pct_tradable_float": 1.10,
+            "underlying_tradable_float_dollars": 4.85e9, "tradable_float_shares": 7.65e6,
+            "shares_outstanding_underlying": 7.65e6, "float_shares_raw": np.nan,
+            "is_etf": True, "tradable_float_source": "yfinance_shares_outstanding",
+            "underlying_dollar_adv_20d": 6.84e9,
+        },
+        {  # clean single name -> kept
+            "underlying": "TSLA", "net_moc_pct_tradable_float": 4.8e-5,
+            "underlying_tradable_float_dollars": 1.088e12, "tradable_float_shares": 2.6e9,
+            "shares_outstanding_underlying": 3.7e9, "float_shares_raw": 2.6e9,
+            "is_etf": False, "tradable_float_source": "yfinance_float_shares",
+            "underlying_dollar_adv_20d": 1.85e10,
+        },
+    ])
+    out = flows._apply_float_quality(df, pct_col="net_moc_pct_tradable_float").set_index("underlying")
+    assert bool(out.loc["SOXX", "tradable_float_reliable"]) is False
+    assert pd.isna(out.loc["SOXX", "net_moc_pct_tradable_float"])
+    assert bool(out.loc["TSLA", "tradable_float_reliable"]) is True
+    assert out.loc["TSLA", "net_moc_pct_tradable_float"] == pytest.approx(4.8e-5)
+
+
+def test_annotate_with_adv_adds_auction_and_physical_stats():
+    fund = flows.build_fund_flows(_universe(), _metrics())
+    agg = flows.build_underlying_aggregates(fund)
+    adv = pd.DataFrame([
+        {"date": "2026-05-19", "underlying": "SPY", "underlying_dollar_adv_20d": 30_000_000_000.0},
+    ])
+    _, agg2 = flows.annotate_with_adv(fund, agg, adv)
+    spy = agg2[(agg2["date"].eq("2026-05-19")) & (agg2["underlying"].eq("SPY"))].iloc[0]
+    net = 180_000_000.0
+    auction = 30_000_000_000.0 * flows._AUCTION_SHARE_OF_ADV
+    assert spy["net_moc_pct_auction_volume"] == pytest.approx(net / auction)
+    assert spy["net_moc_physical_dollars"] == pytest.approx(net * (1.0 - flows._SWAP_HEDGE_SHARE))
+    assert spy["net_moc_pct_adv_physical"] == pytest.approx(
+        net * (1.0 - flows._SWAP_HEDGE_SHARE) / 30_000_000_000.0
+    )
 
 
 def test_fetch_underlying_volume_panel_uses_yfinance_download(monkeypatch):

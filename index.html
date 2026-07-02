@@ -2421,6 +2421,11 @@ async function loadLetfRebalanceFlowsCache() {
     buildTime: latestPayload?.build_time || dailyPayload?.build_time || null,
     method: latestPayload?.method || null,
     flowStaleSummary: latestPayload?.flow_stale_summary || null,
+    sessionState: latestPayload?.session_state || null,
+    asOfUnderlyingClose: latestPayload?.as_of_underlying_close || latestPayload?.latest_date || null,
+    floatQualitySummary: latestPayload?.float_quality_summary || null,
+    auctionShareOfAdv: latestPayload?.auction_share_of_adv_assumption ?? null,
+    swapHedgeShare: latestPayload?.swap_hedge_share_assumption ?? null,
   };
   return LETF_REBALANCE_FLOWS_CACHE;
 }
@@ -2468,6 +2473,8 @@ async function loadLetfIntradayFlowsCache({ force = true } = {}) {
     navFundsStale: latest?.nav_funds_stale ?? null,
     blendOverridesCount: latest?.blend_overrides_count ?? 0,
     method: latest?.method || null,
+    auctionShareOfAdv: latest?.auction_share_of_adv_assumption ?? null,
+    swapHedgeShare: latest?.swap_hedge_share_assumption ?? null,
     todayHistory: Array.isArray(latest?.today_history) ? latest.today_history : [],
     biasMetrics,
   };
@@ -2509,6 +2516,12 @@ const flowDirectionLabel = (v) => {
   if (Number(v) < 0) return 'Sell into close';
   return 'Neutral';
 };
+const flowFloatQualityLabel = (q) => ({
+  etf_elastic: 'ETF underlying — float is elastic (AP create/redeem), not a real constraint',
+  adv_exceeds_float: 'unreliable float (20d $ADV exceeds reported float MV)',
+  missing: 'no float data from provider',
+  ok: 'reliable',
+}[String(q || '')] || 'float quality unknown');
 
 /** Pair backtest SVG x-axis: include day + year and avoid duplicate tick strings. */
 function formatBacktestAxisDate(raw) {
@@ -10768,13 +10781,15 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       : <>$ ADV unavailable</>}
                   </div>
                 </div>
-                <div className="chart-stat" title="Net EOD rebalance divided by underlying tradable float market value. Uses public float when available, otherwise shares outstanding.">
+                <div className="chart-stat" title="Net EOD rebalance divided by underlying tradable float market value. Single names only; ETF underlyings and unreliable floats are suppressed.">
                   <div className="cs-label">% of {String(undSym || '').toUpperCase()} tradable float</div>
-                  <div className={cls('cs-value', flowValClass(underlyingFlowLatest?.net_moc_pct_tradable_float))}>
-                    {fmtPctDecimal(underlyingFlowLatest?.net_moc_pct_tradable_float, 3)}
+                  <div className={cls('cs-value', underlyingFlowLatest?.tradable_float_reliable === false ? '' : flowValClass(underlyingFlowLatest?.net_moc_pct_tradable_float))}>
+                    {underlyingFlowLatest?.tradable_float_reliable === false ? '—' : fmtPctDecimal(underlyingFlowLatest?.net_moc_pct_tradable_float, 3)}
                   </div>
                   <div className="cs-sub">
-                    {underlyingFlowLatest?.underlying_tradable_float_dollars != null
+                    {underlyingFlowLatest?.tradable_float_reliable === false
+                      ? flowFloatQualityLabel(underlyingFlowLatest?.tradable_float_quality)
+                      : underlyingFlowLatest?.underlying_tradable_float_dollars != null
                       ? <>float MV {fmtCompactMoney(underlyingFlowLatest.underlying_tradable_float_dollars)}{underlyingFlowLatest.tradable_float_source ? <> · {underlyingFlowLatest.tradable_float_source}</> : null}</>
                       : <>float unavailable</>}
                   </div>
@@ -12583,6 +12598,10 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
       key === 'abs_pct_aum' ? Math.abs(Number(
         mode === 'intraday' ? row.estimated_close_rebalance_pct_aum : row.net_moc_pct_letf_aum,
       )) :
+      key === 'abs_pct_auction' ? Math.abs(Number(
+        mode === 'intraday' ? row.estimated_close_rebalance_pct_auction_volume : row.net_moc_pct_auction_volume,
+      )) :
+      key === 'abs_pctile' ? Math.abs(Number(row.abs_net_moc_pctile_60d)) :
       key === 'abs_z60' ? Math.abs(Number(row.net_moc_z_60d)) :
       key === 'underlying' ? row.underlying :
       key === 'n_funds' ? fundsOf(row) :
@@ -12699,6 +12718,11 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
   const floatFieldName = mode === 'intraday' ? 'remaining_close_rebalance_pct_tradable_float' : 'net_moc_pct_tradable_float';
   const aumFieldName = mode === 'intraday' ? 'estimated_close_rebalance_pct_aum' : 'net_moc_pct_letf_aum';
   const returnFieldName = mode === 'intraday' ? 'return_d1_so_far' : 'underlying_return_d1';
+  const auctionFieldName = mode === 'intraday' ? 'estimated_close_rebalance_pct_auction_volume' : 'net_moc_pct_auction_volume';
+  const physicalAdvFieldName = mode === 'intraday' ? 'estimated_close_rebalance_pct_adv_physical' : 'net_moc_pct_adv_physical';
+  const auctionShare = (mode === 'intraday' ? intradayPayload?.auctionShareOfAdv : payload?.auctionShareOfAdv) ?? 0.08;
+  const swapShare = (mode === 'intraday' ? intradayPayload?.swapHedgeShare : payload?.swapHedgeShare) ?? 0.85;
+  const sessionState = payload?.sessionState || null;
 
   return (
     <div className="news-content">
@@ -12707,7 +12731,7 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
         Mechanical issuer hedge into the close: <code>{method || 'L × (L − 1) × prior-close AUM × underlying return'}</code>.
         {mode === 'intraday'
           ? <> Snapshot {latestDate ? fmtTime(latestDate) : '—'}{intradayPayload?.minutesToClose != null ? ` · ${intradayPayload.minutesToClose}m to close` : ''}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}.</>
-          : <> Latest aggregate {latestDate || '—'}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}{mode === 'eod' ? <> · {fmtNum(headline.latestEodCount)}/{fmtNum(headline.total)} on latest session</> : null}
+          : <> Realised close {latestDate || '—'}{sessionState ? <> · <span className={sessionState === 'final' ? 'val-positive' : 'val-warning'}>{sessionState === 'final' ? 'session final' : 'session forming (close not set)'}</span></> : null}{buildTime ? ` · built ${fmtTime(buildTime)}` : ''}{mode === 'eod' ? <> · {fmtNum(headline.latestEodCount)}/{fmtNum(headline.total)} on latest session</> : null}
             {mode === 'eod' && flowStaleSummary ? (
               <> · {Number(flowStaleSummary.underlyings_actionable_stale || 0) > 0
                 ? <span className="val-negative">{fmtNum(flowStaleSummary.underlyings_actionable_stale)} actionable stale</span>
@@ -12766,8 +12790,8 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
             {Number.isFinite(Number(headline.topBuy?.[advFieldName]))
               ? <> · {fmtPctDecimal(headline.topBuy[advFieldName], 2)} of {mode === 'intraday' ? '20d median $ ADV' : '20d $ ADV'}</>
               : null}
-            {Number.isFinite(Number(headline.topBuy?.[floatFieldName]))
-              ? <> · {fmtPctDecimal(headline.topBuy[floatFieldName], 3)} of float</>
+            {Number.isFinite(Number(headline.topBuy?.[auctionFieldName]))
+              ? <> · {(Number(headline.topBuy[auctionFieldName]) * 100).toFixed(0)}% of auction</>
               : null}
           </div>
         </div>
@@ -12781,8 +12805,8 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
             {Number.isFinite(Number(headline.topSell?.[advFieldName]))
               ? <> · {fmtPctDecimal(headline.topSell[advFieldName], 2)} of {mode === 'intraday' ? '20d median $ ADV' : '20d $ ADV'}</>
               : null}
-            {Number.isFinite(Number(headline.topSell?.[floatFieldName]))
-              ? <> · {fmtPctDecimal(headline.topSell[floatFieldName], 3)} of float</>
+            {Number.isFinite(Number(headline.topSell?.[auctionFieldName]))
+              ? <> · {(Number(headline.topSell[auctionFieldName]) * 100).toFixed(0)}% of auction</>
               : null}
           </div>
         </div>
@@ -12855,7 +12879,10 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
               <th onClick={() => handleSort('abs_pct_adv')} style={{ cursor: 'pointer' }}>
                 {mode === 'intraday' ? '% 20d median $ ADV' : '% 20d $ ADV'}{sortIndicator('abs_pct_adv')}
               </th>
-              <th onClick={() => handleSort('abs_pct_float')} style={{ cursor: 'pointer' }} title={mode === 'intraday' ? 'Remaining-to-close rebalance divided by underlying tradable float market value' : 'Net MOC rebalance divided by underlying tradable float market value'}>
+              <th onClick={() => handleSort('abs_pct_auction')} style={{ cursor: 'pointer' }} title={`Net rebalance as a multiple of the estimated closing-auction size (≈ ${(auctionShare * 100).toFixed(0)}% of 20d $ADV). >100% means the mechanical flow exceeds the whole auction.`}>
+                % auction{sortIndicator('abs_pct_auction')}
+              </th>
+              <th onClick={() => handleSort('abs_pct_float')} style={{ cursor: 'pointer' }} title={mode === 'intraday' ? 'Remaining-to-close rebalance divided by underlying tradable float market value (single names only; ETF/unreliable shown as —)' : 'Net MOC rebalance divided by underlying tradable float market value (single names only; ETF/unreliable shown as —)'}>
                 {mode === 'intraday' ? 'Remain % float' : '% float'}{sortIndicator('abs_pct_float')}
               </th>
               {mode === 'intraday' ? (
@@ -12872,6 +12899,7 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
                   <th onClick={() => handleSort('net_moc_5d_dollars')} style={{ cursor: 'pointer' }}>5d net{sortIndicator('net_moc_5d_dollars')}</th>
                   <th onClick={() => handleSort('net_moc_20d_dollars')} style={{ cursor: 'pointer' }}>20d net{sortIndicator('net_moc_20d_dollars')}</th>
                   <th onClick={() => handleSort('abs_z60')} style={{ cursor: 'pointer' }}>z60{sortIndicator('abs_z60')}</th>
+                  <th onClick={() => handleSort('abs_pctile')} style={{ cursor: 'pointer' }} title="Percentile rank of |today's net flow| within its trailing 60-session history (1.00 = largest in 60d).">%ile{sortIndicator('abs_pctile')}</th>
                 </>
               ) : null}
               <th>Top contributor</th>
@@ -12914,6 +12942,10 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
                             + (Number.isFinite(Number(row.mean_blend_weight_nav)) && row.mean_blend_weight_nav > 0
                                 ? ' · w_nav≈' + Number(row.mean_blend_weight_nav).toFixed(2)
                                 : '')
+                            + (Number.isFinite(Number(row.estimated_close_rebalance_dollars_lo)) && Number.isFinite(Number(row.estimated_close_rebalance_dollars_hi))
+                                ? ' · reconciled band ' + fmtCompactSignedMoney(row.estimated_close_rebalance_dollars_lo) + '…' + fmtCompactSignedMoney(row.estimated_close_rebalance_dollars_hi)
+                                  + (Number.isFinite(Number(row.forecast_abs_error_pct)) ? ' (±' + (Number(row.forecast_abs_error_pct) * 100).toFixed(0) + '%, n=' + (row.forecast_error_n_obs ?? '?') + ')' : '')
+                                : '')
                           )
                         : fmtSignedMoney(netVal)
                     }
@@ -12932,14 +12964,24 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
                     {fmtPctDecimal(row[advFieldName], 2)}
                   </td>
                   <td
-                    className={flowValClass(row[floatFieldName])}
+                    className={flowValClass(row[auctionFieldName])}
+                    title={`Net rebalance ÷ est. closing-auction size (≈ ${(auctionShare * 100).toFixed(0)}% of 20d $ADV). Swap-adjusted physical ≈ ${fmtPctDecimal(row[physicalAdvFieldName], 2)} of ADV (assumes ${(swapShare * 100).toFixed(0)}% hedged off-tape).`}
+                  >
+                    {Number.isFinite(Number(row[auctionFieldName]))
+                      ? `${(Number(row[auctionFieldName]) * 100).toFixed(0)}%`
+                      : '—'}
+                  </td>
+                  <td
+                    className={row.tradable_float_reliable === false ? 'cs-sub' : flowValClass(row[floatFieldName])}
                     title={
-                      row.underlying_tradable_float_dollars != null
-                        ? `Tradable float ${fmtCompactMoney(row.underlying_tradable_float_dollars)}${row.tradable_float_source ? ` · ${row.tradable_float_source}` : ''}`
-                        : 'Tradable float unavailable'
+                      row.tradable_float_reliable === false
+                        ? `% of float suppressed: ${flowFloatQualityLabel(row.tradable_float_quality)}`
+                        : (row.underlying_tradable_float_dollars != null
+                            ? `Tradable float ${fmtCompactMoney(row.underlying_tradable_float_dollars)}${row.tradable_float_source ? ` · ${row.tradable_float_source}` : ''}`
+                            : 'Tradable float unavailable')
                     }
                   >
-                    {fmtPctDecimal(row[floatFieldName], 3)}
+                    {row.tradable_float_reliable === false ? '—' : fmtPctDecimal(row[floatFieldName], 3)}
                   </td>
                   {mode === 'intraday' ? (
                     <td className={flowValClass(row.volume_so_far_pct_adv)}>
@@ -12956,6 +12998,9 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
                       <td className={flowValClass(row.net_moc_20d_dollars)}>{fmtCompactSignedMoney(row.net_moc_20d_dollars)}</td>
                       <td className={flowValClass(row.net_moc_z_60d)}>
                         {Number.isFinite(Number(row.net_moc_z_60d)) ? Number(row.net_moc_z_60d).toFixed(2) : '—'}
+                      </td>
+                      <td title={Number.isFinite(Number(row.net_moc_pctile_60d)) ? `signed pctile ${(Number(row.net_moc_pctile_60d) * 100).toFixed(0)}%` : ''}>
+                        {Number.isFinite(Number(row.abs_net_moc_pctile_60d)) ? `${(Number(row.abs_net_moc_pctile_60d) * 100).toFixed(0)}%` : '—'}
                       </td>
                     </>
                   ) : null}

@@ -131,6 +131,18 @@ jobs:
         continue-on-error: true
         run: python scripts/score_borrow_spikes.py
 
+      # Slow-lane EOD LETF rebalance flow build. This workflow fires at 4:30 PM
+      # ET (~30 min after the cash close) so the underlying close is settled and
+      # session_state resolves to "final" — unlike the late-delivered nightly
+      # run that used to stamp a still-forming session. Float/ADV come from the
+      # decoupled yfinance cache (data/underlying_volume_history.parquet,
+      # refreshed only when older than ~18h), so this step is not a hot-path
+      # hindrance. Non-fatal: a flake here must not block the Pages deploy.
+      - name: Build LETF rebalance flows (post-close, session final)
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/build_letf_rebalance_flows.py
+
       - name: Print options coverage diagnostics (with hard gate)
         # Same rationale as the build step: don't let a quota-limited options
         # refresh block the Pages deploy.  The diagnostic warning is still
@@ -167,6 +179,10 @@ jobs:
             data/vrp_health.json
             data/yieldboost_put_spreads_latest.json
             data/yieldboost_options_target.json
+            data/letf_rebalance_flows_daily.parquet
+            data/letf_rebalance_flows_daily.json
+            data/letf_rebalance_flows_latest.json
+            data/underlying_volume_history.parquet
           commit_message: "chore: update dashboard data"
 
       # If build_data.py crashed, the working tree may contain partially-
