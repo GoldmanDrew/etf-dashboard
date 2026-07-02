@@ -120,6 +120,10 @@ DELISTINGS_MAX_PAGES = int(os.getenv("CORP_ACTIONS_DELISTINGS_MAX_PAGES", "10"))
 # Fallback cap for phase-2 ticker-targeted checks when the bulk inactive sweep
 # misses a universe symbol (e.g. delisted ETF still present in today's screener).
 DELISTING_FALLBACK_MAX_CALLS = int(os.getenv("CORP_ACTIONS_DELISTING_FALLBACK_MAX_CALLS", "60"))
+# When the bulk inactive sweep hits max_pages, optionally probe a *bounded* sample of
+# still-live screener symbols (lag between screener refresh and Polygon inactive feed).
+# Never expand to the full universe — that can burn 500+ calls on a truncated sweep.
+DELISTING_TRUNCATION_PROBE_MAX = int(os.getenv("CORP_ACTIONS_DELISTING_TRUNCATION_PROBE_MAX", "15"))
 DELISTING_FALLBACK_SYMBOLS = {
     str(s).strip().upper().replace(".", "-")
     for s in os.getenv("CORP_ACTIONS_DELISTING_FALLBACK_SYMBOLS", "").split(",")
@@ -903,11 +907,15 @@ def phase_2_delistings(
     fallback_calls = 0
     fallback_base = set(skipped_live_symbols) | set(DELISTING_FALLBACK_SYMBOLS)
     pagination_likely_truncated = len(raw) >= (DELISTINGS_MAX_PAGES * 1000)
-    if pagination_likely_truncated:
-        # If the bulk scan is truncated at max_pages, proactively sample symbols
-        # still in today's screener so true delistings don't hide behind pager
-        # depth.  Call cap keeps this bounded.
-        fallback_base |= {t for t in universe if t in current_live}
+    if pagination_likely_truncated and DELISTING_TRUNCATION_PROBE_MAX > 0:
+        # Bulk scan hit max_pages — sample a capped subset of still-live screener
+        # symbols so lagged delistings (NNEX-like) aren't lost behind pager depth.
+        proactive = sorted(
+            t
+            for t in universe
+            if t in current_live and t not in seen_delisted_syms and t not in fallback_base
+        )
+        fallback_base |= set(proactive[:DELISTING_TRUNCATION_PROBE_MAX])
     fallback_candidates = sorted(
         {
             t
@@ -987,6 +995,9 @@ def phase_2_delistings(
         missed_universe_tickers,
         len(raw),
     )
+    # Optional fallback uses raise_on_rate_limit=False; don't let its 429 streak
+    # abort mandatory bulk phases (news, symbol changes) that follow.
+    _CONSECUTIVE_429_STATE["count"] = 0
     return events
 
 

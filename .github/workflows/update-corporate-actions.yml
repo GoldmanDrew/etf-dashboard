@@ -41,11 +41,16 @@ jobs:
       # nominal free-tier limit when GitHub runners burst; keep this below 5.
       CORP_ACTIONS_POLYGON_REQS_PER_MIN: "3"
       CORP_ACTIONS_MAX_CONSEC_429: "8"
-      # Bulk pagination caps.  Defaults chosen for ~25 news calls + ~3 splits + ~1 delistings
-      # = ~30 calls total, which costs 6 min on the free tier and seconds on paid tiers.
+      # Bulk pagination caps.  Defaults chosen for ~25 news calls + ~3 splits + ~10 delistings
+      # = ~40 calls total, which costs ~13 min on the free tier and seconds on paid tiers.
       CORP_ACTIONS_NEWS_MAX_PAGES: "25"
       CORP_ACTIONS_SPLITS_MAX_PAGES: "10"
       CORP_ACTIONS_DELISTINGS_MAX_PAGES: "10"
+      # Phase-2 optional per-ticker probes (skipped_live + explicit symbols + capped
+      # truncation sample).  Keep well below universe size so a truncated inactive
+      # sweep cannot burn the Polygon budget before news runs.
+      CORP_ACTIONS_DELISTING_FALLBACK_MAX_CALLS: "15"
+      CORP_ACTIONS_DELISTING_TRUNCATION_PROBE_MAX: "10"
       # Phase 4 (symbol changes) — per-ticker Polygon events with disk cache.
       # The cache lives in data/polygon_ticker_events_cache.json (committed) so
       # that the call budget (see below) can backfill the ~480-ticker
