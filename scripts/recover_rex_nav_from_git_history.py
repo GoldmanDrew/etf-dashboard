@@ -46,6 +46,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from etf_providers import REXSharesProvider  # noqa: E402
+from log_redact import url_host_is_or_subdomain_of  # noqa: E402
 from ingest_etf_metrics import (  # noqa: E402
     REQUIRED_COLUMNS,
     backfill_underlying_adj_close_gaps,
@@ -126,7 +127,7 @@ def _safe_float(v: object) -> float | None:
 
 
 def _is_rex_url(url: str | None) -> bool:
-    return bool(url) and "rexshares.com" in str(url).lower()
+    return url_host_is_or_subdomain_of(url, "rexshares.com")
 
 
 def extract_session_table(

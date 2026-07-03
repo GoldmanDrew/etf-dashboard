@@ -10,6 +10,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import build_data as bd  # noqa: E402
+from log_redact import url_has_host  # noqa: E402
 
 
 class _Resp:
@@ -34,7 +35,7 @@ def test_fetch_csv_from_github_falls_back_to_contents_api(tmp_path, monkeypatch)
 
     def fake_get(url, **kwargs):
         calls.append(url)
-        if "raw.githubusercontent.com" in url:
+        if url_has_host(url, "raw.githubusercontent.com"):
             return _Resp(404, "Not Found")
         return _Resp(
             200,
@@ -51,5 +52,5 @@ def test_fetch_csv_from_github_falls_back_to_contents_api(tmp_path, monkeypatch)
 
     assert list(df["ETF"]) == ["TQQQ"]
     assert (tmp_path / "etf_screened_today.csv").read_text(encoding="utf-8") == csv_text
-    assert any("raw.githubusercontent.com" in url for url in calls)
-    assert any("api.github.com/repos" in url for url in calls)
+    assert any(url_has_host(url, "raw.githubusercontent.com") for url in calls)
+    assert any(url_has_host(url, "api.github.com") for url in calls)

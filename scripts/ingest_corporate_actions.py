@@ -82,6 +82,7 @@ from urllib.parse import urljoin
 import pandas as pd
 import requests
 
+from log_redact import redact_url
 
 LOGGER = logging.getLogger("corporate_actions_ingest")
 
@@ -580,7 +581,7 @@ def _polygon_get(
                 wait_s = 2.0 * (attempt + 1)
             wait_s = min(max(wait_s, 0.5), 20.0)
             LOGGER.debug("polygon 429 on %s; sleeping %.1fs (attempt %d/%d, consec_429=%d)",
-                         url, wait_s, attempt + 1, HTTP_RETRY_TOTAL + 1,
+                         redact_url(url), wait_s, attempt + 1, HTTP_RETRY_TOTAL + 1,
                          _CONSECUTIVE_429_STATE["count"])
             time.sleep(wait_s)
             continue
@@ -600,11 +601,11 @@ def _polygon_get(
                 last_body_snippet = None
             # Don't spam INFO for expected "no events" responses on Phase 4.
             if resp.status_code == 404:
-                LOGGER.debug("polygon 404 (no data) url=%s", url)
+                LOGGER.debug("polygon 404 (no data) url=%s", redact_url(url))
             else:
                 LOGGER.warning(
                     "polygon GET %s -> %d (no retry on 4xx): %s",
-                    url, resp.status_code, (last_body_snippet or "")[:120],
+                    redact_url(url), resp.status_code, (last_body_snippet or "")[:120],
                 )
             return None
 
@@ -629,7 +630,7 @@ def _polygon_get(
 
     LOGGER.warning(
         "polygon GET failed: url=%s status=%s exc=%s body=%s",
-        url,
+        redact_url(url),
         last_status,
         repr(last_exc) if last_exc else None,
         (last_body_snippet or "")[:120],
@@ -1865,10 +1866,10 @@ def _fetch_article_body(session: requests.Session, url: str) -> str:
             allow_redirects=True,
         )
     except Exception as e:  # noqa: BLE001
-        LOGGER.debug("article body fetch failed %s: %s", url, e)
+        LOGGER.debug("article body fetch failed %s: %s", redact_url(url), e)
         return ""
     if resp.status_code != 200 or not resp.text:
-        LOGGER.debug("article body non-200 %s: status=%s", url, resp.status_code)
+        LOGGER.debug("article body non-200 %s: status=%s", redact_url(url), resp.status_code)
         return ""
     # Bail early on clearly non-HTML (PDF press releases come back as
     # application/pdf and the regex pass below would produce garbage).
@@ -2256,7 +2257,9 @@ def _issuer_press_articles_from_jsonld(index_html: str, index_url: str) -> list[
     articles: list[dict] = []
     if not index_html:
         return articles
-    for match in re.finditer(r"<script\b([^>]*)>(.*?)</script>", index_html, re.IGNORECASE | re.DOTALL):
+    for match in re.finditer(
+        r"<script\b([^>]*)>([\s\S]*?)</script\s*>", index_html, re.IGNORECASE
+    ):
         attrs = html.unescape(match.group(1) or "")
         if "application/ld+json" not in attrs.lower():
             continue
@@ -2304,10 +2307,10 @@ def _fetch_issuer_press_index(session: requests.Session, url: str) -> str:
             },
         )
     except Exception as e:  # noqa: BLE001
-        LOGGER.warning("issuer-press index fetch failed %s: %s", url, e)
+        LOGGER.warning("issuer-press index fetch failed %s: %s", redact_url(url), e)
         return ""
     if resp.status_code != 200 or not resp.text:
-        LOGGER.warning("issuer-press index non-200 %s: status=%s", url, resp.status_code)
+        LOGGER.warning("issuer-press index non-200 %s: status=%s", redact_url(url), resp.status_code)
         return ""
     return resp.text
 

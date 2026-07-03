@@ -1510,8 +1510,8 @@ class DefianceProvider:
 
     @staticmethod
     def _html_to_text(html: str) -> str:
-        t = re.sub(r"<script[^>]*>[\s\S]*?</script>", " ", html, flags=re.I)
-        t = re.sub(r"<style[^>]*>[\s\S]*?</style>", " ", t, flags=re.I)
+        t = re.sub(r"<script\b[^>]*>[\s\S]*?</script\s*>", " ", html, flags=re.I)
+        t = re.sub(r"<style\b[^>]*>[\s\S]*?</style\s*>", " ", t, flags=re.I)
         t = re.sub(r"<[^>]+>", " ", t)
         return re.sub(r"\s+", " ", t).strip()
 

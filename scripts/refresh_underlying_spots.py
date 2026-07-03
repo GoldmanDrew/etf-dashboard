@@ -344,14 +344,20 @@ class _PolygonRateLimiter:
         wait_s = max(0.01, 60.0 - (now - self.request_timestamps[0]))
         time.sleep(wait_s)
 
-    def get(self, session: Any, url: str) -> tuple[Any | None, str | None]:
+    def get(
+        self,
+        session: Any,
+        url: str,
+        *,
+        params: dict[str, str] | None = None,
+    ) -> tuple[Any | None, str | None]:
         if POLYGON_MAX_TOTAL_REQUESTS > 0 and self.total_requests >= POLYGON_MAX_TOTAL_REQUESTS:
             return None, f"polygon request budget exceeded ({POLYGON_MAX_TOTAL_REQUESTS})"
         retries_left = max(0, POLYGON_RETRY_MAX_429)
         while True:
             self._rate_limit()
             try:
-                resp = session.get(url, timeout=POLYGON_TIMEOUT_SEC)
+                resp = session.get(url, params=params, timeout=POLYGON_TIMEOUT_SEC)
             except Exception:
                 return None, "polygon request exception"
             self.total_requests += 1
@@ -393,8 +399,8 @@ def fetch_polygon_last_spots(
 
     for sym in tickers:
         polygon_sym = _polygon_sym(sym)
-        url = f"https://api.polygon.io/v2/last/trade/{polygon_sym}?{urlencode({'apiKey': api_key})}"
-        resp, req_err = rl.get(session, url)
+        url = f"https://api.polygon.io/v2/last/trade/{polygon_sym}"
+        resp, req_err = rl.get(session, url, params={"apiKey": api_key})
         if req_err and resp is None:
             if "budget exceeded" in (req_err or ""):
                 LOGGER.warning(req_err)
