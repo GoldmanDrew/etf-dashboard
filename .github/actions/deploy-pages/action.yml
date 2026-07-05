@@ -2,7 +2,7 @@ name: Deploy GitHub Pages
 description: Build _site from index.html + data/ + assets/ and publish to GitHub Pages
 inputs:
   fail-soft:
-    description: When true, the final deploy step uses continue-on-error
+    description: When true, do not fail the job if both deploy attempts fail
     required: false
     default: "false"
 runs:
@@ -50,13 +50,11 @@ runs:
 
     - name: Deploy to GitHub Pages
       id: deploy_pages
-      continue-on-error: ${{ inputs.fail-soft == 'true' }}
+      continue-on-error: true
       uses: actions/deploy-pages@v4
-      with:
-        timeout: 1200000
 
     - name: Retry Pages deploy after idle wait
-      if: steps.deploy_pages.outcome == 'failure' && inputs.fail-soft != 'true'
+      if: steps.deploy_pages.outcome == 'failure'
       shell: bash
       env:
         GITHUB_TOKEN: ${{ github.token }}
@@ -64,7 +62,19 @@ runs:
       run: bash scripts/wait_for_pages_deploy_idle.sh
 
     - name: Deploy to GitHub Pages (retry)
-      if: steps.deploy_pages.outcome == 'failure' && inputs.fail-soft != 'true'
+      id: deploy_pages_retry
+      if: steps.deploy_pages.outcome == 'failure'
+      continue-on-error: true
       uses: actions/deploy-pages@v4
-      with:
-        timeout: 1200000
+
+    - name: Verify Pages deploy
+      if: inputs.fail-soft != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${{ steps.deploy_pages.outcome }}" = "success" ] || [ "${{ steps.deploy_pages_retry.outcome }}" = "success" ]; then
+          echo "Pages deploy succeeded."
+          exit 0
+        fi
+        echo "::error::Pages deploy failed after initial attempt and retry."
+        exit 1

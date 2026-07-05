@@ -23,15 +23,9 @@ on:
 # Sets permissions for GitHub Pages deployment
 permissions:
   contents: write
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages-deploy"
-  cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
     env:
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
@@ -203,6 +197,30 @@ jobs:
           BRANCH="${GITHUB_REF_NAME:-main}"
           git fetch origin "${BRANCH}"
           git checkout "origin/${BRANCH}" -- data index.html assets || true
+
+  deploy:
+    needs: build
+    if: always() && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: "pages-deploy"
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          lfs: true
+
+      - name: Pull latest main
+        run: git pull --ff-only origin main
 
       - name: Deploy Pages
         uses: ./.github/actions/deploy-pages

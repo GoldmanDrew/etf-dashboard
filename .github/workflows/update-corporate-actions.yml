@@ -19,8 +19,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: "corporate-actions-refresh"
@@ -29,6 +27,8 @@ concurrency:
 jobs:
   refresh-corporate-actions:
     runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.commit.outputs.changed == '1' }}
     # 30 min ceiling is plenty with the conservative CI rate below. Bump only if
     # pagination caps are raised substantially.
     timeout-minutes: 30
@@ -165,6 +165,29 @@ jobs:
             data/ticker_alias_map.json
           commit_message: "chore: refresh corporate actions and news"
 
+  deploy:
+    needs: refresh-corporate-actions
+    if: needs.refresh-corporate-actions.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: "pages-deploy"
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          lfs: true
+
+      - name: Pull latest main
+        run: git pull --ff-only origin main
+
       - name: Deploy Pages
-        if: steps.commit.outputs.changed == '1'
         uses: ./.github/actions/deploy-pages

@@ -20,8 +20,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: "market-hours-tick"
@@ -31,6 +29,8 @@ jobs:
   tick:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      deploy: ${{ steps.commit.outputs.changed == '1' }}
     env:
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
       TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
@@ -86,6 +86,29 @@ jobs:
           files: ${{ steps.tick.outputs.files }}
           commit_message: "chore: market tick (${{ steps.tick.outputs.task }})"
 
+  deploy:
+    needs: tick
+    if: needs.tick.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: "pages-deploy"
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          lfs: true
+
+      - name: Pull latest main
+        run: git pull --ff-only origin main
+
       - name: Deploy Pages
-        if: steps.commit.outputs.changed == '1'
         uses: ./.github/actions/deploy-pages

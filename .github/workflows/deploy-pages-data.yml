@@ -2,29 +2,78 @@ name: Deploy Pages (hourly safety net)
 
 # Fallback deploy if a commit landed without an inline deploy step.
 # Primary deploy path: market-hours.yml, nightly.yml, build-and-deploy.yml.
+# Cron at :07 avoids stacking with market-hours ticks on :00/:15/:30/:45.
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "7 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages-deploy"
-  cancel-in-progress: false
+  actions: read
 
 jobs:
   deploy-data:
     runs-on: ubuntu-latest
+    concurrency:
+      group: "pages-deploy"
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
     steps:
+      - name: Skip if Pages deployed recently
+        id: recent
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RECENT_MIN: "45"
+        run: |
+          set -euo pipefail
+          since="$(date -u -d "${RECENT_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
+          skip="$(
+            curl -sS \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs?status=completed&conclusion=success&created=%3E${since}&per_page=50" \
+              | GITHUB_RUN_ID="${GITHUB_RUN_ID}" python3 -c "
+          import json, os, sys
+          deploy_workflows = {
+              'Deploy Pages (hourly safety net)',
+              'Market Hours Data Tick',
+              'Build Data & Deploy Pages',
+              'Update Corporate Actions & News',
+              'Nightly Metrics & Full Build',
+          }
+          try:
+              payload = json.load(sys.stdin)
+          except Exception:
+              print('0')
+              raise SystemExit
+          run_id = int(os.environ.get('GITHUB_RUN_ID', '0'))
+          for run in payload.get('workflow_runs') or []:
+              if run.get('name') in deploy_workflows and run.get('id') != run_id:
+                  print('1')
+                  raise SystemExit
+          print('0')
+          "
+          )"
+          echo "skip=${skip}" >> "$GITHUB_OUTPUT"
+          if [ "${skip}" = "1" ]; then
+            echo "Another workflow deployed Pages within the last ${RECENT_MIN} minutes; skipping hourly safety net."
+          fi
+
       - name: Checkout
+        if: steps.recent.outputs.skip != '1'
         uses: actions/checkout@v4
         with:
           lfs: true
 
       - name: Deploy Pages
+        if: steps.recent.outputs.skip != '1'
         uses: ./.github/actions/deploy-pages
+        with:
+          fail-soft: "true"
