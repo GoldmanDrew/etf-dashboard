@@ -13,6 +13,8 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+from borrow_live_calibration import build_live_calibration_monitor  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -65,6 +67,23 @@ def build_tracking_payload(repo_root: Path) -> dict[str, Any]:
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             util_pct = float((meta.get("feature_coverage") or {}).get("utilization_proxy") or 0.42)
+        except json.JSONDecodeError:
+            pass
+
+    reg_path = data / "borrow_model_registry.json"
+    gate_pass = False
+    if reg_path.exists():
+        try:
+            gate_pass = bool(json.loads(reg_path.read_text(encoding="utf-8")).get("boosting", {}).get("gate_pass"))
+        except json.JSONDecodeError:
+            pass
+
+    live_cal = build_live_calibration_monitor(data / "borrow_spike_realized.jsonl")
+    metrics_path = data / "borrow_spike_metrics.json"
+    if metrics_path.exists():
+        try:
+            m_payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+            live_cal = m_payload.get("live_calibration_monitor") or live_cal
         except json.JSONDecodeError:
             pass
 
@@ -124,12 +143,32 @@ def build_tracking_payload(repo_root: Path) -> dict[str, Any]:
             "target": 1,
             "status": "done" if (v2cmp.get("v2_auroc_delta") or 0) >= 0 else "in_progress",
         },
+        {
+            "id": "boosting_gate_pass",
+            "description": "Boosting L2 passes precision@10 lift gate vs base rate",
+            "current": 1 if gate_pass else 0,
+            "target": 1,
+            "status": "done" if gate_pass else "in_progress",
+        },
+        {
+            "id": "live_elevated_hit_rate_60d",
+            "description": "Rolling 60d elevated/high tier L2 realized rate",
+            "current": float(live_cal.get("elevated_strict_hit_rate") or 0),
+            "target": 0.05,
+            "status": _status(float(live_cal.get("elevated_strict_hit_rate") or 0), 0.05)
+            if live_cal.get("elevated_strict_hit_rate") is not None
+            else "in_progress",
+        },
     ]
 
     next_actions: list[str] = []
     for m in milestones:
         if m["status"] == "blocked":
             next_actions.append(f"Unblock {m['id']}: {m['current']} vs target {m['target']}")
+    if live_cal.get("alert"):
+        next_actions.insert(0, live_cal["alert"])
+    if util_pct < 0.8:
+        next_actions.append(f"Raise utilization coverage: {util_pct:.1%} vs target 80%")
     if not next_actions:
         next_actions.append("Maintain nightly pipeline; monitor live vs replay drift weekly.")
 
@@ -147,7 +186,10 @@ def build_tracking_payload(repo_root: Path) -> dict[str, Any]:
         "forecast_lane": {
             "n_symbols": forecast.get("n_symbols"),
             "method": forecast.get("method"),
+            "registry_winner": forecast.get("registry_winner"),
         },
+        "borrow_ml_registry": gate_pass,
+        "live_calibration_monitor": live_cal,
         "next_actions": next_actions[:8],
         "findings_summary": eval_payload.get("findings_summary"),
     }

@@ -440,6 +440,11 @@ def _build_records_from_csv():
             borrow_spike_scoring_eligible=_v2bool(row, "borrow_spike_scoring_eligible") if "borrow_spike_scoring_eligible" in row else None,
             borrow_forecast_delta_5d_p50=_v2f(row, "borrow_forecast_delta_5d_p50"),
             borrow_forecast_5d_p50=_v2f(row, "borrow_forecast_5d_p50"),
+            borrow_forecast_delta_5d_p25=_v2f(row, "borrow_forecast_delta_5d_p25"),
+            borrow_forecast_delta_5d_p75=_v2f(row, "borrow_forecast_delta_5d_p75"),
+            borrow_stress_borrow_annual=_v2f(row, "borrow_stress_borrow_annual"),
+            net_edge_stress_p50_annual=_v2f(row, "net_edge_stress_p50_annual"),
+            net_edge_stress_basis=_v2s(row, "net_edge_stress_basis"),
             schema_v=scv,
             edge_sign_convention=_v2s(row, "edge_sign_convention") or "short_favorable_positive",
         )

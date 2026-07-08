@@ -16,6 +16,7 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+from borrow_metrics_enrichment import join_supply_to_panel, utilization_coverage_fraction  # noqa: E402
 from borrow_spike_model import (  # noqa: E402
     FEATURE_COLS,
     _symbol_history_frame,
@@ -217,26 +218,9 @@ def _symbol_base_rows(sym: str, hist: list[dict]) -> pd.DataFrame:
 
 
 def _enrich_metrics(panel: pd.DataFrame, metrics: pd.DataFrame) -> pd.DataFrame:
-    if panel.empty or metrics.empty:
+    if panel.empty:
         return panel
-    m = metrics.sort_values(["symbol", "date"]).copy()
-    m["turnover_20d"] = (
-        m.groupby("symbol")["shares_traded"]
-        .transform(lambda s: s.rolling(20, min_periods=5).mean())
-    )
-    m["log_aum"] = np.log1p(m["aum"].clip(lower=0).astype(float))
-    nav = m["nav"].astype(float)
-    close = m["close_price"].astype(float)
-    m["prem_disc_bps"] = np.where(nav > 0, (close - nav) / nav * 10_000.0, np.nan)
-    cols = ["date", "symbol", "shares_outstanding", "aum", "turnover_20d", "log_aum", "prem_disc_bps"]
-    m = m[cols].drop_duplicates(subset=["date", "symbol"], keep="last")
-    out = panel.merge(m, on=["date", "symbol"], how="left")
-    so = out["shares_outstanding"].astype(float)
-    sa = out["shares_available"].astype(float)
-    out["utilization_proxy"] = np.where(so > 0, 1.0 - sa / so, np.nan)
-    adv = out["turnover_20d"].astype(float)
-    out["avail_to_adv"] = np.where(adv > 0, sa / adv, np.nan)
-    return out
+    return join_supply_to_panel(panel, metrics)
 
 
 def _enrich_screener(panel: pd.DataFrame, screener: pd.DataFrame, forecast_vol: dict[str, float]) -> pd.DataFrame:
@@ -385,6 +369,7 @@ def panel_meta(panel: pd.DataFrame) -> dict[str, Any]:
     for c in ALL_FEATURE_COLS:
         if c in panel.columns:
             feature_cov[c] = round(float(panel[c].notna().mean()), 4)
+    feature_cov["utilization_proxy"] = utilization_coverage_fraction(panel)
     return {
         "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "grain": ["date", "symbol"],

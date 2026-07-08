@@ -12,7 +12,12 @@ from operational_signals import enrich_records_with_operational_signals  # noqa:
 
 
 def test_enrich_borrow_spike_forecast_and_moc_flow(tmp_path):
-    records = [{"symbol": "TQQQ", "bucket": "bucket_1_high_beta"}]
+    records = [{
+        "symbol": "TQQQ",
+        "bucket": "bucket_1_high_beta",
+        "net_edge_p50_annual": 0.12,
+        "borrow_for_net_annual": 0.08,
+    }]
     borrow = {
         "symbols": {
             "TQQQ": {
@@ -48,3 +53,5 @@ def test_enrich_borrow_spike_forecast_and_moc_flow(tmp_path):
     assert rec["borrow_spike_alert_tier"] == "elevated"
     assert rec["borrow_forecast_delta_5d_p50"] == 0.05
     assert rec["borrow_forecast_5d_p50"] == 0.23
+    assert rec["borrow_stress_borrow_annual"] == 0.23
+    assert rec["net_edge_stress_p50_annual"] == -0.03

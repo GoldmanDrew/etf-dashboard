@@ -1,81 +1,45 @@
 {
-  "build_time": "2026-07-08T14:38:08.993928Z",
+  "build_time": "2026-07-08T14:47:56.073611Z",
+  "label_variant": "L0",
+  "label": {
+    "name": "production",
+    "description": "future_max > max(1.0, 3*med60, p99_180) and jump > 0.25",
+    "mult_med": 3.0,
+    "jump_min": 0.25,
+    "abs_floor": 1.0,
+    "use_p99": true
+  },
+  "horizon_days": 5,
+  "refit_cadence_days": 7,
+  "panel_rows": 31238,
+  "replay_rows": 29869,
+  "replay_positives": 1,
+  "replay_date_min": "2026-03-31",
+  "replay_date_max": "2026-07-03",
+  "symbols_scored": 465,
+  "l2_replay": {
+    "panel_rows": 35996,
+    "replay_rows": 35454,
+    "replay_positives": 846,
+    "replay_date_min": "2026-03-02",
+    "replay_date_max": "2026-07-03"
+  },
   "label_grid": {
     "L0": {
-      "build_time": "2026-07-08T14:37:33.260375Z",
-      "label_variant": "L0",
-      "label": {
-        "name": "production",
-        "description": "future_max > max(1.0, 3*med60, p99_180) and jump > 0.25",
-        "mult_med": 3.0,
-        "jump_min": 0.25,
-        "abs_floor": 1.0,
-        "use_p99": true
-      },
-      "horizon_days": 5,
-      "refit_cadence_days": 7,
       "panel_rows": 31238,
-      "replay_rows": 29869,
-      "replay_positives": 1,
-      "replay_date_min": "2026-03-31",
-      "replay_date_max": "2026-07-03",
-      "symbols_scored": 465
+      "positives": 4
     },
     "L1": {
-      "build_time": "2026-07-08T14:37:41.994453Z",
-      "label_variant": "L1",
-      "label": {
-        "name": "moderate",
-        "description": "future_max > max(1.0, 2*med60, p99_180) and jump > 0.15",
-        "mult_med": 2.0,
-        "jump_min": 0.15,
-        "abs_floor": 1.0,
-        "use_p99": true
-      },
-      "horizon_days": 5,
-      "refit_cadence_days": 7,
       "panel_rows": 31238,
-      "replay_rows": 29869,
-      "replay_positives": 9,
-      "replay_date_min": "2026-03-31",
-      "replay_date_max": "2026-07-03",
-      "symbols_scored": 465
+      "positives": 14
     },
     "L2": {
-      "build_time": "2026-07-08T14:37:51.872177Z",
-      "label_variant": "L2",
-      "label": {
-        "name": "p90_relative",
-        "description": "future_max > p90_60 and jump > 0.10",
-        "jump_min": 0.1,
-        "use_p90": true
-      },
-      "horizon_days": 5,
-      "refit_cadence_days": 7,
       "panel_rows": 35996,
-      "replay_rows": 35454,
-      "replay_positives": 845,
-      "replay_date_min": "2026-03-02",
-      "replay_date_max": "2026-07-03",
-      "symbols_scored": 488
+      "positives": 865
     },
     "L3": {
-      "build_time": "2026-07-08T14:38:08.978401Z",
-      "label_variant": "L3",
-      "label": {
-        "name": "absolute_5pct",
-        "description": "future_max > 0.05 and jump > 0.10",
-        "jump_min": 0.1,
-        "abs_borrow_min": 0.05
-      },
-      "horizon_days": 5,
-      "refit_cadence_days": 7,
       "panel_rows": 35996,
-      "replay_rows": 35454,
-      "replay_positives": 1206,
-      "replay_date_min": "2026-03-02",
-      "replay_date_max": "2026-07-03",
-      "symbols_scored": 488
+      "positives": 1229
     }
   }
 }

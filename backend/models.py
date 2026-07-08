@@ -187,6 +187,12 @@ class ETFRecord(BaseModel):
     borrow_spike_scoring_eligible: Optional[bool] = None
     borrow_forecast_delta_5d_p50: Optional[float] = None
     borrow_forecast_5d_p50: Optional[float] = None
+    borrow_forecast_method: Optional[str] = None
+    borrow_spike_p_5d_l2_boosting: Optional[float] = None
+    borrow_spike_p_5d_l2_boosting_calibrated: Optional[float] = None
+    borrow_spike_alert_tier_boosting: Optional[str] = None
+    borrow_model_drift_winner: Optional[str] = None
+    borrow_model_spike_winner: Optional[str] = None
     schema_v: Optional[int] = None
     edge_sign_convention: Optional[str] = None
 

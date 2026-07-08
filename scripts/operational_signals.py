@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
+
+STRESS_TIERS = frozenset({"elevated", "high"})
 
 
 def _norm_sym(s: object) -> str:
@@ -61,6 +64,35 @@ def load_flow_signal_maps(
     return intraday, eod
 
 
+def compute_net_edge_stress_fields(rec: dict[str, Any]) -> dict[str, Any]:
+    """Stress-case net edge for elevated/high tiers (display only; ls-algo unchanged)."""
+    tier = str(rec.get("borrow_spike_alert_tier") or rec.get("borrow_spike_risk_band") or "").lower()
+    if tier not in STRESS_TIERS:
+        return {}
+    net_p50 = rec.get("net_edge_p50_annual")
+    borrow_post = rec.get("borrow_for_net_annual")
+    if borrow_post is None:
+        borrow_post = rec.get("borrow_fee_annual") or rec.get("borrow_current")
+    forecast = rec.get("borrow_forecast_5d_p50")
+    if not all(
+        isinstance(x, (int, float)) and math.isfinite(float(x))
+        for x in (net_p50, borrow_post)
+    ):
+        return {}
+    borrow_post_f = float(borrow_post)
+    net_f = float(net_p50)
+    stress_borrow = borrow_post_f
+    if isinstance(forecast, (int, float)) and math.isfinite(float(forecast)):
+        stress_borrow = max(borrow_post_f, float(forecast))
+    if stress_borrow <= borrow_post_f + 1e-9:
+        return {}
+    return {
+        "borrow_stress_borrow_annual": round(stress_borrow, 6),
+        "net_edge_stress_p50_annual": round(net_f - (stress_borrow - borrow_post_f), 6),
+        "net_edge_stress_basis": "max_posterior_forecast_borrow",
+    }
+
+
 def enrich_records_with_operational_signals(
     records: list[dict[str, Any]],
     *,
@@ -72,6 +104,8 @@ def enrich_records_with_operational_signals(
     intra_by_fund, eod_by_ticker = load_flow_signal_maps(data_dir)
     forecast_payload = _load_json(data_dir / "borrow_forecast_latest.json")
     forecast_by = (forecast_payload.get("by_symbol") or {}) if forecast_payload else {}
+    ml_scores = _load_json(data_dir / "borrow_ml_scores_latest.json")
+    registry = _load_json(data_dir / "borrow_model_registry.json")
 
     for rec in records:
         sym = _norm_sym(rec.get("symbol"))
@@ -82,7 +116,10 @@ def enrich_records_with_operational_signals(
         if isinstance(spike, dict):
             rec["borrow_spike_p_5d"] = spike.get("p_spike_5d")
             rec["borrow_spike_p_5d_l2_calibrated"] = spike.get("p_spike_5d_l2_calibrated")
+            rec["borrow_spike_p_5d_l2_boosting"] = spike.get("p_spike_5d_l2_boosting")
+            rec["borrow_spike_p_5d_l2_boosting_calibrated"] = spike.get("p_spike_5d_l2_boosting_calibrated")
             rec["borrow_spike_alert_tier"] = spike.get("alert_tier")
+            rec["borrow_spike_alert_tier_boosting"] = spike.get("alert_tier_boosting")
             rec["borrow_spike_risk_band"] = spike.get("risk_band") or spike.get("alert_tier")
             rec["borrow_spike_quality_band"] = spike.get("quality_band")
             rec["borrow_spike_scoring_eligible"] = spike.get("scoring_eligible")
@@ -92,6 +129,15 @@ def enrich_records_with_operational_signals(
         if isinstance(fc, dict):
             rec["borrow_forecast_delta_5d_p50"] = fc.get("delta_borrow_5d_p50")
             rec["borrow_forecast_5d_p50"] = fc.get("borrow_forecast_5d_p50")
+            rec["borrow_forecast_delta_5d_p25"] = fc.get("delta_borrow_5d_p25")
+            rec["borrow_forecast_delta_5d_p75"] = fc.get("delta_borrow_5d_p75")
+            rec["borrow_forecast_method"] = fc.get("method") or forecast_payload.get("method")
+
+        rec.update(compute_net_edge_stress_fields(rec))
+
+        if registry:
+            rec["borrow_model_drift_winner"] = (registry.get("drift") or {}).get("winner")
+            rec["borrow_model_spike_winner"] = (registry.get("spike_l2") or {}).get("winner")
 
         if rec.get("bucket") != "bucket_1_high_beta":
             continue
