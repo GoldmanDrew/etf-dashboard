@@ -4456,6 +4456,8 @@ def build():
         beta = float(row["Delta"]) if pd.notna(row.get("Delta")) else None
 
         bucket = assign_bucket(sym, beta or 0)
+        screener_bucket_raw = str(row.get("bucket") or "").strip().lower()
+        screener_bucket = screener_bucket_raw if screener_bucket_raw else None
         is_yieldboost = norm_sym(sym) in yieldboost_symbols
         scenario_style = (
             "income_style"
@@ -4836,6 +4838,25 @@ def build():
             "include_for_algo": bool(row.get("include_for_algo", False)),
             "strategy_blacklisted": _truthy(rdict.get("strategy_blacklisted")),
             "protected": bool(row.get("protected", False)),
+            "screener_bucket": screener_bucket,
+            "bucket4_net_edge_annual": _safe_float(rdict, "bucket4_net_edge_annual"),
+            "init_pct_short": _safe_float(rdict, "init_pct_short"),
+            "maint_pct_short": _safe_float(rdict, "maint_pct_short"),
+            "inverse_shortable": (
+                _truthy(rdict.get("inverse_shortable"))
+                if "inverse_shortable" in rdict and pd.notna(rdict.get("inverse_shortable"))
+                else None
+            ),
+            "purgatory": (
+                _truthy(rdict.get("purgatory"))
+                if "purgatory" in rdict and pd.notna(rdict.get("purgatory"))
+                else None
+            ),
+            "purgatory_net_edge": (
+                _truthy(rdict.get("purgatory_net_edge"))
+                if "purgatory_net_edge" in rdict and pd.notna(rdict.get("purgatory_net_edge"))
+                else None
+            ),
             "cagr_positive": bool(row.get("cagr_positive")) if pd.notna(row.get("cagr_positive")) else None,
             "borrow_source": borrow_source,
             # Screener schema v2 (optional; from ls-algo daily_screener export)

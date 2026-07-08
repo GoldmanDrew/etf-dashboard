@@ -164,6 +164,14 @@ jobs:
         continue-on-error: true
         run: python scripts/audit_metrics_gaps.py --start $(python -c "from datetime import date,timedelta; print((date.today()-timedelta(days=14)).isoformat())")
 
+      - name: Apply metrics gap easy fixes
+        continue-on-error: true
+        run: python scripts/audit_metrics_gaps.py --apply-easy-fixes
+
+      - name: Repair stale issuer closes from market
+        continue-on-error: true
+        run: python scripts/repair_metrics_staleness.py --apply --skip-ingest --minimal
+
       - name: Bootstrap Yahoo prices before first stored metrics row
         continue-on-error: true
         run: python scripts/bootstrap_metrics_yahoo_history.py --max-tickers 500
@@ -307,6 +315,11 @@ jobs:
         run: |
           pip install -r ls-algo/requirements.txt
           python scripts/build_bucket5_insurance_backtest.py --copy-ls-algo-panel
+
+      - name: Build Bucket 4 inverse-decay backtest artifact
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/build_bucket4_backtest.py
 
       - name: Refresh YieldBOOST VRP (sleeves + Tradier OCC)
         if: steps.build_data.outcome == 'success'

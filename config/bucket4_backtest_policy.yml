@@ -1,0 +1,114 @@
+# Snapshot of production Bucket 4 hedge/cadence/sizing rules (DCQ 2026-06-30).
+# Source: config/strategy_config.yml inverse_decay_bucket4 + config/sizing.yaml bucket_4*
+
+schema: bucket4_backtest_policy.v1
+snapshot_date: "2026-06-30"
+
+inverse_decay_bucket4:
+  enabled: true
+  target_weight: 0.03
+  rules:
+    partial_hedge_ratio: 1.0
+    bucket4_weekly_opt2:
+      enabled: true
+      history_start: "2018-01-01"
+      warmup_bdays: 65
+      fee_bps: 1.0
+      slippage_bps: 20.0
+      borrow_multiplier: 1.0
+      hedge_cadence_policy:
+        source: tr_vcr
+        hedge_ratio_model: v7
+        opt2_k: 0.05
+        h_mid: 0.45
+        k_vcr: 1.0
+        h_min: 0.30
+        h_max: 0.80
+        alpha: 0.25
+        k_z: 0.20
+        cadence_signal_col: tr_est
+        base_days: 14.0
+        k_tr: -1.0
+        m_vcr: 2.5
+        min_interval: 1
+        max_interval: 21
+        operator_check_days: 5
+        force_on_max_interval: true
+        name_tilt: {}
+    ratchet:
+      enabled: true
+      state_json: data/b4_inverse_ratchet_state.json
+      reconcile_tolerance_usd: 250.0
+      trim:
+        enabled: true
+        trim_max: 0.5
+        creep_full: 1.0
+        k_edge: 0.3
+        edge_floor: 0.25
+        k_borrow: 0.0
+        edge_ref: 0.30
+        borrow_ref: 0.30
+      release_below_edge: null
+    min_net_edge_annual: 0.30
+    min_underlying_vol: 0.40
+    min_underlying_vol_entry: 0.50
+    min_underlying_vol_keep: 0.40
+    concentration:
+      enabled: false
+      top_n_pairs: 15
+    cluster_caps:
+      crypto:
+        cap: 0.35
+        members: [MSTR, COIN, IBIT, CLSK, IREN, BMNR, CRCL, RIOT, MARA, XRPZ, BLSH]
+    excluded_etfs:
+      - KOLD
+      - SCO
+    weighting:
+      max_name_weight: 0.20
+      eq_blend: 0.05
+      borrow_aversion: 0.75
+
+bucket_4:
+  label: inverse_decay
+  screener_buckets: ["bucket_4"]
+  target_weight: 0.30
+  rules:
+    partial_hedge_ratio: 1.0
+    min_abs_beta: 0.5
+    max_borrow_current: 1.20
+    min_underlying_vol: 0.05
+    max_pair_weight: 0.18
+    max_underlying_weight: 0.30
+    exclude_purgatory: true
+
+bucket_4_dynamic_hedge:
+  state_path: data/b4_hedge_state.json
+  h_base: 0.75
+  k: 0.05
+  alpha: 0.25
+  h_min: 0.10
+  h_max: 1.10
+  min_names: 5
+
+bucket_4_ratchet:
+  enabled: true
+  state_json: data/b4_inverse_ratchet_state.json
+  reconcile_tolerance_usd: 250.0
+  trim:
+    enabled: true
+    trim_max: 0.5
+    creep_full: 1.0
+    k_edge: 0.3
+    edge_floor: 0.25
+    k_borrow: 0.0
+    edge_ref: 0.30
+    borrow_ref: 0.30
+  release_below_edge: null
+
+backtest:
+  start: "2024-01-01"
+  min_days: 60
+  warmup_bdays: 60
+  signal_window: 60
+  initial_capital: 1.0
+  gross_multiplier: 1.0

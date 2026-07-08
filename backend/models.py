@@ -211,6 +211,13 @@ class ETFRecord(BaseModel):
     include_for_algo: bool = False
     strategy_blacklisted: bool = False
     protected: bool = False
+    screener_bucket: Optional[str] = None
+    bucket4_net_edge_annual: Optional[float] = None
+    init_pct_short: Optional[float] = None
+    maint_pct_short: Optional[float] = None
+    inverse_shortable: Optional[bool] = None
+    purgatory: Optional[bool] = None
+    purgatory_net_edge: Optional[bool] = None
     cagr_positive: Optional[bool] = None
 
     # Freshness
