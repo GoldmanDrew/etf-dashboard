@@ -66,7 +66,9 @@ from split_adjustments import (
 from etf_providers import (
     ProviderResult,
     STALE_KIND_ISSUER_EARLY,
+    STALE_KIND_ISSUER_LAG,
     STALE_KIND_ISSUER_SESSION_EXTEND,
+    _ISSUER_SESSION_PROVIDERS,
     _build_session,
     build_default_stack,
     infer_stale_kind,
@@ -1912,6 +1914,87 @@ def repair_close_price_vs_issuer_session(
     return work, int(mis.sum())
 
 
+def repair_stale_issuer_close_from_market(
+    df: pd.DataFrame,
+    *,
+    lookback_calendar_days: int | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """Overwrite stale issuer ``close_price`` with Yahoo close on the row session date.
+
+    Issuer pages (notably REX/T-REX) can publish a frozen Closing Price/NAV pair while
+    ``stale_kind=issuer_lag``. ``merge_close_prices`` keeps that stale issuer close;
+    this repair prefers the exchange close for the stamped session when the row is
+    issuer-lagged.
+    """
+    if df.empty:
+        return df, 0
+    if os.getenv("ETF_METRICS_DISABLE_STALE_ISSUER_CLOSE_REPAIR", "").lower() in ("1", "true", "yes"):
+        return df, 0
+
+    lb = lookback_calendar_days or int(os.getenv("ETF_METRICS_STALE_ISSUER_CLOSE_LOOKBACK_DAYS", "60"))
+    work = df.copy()
+    work["date"] = pd.to_datetime(work["date"], errors="coerce").dt.date
+    work["ticker"] = work["ticker"].astype(str).str.upper()
+    max_d = work["date"].max()
+    if max_d is None or (isinstance(max_d, float) and math.isnan(max_d)):
+        return df, 0
+
+    tail = work[work["date"] >= (max_d - timedelta(days=max(7, lb)))].copy()
+    if tail.empty:
+        return df, 0
+
+    kind = (
+        tail.get("stale_kind", pd.Series(index=tail.index, dtype=object))
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+    stale_num = pd.to_numeric(tail.get("stale", 0), errors="coerce").fillna(0).astype(bool)
+    prov = tail["source_provider"].astype(str).str.strip().str.lower()
+    issuer_set = {p.lower() for p in _ISSUER_SESSION_PROVIDERS}
+    kind_early = kind.eq(STALE_KIND_ISSUER_EARLY)
+    close_miss = pd.to_numeric(tail.get("close_price"), errors="coerce").isna()
+    mis = (
+        kind.eq(STALE_KIND_ISSUER_LAG)
+        | (stale_num & prov.isin(issuer_set))
+        | (kind_early & close_miss)
+    )
+    if not mis.any():
+        return df, 0
+
+    idx = tail.index[mis]
+    tickers = sorted({str(tail.at[i, "ticker"]).strip().upper() for i in idx})
+    d_min = min(tail.loc[idx, "date"].tolist())
+    d_max = max(tail.loc[idx, "date"].tolist())
+    close_df = fetch_close_prices_batch(tickers, d_min, d_max)
+    if close_df.empty:
+        return df, 0
+
+    close_df = close_df.copy()
+    close_df["date"] = pd.to_datetime(close_df["date"], errors="coerce").dt.date
+    close_df["ticker"] = close_df["ticker"].astype(str).str.upper()
+    close_lookup = {
+        (str(r["ticker"]).upper(), r["date"]): float(r["close_price"])
+        for _, r in close_df.iterrows()
+        if pd.notna(r.get("close_price")) and float(r["close_price"]) > 0
+    }
+
+    n_fixed = 0
+    for i in idx:
+        sym = str(work.at[i, "ticker"]).upper()
+        d = work.at[i, "date"]
+        new_close = close_lookup.get((sym, d))
+        if new_close is None:
+            continue
+        old_close = pd.to_numeric(work.at[i, "close_price"], errors="coerce")
+        if pd.notna(old_close) and abs(float(old_close) - new_close) < 1e-6:
+            continue
+        work.at[i, "close_price"] = new_close
+        n_fixed += 1
+
+    return work, n_fixed
+
+
 def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame:
     """Left-join close prices and exchange-reported share volume on (session date, ticker)."""
     if close_df.empty:
@@ -1940,10 +2023,35 @@ def merge_close_prices(df: pd.DataFrame, close_df: pd.DataFrame) -> pd.DataFrame
         merged["close_price"] = None
     if "shares_traded" not in merged.columns:
         merged["shares_traded"] = None
-    # Prefer issuer/session close already on the row; Yahoo fills gaps only.
-    merged["close_price"] = pd.to_numeric(merged["close_price"], errors="coerce").combine_first(
-        pd.to_numeric(merged["_close_new"], errors="coerce")
+    issuer_close = pd.to_numeric(merged["close_price"], errors="coerce")
+    yf_close = pd.to_numeric(merged["_close_new"], errors="coerce")
+    stale_lag = (
+        merged.get("stale_kind", pd.Series(index=merged.index, dtype=object))
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .eq(STALE_KIND_ISSUER_LAG)
     )
+    row_close = c2.rename(columns={"close_price": "_close_row", "date": "_row_date"})
+    merged = merged.merge(
+        row_close[["ticker", "_row_date", "_close_row"]],
+        left_on=["ticker", "date"],
+        right_on=["ticker", "_row_date"],
+        how="left",
+    )
+    row_yf = pd.to_numeric(merged["_close_row"], errors="coerce")
+    prefer_row = stale_lag & row_yf.notna()
+    prefer_join = stale_lag & (~prefer_row) & yf_close.notna()
+    merged["close_price"] = np.where(
+        prefer_row,
+        row_yf,
+        np.where(
+            prefer_join,
+            yf_close,
+            issuer_close.combine_first(yf_close),
+        ),
+    )
+    merged = merged.drop(columns=["_row_date", "_close_row"], errors="ignore")
     merged["shares_traded"] = pd.to_numeric(merged["_shares_traded_new"], errors="coerce").combine_first(
         pd.to_numeric(merged["shares_traded"], errors="coerce")
     )
@@ -2287,9 +2395,8 @@ def save_outputs(df: pd.DataFrame) -> None:
     df, n_non_session = filter_metrics_to_nyse_sessions(df)
     if n_non_session:
         LOGGER.info("Dropped %d non-NYSE-session metrics row(s) before persistence", n_non_session)
-    df, n_early_market = clear_issuer_early_market_fields(df)
-    if n_early_market:
-        LOGGER.info("Cleared market overlays on %d issuer_early metrics row(s)", n_early_market)
+    # Parquet/CSV retain market overlays on issuer_early rows for pair-backtest consumers.
+    # browser_metrics_frame() excludes issuer_early from the browser JSON export.
     df.to_parquet(PARQUET_PATH, index=False)
     df.to_csv(CSV_PATH, index=False)
 
@@ -2985,6 +3092,12 @@ def main() -> None:
         LOGGER.info(
             "Re-aligned Yahoo close / underlying to issuer valuation session on %d tail row(s)",
             n_sess,
+        )
+    merged, n_stale_close = repair_stale_issuer_close_from_market(merged)
+    if n_stale_close:
+        LOGGER.info(
+            "Replaced stale issuer close_price with Yahoo session close on %d row(s)",
+            n_stale_close,
         )
     merged, n_collapse = collapse_redundant_consecutive_rows(merged)
     if n_collapse:

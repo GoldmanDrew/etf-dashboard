@@ -30,6 +30,7 @@ from ingest_etf_metrics import (  # noqa: E402
     enforce_status_consistency,
     load_existing,
     repair_close_price_split_basis_mismatch,
+    repair_stale_issuer_close_from_market,
     save_outputs,
     validate_df,
 )
@@ -235,6 +236,9 @@ def apply_easy_fixes(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     out, n_poly = backfill_close_prices_polygon_gaps(out)
     summary["polygon_fields"] = n_poly
+
+    out, n_stale_close = repair_stale_issuer_close_from_market(out)
+    summary["stale_issuer_close"] = n_stale_close
 
     out, n_adj2 = backfill_etf_adj_close_from_close_gaps(out)
     summary["etf_adj_close_post_polygon"] = n_adj2

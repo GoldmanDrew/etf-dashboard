@@ -78,7 +78,7 @@ def repair_rex_rows(
             else None
         )
         out.loc[ix, "nav"] = res.nav
-        if res.market_close is not None:
+        if res.market_close is not None and not res.stale:
             out.loc[ix, "close_price"] = res.market_close
         if old_nav != res.nav or (res.market_close is not None and old_close != res.market_close):
             n_fixed += int(ix.sum())
