@@ -1,62 +1,62 @@
 {
-  "build_time": "2026-07-08T15:18:45.419876Z",
+  "build_time": "2026-07-08T15:58:46.964075Z",
   "panel_rows": 46009,
   "panel_symbols": 503,
   "recommended_v2_features": [
     "borrow_current",
-    "etf_aum_over_float",
     "borrow_vol10",
     "borrow_z60",
     "log_aum",
     "delta",
     "shares_available",
-    "turnover_20d",
+    "prem_disc_bps",
     "borrow_slope5",
     "borrow_pctile_60",
-    "utilization_proxy",
     "peer_shares_avail_sum",
-    "prem_disc_bps",
     "shares_drop5",
+    "turnover_20d",
     "tradable_float_shares",
     "shares_drop3",
     "peer_borrow_z_mean",
     "rebalance_pct_adv",
     "forecast_vol_underlying_annual",
-    "avail_to_adv"
+    "gross_decay_annual",
+    "shares_drop1",
+    "utilization_proxy"
   ],
   "top_predictors_by_horizon": {
     "h1": [
       {
         "feature": "borrow_z60",
-        "mean_abs_rank_corr": 0.073724
+        "mean_abs_rank_corr": 0.073726
       },
       {
         "feature": "borrow_pctile_60",
-        "mean_abs_rank_corr": 0.070393
+        "mean_abs_rank_corr": 0.070399
       },
       {
         "feature": "shares_available",
-        "mean_abs_rank_corr": 0.060599
-      },
-      {
-        "feature": "borrow_slope5",
-        "mean_abs_rank_corr": 0.050538
+        "mean_abs_rank_corr": 0.060611
       },
       {
         "feature": "log_aum",
-        "mean_abs_rank_corr": 0.048357
+        "mean_abs_rank_corr": 0.051068
+      },
+      {
+        "feature": "borrow_slope5",
+        "mean_abs_rank_corr": 0.050544
       },
       {
         "feature": "borrow_current",
-        "mean_abs_rank_corr": 0.046581
-      },
-      {
-        "feature": "etf_aum_over_float",
-        "mean_abs_rank_corr": 0.043494
+        "mean_abs_rank_corr": 0.046584
       },
       {
         "feature": "borrow_vol10",
         "mean_abs_rank_corr": 0.041844
+      },
+      {
+        "feature": "tradable_float_shares",
+        "mean_abs_rank_corr": 0.03842
       }
     ],
     "h3": [
@@ -70,7 +70,7 @@
       },
       {
         "feature": "log_aum",
-        "mean_abs_rank_corr": 0.090526
+        "mean_abs_rank_corr": 0.084767
       },
       {
         "feature": "shares_available",
@@ -90,7 +90,7 @@
       },
       {
         "feature": "forecast_vol_underlying_annual",
-        "mean_abs_rank_corr": 0.058944
+        "mean_abs_rank_corr": 0.058894
       }
     ],
     "h5": [
@@ -104,7 +104,7 @@
       },
       {
         "feature": "log_aum",
-        "mean_abs_rank_corr": 0.112144
+        "mean_abs_rank_corr": 0.107012
       },
       {
         "feature": "shares_available",
@@ -112,15 +112,15 @@
       },
       {
         "feature": "forecast_vol_underlying_annual",
-        "mean_abs_rank_corr": 0.074985
-      },
-      {
-        "feature": "etf_aum_over_float",
-        "mean_abs_rank_corr": 0.067292
+        "mean_abs_rank_corr": 0.074827
       },
       {
         "feature": "gross_decay_annual",
-        "mean_abs_rank_corr": 0.066152
+        "mean_abs_rank_corr": 0.066349
+      },
+      {
+        "feature": "turnover_20d",
+        "mean_abs_rank_corr": 0.060952
       },
       {
         "feature": "borrow_z60",
@@ -134,7 +134,7 @@
       },
       {
         "feature": "log_aum",
-        "mean_abs_rank_corr": 0.145938
+        "mean_abs_rank_corr": 0.141942
       },
       {
         "feature": "borrow_vol10",
@@ -145,20 +145,20 @@
         "mean_abs_rank_corr": 0.116072
       },
       {
-        "feature": "etf_aum_over_float",
-        "mean_abs_rank_corr": 0.091797
-      },
-      {
         "feature": "forecast_vol_underlying_annual",
-        "mean_abs_rank_corr": 0.08776
+        "mean_abs_rank_corr": 0.087467
       },
       {
         "feature": "gross_decay_annual",
-        "mean_abs_rank_corr": 0.077997
+        "mean_abs_rank_corr": 0.077388
       },
       {
         "feature": "turnover_20d",
-        "mean_abs_rank_corr": 0.066163
+        "mean_abs_rank_corr": 0.066509
+      },
+      {
+        "feature": "tradable_float_shares",
+        "mean_abs_rank_corr": 0.062833
       }
     ],
     "univariate_r2_y_spike_5": [
@@ -180,7 +180,7 @@
       },
       {
         "feature": "log_aum",
-        "r2": 0.000574
+        "r2": 0.000645
       },
       {
         "feature": "borrow_pctile_60",
@@ -196,14 +196,14 @@
       }
     ]
   },
-  "guidance_for_spike_model": "Use recommended_v2_features for logistic_v2 candidate set. Prioritize supply (utilization_proxy, shares_drop3) and peer_borrow_z_mean when re-running borrow_spike_eval; keep L0 labels and out-of-time splits. Best ablation block: borrow_plus_supply (AUROC 0.9940).",
+  "guidance_for_spike_model": "Use recommended_v2_features for logistic_v2 candidate set. Prioritize supply (utilization_proxy, shares_drop3) and peer_borrow_z_mean when re-running borrow_spike_eval; keep L0 labels and out-of-time splits. Best ablation block: full_plus_screener (AUROC 0.9946).",
   "key_findings": [
     "Top rank-corr predictors at h=5: borrow_current, borrow_vol10, log_aum."
   ],
-  "best_block_ablation": "borrow_plus_supply",
+  "best_block_ablation": "full_plus_screener",
   "block_auroc_lifts": {
-    "supply_vs_borrow_only": 0.002245,
-    "peer_vs_borrow_only": -0.008263,
-    "full_vs_borrow_only": 0.001617
+    "supply_vs_borrow_only": 0.002605,
+    "peer_vs_borrow_only": -0.005119,
+    "full_vs_borrow_only": 0.002874
   }
 }

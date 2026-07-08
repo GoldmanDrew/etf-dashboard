@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-07-08T15:17:06.572544Z",
+  "as_of": "2026-07-08T14:58:29.077639Z",
   "program_phase": "v2_shipped_monitoring",
   "milestones": [
     {
@@ -12,7 +12,7 @@
     {
       "id": "l2_replay_positives_100",
       "description": "L2 relative-stress label positives for model dev gates",
-      "current": 845,
+      "current": 846,
       "target": 100,
       "status": "done"
     },
@@ -26,14 +26,14 @@
     {
       "id": "utilization_coverage_0p8",
       "description": "Supply feature coverage for logistic_v2",
-      "current": 0.4193,
+      "current": 0.9958,
       "target": 0.8,
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "l2_elevated_band_hit_rate",
       "description": "Calibrated elevated tier realized rate > 0",
-      "current": 0.116084,
+      "current": 0.12928,
       "target": 0.05,
       "status": "done"
     },
@@ -42,6 +42,20 @@
       "description": "logistic_v2 L2 AUROC >= v1 L0 AUROC on replay",
       "current": 0,
       "target": 1,
+      "status": "in_progress"
+    },
+    {
+      "id": "boosting_gate_pass",
+      "description": "Boosting L2 passes precision@10 lift gate vs base rate",
+      "current": 1,
+      "target": 1,
+      "status": "done"
+    },
+    {
+      "id": "live_elevated_hit_rate_60d",
+      "description": "Rolling 60d elevated/high tier L2 realized rate",
+      "current": 0.0,
+      "target": 0.05,
       "status": "in_progress"
     }
   ],
@@ -53,12 +67,12 @@
   },
   "model_comparison": {
     "v1_l0_auroc": 0.951855,
-    "v2_l2_auroc": 0.773258,
-    "v2_auroc_delta": -0.178597,
+    "v2_l2_auroc": 0.777665,
+    "v2_auroc_delta": -0.17419,
     "v1_l0_positives": 1,
-    "v2_l2_positives": 845,
-    "v2_ece": 0.004721,
-    "v2_elevated_realized": 0.116084,
+    "v2_l2_positives": 846,
+    "v2_ece": 0.006819,
+    "v2_elevated_realized": 0.12928,
     "recommendation": "Continue monitoring v2; v1 remains primary until v2 AUROC stable."
   },
   "live_track": {
@@ -68,7 +82,23 @@
   },
   "forecast_lane": {
     "n_symbols": 503,
-    "method": "pooled_ols_top_features"
+    "method": "boosting_drift_lightgbm",
+    "registry_winner": "boosting"
+  },
+  "borrow_ml_registry": true,
+  "live_calibration_monitor": {
+    "status": "ok",
+    "window_days": 60,
+    "as_of": "2026-07-08",
+    "cutoff_date": "2026-05-09",
+    "n_rows": 16710,
+    "n_elevated_tier": 0,
+    "n_elevated_strict": 0,
+    "elevated_tier_hit_rate": null,
+    "elevated_strict_hit_rate": null,
+    "elevated_floor": 0.05,
+    "alert": null,
+    "label_column": "y_spike_l2"
   },
   "next_actions": [
     "Unblock l0_replay_positives_20: 1 vs target 20"
@@ -76,7 +106,7 @@
   "findings_summary": {
     "best_estimate_borrow": "Combine (1) current borrow level, (2) v2 calibrated L2 stress score for spike risk, and (3) delta_borrow_5d_p50 OLS forecast for directional drift. Level/momentum features explain ~5% of forward borrow change; spike L0 remains too rare for calibrated probabilities.",
     "spike_headline": "L0 catastrophic spikes: 1 in 29869 replay rows \u2014 use rank/decile, not raw P\u226530%.",
-    "stress_headline": "L2 relative stress: 845 events \u2014 v2+calibration for watch/elevated/high tiers.",
+    "stress_headline": "L2 relative stress: 846 events \u2014 v2+calibration for watch/elevated/high tiers.",
     "forecast_headline": "Positive delta_borrow_5d_p50 means expected increase in annual borrow fee over the next 5 IBKR/git observations. Low R\u00b2 (~5%) \u2014 use as directional stress, not point forecast.",
     "model_choice": "Continue monitoring v2; v1 remains primary until v2 AUROC stable."
   }
