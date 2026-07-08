@@ -212,7 +212,13 @@ jobs:
         continue-on-error: true
         run: python scripts/fof_pipeline_diagnostics.py --report data/fof_pipeline_report.json
 
+      - name: Earnings seed weekly refresh (Monday)
+        if: needs.resolve-slot.outputs.monday_catchup == 'true'
+        continue-on-error: true
+        run: python scripts/refresh_earnings_seed.py --refresh --report data/earnings_seed_audit.json
+
       - name: Earnings seed audit
+        if: needs.resolve-slot.outputs.monday_catchup != 'true'
         continue-on-error: true
         run: python scripts/refresh_earnings_seed.py --report data/earnings_seed_audit.json
 
@@ -263,6 +269,8 @@ jobs:
             data/letf_intraday_flow_metrics.json
             data/letf_intraday_remaining_backtest.json
             data/freshness_summary.json
+            data/earnings_seed_audit.json
+            data/earnings_calendar_seed.json
           commit_message: "${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday metrics catch-up ingest' || 'chore: nightly metrics ingest' }}"
 
       - name: Full dashboard build

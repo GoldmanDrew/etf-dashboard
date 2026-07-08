@@ -1,0 +1,67 @@
+name: Weekly Ops Email
+
+on:
+  schedule:
+    # Sunday ~8 AM ET (12 UTC during EDT; ~7 AM during EST).
+    - cron: "0 12 * * 0"
+  workflow_dispatch:
+    inputs:
+      send_email:
+        description: "Send email (requires SMTP secrets)"
+        required: false
+        default: "true"
+      skip_ingest:
+        description: "Skip Nasdaq earnings refresh before compose"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "weekly-ops-email"
+  cancel-in-progress: false
+
+jobs:
+  weekly-email:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FROM_EMAIL: werdnamdlog01@gmail.com
+      SMTP_USER: werdnamdlog01@gmail.com
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: "587"
+      PNL_RECIPIENTS: ${{ secrets.PNL_RECIPIENTS }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh earnings calendar
+        if: github.event.inputs.skip_ingest != 'true'
+        continue-on-error: true
+        run: python scripts/ingest_event_calendar.py
+
+      - name: Build and send weekly ops email
+        env:
+          WEEKLY_OPS_SKIP_EMAIL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.send_email != 'true' && '1' || '' }}
+        run: python scripts/weekly_ops_email.py --send
+
+      - name: Commit preview artifact
+        uses: ./.github/actions/commit-data
+        with:
+          files: >-
+            data/weekly_ops_email_preview.json
+            data/event_calendar_known.json
+          commit_message: "chore: weekly ops email preview"
