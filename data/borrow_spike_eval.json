@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-07-08T14:28:19.244623Z",
+  "as_of": "2026-07-08T14:42:06.957704Z",
   "label": {
     "name": "production",
     "description": "future_max > max(1.0, 3*med60, p99_180) and jump > 0.25",
@@ -409,7 +409,7 @@
       "precision_at_10_lift_vs_base": 39.8603
     },
     "production_rollup": {
-      "build_time": "2026-07-08T14:26:49.011288Z",
+      "build_time": "2026-07-08T14:42:00.651954Z",
       "n_rows": 18335,
       "brier_score": 0.000587,
       "log_loss": 0.023134,
@@ -493,7 +493,21 @@
           "avg_pred": 0.062359,
           "realized_rate": 0.0
         }
-      ]
+      ],
+      "live_calibration_monitor": {
+        "status": "ok",
+        "window_days": 60,
+        "as_of": "2026-07-08",
+        "cutoff_date": "2026-05-09",
+        "n_rows": 16710,
+        "n_elevated_tier": 0,
+        "n_elevated_strict": 0,
+        "elevated_tier_hit_rate": null,
+        "elevated_strict_hit_rate": null,
+        "elevated_floor": 0.05,
+        "alert": null,
+        "label_column": "y_spike_l2"
+      }
     }
   },
   "model_comparison": {
@@ -508,7 +522,7 @@
   },
   "label_grid_summary": {
     "L0": {
-      "build_time": "2026-07-08T14:27:19.746440Z",
+      "build_time": "2026-07-08T14:37:33.260375Z",
       "label_variant": "L0",
       "label": {
         "name": "production",
@@ -528,7 +542,7 @@
       "symbols_scored": 465
     },
     "L1": {
-      "build_time": "2026-07-08T14:27:34.821110Z",
+      "build_time": "2026-07-08T14:37:41.994453Z",
       "label_variant": "L1",
       "label": {
         "name": "moderate",
@@ -548,7 +562,7 @@
       "symbols_scored": 465
     },
     "L2": {
-      "build_time": "2026-07-08T14:27:49.329047Z",
+      "build_time": "2026-07-08T14:37:51.872177Z",
       "label_variant": "L2",
       "label": {
         "name": "p90_relative",
@@ -566,7 +580,7 @@
       "symbols_scored": 488
     },
     "L3": {
-      "build_time": "2026-07-08T14:28:03.952021Z",
+      "build_time": "2026-07-08T14:38:08.978401Z",
       "label_variant": "L3",
       "label": {
         "name": "absolute_5pct",
@@ -1119,7 +1133,7 @@
       }
     ],
     "study_summary": {
-      "build_time": "2026-07-08T13:24:24.409451Z",
+      "build_time": "2026-07-08T14:30:05.631109Z",
       "panel_rows": 46009,
       "panel_symbols": 503,
       "recommended_v2_features": [
@@ -1157,11 +1171,11 @@
       "top_predictors_h5": [
         {
           "feature": "borrow_current",
-          "mean_abs_rank_corr": 0.128343
+          "mean_abs_rank_corr": 0.128703
         },
         {
           "feature": "borrow_vol10",
-          "mean_abs_rank_corr": 0.120377
+          "mean_abs_rank_corr": 0.120566
         },
         {
           "feature": "log_aum",
@@ -1169,11 +1183,11 @@
         },
         {
           "feature": "shares_available",
-          "mean_abs_rank_corr": 0.096634
+          "mean_abs_rank_corr": 0.096938
         },
         {
           "feature": "forecast_vol_underlying_annual",
-          "mean_abs_rank_corr": 0.074613
+          "mean_abs_rank_corr": 0.074985
         },
         {
           "feature": "etf_aum_over_float",
@@ -1181,16 +1195,16 @@
         },
         {
           "feature": "gross_decay_annual",
-          "mean_abs_rank_corr": 0.065788
+          "mean_abs_rank_corr": 0.066152
         },
         {
           "feature": "borrow_z60",
-          "mean_abs_rank_corr": 0.060139
+          "mean_abs_rank_corr": 0.06006
         }
       ]
     },
     "feature_importance": {
-      "build_time": "2026-07-08T13:24:22.004074Z",
+      "build_time": "2026-07-08T14:30:03.235285Z",
       "target": "y_spike_5",
       "split": "out_of_time_80_20",
       "blocks": {

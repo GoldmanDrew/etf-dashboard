@@ -1499,6 +1499,8 @@ function borrowOutlookFields(r) {
   const level = getBorrowRate(r);
   const delta = Number(r?.borrow_forecast_delta_5d_p50);
   const forecastLevel = Number(r?.borrow_forecast_5d_p50);
+  const forecastMethod = String(r?.borrow_forecast_method || '').trim();
+  const boostTier = String(r?.borrow_spike_alert_tier_boosting || '').toLowerCase();
   const tier = String(r?.borrow_spike_alert_tier || r?.borrow_spike_risk_band || '').toLowerCase();
   const pCal = Number(r?.borrow_spike_p_5d_l2_calibrated);
   const pL0 = Number(r?.borrow_spike_p_5d);
@@ -1508,6 +1510,8 @@ function borrowOutlookFields(r) {
     level: Number.isFinite(Number(level)) ? Number(level) : null,
     delta: Number.isFinite(delta) ? delta : null,
     forecastLevel: Number.isFinite(forecastLevel) ? forecastLevel : null,
+    forecastMethod: forecastMethod || null,
+    boostTier: boostTier || null,
     tier,
     pCal: Number.isFinite(pCal) ? pCal : null,
     pL0: Number.isFinite(pL0) ? pL0 : null,
@@ -1556,7 +1560,9 @@ function borrowOutlookTooltip(r, display) {
     lines.push(`Net-edge posterior: ${fmt(o.posterior)}/yr${r?.borrow_resample_mode ? ` (${r.borrow_resample_mode})` : ''}`);
   }
   if (o.delta != null) {
+    const cadence = borrowHistoryObsCadenceHint(typeof BORROW_HISTORY_META !== 'undefined' ? BORROW_HISTORY_META : null);
     lines.push(`Drift (5 obs p50): ${fmtSignedPp(o.delta)} → forecast ${o.forecastLevel != null ? fmt(o.forecastLevel) : '—'} (low R² — directional only)`);
+    if (cadence) lines.push(cadence);
   }
   if (o.eligible && o.pCal != null) {
     lines.push(`Stress (L2 cal): ${fmt(o.pCal)} · tier ${o.tier || '—'} (use tier, not literal spike %)`);
@@ -1592,6 +1598,11 @@ function borrowOutlookNetEdgeNotes(r) {
     lines.push('Borrow easing — spot may overstate long-run carry vs posterior.');
   } else if (o.tier === 'elevated' || o.tier === 'high') {
     lines.push('Elevated borrow stress tier — monitor sizing; fan width uses historical resampling only.');
+  }
+  const stressP50 = Number(r?.net_edge_stress_p50_annual);
+  const stressBorrow = Number(r?.borrow_stress_borrow_annual);
+  if (Number.isFinite(stressP50) && (o.tier === 'elevated' || o.tier === 'high')) {
+    lines.push(`Stress-case net edge p50: ${fmtLogYr(stressP50)} (if borrow → ${Number.isFinite(stressBorrow) ? fmt(stressBorrow) : 'forecast'}/yr). Display only — ls-algo posterior unchanged.`);
   }
   return lines;
 }
@@ -2235,6 +2246,23 @@ function borrowHistoryHealthWarning(meta, seriesLen) {
     parts.push(`Only ${seriesLen} day(s) of borrow history on file — trailing avg equals spot.`);
   }
   return parts.length ? parts.join(' ') : null;
+}
+
+/** Median calendar days between borrow history snapshots (for 5-obs drift tooltip). */
+function borrowHistoryObsCadenceHint(meta) {
+  const m = meta && typeof meta === 'object' ? meta : {};
+  const gap = Number(m.median_obs_gap_days ?? m.median_history_days);
+  if (!Number.isFinite(gap) || gap <= 0) return null;
+  const fiveObs = Math.round(gap * 5);
+  return `5 borrow observations ≈ ${fiveObs} calendar days (median snapshot gap ${gap.toFixed(1)}d).`;
+}
+
+const BORROW_STRESS_TIER_RANK = { high: 3, elevated: 2, watch: 1, low: 0, none: 0 };
+function borrowStressMeetsFilter(r, minTier) {
+  if (!minTier || minTier === 'all') return true;
+  const tier = String(r?.borrow_spike_alert_tier || r?.borrow_spike_risk_band || 'low').toLowerCase();
+  const need = BORROW_STRESS_TIER_RANK[minTier] ?? 0;
+  return (BORROW_STRESS_TIER_RANK[tier] ?? 0) >= need;
 }
 
 /** Prefer CI-built history JSON; fall back to client recompute from metrics rows. */
@@ -5160,11 +5188,17 @@ function NetEdgeMergedCell({ r }) {
     tipLines.push(`Forward forecast model: ${anchorSource}`);
   }
   borrowOutlookNetEdgeNotes(r).forEach((line) => tipLines.push(line));
+  const stressP50 = Number(r?.net_edge_stress_p50_annual);
+  if (Number.isFinite(stressP50)) {
+    tipLines.push(`Stress net edge p50 (elevated+): ${fmtLogYr(stressP50)}`);
+  }
   const tip = tipLines.join('\n');
   const hasFan = Number.isFinite(Number(r.net_edge_p05_annual)) && Number.isFinite(Number(r.net_edge_p95_annual)) && Number.isFinite(Number(p50));
+  const stressSub = Number.isFinite(stressP50) ? `stress ${fmtLogYr(stressP50)}` : null;
   return (
     <div className="net-edge-merged" title={tip} onClick={e => e.stopPropagation()}>
       <div className={cls('net-edge-merged-p50', spreadCls(p50))}>{p50 != null ? fmtLogYr(p50) : '—'}</div>
+      {stressSub ? <div className="net-edge-stress-sub" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{stressSub}</div> : null}
       <div className="net-edge-merged-fan">
         {hasFan ? <NetEdgeFanGlyph r={r} w={62} h={20} vbW={58} /> : <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>—</span>}
       </div>
@@ -11559,6 +11593,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   label="Borrow rate (annual, fee-only)"
                   formatValue={(v) => fmt(v)}
                   zeroLabel="0% borrow"
+                  referenceValue={Number.isFinite(Number(r?.borrow_forecast_5d_p50)) ? Number(r.borrow_forecast_5d_p50) : null}
+                  referenceLabel="5D forecast"
                 />
               )}
               {!borrowHistoryLoading && !borrowHistoryError && (
@@ -11663,6 +11699,17 @@ function BorrowResearchSection() {
       {(tracking?.next_actions || []).length > 0 && (
         <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           <strong>Next:</strong> {tracking.next_actions.join(' · ')}
+        </div>
+      )}
+      {tracking?.live_calibration_monitor?.status === 'ok' && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
+          <strong>Live calibration ({tracking.live_calibration_monitor.window_days}d):</strong>{' '}
+          elevated/high hit rate {tracking.live_calibration_monitor.elevated_strict_hit_rate != null
+            ? fmtPct(tracking.live_calibration_monitor.elevated_strict_hit_rate)
+            : '—'}
+          {tracking.live_calibration_monitor.alert ? (
+            <span style={{ color: 'var(--warning)', marginLeft: 6 }}>⚠ {tracking.live_calibration_monitor.alert}</span>
+          ) : null}
         </div>
       )}
     </div>
@@ -13933,6 +13980,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState('net_edge_p50_annual');
   const [sortDesc, setSortDesc] = useState(true);
+  const [borrowStressFilter, setBorrowStressFilter] = useState('all');
+  const userPickedSortRef = React.useRef(false);
   const [expandedSym, setExpandedSym] = useState(null);
   const [showInfo, setShowInfo] = useState(false);
   const [showNews, setShowNews] = useState(false);
@@ -14289,6 +14338,13 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
     window.location.hash = '';
   }, []);
 
+  useEffect(() => {
+    if (activeTab === 'bucket_1' && !userPickedSortRef.current && sortKey === 'net_edge_p50_annual') {
+      setSortKey('borrow_outlook');
+      setSortDesc(true);
+    }
+  }, [activeTab]);
+
   // Stable lookup: symbol -> bucket, for coloring ticker chips in the News tab.
   const bucketOf = useCallback((sym) => {
     if (!sym || !data?.records) return null;
@@ -14320,6 +14376,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       const s = search.toUpperCase();
       d = d.filter(r => r.symbol.includes(s) || r.underlying.includes(s));
     }
+    if (borrowStressFilter && borrowStressFilter !== 'all') {
+      d = d.filter((r) => borrowStressMeetsFilter(r, borrowStressFilter));
+    }
     d.sort((a, b) => {
       let av = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
         ? computeScenarioEtf1mFlatUnd(a, chartVolLookbackRange)
@@ -14350,7 +14409,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       return sortDesc ? bv - av : av - bv;
     });
     return d;
-  }, [records, activeTab, search, sortKey, sortDesc, chartVolLookbackRange]);
+  }, [records, activeTab, search, sortKey, sortDesc, chartVolLookbackRange, borrowStressFilter]);
 
   const tabCounts = useMemo(() => {
     const c = { all: records.length, bucket_1: 0, bucket_2: 0, bucket_3: 0 };
@@ -14363,6 +14422,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   }, [records]);
 
   const handleSort = key => {
+    userPickedSortRef.current = true;
     if (sortKey === key) setSortDesc(d => !d);
     else { setSortKey(key); setSortDesc(true); }
   };
@@ -14603,6 +14663,18 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
               {filtered.length} results
             </span>
+            <select
+              className="topbar-btn"
+              style={{ fontSize: 11, marginLeft: 8 }}
+              value={borrowStressFilter}
+              onChange={(e) => setBorrowStressFilter(e.target.value)}
+              title="Filter by L2 borrow stress tier"
+            >
+              <option value="all">Borrow stress: all</option>
+              <option value="watch">≥ Watch</option>
+              <option value="elevated">≥ Elevated</option>
+              <option value="high">High only</option>
+            </select>
           </div>
 
           <p style={{ padding: '0 24px 6px', margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, maxWidth: 1100 }}>

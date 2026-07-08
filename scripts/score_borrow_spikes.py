@@ -17,6 +17,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from analyze_borrow_spike_accuracy import compute_metrics_df  # noqa: E402
+from borrow_live_calibration import build_live_calibration_monitor  # noqa: E402
 from borrow_spike_model import (  # noqa: E402
     borrow_outcome_at_date,
     compute_borrow_spike_event_by_date,
@@ -94,6 +95,7 @@ def score_prediction_file(
     require_mature: bool = True,
     today: date | None = None,
     label_cache: dict[tuple[str, int], dict[str, float | None]] | None = None,
+    label_cache_l2: dict[tuple[str, int], dict[str, float | None]] | None = None,
 ) -> list[dict]:
     payload = _load_json(pred_path)
     pred_date = str(payload.get("as_of") or pred_path.stem)
@@ -116,11 +118,11 @@ def score_prediction_file(
         if label_cache is not None:
             if cache_key not in label_cache:
                 label_cache[cache_key] = compute_borrow_spike_event_by_date(
-                    hist, horizon_days=horizon_days,
+                    hist, horizon_days=horizon_days, label_variant="L0",
                 )
             labels = label_cache[cache_key]
         else:
-            labels = compute_borrow_spike_event_by_date(hist, horizon_days=horizon_days)
+            labels = compute_borrow_spike_event_by_date(hist, horizon_days=horizon_days, label_variant="L0")
         y = labels.get(pred_date)
         if y is None:
             continue
@@ -128,16 +130,38 @@ def score_prediction_file(
         if p is None or not isinstance(p, (int, float)) or not math.isfinite(float(p)):
             continue
         p = float(p)
+        # L2 labels for live calibration monitor (separate from L0 archive).
+        y_l2 = None
+        if label_cache_l2 is not None:
+            if cache_key not in label_cache_l2:
+                label_cache_l2[cache_key] = compute_borrow_spike_event_by_date(
+                    hist, horizon_days=horizon_days, label_variant="L2",
+                )
+            y_l2 = label_cache_l2[cache_key].get(pred_date)
+        else:
+            y_l2 = compute_borrow_spike_event_by_date(
+                hist, horizon_days=horizon_days, label_variant="L2",
+            ).get(pred_date)
+        p_l2 = row.get("p_spike_5d_l2_calibrated") if isinstance(row, dict) else None
+        alert_tier = row.get("alert_tier") if isinstance(row, dict) else None
         rec: dict[str, Any] = {
             "pred_date": pred_date,
             "symbol": sym,
             "horizon_days": horizon_days,
             "p_spike": round(p, 6),
+            "p_spike_l0": round(p, 6),
             "y_spike": int(y),
+            "y_spike_l0": int(y),
             "risk_band": row.get("risk_band") if isinstance(row, dict) else risk_band(p),
             "scoring_eligible": bool(row.get("scoring_eligible")) if isinstance(row, dict) else False,
             "scored_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         }
+        if y_l2 is not None:
+            rec["y_spike_l2"] = int(y_l2)
+        if p_l2 is not None and isinstance(p_l2, (int, float)) and math.isfinite(float(p_l2)):
+            rec["p_spike_l2_calibrated"] = round(float(p_l2), 6)
+        if alert_tier:
+            rec["alert_tier"] = str(alert_tier).lower()
         outcome = borrow_outcome_at_date(hist, pred_date, horizon_days=horizon_days)
         if outcome:
             rec.update(outcome)
@@ -173,6 +197,7 @@ def rollup_metrics(realized_path: Path, *, max_lines: int = 50_000) -> dict[str,
     metrics = compute_metrics_df(
         pd.DataFrame(rows), p_col="p_spike", y_col="y_spike", source="live_predictions",
     )
+    l2_monitor = build_live_calibration_monitor(realized_path)
     return {
         "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "n_rows": metrics.get("n_rows", len(rows)),
@@ -187,6 +212,7 @@ def rollup_metrics(realized_path: Path, *, max_lines: int = 50_000) -> dict[str,
         "ece": metrics.get("ece"),
         "calibration_by_band": metrics.get("calibration_by_band") or [],
         "calibration_bins": metrics.get("calibration_bins") or [],
+        "live_calibration_monitor": l2_monitor,
     }
 
 
@@ -218,6 +244,7 @@ def _collect_all_scores(
 ) -> list[dict]:
     all_rows: list[dict] = []
     label_cache: dict[tuple[str, int], dict[str, float | None]] = {}
+    label_cache_l2: dict[tuple[str, int], dict[str, float | None]] = {}
     if not pred_dir.exists():
         return all_rows
     for pred_path in sorted(pred_dir.glob("*.json")):
@@ -234,6 +261,7 @@ def _collect_all_scores(
                 require_mature=require_mature,
                 today=today,
                 label_cache=label_cache,
+                label_cache_l2=label_cache_l2,
             )
         )
     return all_rows

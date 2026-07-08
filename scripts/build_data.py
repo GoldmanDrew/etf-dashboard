@@ -979,6 +979,13 @@ def write_borrow_spike_predictions_snapshot(
         "horizon_days": borrow_spike_risk.get("horizon_days"),
         "label_definition": borrow_spike_risk.get("label_definition"),
         "model": borrow_spike_risk.get("model"),
+        "models": borrow_spike_risk.get("models"),
+        "archive_policy": {
+            "l0_primary_field": "p_spike_5d",
+            "l2_operational_field": "p_spike_5d_l2_calibrated",
+            "productize_l0_probs": False,
+            "productize_l2_tiers": True,
+        },
         "symbols": borrow_spike_risk.get("symbols") or {},
     }
     with path.open("w", encoding="utf-8") as f:
