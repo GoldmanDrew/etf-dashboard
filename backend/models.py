@@ -179,6 +179,14 @@ class ETFRecord(BaseModel):
     borrow_weight_halflife_days: Optional[float] = None
     borrow_history_points_used: Optional[float] = None
     borrow_resample_mode: Optional[str] = None
+    # Borrow outlook (build_data operational_signals enrichment)
+    borrow_spike_p_5d: Optional[float] = None
+    borrow_spike_p_5d_l2_calibrated: Optional[float] = None
+    borrow_spike_alert_tier: Optional[str] = None
+    borrow_spike_risk_band: Optional[str] = None
+    borrow_spike_scoring_eligible: Optional[bool] = None
+    borrow_forecast_delta_5d_p50: Optional[float] = None
+    borrow_forecast_5d_p50: Optional[float] = None
     schema_v: Optional[int] = None
     edge_sign_convention: Optional[str] = None
 

@@ -323,22 +323,12 @@ jobs:
         continue-on-error: true
         run: python scripts/score_borrow_spikes.py --rescore-all
 
-      - name: Replay borrow spike model
+      - name: Replay borrow spike model (v1 L0 + v2 L2)
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
-        run: python scripts/replay_borrow_spike_model.py
+        run: python scripts/borrow_spike_pipeline.py --skip-scorer
 
-      - name: Borrow spike label grid
-        if: steps.build_data.outcome == 'success'
-        continue-on-error: true
-        run: python scripts/replay_borrow_spike_model.py --label-grid
-
-      - name: Analyze borrow spike accuracy
-        if: steps.build_data.outcome == 'success'
-        continue-on-error: true
-        run: python scripts/analyze_borrow_spike_accuracy.py
-
-      - name: Borrow spike accuracy gate
+      - name: Borrow spike accuracy gate (L2)
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
         run: python scripts/analyze_borrow_spike_accuracy.py --fail-below-floor
@@ -385,8 +375,11 @@ jobs:
             data/borrow_spike_realized.jsonl
             data/borrow_spike_metrics.json
             data/borrow_spike_replay_panel.parquet
+            data/borrow_spike_replay_l2_panel.parquet
             data/borrow_spike_replay_summary.json
             data/borrow_spike_eval.json
+            data/borrow_spike_tracking.json
+            data/borrow_forecast_latest.json
             data/borrow_predictor_panel.parquet
             data/borrow_predictor_panel_meta.json
             data/borrow_predictor_leadlag.json

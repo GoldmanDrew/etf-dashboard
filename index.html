@@ -1493,6 +1493,233 @@ function borrowSpikeBadge(r) {
   return null;
 }
 
+const BORROW_OUTLOOK_TIER_RANK = { high: 4, elevated: 3, watch: 2, low: 1 };
+
+function borrowOutlookFields(r) {
+  const level = getBorrowRate(r);
+  const delta = Number(r?.borrow_forecast_delta_5d_p50);
+  const forecastLevel = Number(r?.borrow_forecast_5d_p50);
+  const tier = String(r?.borrow_spike_alert_tier || r?.borrow_spike_risk_band || '').toLowerCase();
+  const pCal = Number(r?.borrow_spike_p_5d_l2_calibrated);
+  const pL0 = Number(r?.borrow_spike_p_5d);
+  const posterior = Number(r?.borrow_for_net_annual);
+  const eligible = r?.borrow_spike_scoring_eligible !== false;
+  return {
+    level: Number.isFinite(Number(level)) ? Number(level) : null,
+    delta: Number.isFinite(delta) ? delta : null,
+    forecastLevel: Number.isFinite(forecastLevel) ? forecastLevel : null,
+    tier,
+    pCal: Number.isFinite(pCal) ? pCal : null,
+    pL0: Number.isFinite(pL0) ? pL0 : null,
+    posterior: Number.isFinite(posterior) ? posterior : null,
+    eligible,
+  };
+}
+
+function borrowOutlookStressRank(r) {
+  const { tier, delta, eligible } = borrowOutlookFields(r);
+  if (!eligible) return -1;
+  const tr = BORROW_OUTLOOK_TIER_RANK[tier] || 0;
+  return tr * 1000 + (Number.isFinite(delta) ? delta : 0);
+}
+
+const fmtSignedPp = (v, digits = 1) => {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  const n = Number(v) * 100;
+  const sign = n >= 0 ? '+' : '';
+  return `${sign}${n.toFixed(digits)}pp`;
+};
+
+function borrowOutlookDriftCls(delta) {
+  if (!Number.isFinite(Number(delta))) return '';
+  if (Number(delta) > 0.02) return 'val-negative';
+  if (Number(delta) < -0.02) return 'val-positive';
+  return 'val-muted';
+}
+
+function borrowOutlookTierCls(tier) {
+  const t = String(tier || '').toLowerCase();
+  if (t === 'high') return 'val-negative';
+  if (t === 'elevated' || t === 'watch') return 'val-warning';
+  if (t === 'low') return 'val-positive';
+  return 'val-muted';
+}
+
+function borrowOutlookTooltip(r, display) {
+  const o = borrowOutlookFields(r);
+  const lines = [
+    'Borrow outlook: level (spot) + 5D drift (directional) + L2 stress tier.',
+    `Level (spot): ${o.level != null ? fmt(o.level) : '—'}`,
+  ];
+  if (display) lines.push(borrowSourceHint(display));
+  if (o.posterior != null) {
+    lines.push(`Net-edge posterior: ${fmt(o.posterior)}/yr${r?.borrow_resample_mode ? ` (${r.borrow_resample_mode})` : ''}`);
+  }
+  if (o.delta != null) {
+    lines.push(`Drift (5 obs p50): ${fmtSignedPp(o.delta)} → forecast ${o.forecastLevel != null ? fmt(o.forecastLevel) : '—'} (low R² — directional only)`);
+  }
+  if (o.eligible && o.pCal != null) {
+    lines.push(`Stress (L2 cal): ${fmt(o.pCal)} · tier ${o.tier || '—'} (use tier, not literal spike %)`);
+  } else if (!o.eligible) {
+    lines.push('Stress: insufficient borrow history for scoring');
+  }
+  if (o.pL0 != null) lines.push(`L0 catastrophic P(spike): ${fmt(o.pL0)} (diagnostic only)`);
+  return lines.join('\n');
+}
+
+function borrowOutlookSublabel(r) {
+  const o = borrowOutlookFields(r);
+  const parts = [];
+  if (o.delta != null) parts.push(`${fmtSignedPp(o.delta)} est`);
+  if (o.tier && o.tier !== 'low' && o.tier !== 'unknown' && o.eligible) {
+    parts.push(o.tier.toUpperCase());
+  }
+  return parts.length ? parts.join(' · ') : 'stable';
+}
+
+function borrowOutlookNetEdgeNotes(r) {
+  const o = borrowOutlookFields(r);
+  const lines = [];
+  const mode = (r?.borrow_resample_mode || '').trim();
+  if (o.posterior != null) {
+    lines.push(`Net edge uses borrow posterior ≈ ${fmt(o.posterior)}/yr${mode ? ` (${mode}${r?.borrow_weight_halflife_days ? `, ${Math.round(Number(r.borrow_weight_halflife_days))}d halflife` : ''})` : ''}.`);
+  } else if (o.level != null) {
+    lines.push(`Net edge subtracts resampled borrow history (spot ${fmt(o.level)}).`);
+  }
+  if (o.delta != null && o.delta > 0.02 && (o.tier === 'elevated' || o.tier === 'high')) {
+    lines.push('Borrow stress elevated with upward drift — p50 may understate carry if borrow ramps.');
+  } else if (o.delta != null && o.delta < -0.02) {
+    lines.push('Borrow easing — spot may overstate long-run carry vs posterior.');
+  } else if (o.tier === 'elevated' || o.tier === 'high') {
+    lines.push('Elevated borrow stress tier — monitor sizing; fan width uses historical resampling only.');
+  }
+  return lines;
+}
+
+function BorrowOutlookCell({ r, borrowHistoryMap, dashboardBuildTime }) {
+  const display = borrowDisplay(r, borrowHistoryMap?.[r?.symbol], { dashboardBuildTime });
+  const o = borrowOutlookFields(r);
+  const sb = borrowSpikeBadge(r);
+  const sub = borrowOutlookSublabel(r);
+  return (
+    <div title={borrowOutlookTooltip(r, display)}>
+      <div className={cls('net-edge-merged-p50', borrowCls(o.level))} style={{ fontSize: 13 }}>
+        {o.level != null ? fmt(o.level) : '—'}
+        {borrowBadge(o.level)}
+        {sb ? <span className={cls('badge', sb.cls)} style={{ marginLeft: 4, fontSize: 9 }} title={sb.title}>{sb.label}</span> : null}
+      </div>
+      <div className="col-sublabel" style={{ fontSize: 10, marginTop: 2 }}>
+        <span className={borrowOutlookDriftCls(o.delta)}>{sub}</span>
+      </div>
+    </div>
+  );
+}
+
+function BorrowOutlookCard({
+  r,
+  borrowSpikeRisk,
+  borrowHistoryStats,
+  spikeReplayMetrics,
+  spikeReplayWindow,
+  spikeFindings,
+  spikeTracking,
+  borrowSpikeEvalError,
+  borrowSpikeRiskMeta,
+  loading,
+  error,
+}) {
+  const o = borrowOutlookFields(r);
+  const spike = borrowSpikeRisk || {};
+  const probCal = Number.isFinite(o.pCal) ? o.pCal : Number(spike.p_spike_5d_l2_calibrated);
+  const tier = o.tier || String(spike.alert_tier || spike.risk_band || 'unknown').toLowerCase();
+  const eligible = o.eligible && spike.scoring_eligible !== false;
+  const minObs = Number(borrowSpikeRiskMeta?.quality_gate?.min_obs_for_scoring) || 30;
+  const blocked = (spikeTracking?.milestones || []).filter((m) => m.status === 'blocked');
+  return (
+    <div className="trade-card" style={{ marginTop: 10 }}>
+      <div className="trade-head">
+        <div>
+          <div className="scenario-title">Borrow Outlook</div>
+          <div className="scenario-sub">Level · 5D drift · L2 stress tier</div>
+        </div>
+        <a href="#/info" className="topbar-btn" style={{ fontSize: 10, padding: '4px 8px' }} title="Borrow research milestones on Info page">
+          Research ↗
+        </a>
+      </div>
+      {loading ? (
+        <div className="scenario-warning">Loading borrow outlook…</div>
+      ) : error ? (
+        <div className="scenario-warning">{error}</div>
+      ) : !eligible ? (
+        <div className="scenario-warning">
+          Needs ≥{fmtNum(minObs)} borrow prints for stress scoring — level and drift may still apply.
+        </div>
+      ) : null}
+      <div className="chart-stats">
+        <div className="stat-pill">
+          <div className="k">Level (spot)</div>
+          <div className={cls('v', borrowCls(o.level))}>{o.level != null ? fmt(o.level) : '—'}</div>
+        </div>
+        <div className="stat-pill">
+          <div className="k">Net-edge borrow</div>
+          <div className="v">{o.posterior != null ? fmt(o.posterior) : '—'}</div>
+        </div>
+      </div>
+      <div className="chart-stats" style={{ marginTop: 8 }}>
+        <div className="stat-pill">
+          <div className="k">Δborrow 5D</div>
+          <div className={cls('v', borrowOutlookDriftCls(o.delta))}>{fmtSignedPp(o.delta)}</div>
+        </div>
+        <div className="stat-pill">
+          <div className="k">Forecast 5D</div>
+          <div className="v">{o.forecastLevel != null ? fmt(o.forecastLevel) : '—'}</div>
+        </div>
+      </div>
+      <div className="chart-stats" style={{ marginTop: 8 }}>
+        <div className="stat-pill">
+          <div className="k">Stress tier</div>
+          <div className={cls('v', borrowOutlookTierCls(tier))}>{tier.toUpperCase()}</div>
+        </div>
+        <div className="stat-pill">
+          <div className="k">L2 calibrated</div>
+          <div className={cls('v', borrowOutlookTierCls(tier))}>{Number.isFinite(probCal) ? fmt(probCal) : '—'}</div>
+        </div>
+      </div>
+      {borrowHistoryStats?.avg != null && (
+        <div className="borrow-meta" style={{ marginTop: 8 }}>
+          History avg {fmt(borrowHistoryStats.avg)} · median 60d {Number.isFinite(Number(r?.borrow_median_60d)) ? fmt(Number(r.borrow_median_60d)) : '—'}
+          {r?.borrow_resample_mode ? ` · resample ${r.borrow_resample_mode}` : ''}
+        </div>
+      )}
+      {spikeFindings?.best_estimate_borrow && (
+        <div className="borrow-meta" style={{ marginTop: 6 }}>
+          <strong>Summary:</strong> {spikeFindings.best_estimate_borrow}
+        </div>
+      )}
+      <details style={{ marginTop: 8, fontSize: 11, color: 'var(--text-muted)' }}>
+        <summary style={{ cursor: 'pointer' }}>Model diagnostics</summary>
+        <div style={{ marginTop: 6 }}>
+          L0 P(spike): {Number.isFinite(o.pL0) ? fmt(o.pL0) : '—'} (too rare for sizing)
+          {spikeReplayMetrics?.status === 'ok' ? (
+            <>
+              {' '}· Replay AUROC {Number(spikeReplayMetrics.auroc).toFixed(3)}
+              {' '}· elevated hit {Number.isFinite(Number(spikeReplayMetrics?.calibration_by_band?.find((b) => b.band === 'elevated')?.realized_rate))
+                ? fmtPctDecimal(spikeReplayMetrics.calibration_by_band.find((b) => b.band === 'elevated').realized_rate, 1)
+                : '—'}
+              {' '}({spikeReplayWindow?.start || '—'} → {spikeReplayWindow?.end || '—'})
+            </>
+          ) : borrowSpikeEvalError ? (
+            <> · Eval: {borrowSpikeEvalError}</>
+          ) : (
+            <> · Replay eval pending</>
+          )}
+          {blocked.length ? <> · Tracking: {blocked.length} blocked milestone(s)</> : null}
+        </div>
+      </details>
+    </div>
+  );
+}
+
 function spikeStudyGuidanceLines(guidance) {
   if (!guidance || typeof guidance !== 'object') return [];
   const summary = guidance.study_summary || {};
@@ -4497,7 +4724,7 @@ const COLS = [
   { key: 'symbol', label: 'Symbol', w: 100, hint: 'BL = strategy blacklist (shown for context; not sized in trade plan / rebalancer).' },
   { key: 'underlying', label: 'Underlying', w: 85 },
   { key: 'delta', label: 'Delta', w: 65, hint: 'ls-algo hedge δ: OLS on aligned daily simple returns vs underlying TR, shrunk toward listed leverage (AR(1)-adjusted n_eff).' },
-  { key: 'borrow_current', label: 'Borrow Rate', w: 105, hint: 'Spot fee-only borrow on this row (IBKR FTP on full build, else screener CSV). Compare to borrow_history.json tail on chart Borrow tab.' },
+  { key: 'borrow_outlook', label: 'Borrow outlook', w: 118, sublabel: 'level · drift · stress', hint: 'Three-piece borrow view: (1) spot level, (2) 5-obs drift estimate (directional, ~5% R²), (3) L2 stress tier (watch/elevated/high). Net edge uses borrow posterior from history — see Net edge bridge.' },
   { key: 'shares_available', label: 'Shares Avail', w: 100 },
   { key: 'gross_decay_annual', label: 'Gross (realiz.)', w: 100, sublabel: 'trailing', hint: 'Realized: trailing annualized hedge drag from ls-algo screener (β·r_U − r_ETF) × 252. Not the forward Exp. edge (fwd) column.' },
   { key: 'expected_pair_pnl_p50_annual', label: 'Exp. edge (fwd)', sublabel: 'struct · 1Y log/yr', w: 128, hint: 'Forward structural gross decay before borrow (log/yr). YieldBOOST: screener put-spread MC — same anchor as Net edge and Scenarios heatmap. LETF/inverse/vol-ETP: vol-drag identity. Sub-row: p10/p90 band. Hover for vol sensitivity and weekly pair MC diagnostic.' },
@@ -4932,6 +5159,7 @@ function NetEdgeMergedCell({ r }) {
   } else if (anchorSource) {
     tipLines.push(`Forward forecast model: ${anchorSource}`);
   }
+  borrowOutlookNetEdgeNotes(r).forEach((line) => tipLines.push(line));
   const tip = tipLines.join('\n');
   const hasFan = Number.isFinite(Number(r.net_edge_p05_annual)) && Number.isFinite(Number(r.net_edge_p95_annual)) && Number.isFinite(Number(p50));
   return (
@@ -5015,10 +5243,23 @@ function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheT
     <tr className="detail-row">
       <td colSpan={COLS.length + 1}>
         <div className="detail-grid">
-          <div className="detail-item" title={borrowSourceHint(borrowDisplay(r, borrowHistoryMap?.[r.symbol], { dashboardBuildTime }))}>
-            <div className="dlabel">Borrow (spot, fee-only)</div>
+          <div className="detail-item" title={borrowOutlookTooltip(r, borrowDisplay(r, borrowHistoryMap?.[r.symbol], { dashboardBuildTime }))}>
+            <div className="dlabel">Borrow outlook</div>
             <div className={cls('dval', borrowCls(getBorrowRate(r)))}>{fmt(getBorrowRate(r))}</div>
-            <div className="detail-item-hint">{r.borrow_source === 'ibkr_ftp' ? 'IBKR FTP · realized snapshot' : 'CSV · screener snapshot'}</div>
+            <div className="detail-item-hint">
+              {borrowOutlookSublabel(r)}
+              {Number.isFinite(Number(r?.borrow_forecast_5d_p50)) ? (
+                <> · fcst {fmt(Number(r.borrow_forecast_5d_p50))}</>
+              ) : null}
+            </div>
+          </div>
+          <div className="detail-item">
+            <div className="dlabel">Net-edge borrow</div>
+            <div className="dval">{Number.isFinite(Number(r?.borrow_for_net_annual)) ? fmt(Number(r.borrow_for_net_annual)) : '—'}</div>
+            <div className="detail-item-hint">
+              {r?.borrow_resample_mode || 'resample mode —'}
+              {r?.borrow_weight_halflife_days ? ` · ${Math.round(Number(r.borrow_weight_halflife_days))}d halflife` : ''}
+            </div>
           </div>
           <div className="detail-item">
             <div className="dlabel">Borrow (hist. avg)</div>
@@ -5091,6 +5332,13 @@ function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheT
             </div>
           </div>
         </div>
+        {borrowOutlookNetEdgeNotes(r).length > 0 ? (
+          <div className="borrow-meta" style={{ marginTop: 8, marginBottom: 4, maxWidth: 720, lineHeight: 1.45 }}>
+            {borrowOutlookNetEdgeNotes(r).map((line, idx) => (
+              <div key={idx}>{line}</div>
+            ))}
+          </div>
+        ) : null}
         <div className="detail-visuals">
           <EdgeFactsStrip r={r} />
           <NetEdgeQuantileTable r={r} />
@@ -5268,6 +5516,9 @@ function NetEdgeBridgePanel({ r }) {
         <div>Net edge p50: <strong>{fmtLogYr(netP50)}</strong>
           {Number.isFinite(borrow) ? <> (after {isYieldBoostFoF(r) ? 'FoF ' : ''}borrow ≈ {fmt(borrow)}/yr)</> : null}
         </div>
+        {borrowOutlookNetEdgeNotes(r).map((line, idx) => (
+          <div key={idx} style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>{line}</div>
+        ))}
       </div>
     </div>
   );
@@ -6841,6 +7092,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [borrowSpikeRiskError, setBorrowSpikeRiskError] = useState(null);
   const [borrowSpikeEval, setBorrowSpikeEval] = useState(null);
   const [borrowSpikeEvalError, setBorrowSpikeEvalError] = useState(null);
+  const [borrowSpikeTracking, setBorrowSpikeTracking] = useState(null);
   const [optionsCache, setOptionsCache] = useState(null);
   const [optionsCacheError, setOptionsCacheError] = useState(null);
   const [intradaySpotPayload, setIntradaySpotPayload] = useState(null);
@@ -7146,9 +7398,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       setBorrowSpikeRiskError(null);
       try {
         const cacheBust = `?t=${Math.floor(Date.now() / 1800)}`;
-        const [riskRes, evalRes] = await Promise.all([
+        const [riskRes, evalRes, trackingRes] = await Promise.all([
           fetch(`${BORROW_SPIKE_RISK_URL}${cacheBust}`, { cache: 'no-store' }),
           fetch(`${BORROW_SPIKE_EVAL_URL}${cacheBust}`, { cache: 'no-store' }),
+          fetch(`${BORROW_SPIKE_TRACKING_URL}${cacheBust}`, { cache: 'no-store' }),
         ]);
         if (!riskRes.ok) throw new Error(`borrow spike risk HTTP ${riskRes.status}`);
         const payload = await riskRes.json();
@@ -7169,6 +7422,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           model: payload?.model || null,
           predictor_study_guidance: evalPayload?.predictor_study_guidance || null,
         });
+        if (!cancelled && trackingRes.ok) {
+          setBorrowSpikeTracking(await trackingRes.json());
+        }
       } catch (e) {
         if (!cancelled) setBorrowSpikeRiskError(e?.message || 'borrow spike risk unavailable');
       } finally {
@@ -11306,92 +11562,19 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 />
               )}
               {!borrowHistoryLoading && !borrowHistoryError && (
-                <div className="trade-card" style={{ marginTop: 10 }}>
-                  <div className="trade-head">
-                    <div className="scenario-title">Spike Risk (5D)</div>
-                    <div className="scenario-sub">L2 stress (calibrated) · L0 catastrophic in tooltip</div>
-                  </div>
-                  {borrowSpikeRiskLoading ? (
-                    <div className="scenario-warning">Loading spike risk…</div>
-                  ) : borrowSpikeRiskError ? (
-                    <div className="scenario-warning">{borrowSpikeRiskError}</div>
-                  ) : etfSpikeRisk?.scoring_eligible === false ? (
-                    <div className="scenario-warning">
-                      Spike model needs ≥{fmtNum(Number(borrowSpikeRiskMeta?.quality_gate?.min_obs_for_scoring) || 30)} borrow prints — not enough yet.
-                    </div>
-                  ) : !Number.isFinite(etfSpikeProb) ? (
-                    <div className="scenario-warning">Spike risk not available for this symbol yet.</div>
-                  ) : (
-                    <>
-                      <div className="chart-stats">
-                        <div className="stat-pill">
-                          <div className="k">Stress (L2 cal)</div>
-                          <div className={cls('v', etfSpikeBandCls)}>{fmt(etfSpikeProb)}</div>
-                        </div>
-                        <div className="stat-pill">
-                          <div className="k">Alert Tier</div>
-                          <div className={cls('v', etfSpikeBandCls)}>{etfSpikeBand.toUpperCase()}</div>
-                        </div>
-                      </div>
-                      <div className="chart-stats" style={{ marginTop: 8 }}>
-                        <div className="stat-pill">
-                          <div className="k">L0 P(spike)</div>
-                          <div className="v">{Number.isFinite(etfSpikeProbL0) ? fmt(etfSpikeProbL0) : '—'}</div>
-                        </div>
-                        <div className="stat-pill">
-                          <div className="k">Δborrow 5D (est)</div>
-                          <div className="v">{Number.isFinite(etfBorrowForecastDelta) ? fmtSignedPctDecimal(etfBorrowForecastDelta, 1) : '—'}</div>
-                        </div>
-                      </div>
-                      <div className="chart-stats" style={{ marginTop: 8 }}>
-                        <div className="stat-pill">
-                          <div className="k">Data Quality</div>
-                          <div className={cls('v', etfSpikeQualityCls)}>{etfSpikeQualityBand.toUpperCase()}</div>
-                        </div>
-                        <div className="stat-pill">
-                          <div className="k">Replay AUROC</div>
-                          <div className="v">{Number.isFinite(Number(spikeReplayMetrics?.auroc)) ? Number(spikeReplayMetrics.auroc).toFixed(3) : '—'}</div>
-                        </div>
-                      </div>
-                      <div className="chart-stats" style={{ marginTop: 8 }}>
-                        <div className="stat-pill">
-                          <div className="k">Precision@10</div>
-                          <div className="v">{Number.isFinite(Number(spikeReplayMetrics?.precision_at_k?.precision_at_10)) ? fmtPctDecimal(spikeReplayMetrics.precision_at_k.precision_at_10, 1) : '—'}</div>
-                        </div>
-                        <div className="stat-pill">
-                          <div className="k">Capture (p≥10%)</div>
-                          <div className="v">{Number.isFinite(Number(spikeReplayMetrics?.capture_rate_p_ge_0p10)) ? fmtPctDecimal(spikeReplayMetrics.capture_rate_p_ge_0p10, 0) : '—'}</div>
-                        </div>
-                      </div>
-                      <div className="borrow-meta" style={{ marginTop: 8 }}>
-                        {borrowSpikeEvalError ? (
-                          <span className="val-muted">Eval: {borrowSpikeEvalError}</span>
-                        ) : spikeReplayMetrics?.status === 'ok' ? (
-                          <>
-                            Walk-forward replay ({spikeReplayWindow?.start || '—'} → {spikeReplayWindow?.end || '—'},
-                            {' '}{fmtNum(spikeReplayMetrics?.n_rows)} rows, {fmtNum(spikeReplayMetrics?.positives)} spikes).
-                            {Number.isFinite(Number(spikeReplayMetrics?.ece)) ? ` ECE ${Number(spikeReplayMetrics.ece).toFixed(3)}.` : ''}
-                            {' '}Holdout Brier {Number.isFinite(Number(spikeAccuracy?.brier_score)) ? Number(spikeAccuracy.brier_score).toFixed(4) : '—'} (in-model).
-                          </>
-                        ) : (
-                          <span className="val-muted">Replay eval pending — rerun nightly build.</span>
-                        )}
-                      </div>
-                      {spikeFindings?.best_estimate_borrow && (
-                        <div className="borrow-meta" style={{ marginTop: 6 }}>
-                          <strong>Best estimate:</strong> {spikeFindings.best_estimate_borrow}
-                        </div>
-                      )}
-                      {spikeStudyGuidance.length > 0 && (
-                        <div className="borrow-meta" style={{ marginTop: 6 }}>
-                          {spikeStudyGuidance.map((line, idx) => (
-                            <div key={idx}>{line}</div>
-                          ))}
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
+                <BorrowOutlookCard
+                  r={r}
+                  borrowSpikeRisk={etfSpikeRisk}
+                  borrowHistoryStats={avgBorrowFromHistoryStats}
+                  spikeReplayMetrics={borrowSpikeEval?.metrics?.replay_l2 || borrowSpikeEval?.metrics?.replay || null}
+                  spikeReplayWindow={borrowSpikeEval?.replay_window_l2 || borrowSpikeEval?.replay_window || null}
+                  spikeFindings={borrowSpikeEval?.findings_summary || null}
+                  spikeTracking={borrowSpikeTracking}
+                  borrowSpikeEvalError={borrowSpikeEvalError}
+                  borrowSpikeRiskMeta={borrowSpikeRiskMeta}
+                  loading={borrowSpikeRiskLoading}
+                  error={borrowSpikeRiskError}
+                />
               )}
             </div>
 
@@ -11427,6 +11610,65 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 }
 
 // ── Info Page ────────────────────────────────
+function BorrowResearchSection() {
+  const [tracking, setTracking] = useState(null);
+  const [evalData, setEvalData] = useState(null);
+  useEffect(() => {
+    const cacheBust = `?t=${Math.floor(Date.now() / 3600000)}`;
+    Promise.all([
+      fetch(`${BORROW_SPIKE_TRACKING_URL}${cacheBust}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)),
+      fetch(`${BORROW_SPIKE_EVAL_URL}${cacheBust}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)),
+    ]).then(([t, e]) => {
+      setTracking(t);
+      setEvalData(e);
+    }).catch(() => {});
+  }, []);
+  const milestones = tracking?.milestones || [];
+  const findings = tracking?.findings_summary || evalData?.findings_summary || {};
+  return (
+    <div id="borrow-research" style={{ marginTop: 28 }}>
+      <div className="info-section"><span style={{ color: 'var(--accent-amber, #f59e0b)' }}>◈</span> Borrow Outlook Research</div>
+      <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 12 }}>
+        Three-piece borrow view on the main grid: <strong>level</strong> (spot), <strong>drift</strong> (5-obs OLS, directional),
+        <strong> stress tier</strong> (L2 calibrated). Net edge uses historical borrow posterior — not the drift forecast.
+        Operator guide: <code>BORROW_SPIKE_EVAL.md</code> in repo.
+      </p>
+      {findings.best_estimate_borrow && (
+        <div style={{ fontSize: 12, marginBottom: 12, padding: 10, borderRadius: 8, background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
+          {findings.best_estimate_borrow}
+        </div>
+      )}
+      {milestones.length > 0 ? (
+        <table className="scenario-table" style={{ fontSize: 12, marginBottom: 12 }}>
+          <thead>
+            <tr><th>Milestone</th><th>Progress</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {milestones.map((m) => (
+              <tr key={m.id}>
+                <td>{m.description || m.id}</td>
+                <td>{fmtNum(m.current)} / {fmtNum(m.target)}</td>
+                <td>
+                  <span className={cls('badge', m.status === 'done' ? 'badge-ok' : m.status === 'blocked' ? 'badge-stale' : 'badge-warn')}>
+                    {m.status || '—'}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Tracking file loading… (<code>borrow_spike_tracking.json</code>)</div>
+      )}
+      {(tracking?.next_actions || []).length > 0 && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          <strong>Next:</strong> {tracking.next_actions.join(' · ')}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function InfoPage({ data }) {
   if (!data) return null;
   const s = data.summary;
@@ -11465,6 +11707,7 @@ function InfoPage({ data }) {
         ETF metrics (NAV, AUM/TNA, shares outstanding, shares traded) refresh daily at 5:00 AM ET via issuer files plus Yahoo close/volume overlays.
         Headline decay / scenarios use log-space models (HARQ, Itô, put-spread); some legacy CSV fields may still quote linear annualized figures — see Decay math for the live definitions.
       </div>
+      <BorrowResearchSection />
     </div>
   );
 }
@@ -14086,6 +14329,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         ? volHeadlineValue(a, 'underlying', chartVolLookbackRange)
         : sortKey === 'vol_etf_annual'
         ? volHeadlineValue(a, 'etf', chartVolLookbackRange)
+        : sortKey === 'borrow_outlook'
+        ? borrowOutlookStressRank(a)
         : a[sortKey];
       let bv = sortKey === SCENARIO_ETF_1M_FLAT_SORT_KEY
         ? computeScenarioEtf1mFlatUnd(b, chartVolLookbackRange)
@@ -14095,6 +14340,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         ? volHeadlineValue(b, 'underlying', chartVolLookbackRange)
         : sortKey === 'vol_etf_annual'
         ? volHeadlineValue(b, 'etf', chartVolLookbackRange)
+        : sortKey === 'borrow_outlook'
+        ? borrowOutlookStressRank(b)
         : b[sortKey];
       if (av == null) av = sortDesc ? -Infinity : Infinity;
       if (bv == null) bv = sortDesc ? -Infinity : Infinity;
@@ -14515,12 +14762,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                           {isYieldBoostFoF(r) ? fofUnderlyingDisplayLabel(r) : r.underlying}
                         </td>
                         <td>{r.delta?.toFixed(2) ?? '—'}</td>
-                        <td className={borrowCls(getBorrowRate(r))} title={borrowSourceHint(borrowDisplay(r, borrowHistoryMap?.[r.symbol], { dashboardBuildTime: data.build_time }))}>
-                          {fmt(getBorrowRate(r))} {borrowBadge(getBorrowRate(r))}
-                          {(() => {
-                            const sb = borrowSpikeBadge(r);
-                            return sb ? <span className={cls('badge', sb.cls)} style={{ marginLeft: 6, fontSize: 9 }} title={sb.title}>{sb.label}</span> : null;
-                          })()}
+                        <td style={{ verticalAlign: 'middle' }}>
+                          <BorrowOutlookCell r={r} borrowHistoryMap={borrowHistoryMap} dashboardBuildTime={data.build_time} />
                         </td>
                         <td>{fmtNum(r.shares_available)}</td>
                         <td title="Realized trailing hedge drag (ls-algo screener)">{fmtGrossRealizedLog(r, r.gross_decay_annual)}</td>

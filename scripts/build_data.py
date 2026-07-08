@@ -4015,6 +4015,13 @@ def refresh_borrow_only() -> None:
             rec["borrow_dispersion_type"] = stats["borrow_dispersion_type"]
         _normalize_borrow_fields(rec)
 
+    borrow_spike_risk = build_extended_risk_payload(hist_symbols, today_utc)
+    enrich_records_with_operational_signals(
+        records,
+        borrow_spike_risk=borrow_spike_risk,
+        data_dir=OUTPUT_DIR,
+    )
+
     hist_payload["symbols"] = hist_symbols
     depth = _borrow_history_depth_stats(hist_symbols)
     hist_payload["meta"] = {
@@ -4028,6 +4035,8 @@ def refresh_borrow_only() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=None, separators=(",", ":"))
+    with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
+        json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
     _write_borrow_history_payload(hist_payload, context="borrow_only")
 
     print(f"[OK] Borrow-only refresh wrote {OUTPUT_FILE}")
@@ -4073,6 +4082,11 @@ def rebuild_borrow_stats_from_history() -> None:
     today_utc = dt.datetime.now(dt.UTC).date().isoformat()
 
     borrow_spike_risk = build_extended_risk_payload(hist_symbols, today_utc)
+    enrich_records_with_operational_signals(
+        records,
+        borrow_spike_risk=borrow_spike_risk,
+        data_dir=OUTPUT_DIR,
+    )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
@@ -5292,6 +5306,9 @@ def build():
         "decay_method": "linear_daily_pnl_1_over_delta_hedge",
         "borrow_history_file": "data/borrow_history.json",
         "borrow_spike_risk_file": "data/borrow_spike_risk.json",
+        "borrow_spike_eval_file": "data/borrow_spike_eval.json",
+        "borrow_spike_tracking_file": "data/borrow_spike_tracking.json",
+        "borrow_forecast_file": "data/borrow_forecast_latest.json",
         "product_taxonomy_file": "data/product_taxonomy.json",
         "freshness_summary_file": "data/freshness_summary.json",
         "vol_shape_history_file": "data/vol_shape_history.json",

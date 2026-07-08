@@ -567,6 +567,10 @@ Every user-facing JSON under `data/` has a single producer workflow, a primary c
 | `borrow_spike_predictions/<DATE>.json` | `build_data.py` (full build only) | `scripts/score_borrow_spikes.py` | daily (`nightly.yml` / `build-and-deploy.yml`) |
 | `borrow_spike_realized.jsonl` | `scripts/score_borrow_spikes.py` | ops / calibration audits | append on workflow |
 | `borrow_spike_metrics.json` | `scripts/score_borrow_spikes.py` | Brier, log-loss, band calibration rollup | daily |
+| `borrow_spike_eval.json` | `scripts/analyze_borrow_spike_accuracy.py` | Chart Borrow tab diagnostics, Info research section | nightly / `borrow_spike_pipeline.py` |
+| `borrow_spike_tracking.json` | `scripts/update_borrow_spike_tracking.py` | Milestone tracker (what's done vs blocked) | nightly / `borrow_spike_pipeline.py` |
+| `borrow_forecast_latest.json` | `scripts/forecast_borrow_level.py` | Per-symbol `borrow_forecast_*` on dashboard rows | nightly / `borrow_spike_pipeline.py` |
+| `borrow_spike_replay_l2_panel.parquet` | `scripts/borrow_spike_pipeline.py` | L2 walk-forward replay panel | nightly |
 | `options_cache.json` | `build_data.py --options-only` / `--yieldboost-vrp-only` | `ChartPage`, `Trade Lab`, `vrp_live.json` builder | `market-hours.yml` ~15 min rotation |
 | `yieldboost_put_spreads_latest.json` | `ingest_etf_metrics.py` + `build_data.py` (`refresh_yieldboost_vrp_files`) | Vol / VRP tab (fallback), `vrp_live.json` builder | daily metrics + each `build_data` / `--options-only` run |
 | `vrp_live.json` | `build_data.py` (`refresh_yieldboost_vrp_files`) | Vol / VRP tab (`index.html`) | each `build_data` / `--options-only` run; deployed via `build-and-deploy.yml` |

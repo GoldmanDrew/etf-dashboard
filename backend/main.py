@@ -433,6 +433,13 @@ def _build_records_from_csv():
             borrow_weight_halflife_days=_v2f(row, "borrow_weight_halflife_days"),
             borrow_history_points_used=_v2f(row, "borrow_history_points_used"),
             borrow_resample_mode=_v2s(row, "borrow_resample_mode"),
+            borrow_spike_p_5d=_v2f(row, "borrow_spike_p_5d"),
+            borrow_spike_p_5d_l2_calibrated=_v2f(row, "borrow_spike_p_5d_l2_calibrated"),
+            borrow_spike_alert_tier=_v2s(row, "borrow_spike_alert_tier"),
+            borrow_spike_risk_band=_v2s(row, "borrow_spike_risk_band"),
+            borrow_spike_scoring_eligible=_v2bool(row, "borrow_spike_scoring_eligible") if "borrow_spike_scoring_eligible" in row else None,
+            borrow_forecast_delta_5d_p50=_v2f(row, "borrow_forecast_delta_5d_p50"),
+            borrow_forecast_5d_p50=_v2f(row, "borrow_forecast_5d_p50"),
             schema_v=scv,
             edge_sign_convention=_v2s(row, "edge_sign_convention") or "short_favorable_positive",
         )

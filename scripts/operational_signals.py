@@ -70,6 +70,8 @@ def enrich_records_with_operational_signals(
     """Mutate records in place with borrow spike + MOC flow fields."""
     spike_syms = (borrow_spike_risk or {}).get("symbols") or {}
     intra_by_fund, eod_by_ticker = load_flow_signal_maps(data_dir)
+    forecast_payload = _load_json(data_dir / "borrow_forecast_latest.json")
+    forecast_by = (forecast_payload.get("by_symbol") or {}) if forecast_payload else {}
 
     for rec in records:
         sym = _norm_sym(rec.get("symbol"))
@@ -79,9 +81,17 @@ def enrich_records_with_operational_signals(
         spike = spike_syms.get(sym) if isinstance(spike_syms, dict) else None
         if isinstance(spike, dict):
             rec["borrow_spike_p_5d"] = spike.get("p_spike_5d")
-            rec["borrow_spike_risk_band"] = spike.get("risk_band")
+            rec["borrow_spike_p_5d_l2_calibrated"] = spike.get("p_spike_5d_l2_calibrated")
+            rec["borrow_spike_alert_tier"] = spike.get("alert_tier")
+            rec["borrow_spike_risk_band"] = spike.get("risk_band") or spike.get("alert_tier")
             rec["borrow_spike_quality_band"] = spike.get("quality_band")
             rec["borrow_spike_scoring_eligible"] = spike.get("scoring_eligible")
+            rec["borrow_spike_supply_data_grade"] = spike.get("supply_data_grade")
+
+        fc = forecast_by.get(sym) if isinstance(forecast_by, dict) else None
+        if isinstance(fc, dict):
+            rec["borrow_forecast_delta_5d_p50"] = fc.get("delta_borrow_5d_p50")
+            rec["borrow_forecast_5d_p50"] = fc.get("borrow_forecast_5d_p50")
 
         if rec.get("bucket") != "bucket_1_high_beta":
             continue
