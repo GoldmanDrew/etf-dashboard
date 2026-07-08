@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Borrow spike model core: labels, features, logistic_v1, walk-forward replay."""
+"""Borrow spike model core: labels, features, logistic_v1, walk-forward replay.
+
+Predictor study (borrow_predictor_study_summary.json) recommended_v2_features for
+future logistic_v2 (not implemented here): borrow_current, etf_aum_over_float,
+borrow_vol10, borrow_z60, log_aum, delta, shares_available, turnover_20d,
+borrow_slope5, borrow_pctile_60, utilization_proxy, peer_shares_avail_sum,
+prem_disc_bps, shares_drop5, tradable_float_shares, shares_drop3,
+peer_borrow_z_mean, rebalance_pct_adv, forecast_vol_underlying_annual,
+gross_decay_annual. Supply block (borrow_plus_supply) edges borrow-only; peer
+basket underperforms in the study ablation.
+"""
 from __future__ import annotations
 
 import math

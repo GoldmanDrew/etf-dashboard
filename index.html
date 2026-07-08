@@ -1470,6 +1470,7 @@ const AUTH_STORAGE_KEY = "etf_dash_session_v1";
 const AUTH_SESSION_MS = 7 * 86400000;
 const BORROW_HISTORY_URL = "data/borrow_history.json";
 const BORROW_SPIKE_RISK_URL = "data/borrow_spike_risk.json";
+const BORROW_SPIKE_EVAL_URL = "data/borrow_spike_eval.json";
 const OPTIONS_CACHE_URL = "data/options_cache.json";
 const INTRADAY_SPOT_URL = "data/underlying_intraday_spot.json";
 const OPTIONS_POLL_MS = 10 * 60 * 1000;
@@ -1488,6 +1489,29 @@ function borrowSpikeBadge(r) {
   if (band === 'high' || p >= 0.25) return { label: 'SPIKE', cls: 'badge-stale', title: `P(borrow spike 5d)=${fmt(p)} (${band || 'high'})` };
   if (band === 'medium' || p >= 0.12) return { label: '↑', cls: 'badge-warn', title: `P(borrow spike 5d)=${fmt(p)}` };
   return null;
+}
+
+function spikeStudyGuidanceLines(guidance) {
+  if (!guidance || typeof guidance !== 'object') return [];
+  const summary = guidance.study_summary || {};
+  const lifts = summary.block_auroc_lifts || {};
+  const lines = [];
+  const h5 = summary.top_predictors_h5 || guidance.top_leadlag_y_spike_5 || [];
+  if (h5.length) {
+    const top3 = h5.slice(0, 3).map((x) => x.feature).filter(Boolean).join(', ');
+    if (top3) lines.push(`Predictor study (5D): top signals — ${top3}`);
+  }
+  const supplyLift = Number(lifts.supply_vs_borrow_only);
+  const peerLift = Number(lifts.peer_vs_borrow_only);
+  if (Number.isFinite(supplyLift) && Number.isFinite(peerLift)) {
+    const supplyTxt = supplyLift > 0.001 ? 'supply edges borrow-only' : 'supply ≈ borrow-only';
+    const peerTxt = peerLift < -0.001 ? 'peer basket underperforms' : (peerLift > 0.001 ? 'peer helps' : 'peer ≈ flat');
+    const best = summary.best_block_ablation || 'borrow_plus_supply';
+    lines.push(`Ablation: ${supplyTxt}; ${peerTxt} (${best} best).`);
+  } else if (summary.guidance_for_spike_model) {
+    lines.push(String(summary.guidance_for_spike_model).slice(0, 160));
+  }
+  return lines.slice(0, 2);
 }
 
 function mocFlowHeadline(r) {
@@ -1576,6 +1600,7 @@ let BORROW_HISTORY_CACHE = null;
 let BORROW_HISTORY_BUILD_TIME = null;
 let BORROW_HISTORY_META = null;
 let BORROW_SPIKE_RISK_CACHE = null;
+let BORROW_SPIKE_EVAL_CACHE = null;
 /** @type {{ bySymbol: Record<string, object[]>, buildTime: string|null }|null} */
 let ETF_METRICS_CACHE = null;
 /** @type {{ byTicker: Record<string, object[]>, byUnderlying: Record<string, object>, latestDate: string|null, buildTime: string|null, method: string|null }|null} */
@@ -6812,6 +6837,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [borrowSpikeRiskMeta, setBorrowSpikeRiskMeta] = useState({});
   const [borrowSpikeRiskLoading, setBorrowSpikeRiskLoading] = useState(false);
   const [borrowSpikeRiskError, setBorrowSpikeRiskError] = useState(null);
+  const [borrowSpikeEval, setBorrowSpikeEval] = useState(null);
+  const [borrowSpikeEvalError, setBorrowSpikeEvalError] = useState(null);
   const [optionsCache, setOptionsCache] = useState(null);
   const [optionsCacheError, setOptionsCacheError] = useState(null);
   const [intradaySpotPayload, setIntradaySpotPayload] = useState(null);
@@ -7108,23 +7135,37 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           quality_gate: BORROW_SPIKE_RISK_CACHE?.quality_gate || null,
           accuracy_tracking: BORROW_SPIKE_RISK_CACHE?.accuracy_tracking || null,
           model: BORROW_SPIKE_RISK_CACHE?.model || null,
+          predictor_study_guidance: BORROW_SPIKE_EVAL_CACHE?.predictor_study_guidance || null,
         });
+        setBorrowSpikeEval(BORROW_SPIKE_EVAL_CACHE);
         return;
       }
       setBorrowSpikeRiskLoading(true);
       setBorrowSpikeRiskError(null);
       try {
         const cacheBust = `?t=${Math.floor(Date.now() / 1800)}`;
-        const res = await fetch(`${BORROW_SPIKE_RISK_URL}${cacheBust}`, { cache: 'no-store' });
-        if (!res.ok) throw new Error(`borrow spike risk HTTP ${res.status}`);
-        const payload = await res.json();
+        const [riskRes, evalRes] = await Promise.all([
+          fetch(`${BORROW_SPIKE_RISK_URL}${cacheBust}`, { cache: 'no-store' }),
+          fetch(`${BORROW_SPIKE_EVAL_URL}${cacheBust}`, { cache: 'no-store' }),
+        ]);
+        if (!riskRes.ok) throw new Error(`borrow spike risk HTTP ${riskRes.status}`);
+        const payload = await riskRes.json();
+        let evalPayload = BORROW_SPIKE_EVAL_CACHE;
+        if (evalRes.ok) {
+          evalPayload = await evalRes.json();
+          BORROW_SPIKE_EVAL_CACHE = evalPayload;
+        } else if (!cancelled) {
+          setBorrowSpikeEvalError(`borrow spike eval HTTP ${evalRes.status}`);
+        }
         const symbols = payload?.symbols && typeof payload.symbols === 'object' ? payload.symbols : {};
         BORROW_SPIKE_RISK_CACHE = payload;
         if (!cancelled) setBorrowSpikeRiskMap(symbols);
+        if (!cancelled) setBorrowSpikeEval(evalPayload);
         if (!cancelled) setBorrowSpikeRiskMeta({
           quality_gate: payload?.quality_gate || null,
           accuracy_tracking: payload?.accuracy_tracking || null,
           model: payload?.model || null,
+          predictor_study_guidance: evalPayload?.predictor_study_guidance || null,
         });
       } catch (e) {
         if (!cancelled) setBorrowSpikeRiskError(e?.message || 'borrow spike risk unavailable');
@@ -7708,6 +7749,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     ? 'val-warning'
     : 'val-negative';
   const spikeAccuracy = borrowSpikeRiskMeta?.accuracy_tracking || null;
+  const spikeStudyGuidance = spikeStudyGuidanceLines(borrowSpikeRiskMeta?.predictor_study_guidance);
+  const spikeReplayMetrics = borrowSpikeEval?.metrics?.replay || null;
+  const spikeReplayWindow = borrowSpikeEval?.replay_window || null;
   const annualCarryDragRaw = Number.isFinite(avgBorrowFromHistory)
     ? avgBorrowFromHistory
     : (Number.isFinite(Number(r.borrow_avg_annual))
@@ -11287,10 +11331,41 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <div className={cls('v', etfSpikeQualityCls)}>{etfSpikeQualityBand.toUpperCase()}</div>
                         </div>
                         <div className="stat-pill">
-                          <div className="k">Brier Score</div>
-                          <div className="v">{Number.isFinite(Number(spikeAccuracy?.brier_score)) ? Number(spikeAccuracy.brier_score).toFixed(4) : '—'}</div>
+                          <div className="k">Replay AUROC</div>
+                          <div className="v">{Number.isFinite(Number(spikeReplayMetrics?.auroc)) ? Number(spikeReplayMetrics.auroc).toFixed(3) : '—'}</div>
                         </div>
                       </div>
+                      <div className="chart-stats" style={{ marginTop: 8 }}>
+                        <div className="stat-pill">
+                          <div className="k">Precision@10</div>
+                          <div className="v">{Number.isFinite(Number(spikeReplayMetrics?.precision_at_k?.precision_at_10)) ? fmtPctDecimal(spikeReplayMetrics.precision_at_k.precision_at_10, 1) : '—'}</div>
+                        </div>
+                        <div className="stat-pill">
+                          <div className="k">Capture (p≥10%)</div>
+                          <div className="v">{Number.isFinite(Number(spikeReplayMetrics?.capture_rate_p_ge_0p10)) ? fmtPctDecimal(spikeReplayMetrics.capture_rate_p_ge_0p10, 0) : '—'}</div>
+                        </div>
+                      </div>
+                      <div className="borrow-meta" style={{ marginTop: 8 }}>
+                        {borrowSpikeEvalError ? (
+                          <span className="val-muted">Eval: {borrowSpikeEvalError}</span>
+                        ) : spikeReplayMetrics?.status === 'ok' ? (
+                          <>
+                            Walk-forward replay ({spikeReplayWindow?.start || '—'} → {spikeReplayWindow?.end || '—'},
+                            {' '}{fmtNum(spikeReplayMetrics?.n_rows)} rows, {fmtNum(spikeReplayMetrics?.positives)} spikes).
+                            {Number.isFinite(Number(spikeReplayMetrics?.ece)) ? ` ECE ${Number(spikeReplayMetrics.ece).toFixed(3)}.` : ''}
+                            {' '}Holdout Brier {Number.isFinite(Number(spikeAccuracy?.brier_score)) ? Number(spikeAccuracy.brier_score).toFixed(4) : '—'} (in-model).
+                          </>
+                        ) : (
+                          <span className="val-muted">Replay eval pending — rerun nightly build.</span>
+                        )}
+                      </div>
+                      {spikeStudyGuidance.length > 0 && (
+                        <div className="borrow-meta" style={{ marginTop: 6 }}>
+                          {spikeStudyGuidance.map((line, idx) => (
+                            <div key={idx}>{line}</div>
+                          ))}
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
