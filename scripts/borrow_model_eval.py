@@ -17,6 +17,7 @@ if str(_SCRIPTS) not in sys.path:
 
 from analyze_borrow_spike_accuracy import compute_metrics_df  # noqa: E402
 from borrow_boosting_model import evaluate_drift_replay  # noqa: E402
+from borrow_model_common import sanitize_for_json  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -105,8 +106,9 @@ def main() -> None:
     repo_root = Path(args.repo_root)
     payload = build_model_eval_payload(repo_root)
     out = repo_root / "data" / "borrow_model_eval_latest.json"
+    clean = sanitize_for_json(payload)
     with out.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(clean, f, indent=2, allow_nan=False)
     print(f"[OK] borrow_model_eval_latest.json: {len(payload.get('models') or {})} models")
 
 

@@ -16,6 +16,7 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+from borrow_model_common import sanitize_for_json  # noqa: E402
 from borrow_spike_model import LABEL_VARIANTS, risk_band  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -594,8 +595,9 @@ def main() -> None:
     payload = build_eval_payload(repo_root)
     out_path = repo_root / "data" / "borrow_spike_eval.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    clean = sanitize_for_json(payload)
     with out_path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(clean, f, indent=2, allow_nan=False)
     replay_m = payload["metrics"]["replay"]
     print(
         f"[OK] borrow_spike_eval.json: replay_rows={replay_m.get('n_rows')} "

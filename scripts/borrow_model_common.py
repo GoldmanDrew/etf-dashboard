@@ -96,19 +96,46 @@ def prepare_feature_matrix(
     return x.to_numpy(dtype=float), cols
 
 
+def _finite_metric(v: float | None) -> float | None:
+    if v is None or not math.isfinite(v):
+        return None
+    return round(float(v), 6)
+
+
+def sanitize_for_json(obj: Any) -> Any:
+    """Replace NaN/inf with null so json.dump emits browser-safe JSON."""
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_json(v) for v in obj]
+    if isinstance(obj, (float, np.floating)):
+        f = float(obj)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    return obj
+
+
 def drift_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float | None]:
     mask = np.isfinite(y_true) & np.isfinite(y_pred)
     if mask.sum() < 10:
         return {"mae": None, "rmse": None, "r2": None, "n": int(mask.sum())}
     yt = y_true[mask]
     yp = y_pred[mask]
-    err = yp - yt
+    # Clip pathological model blow-ups before aggregate metrics (borrow deltas live in ~±1).
+    err = np.clip(yp - yt, -5.0, 5.0)
+    yp_clip = yt + err
     mae = float(np.mean(np.abs(err)))
-    rmse = float(np.sqrt(np.mean(err**2)))
-    ss_res = float(np.sum((yt - yp) ** 2))
-    ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
+    rmse = float(np.sqrt(np.mean(np.square(err))))
+    ss_res = float(np.sum(np.square(yt - yp_clip)))
+    ss_tot = float(np.sum(np.square(yt - np.mean(yt))))
     r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 1e-12 else None
-    return {"mae": round(mae, 6), "rmse": round(rmse, 6), "r2": round(r2, 6) if r2 is not None else None, "n": int(mask.sum())}
+    return {
+        "mae": _finite_metric(mae),
+        "rmse": _finite_metric(rmse),
+        "r2": _finite_metric(r2),
+        "n": int(mask.sum()),
+    }
 
 
 def row_obs_count(row: pd.Series, panel: pd.DataFrame | None, symbol: str) -> int | None:

@@ -1473,6 +1473,16 @@ const BORROW_SPIKE_RISK_URL = "data/borrow_spike_risk.json";
 const BORROW_SPIKE_EVAL_URL = "data/borrow_spike_eval.json";
 const BORROW_SPIKE_TRACKING_URL = "data/borrow_spike_tracking.json";
 const OPTIONS_CACHE_URL = "data/options_cache.json";
+/** Parse JSON response; returns null on HTTP failure or invalid JSON (e.g. NaN/Infinity tokens). */
+async function fetchJsonSafe(url, { cache = 'no-store' } = {}) {
+  try {
+    const res = await fetch(url, { cache });
+    if (!res.ok) return { data: null, error: `HTTP ${res.status}` };
+    return { data: JSON.parse(await res.text()), error: null };
+  } catch (e) {
+    return { data: null, error: e?.message || 'JSON parse failed' };
+  }
+}
 const INTRADAY_SPOT_URL = "data/underlying_intraday_spot.json";
 const OPTIONS_POLL_MS = 10 * 60 * 1000;
 const ETF_METRICS_DAILY_URL = "data/etf_metrics_daily.json";
@@ -4444,6 +4454,9 @@ function SimpleSeriesPlot({
   includeZero = true,
   /** When true, null/blank primary values stay missing (do not coerce via Number(null) → 0). */
   strictNullPrimary = false,
+  /** Optional (point, index) => true marks a gap day (e.g. no locate) with a bottom tick. */
+  gapMarkerAt = null,
+  gapMarkerLabel = 'no locate',
 }) {
   if (!Array.isArray(series) || !series.length) {
     return <div className="scenario-warning">No data available.</div>;
@@ -4513,6 +4526,9 @@ function SimpleSeriesPlot({
 
   const lineVals = series.map(readPrimary);
   const linePath = buildPath(lineVals);
+  const gapIndices = typeof gapMarkerAt === 'function'
+    ? series.map((p, i) => (gapMarkerAt(p, i) ? i : -1)).filter((i) => i >= 0)
+    : [];
   const overlayLineVals = overlayValueKey ? series.map(p => toFiniteNum(p?.[overlayValueKey])) : [];
   const overlayPath = overlayValueKey ? buildPath(overlayLineVals) : '';
 
@@ -4594,6 +4610,18 @@ function SimpleSeriesPlot({
           <path d={overlayPath} fill="none" stroke={ovColor} strokeWidth="1.6" strokeDasharray="5 4" />
         )}
         <path d={linePath} fill="none" stroke={primaryColor} strokeWidth="2" />
+        {gapIndices.map((idx) => (
+          <g key={`gap-${idx}`} title={gapMarkerLabel}>
+            <line
+              x1={x(idx)}
+              y1={H - B - 1}
+              x2={x(idx)}
+              y2={H - B + 5}
+              stroke="rgba(245,158,11,0.85)"
+              strokeWidth="2"
+            />
+          </g>
+        ))}
         {Number.isFinite(latestVal) && (
           <>
             <circle cx={x(latestIdx)} cy={y(latestVal)} r="3.2" fill={primaryColor} />
@@ -4629,6 +4657,14 @@ function SimpleSeriesPlot({
           <g>
             <line x1={L + 14} y1={T + 30} x2={L + 34} y2={T + 30} stroke={ovColor} strokeWidth="1.6" strokeDasharray="5 4" />
             <text x={L + 40} y={T + 34} fontSize="11" fill={ovColor} fontFamily="DM Sans">{overlayLabel}</text>
+          </g>
+        )}
+        {gapIndices.length > 0 && (
+          <g>
+            <line x1={L + 14} y1={T + (overlayPath && overlayLabel ? 46 : 30)} x2={L + 24} y2={T + (overlayPath && overlayLabel ? 46 : 30)} stroke="rgba(245,158,11,0.85)" strokeWidth="2" />
+            <text x={L + 30} y={T + (overlayPath && overlayLabel ? 50 : 34)} fontSize="11" fill="rgba(245,158,11,0.9)" fontFamily="DM Sans">
+              {gapMarkerLabel} ({gapIndices.length})
+            </text>
           </g>
         )}
         {xTickIdxUnique.map((idx, i) => (
@@ -7474,6 +7510,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       }
       setBorrowSpikeRiskLoading(true);
       setBorrowSpikeRiskError(null);
+      setBorrowSpikeEvalError(null);
       try {
         const cacheBust = `?t=${Math.floor(Date.now() / 1800)}`;
         const [riskRes, evalRes, trackingRes] = await Promise.all([
@@ -7485,8 +7522,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         const payload = await riskRes.json();
         let evalPayload = BORROW_SPIKE_EVAL_CACHE;
         if (evalRes.ok) {
-          evalPayload = await evalRes.json();
-          BORROW_SPIKE_EVAL_CACHE = evalPayload;
+          try {
+            evalPayload = await evalRes.json();
+            BORROW_SPIKE_EVAL_CACHE = evalPayload;
+          } catch (evalErr) {
+            if (!cancelled) {
+              setBorrowSpikeEvalError(evalErr?.message || 'borrow spike eval JSON invalid');
+            }
+          }
         } else if (!cancelled) {
           setBorrowSpikeEvalError(`borrow spike eval HTTP ${evalRes.status}`);
         }
@@ -7501,7 +7544,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           predictor_study_guidance: evalPayload?.predictor_study_guidance || null,
         });
         if (!cancelled && trackingRes.ok) {
-          setBorrowSpikeTracking(await trackingRes.json());
+          try {
+            setBorrowSpikeTracking(await trackingRes.json());
+          } catch (_) { /* optional sidecar */ }
         }
       } catch (e) {
         if (!cancelled) setBorrowSpikeRiskError(e?.message || 'borrow spike risk unavailable');
@@ -11637,6 +11682,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   label="Borrow rate (annual, fee-only)"
                   formatValue={(v) => fmt(v)}
                   zeroLabel="0% borrow"
+                  strictNullPrimary={true}
+                  gapMarkerAt={(pt) => !borrowHistoryPointForAvg(pt)}
+                  gapMarkerLabel="no locate"
                   referenceValue={Number.isFinite(Number(r?.borrow_forecast_5d_p50)) ? Number(r.borrow_forecast_5d_p50) : null}
                   referenceLabel="5D forecast"
                 />
@@ -11696,11 +11744,11 @@ function BorrowResearchSection() {
   useEffect(() => {
     const cacheBust = `?t=${Math.floor(Date.now() / 3600000)}`;
     Promise.all([
-      fetch(`${BORROW_SPIKE_TRACKING_URL}${cacheBust}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)),
-      fetch(`${BORROW_SPIKE_EVAL_URL}${cacheBust}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)),
+      fetchJsonSafe(`${BORROW_SPIKE_TRACKING_URL}${cacheBust}`),
+      fetchJsonSafe(`${BORROW_SPIKE_EVAL_URL}${cacheBust}`),
     ]).then(([t, e]) => {
-      setTracking(t);
-      setEvalData(e);
+      setTracking(t.data);
+      setEvalData(e.data);
     }).catch(() => {});
   }, []);
   const milestones = tracking?.milestones || [];

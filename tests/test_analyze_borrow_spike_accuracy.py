@@ -63,3 +63,15 @@ def test_build_eval_payload_smoke(tmp_path: Path):
     payload = build_eval_payload(tmp_path)
     assert "metrics" in payload
     assert "replay" in payload["metrics"]
+
+
+def test_eval_json_dump_rejects_non_finite(tmp_path: Path):
+    from borrow_model_common import sanitize_for_json
+
+    payload = {"metrics": {"cnn_drift": {"rmse": float("inf"), "r2": float("-inf"), "mae": float("nan")}}}
+    clean = sanitize_for_json(payload)
+    text = json.dumps(clean, allow_nan=False)
+    assert "Infinity" not in text
+    assert "NaN" not in text
+    parsed = json.loads(text)
+    assert parsed["metrics"]["cnn_drift"]["rmse"] is None

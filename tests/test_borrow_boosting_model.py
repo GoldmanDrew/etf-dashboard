@@ -70,6 +70,16 @@ def test_drift_metrics_basic():
     assert m["n"] == 12
 
 
+def test_drift_metrics_clips_pathological_predictions():
+    y = np.full(12, 0.05)
+    p = np.full(12, 1e30)
+    m = drift_metrics(y, p)
+    assert m["mae"] is not None
+    assert m["rmse"] is not None
+    assert np.isfinite(m["rmse"])
+    assert m["rmse"] <= 5.0
+
+
 @pytest.mark.skipif(_backend_name() == "unavailable", reason="no lightgbm/sklearn")
 def test_fit_boosting_bundle_smoke():
     panel = _synthetic_panel()

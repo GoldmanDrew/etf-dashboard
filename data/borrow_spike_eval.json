@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-07-08T18:49:07.499054Z",
+  "as_of": "2026-07-08T21:22:03.726495Z",
   "label": {
     "name": "production",
     "description": "future_max > max(1.0, 3*med60, p99_180) and jump > 0.25",
@@ -1056,8 +1056,8 @@
       {
         "feature": "delta",
         "target": "y_spike_5",
-        "rank_corr": -0.060362,
-        "abs_rank_corr": 0.060362
+        "rank_corr": -0.060087,
+        "abs_rank_corr": 0.060087
       },
       {
         "feature": "shares_available",
@@ -1079,7 +1079,7 @@
       }
     ],
     "study_summary": {
-      "build_time": "2026-07-08T15:58:46.964075Z",
+      "build_time": "2026-07-08T18:50:46.855816Z",
       "panel_rows": 46009,
       "panel_symbols": 503,
       "recommended_v2_features": [
@@ -1104,7 +1104,7 @@
         "shares_drop1",
         "utilization_proxy"
       ],
-      "guidance_for_spike_model": "Use recommended_v2_features for logistic_v2 candidate set. Prioritize supply (utilization_proxy, shares_drop3) and peer_borrow_z_mean when re-running borrow_spike_eval; keep L0 labels and out-of-time splits. Best ablation block: full_plus_screener (AUROC 0.9946).",
+      "guidance_for_spike_model": "Use recommended_v2_features for logistic_v2 candidate set. Prioritize supply (utilization_proxy, shares_drop3) and peer_borrow_z_mean when re-running borrow_spike_eval; keep L0 labels and out-of-time splits. Best ablation block: full_plus_screener (AUROC 0.9949).",
       "key_findings": [
         "Top rank-corr predictors at h=5: borrow_current, borrow_vol10, log_aum."
       ],
@@ -1112,45 +1112,45 @@
       "block_auroc_lifts": {
         "supply_vs_borrow_only": 0.002605,
         "peer_vs_borrow_only": -0.005119,
-        "full_vs_borrow_only": 0.002874
+        "full_vs_borrow_only": 0.003144
       },
       "top_predictors_h5": [
         {
           "feature": "borrow_current",
-          "mean_abs_rank_corr": 0.128703
+          "mean_abs_rank_corr": 0.128852
         },
         {
           "feature": "borrow_vol10",
-          "mean_abs_rank_corr": 0.120566
+          "mean_abs_rank_corr": 0.120695
         },
         {
           "feature": "log_aum",
-          "mean_abs_rank_corr": 0.107012
+          "mean_abs_rank_corr": 0.107197
         },
         {
           "feature": "shares_available",
-          "mean_abs_rank_corr": 0.096938
+          "mean_abs_rank_corr": 0.096861
         },
         {
           "feature": "forecast_vol_underlying_annual",
-          "mean_abs_rank_corr": 0.074827
+          "mean_abs_rank_corr": 0.074706
         },
         {
           "feature": "gross_decay_annual",
-          "mean_abs_rank_corr": 0.066349
+          "mean_abs_rank_corr": 0.066764
         },
         {
           "feature": "turnover_20d",
-          "mean_abs_rank_corr": 0.060952
+          "mean_abs_rank_corr": 0.06059
         },
         {
           "feature": "borrow_z60",
-          "mean_abs_rank_corr": 0.06006
+          "mean_abs_rank_corr": 0.059966
         }
       ]
     },
     "feature_importance": {
-      "build_time": "2026-07-08T15:58:44.540897Z",
+      "build_time": "2026-07-08T18:50:44.452676Z",
       "target": "y_spike_5",
       "split": "out_of_time_80_20",
       "blocks": {
@@ -1195,10 +1195,10 @@
         },
         "full_plus_screener": {
           "status": "ok",
-          "auroc": 0.994611,
+          "auroc": 0.994881,
           "precision_at_10": 0.004348,
           "precision_lift_vs_base": 2.7125,
-          "auroc_delta_vs_borrow_only": 0.002874,
+          "auroc_delta_vs_borrow_only": 0.003144,
           "test_positives": 1
         },
         "logistic_v1_reference": {
@@ -1596,8 +1596,8 @@
       "cnn_drift": {
         "status": "ok",
         "mae": 4.426289386462344e+156,
-        "rmse": Infinity,
-        "r2": -Infinity,
+        "rmse": null,
+        "r2": null,
         "n": 24866
       }
     },
@@ -1678,9 +1678,9 @@
     "version": "1",
     "policy": "v2_spike_boosting_drift",
     "drift": {
-      "method": "pooled_ols_top_features_shrunk",
-      "winner": "ols",
-      "artifact": null
+      "method": "boosting_lightgbm_huber",
+      "winner": "boosting",
+      "artifact": "data/borrow_boosting_bundle.pkl"
     },
     "spike_l2": {
       "method": "logistic_v2_l2_isotonic",
@@ -1697,16 +1697,31 @@
       "primary_eval_label": "L2",
       "spike_production": "logistic_v2"
     },
-    "build_time": "2026-07-08T18:49:00.936114Z",
+    "build_time": "2026-07-08T17:46:15.950808Z",
     "boosting": {
-      "backend": "unavailable",
+      "backend": "lightgbm",
       "spike_replay": {
-        "status": "empty"
+        "status": "ok",
+        "n_rows": 38486,
+        "positives": 868,
+        "positive_rate": 0.022554,
+        "precision_at_10": 0.150485,
+        "precision_at_10_lift": 6.6723
       },
       "drift_replay": {
-        "status": "empty"
+        "status": "ok",
+        "mae": 0.033672,
+        "rmse": 0.100498,
+        "r2": -0.033425,
+        "n": 38486,
+        "full_panel": {
+          "mae": 0.027819,
+          "rmse": 0.077887,
+          "r2": 0.39223,
+          "n": 38900
+        }
       },
-      "drift_gate_pass": false
+      "drift_gate_pass": true
     },
     "cnn": {
       "spike_replay": {
