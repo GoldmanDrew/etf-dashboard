@@ -15,6 +15,7 @@ if str(SCRIPTS) not in sys.path:
 
 from earnings_universe import (  # noqa: E402
     DEFAULT_EARNINGS_BUCKETS,
+    is_earnings_eligible_underlying,
     load_bucket_underlyings,
 )
 from event_vol import (  # noqa: E402
@@ -110,6 +111,7 @@ def build_known_calendar(
             underlyings = sorted({str(und).upper() for _, und in universe if str(und).strip()})
         else:
             underlyings = load_bucket_underlyings(buckets)
+    underlyings = [u for u in underlyings if is_earnings_eligible_underlying(u)]
 
     items: list[dict] = []
     today = date.today()
@@ -206,6 +208,7 @@ def build_known_calendar(
         "item_count": len(items),
         "universe": underlyings,
         "universe_buckets": list(buckets),
+        "bucket_2_scope": "yieldboost_only",
         "live_source": "nasdaq_only",
         "nasdaq_window_days": nasdaq_days,
         "items": items,

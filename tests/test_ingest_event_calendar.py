@@ -12,19 +12,30 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from earnings_universe import load_bucket_underlyings, load_bucket_underlying_etfs  # noqa: E402
+from earnings_universe import (  # noqa: E402
+    is_earnings_eligible_underlying,
+    load_bucket_underlyings,
+    load_bucket_underlying_etfs,
+)
 from ingest_event_calendar import build_known_calendar  # noqa: E402
 
 
 def _write_universe_csv(path: Path) -> None:
     df = pd.DataFrame([
-        {"ETF": "AMYY", "Underlying": "AMD", "bucket": "bucket_2"},
-        {"ETF": "MSTY", "Underlying": "MSTR", "bucket": "bucket_2"},
+        {"ETF": "AMYY", "Underlying": "AMD", "bucket": "bucket_2", "is_yieldboost": True, "product_class": "income_yieldboost"},
+        {"ETF": "MSTY", "Underlying": "MSTR", "bucket": "bucket_2", "is_yieldboost": True, "product_class": "income_yieldboost"},
+        {"ETF": "QYLD", "Underlying": "QQQ", "bucket": "bucket_2", "is_yieldboost": False, "product_class": "passive_low_delta"},
         {"ETF": "CONY", "Underlying": "COIN", "bucket": "bucket_4"},
         {"ETF": "TQQQ", "Underlying": "QQQ", "bucket": "bucket_1"},
         {"ETF": "SQQQ", "Underlying": "QQQ", "bucket": "bucket_3"},
     ])
     df.to_csv(path, index=False)
+
+
+def test_fund_underlyings_are_not_earnings_eligible():
+    for sym in ("SPY", "QQQ", "GDX", "IBIT", "SOXX"):
+        assert not is_earnings_eligible_underlying(sym)
+    assert is_earnings_eligible_underlying("NVDA")
 
 
 def test_load_bucket_underlyings_filters_b2_b4(tmp_path):
@@ -35,6 +46,14 @@ def test_load_bucket_underlyings_filters_b2_b4(tmp_path):
     etfs = load_bucket_underlying_etfs(csv_path=csv_path)
     assert etfs["AMD"] == ["AMYY"]
     assert etfs["COIN"] == ["CONY"]
+    assert "QQQ" not in etfs
+
+
+def test_bucket2_passive_low_delta_excluded_from_earnings_scope(tmp_path):
+    csv_path = tmp_path / "etf_screened_today.csv"
+    _write_universe_csv(csv_path)
+    unds = load_bucket_underlyings(("bucket_2",), csv_path=csv_path)
+    assert unds == ["AMD", "MSTR"]
 
 
 def test_build_known_calendar_nasdaq_only_confirmed(tmp_path, monkeypatch):

@@ -209,7 +209,7 @@ def render_plain_text(payload: dict) -> str:
     lines = [
         f"ETF Dashboard Weekly Ops — {today}",
         "",
-        f"Upcoming earnings (B2/B4 underlyings, next {payload.get('earnings_horizon_days', EARNINGS_HORIZON_DAYS)} days)",
+        f"Upcoming earnings (B2 YieldBOOST + B4 underlyings, next {payload.get('earnings_horizon_days', EARNINGS_HORIZON_DAYS)} days)",
         "—" * 72,
     ]
     earnings = payload.get("earnings") or []
@@ -307,7 +307,7 @@ def render_html(payload: dict) -> str:
 <html>
 <body style="font-family:sans-serif;color:#111;line-height:1.45;max-width:900px;">
   <h2>ETF Dashboard Weekly Ops — {escape(today)}</h2>
-  <p>Upcoming <strong>bucket 2 + bucket 4</strong> underlying earnings (next {int(payload.get('earnings_horizon_days', EARNINGS_HORIZON_DAYS))} days).</p>
+  <p>Upcoming <strong>bucket 2 YieldBOOST + bucket 4</strong> underlying earnings (next {int(payload.get('earnings_horizon_days', EARNINGS_HORIZON_DAYS))} days).</p>
   {_html_table(["Date", "Underlying", "Confirmation", "B2/B4 ETFs", "Source"], earnings_rows)}
   <h3>Delisting announcements (last {int(payload.get('delisting_lookback_days', DELISTING_LOOKBACK_DAYS))} days)</h3>
   {_html_table(["Announced", "ETF", "Effective", "Status", "Bucket", "Headline"], delisting_rows)}
