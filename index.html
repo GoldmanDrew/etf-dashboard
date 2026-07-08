@@ -1486,8 +1486,8 @@ function borrowSpikeBadge(r) {
   const p = Number(r?.borrow_spike_p_5d);
   const band = String(r?.borrow_spike_risk_band || '').toLowerCase();
   if (!Number.isFinite(p) || r?.borrow_spike_scoring_eligible === false) return null;
-  if (band === 'high' || p >= 0.25) return { label: 'SPIKE', cls: 'badge-stale', title: `P(borrow spike 5d)=${fmt(p)} (${band || 'high'})` };
-  if (band === 'medium' || p >= 0.12) return { label: '↑', cls: 'badge-warn', title: `P(borrow spike 5d)=${fmt(p)}` };
+  if (band === 'high' || p >= 0.30) return { label: 'SPIKE', cls: 'badge-stale', title: `P(borrow spike 5d)=${fmt(p)} (${band || 'high'})` };
+  if (band === 'elevated' || p >= 0.10) return { label: '↑', cls: 'badge-warn', title: `P(borrow spike 5d)=${fmt(p)} (${band || 'elevated'})` };
   return null;
 }
 
