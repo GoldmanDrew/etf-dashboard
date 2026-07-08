@@ -1,0 +1,105 @@
+{
+  "build_time": "2026-07-08T00:57:42.945800Z",
+  "grain": [
+    "date",
+    "symbol"
+  ],
+  "rows": 44500,
+  "symbols": 503,
+  "date_min": "2025-12-10",
+  "date_max": "2026-07-05",
+  "target_horizons": [
+    1,
+    3,
+    5,
+    10
+  ],
+  "target_columns": [
+    "delta_borrow_1",
+    "max_borrow_jump_1",
+    "y_spike_1",
+    "delta_borrow_3",
+    "max_borrow_jump_3",
+    "y_spike_3",
+    "delta_borrow_5",
+    "max_borrow_jump_5",
+    "y_spike_5",
+    "delta_borrow_10",
+    "max_borrow_jump_10",
+    "y_spike_10"
+  ],
+  "feature_blocks": {
+    "borrow_dynamics": [
+      "borrow_current",
+      "borrow_z60",
+      "borrow_slope5",
+      "borrow_vol10",
+      "borrow_pctile_60"
+    ],
+    "supply": [
+      "shares_available",
+      "shares_drop1",
+      "shares_drop3",
+      "shares_drop5",
+      "utilization_proxy",
+      "avail_to_adv"
+    ],
+    "scale": [
+      "log_aum",
+      "turnover_20d",
+      "prem_disc_bps"
+    ],
+    "float": [
+      "tradable_float_shares",
+      "etf_aum_over_float",
+      "rebalance_pct_adv"
+    ],
+    "peer": [
+      "peer_borrow_z_mean",
+      "peer_shares_drop3_mean",
+      "peer_shares_avail_sum"
+    ],
+    "screener": [
+      "delta",
+      "leverage",
+      "net_edge_p50",
+      "gross_decay_annual",
+      "forecast_vol_underlying_annual",
+      "bucket"
+    ]
+  },
+  "feature_coverage": {
+    "borrow_current": 0.9327,
+    "borrow_z60": 0.8287,
+    "borrow_slope5": 0.8416,
+    "borrow_vol10": 0.9086,
+    "borrow_pctile_60": 0.8318,
+    "shares_available": 0.9998,
+    "shares_drop1": 0.9885,
+    "shares_drop3": 0.9659,
+    "shares_drop5": 0.9433,
+    "utilization_proxy": 0.4185,
+    "avail_to_adv": 0.6802,
+    "log_aum": 0.4184,
+    "turnover_20d": 0.6802,
+    "prem_disc_bps": 0.4455,
+    "tradable_float_shares": 0.2732,
+    "etf_aum_over_float": 0.237,
+    "rebalance_pct_adv": 0.3507,
+    "peer_borrow_z_mean": 0.6288,
+    "peer_shares_drop3_mean": 0.6777,
+    "peer_shares_avail_sum": 0.6875,
+    "delta": 1.0,
+    "net_edge_p50": 0.9768,
+    "gross_decay_annual": 0.9628,
+    "forecast_vol_underlying_annual": 1.0,
+    "bucket": 1.0
+  },
+  "label_variant": "L0",
+  "inputs": {
+    "borrow_history": "data\\borrow_history.json",
+    "etf_metrics": "etf_metrics_daily.parquet|csv",
+    "screener": "data\\etf_screened_today.csv",
+    "rebalance_flows": "data\\letf_rebalance_flows_daily.parquet"
+  }
+}

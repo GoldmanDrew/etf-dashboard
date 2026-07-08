@@ -321,7 +321,37 @@ jobs:
       - name: Score borrow spike predictions
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
-        run: python scripts/score_borrow_spikes.py
+        run: python scripts/score_borrow_spikes.py --rescore-all
+
+      - name: Replay borrow spike model
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/replay_borrow_spike_model.py
+
+      - name: Borrow spike label grid
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/replay_borrow_spike_model.py --label-grid
+
+      - name: Analyze borrow spike accuracy
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/analyze_borrow_spike_accuracy.py
+
+      - name: Borrow spike accuracy gate
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/analyze_borrow_spike_accuracy.py --fail-below-floor
+
+      - name: Build borrow predictor panel
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/build_borrow_predictor_panel.py
+
+      - name: Analyze borrow predictors
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/analyze_borrow_predictors.py --fail-if-no-panel
 
       - name: Split TR quality audit
         if: steps.build_data.outcome == 'success'
@@ -354,6 +384,14 @@ jobs:
             data/borrow_spike_predictions
             data/borrow_spike_realized.jsonl
             data/borrow_spike_metrics.json
+            data/borrow_spike_replay_panel.parquet
+            data/borrow_spike_replay_summary.json
+            data/borrow_spike_eval.json
+            data/borrow_predictor_panel.parquet
+            data/borrow_predictor_panel_meta.json
+            data/borrow_predictor_leadlag.json
+            data/borrow_feature_importance.json
+            data/borrow_predictor_study_summary.json
             data/options_cache.json
             data/vol_shape_history.json
             data/vrp_live.json
