@@ -117,7 +117,11 @@ def main() -> None:
     if not args.skip_scorer:
         _run([py, "scripts/score_borrow_spikes.py", "--rescore-all", "--repo-root", str(repo_root)])
 
+    _run([py, "scripts/build_borrow_predictor_panel.py", "--repo-root", str(repo_root)])
+    _run([py, "scripts/train_borrow_models.py", "--repo-root", str(repo_root), "--skip-cnn"])
+    _run([py, "scripts/train_borrow_models.py", "--repo-root", str(repo_root), "--score-only"])
     _run([py, "scripts/forecast_borrow_level.py", "--repo-root", str(repo_root)])
+    _run([py, "scripts/borrow_model_eval.py", "--repo-root", str(repo_root)])
     _run([py, "scripts/analyze_borrow_spike_accuracy.py", "--repo-root", str(repo_root)])
     _run([py, "scripts/update_borrow_spike_tracking.py", "--repo-root", str(repo_root)])
 

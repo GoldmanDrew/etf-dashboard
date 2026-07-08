@@ -554,6 +554,19 @@ def build_eval_payload(repo_root: Path) -> dict[str, Any]:
     guidance = _load_predictor_study_guidance(data_dir)
     if guidance is not None:
         payload["predictor_study_guidance"] = guidance
+
+    ml_eval_path = data_dir / "borrow_model_eval_latest.json"
+    if ml_eval_path.exists():
+        try:
+            payload["borrow_model_eval"] = json.loads(ml_eval_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+    reg_path = data_dir / "borrow_model_registry.json"
+    if reg_path.exists():
+        try:
+            payload["borrow_model_registry"] = json.loads(reg_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
     return payload
 
 

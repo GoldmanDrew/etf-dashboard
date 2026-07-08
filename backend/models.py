@@ -193,6 +193,17 @@ class ETFRecord(BaseModel):
     borrow_spike_alert_tier_boosting: Optional[str] = None
     borrow_model_drift_winner: Optional[str] = None
     borrow_model_spike_winner: Optional[str] = None
+    borrow_stress_borrow_annual: Optional[float] = None
+    net_edge_stress_p50_annual: Optional[float] = None
+    net_edge_stress_basis: Optional[str] = None
+    borrow_ops_policy: Optional[str] = None
+    borrow_ops_spike_block: Optional[bool] = None
+    borrow_ops_spike_watch: Optional[bool] = None
+    borrow_ops_model_disagree: Optional[bool] = None
+    borrow_ops_drift_tightening: Optional[bool] = None
+    borrow_ops_spike_tier_v2: Optional[str] = None
+    borrow_ops_spike_tier_boosting: Optional[str] = None
+    borrow_ops_effective_net_edge_p50: Optional[float] = None
     schema_v: Optional[int] = None
     edge_sign_convention: Optional[str] = None
 

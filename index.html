@@ -1485,12 +1485,24 @@ const VRP_LIVE_URL = "data/vrp_live.json";
 const VRP_HEALTH_URL = "data/vrp_health.json";
 function borrowSpikeBadge(r) {
   const tier = String(r?.borrow_spike_alert_tier || r?.borrow_spike_risk_band || '').toLowerCase();
+  const boostTier = String(r?.borrow_spike_alert_tier_boosting || '').toLowerCase();
   const pCal = Number(r?.borrow_spike_p_5d_l2_calibrated);
   const p = Number.isFinite(pCal) ? pCal : Number(r?.borrow_spike_p_5d);
   if (!Number.isFinite(p) || r?.borrow_spike_scoring_eligible === false) return null;
   if (tier === 'high' || p >= 0.25) return { label: 'SPIKE', cls: 'badge-stale', title: `Borrow stress (L2 cal)=${fmt(p)} (${tier || 'high'})` };
   if (tier === 'elevated' || tier === 'watch' || p >= 0.12) return { label: '↑', cls: 'badge-warn', title: `Borrow stress (L2 cal)=${fmt(p)} (${tier || 'elevated'})` };
   return null;
+}
+
+function borrowModelDisagreeBadge(r) {
+  if (!r?.borrow_ops_model_disagree || r?.borrow_spike_scoring_eligible === false) return null;
+  const v2 = String(r?.borrow_ops_spike_tier_v2 || r?.borrow_spike_alert_tier || '').toLowerCase();
+  const boost = String(r?.borrow_ops_spike_tier_boosting || r?.borrow_spike_alert_tier_boosting || '').toLowerCase();
+  return {
+    label: '≠',
+    cls: 'badge-warn',
+    title: `Borrow model disagree: v2=${v2 || '—'} vs boosting shadow=${boost || '—'} — review sizing`,
+  };
 }
 
 const BORROW_OUTLOOK_TIER_RANK = { high: 4, elevated: 3, watch: 2, low: 1 };
@@ -1502,6 +1514,11 @@ function borrowOutlookFields(r) {
   const forecastMethod = String(r?.borrow_forecast_method || '').trim();
   const boostTier = String(r?.borrow_spike_alert_tier_boosting || '').toLowerCase();
   const tier = String(r?.borrow_spike_alert_tier || r?.borrow_spike_risk_band || '').toLowerCase();
+  const policy = String(r?.borrow_ops_policy || r?.borrow_model_spike_winner || '').trim();
+  const driftWinner = String(r?.borrow_model_drift_winner || '').trim();
+  const disagree = r?.borrow_ops_model_disagree === true;
+  const driftTight = r?.borrow_ops_drift_tightening === true;
+  const effP50 = Number(r?.borrow_ops_effective_net_edge_p50);
   const pCal = Number(r?.borrow_spike_p_5d_l2_calibrated);
   const pL0 = Number(r?.borrow_spike_p_5d);
   const posterior = Number(r?.borrow_for_net_annual);
@@ -1513,6 +1530,11 @@ function borrowOutlookFields(r) {
     forecastMethod: forecastMethod || null,
     boostTier: boostTier || null,
     tier,
+    policy: policy || null,
+    driftWinner: driftWinner || null,
+    disagree,
+    driftTight,
+    effP50: Number.isFinite(effP50) ? effP50 : null,
     pCal: Number.isFinite(pCal) ? pCal : null,
     pL0: Number.isFinite(pL0) ? pL0 : null,
     posterior: Number.isFinite(posterior) ? posterior : null,
@@ -1552,7 +1574,8 @@ function borrowOutlookTierCls(tier) {
 function borrowOutlookTooltip(r, display) {
   const o = borrowOutlookFields(r);
   const lines = [
-    'Borrow outlook: level (spot) + 5D drift (directional) + L2 stress tier.',
+    'Borrow outlook: v2 L2 stress tier (production) + boosting drift (5D) + shadow spike.',
+    `Policy: ${o.policy || 'v2_spike_boosting_drift'} · drift model: ${o.driftWinner || o.forecastMethod || '—'}`,
     `Level (spot): ${o.level != null ? fmt(o.level) : '—'}`,
   ];
   if (display) lines.push(borrowSourceHint(display));
@@ -1565,9 +1588,18 @@ function borrowOutlookTooltip(r, display) {
     if (cadence) lines.push(cadence);
   }
   if (o.eligible && o.pCal != null) {
-    lines.push(`Stress (L2 cal): ${fmt(o.pCal)} · tier ${o.tier || '—'} (use tier, not literal spike %)`);
+    lines.push(`Stress (L2 cal): ${fmt(o.pCal)} · tier ${o.tier || '—'} (production spike tier)`);
+    if (o.boostTier && o.boostTier !== o.tier) {
+      lines.push(`Boosting shadow tier: ${o.boostTier.toUpperCase()} (diagnostic — not used for alerts)`);
+    }
   } else if (!o.eligible) {
     lines.push('Stress: insufficient borrow history for scoring');
+  }
+  if (o.disagree) {
+    lines.push(`Model disagree: v2 tier ${o.tier || '—'} vs boosting shadow ${o.boostTier || '—'} — review sizing.`);
+  }
+  if (o.driftTight && o.disagree) {
+    lines.push('Upward drift + shadow spike hotter than v2 — YB Edge may downgrade short signal one notch.');
   }
   if (o.pL0 != null) lines.push(`L0 catastrophic P(spike): ${fmt(o.pL0)} (diagnostic only)`);
   return lines.join('\n');
@@ -1580,6 +1612,7 @@ function borrowOutlookSublabel(r) {
   if (o.tier && o.tier !== 'low' && o.tier !== 'unknown' && o.eligible) {
     parts.push(o.tier.toUpperCase());
   }
+  if (o.disagree) parts.push('≠');
   return parts.length ? parts.join(' · ') : 'stable';
 }
 
@@ -1591,6 +1624,15 @@ function borrowOutlookNetEdgeNotes(r) {
     lines.push(`Net edge uses borrow posterior ≈ ${fmt(o.posterior)}/yr${mode ? ` (${mode}${r?.borrow_weight_halflife_days ? `, ${Math.round(Number(r.borrow_weight_halflife_days))}d halflife` : ''})` : ''}.`);
   } else if (o.level != null) {
     lines.push(`Net edge subtracts resampled borrow history (spot ${fmt(o.level)}).`);
+  }
+  if (o.effP50 != null && (o.tier === 'elevated' || o.tier === 'high')) {
+    const headline = Number(r?.net_edge_p50_annual);
+    if (Number.isFinite(headline) && o.effP50 < headline - 1e-6) {
+      lines.push(`Sizing uses effective net edge ${fmtLogYr(o.effP50)} (min of p50 and stress) — headline p50 ${fmtLogYr(headline)} unchanged.`);
+    }
+  }
+  if (o.disagree) {
+    lines.push('Borrow models disagree on spike tier — YB Edge may downgrade short signal; v2 tier still drives alerts.');
   }
   if (o.delta != null && o.delta > 0.02 && (o.tier === 'elevated' || o.tier === 'high')) {
     lines.push('Borrow stress elevated with upward drift — p50 may understate carry if borrow ramps.');
@@ -1611,6 +1653,7 @@ function BorrowOutlookCell({ r, borrowHistoryMap, dashboardBuildTime }) {
   const display = borrowDisplay(r, borrowHistoryMap?.[r?.symbol], { dashboardBuildTime });
   const o = borrowOutlookFields(r);
   const sb = borrowSpikeBadge(r);
+  const db = borrowModelDisagreeBadge(r);
   const sub = borrowOutlookSublabel(r);
   return (
     <div title={borrowOutlookTooltip(r, display)}>
@@ -1618,6 +1661,7 @@ function BorrowOutlookCell({ r, borrowHistoryMap, dashboardBuildTime }) {
         {o.level != null ? fmt(o.level) : '—'}
         {borrowBadge(o.level)}
         {sb ? <span className={cls('badge', sb.cls)} style={{ marginLeft: 4, fontSize: 9 }} title={sb.title}>{sb.label}</span> : null}
+        {db ? <span className={cls('badge', db.cls)} style={{ marginLeft: 4, fontSize: 9 }} title={db.title}>{db.label}</span> : null}
       </div>
       <div className="col-sublabel" style={{ fontSize: 10, marginTop: 2 }}>
         <span className={borrowOutlookDriftCls(o.delta)}>{sub}</span>

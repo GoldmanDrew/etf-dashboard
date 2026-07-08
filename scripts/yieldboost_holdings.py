@@ -2155,12 +2155,13 @@ def load_short_edge_by_yb_from_screener(
 
 
 def is_directly_shortable(rec: dict[str, Any] | None) -> bool:
-    """Conservative shortability read from screener exclusion flags.
+    """Conservative shortability read from screener exclusion flags + live borrow ops.
 
     ``purgatory`` / ``exclude_no_shares`` (no borrowable shares of the YB ETF
-    itself), ``strategy_blacklisted`` and a live ``exclude_borrow_spike`` all
-    mean the name is not cleanly shortable *right now*. We do not hard-drop
-    these rows (Bucket-2 may still locate borrow); we flag and sink them.
+    itself), ``strategy_blacklisted``, screener ``exclude_borrow_spike``, and
+    live ``borrow_ops_spike_block`` (v2 elevated/high) all mean the name is not
+    cleanly shortable *right now*. We do not hard-drop these rows (Bucket-2 may
+    still locate borrow); we flag and sink them.
     """
     if not rec:
         return False
@@ -2169,6 +2170,7 @@ def is_directly_shortable(rec: dict[str, Any] | None) -> bool:
         or rec.get("exclude_no_shares") is True
         or rec.get("strategy_blacklisted") is True
         or rec.get("exclude_borrow_spike") is True
+        or rec.get("borrow_ops_spike_block") is True
     )
     return not blockers
 
@@ -2198,19 +2200,36 @@ def compute_short_signal(
     net_edge_p05: float | None = None,
     *,
     shortable: bool = True,
+    effective_net_edge_p50: float | None = None,
+    net_edge_stress_p50: float | None = None,
+    borrow_ops_model_disagree: bool = False,
+    borrow_ops_drift_tightening: bool = False,
+    borrow_ops_spike_watch: bool = False,
 ) -> dict[str, Any]:
     """Headline SHORT signal derived from the screener net annual edge.
 
-    Uses ``net_edge_p50_annual`` (short_favorable_positive). A robust STRONG
-    SHORT additionally requires the p05 lower band to stay positive so a wide
-    downside tail can't earn the top label.
+    Uses ``net_edge_p50_annual`` (short_favorable_positive). When borrow stress
+    is elevated/high, ``effective_net_edge_p50`` (min of p50 and stress p50)
+    drives tier labels. Disagreement + upward drift downgrades one notch.
     """
-    p50 = _parse_float(net_edge_p50)
+    p50_headline = _parse_float(net_edge_p50)
+    p50 = _parse_float(effective_net_edge_p50)
+    if p50 is None:
+        p50 = p50_headline
     p05 = _parse_float(net_edge_p05)
+    stress = _parse_float(net_edge_stress_p50)
     if p50 is None:
         return {"label": "no edge data", "tier": "none", "rank": -1e9}
     if not shortable:
-        return {"label": "No locate", "tier": "nolocate", "rank": p50}
+        return {"label": "No locate", "tier": "nolocate", "rank": p50_headline or p50}
+    if stress is not None and stress < 0:
+        return {
+            "label": "Stress−",
+            "tier": "stress_neg",
+            "rank": stress,
+            "effective_net_edge_p50": p50,
+        }
+    tier = label = None
     if p50 >= SHORT_SIGNAL_STRONG and (p05 is None or p05 > 0):
         tier, label = "top", "Top"
     elif p50 >= SHORT_SIGNAL_SELL:
@@ -2219,7 +2238,20 @@ def compute_short_signal(
         tier, label = "thin", "Thin"
     else:
         tier, label = "skip", "Skip"
-    return {"label": label, "tier": tier, "rank": p50}
+    if borrow_ops_model_disagree and borrow_ops_drift_tightening:
+        if tier == "top":
+            tier, label = "good", "Good"
+        elif tier == "good":
+            tier, label = "thin", "Thin"
+    elif borrow_ops_spike_watch and tier == "top":
+        tier, label = "good", "Good"
+    return {
+        "label": label,
+        "tier": tier,
+        "rank": p50,
+        "effective_net_edge_p50": p50,
+        "headline_net_edge_p50": p50_headline,
+    }
 
 
 def evaluate_quote_sync(
@@ -2361,6 +2393,12 @@ def _short_edge_why_sentence(row: dict[str, Any]) -> str:
         parts.append(f"hedge: {align}")
     if not row.get("short_directly_shortable", True):
         parts.append("no locate")
+    if row.get("borrow_ops_spike_block"):
+        parts.append("borrow spike block (v2)")
+    if row.get("borrow_ops_model_disagree"):
+        parts.append("borrow model disagree")
+    if row.get("borrow_ops_drift_tightening"):
+        parts.append("borrow drift tightening")
     if not (row.get("quote_sync") or {}).get("sync_ok", True):
         parts.append("NOT SYNCED")
     return "; ".join(parts) + "."
@@ -2398,10 +2436,23 @@ def enrich_vrp_rows_with_short_edge(
         row["short_thesis_alignment"] = compute_short_thesis_alignment(
             row.get("edge_pp_of_max_loss")
         )
+        eff_p50 = rec.get("borrow_ops_effective_net_edge_p50")
+        if eff_p50 is None and rec:
+            try:
+                from borrow_ops_policy import effective_net_edge_for_sizing
+
+                eff_p50 = effective_net_edge_for_sizing(rec)
+            except Exception:
+                eff_p50 = rec.get("net_edge_p50_annual")
         row["short_signal"] = compute_short_signal(
             rec.get("net_edge_p50_annual"),
             rec.get("net_edge_p05_annual"),
             shortable=bool(shortable) if shortable is not None else True,
+            effective_net_edge_p50=eff_p50,
+            net_edge_stress_p50=rec.get("net_edge_stress_p50_annual"),
+            borrow_ops_model_disagree=bool(rec.get("borrow_ops_model_disagree")),
+            borrow_ops_drift_tightening=bool(rec.get("borrow_ops_drift_tightening")),
+            borrow_ops_spike_watch=bool(rec.get("borrow_ops_spike_watch")),
         )
         row["quote_sync"] = evaluate_quote_sync(row, screener_asof=screener_asof)
         row["borrow_carry"] = borrow_carry_display_meta(row)

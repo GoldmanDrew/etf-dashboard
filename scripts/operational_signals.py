@@ -13,6 +13,17 @@ def _norm_sym(s: object) -> str:
     return str(s or "").strip().upper().replace(".", "-")
 
 
+def _json_finite(v: Any) -> Any:
+    """Drop NaN/inf numeric values so dashboard JSON stays browser-parseable."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return v
+    return f if math.isfinite(f) else None
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -114,10 +125,12 @@ def enrich_records_with_operational_signals(
 
         spike = spike_syms.get(sym) if isinstance(spike_syms, dict) else None
         if isinstance(spike, dict):
-            rec["borrow_spike_p_5d"] = spike.get("p_spike_5d")
-            rec["borrow_spike_p_5d_l2_calibrated"] = spike.get("p_spike_5d_l2_calibrated")
-            rec["borrow_spike_p_5d_l2_boosting"] = spike.get("p_spike_5d_l2_boosting")
-            rec["borrow_spike_p_5d_l2_boosting_calibrated"] = spike.get("p_spike_5d_l2_boosting_calibrated")
+            rec["borrow_spike_p_5d"] = _json_finite(spike.get("p_spike_5d"))
+            rec["borrow_spike_p_5d_l2_calibrated"] = _json_finite(spike.get("p_spike_5d_l2_calibrated"))
+            rec["borrow_spike_p_5d_l2_boosting"] = _json_finite(spike.get("p_spike_5d_l2_boosting"))
+            rec["borrow_spike_p_5d_l2_boosting_calibrated"] = _json_finite(
+                spike.get("p_spike_5d_l2_boosting_calibrated")
+            )
             rec["borrow_spike_alert_tier"] = spike.get("alert_tier")
             rec["borrow_spike_alert_tier_boosting"] = spike.get("alert_tier_boosting")
             rec["borrow_spike_risk_band"] = spike.get("risk_band") or spike.get("alert_tier")
@@ -127,10 +140,10 @@ def enrich_records_with_operational_signals(
 
         fc = forecast_by.get(sym) if isinstance(forecast_by, dict) else None
         if isinstance(fc, dict):
-            rec["borrow_forecast_delta_5d_p50"] = fc.get("delta_borrow_5d_p50")
-            rec["borrow_forecast_5d_p50"] = fc.get("borrow_forecast_5d_p50")
-            rec["borrow_forecast_delta_5d_p25"] = fc.get("delta_borrow_5d_p25")
-            rec["borrow_forecast_delta_5d_p75"] = fc.get("delta_borrow_5d_p75")
+            rec["borrow_forecast_delta_5d_p50"] = _json_finite(fc.get("delta_borrow_5d_p50"))
+            rec["borrow_forecast_5d_p50"] = _json_finite(fc.get("borrow_forecast_5d_p50"))
+            rec["borrow_forecast_delta_5d_p25"] = _json_finite(fc.get("delta_borrow_5d_p25"))
+            rec["borrow_forecast_delta_5d_p75"] = _json_finite(fc.get("delta_borrow_5d_p75"))
             rec["borrow_forecast_method"] = fc.get("method") or forecast_payload.get("method")
 
         rec.update(compute_net_edge_stress_fields(rec))

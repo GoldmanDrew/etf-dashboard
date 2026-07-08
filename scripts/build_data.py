@@ -434,6 +434,20 @@ def _safe_float(row, key):
         return None
 
 
+def _sanitize_for_json(obj):
+    """Replace NaN/inf with null so json.dump emits valid JSON for browsers."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, (float, np.floating)):
+        f = float(obj)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    return obj
+
+
 def _int_schema_v(v, default: int = 2) -> int:
     try:
         return int(float(v))
@@ -4041,9 +4055,9 @@ def refresh_borrow_only() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=None, separators=(",", ":"))
+        json.dump(_sanitize_for_json(output), f, indent=None, separators=(",", ":"), allow_nan=False)
     with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
-        json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
+        json.dump(_sanitize_for_json(borrow_spike_risk), f, indent=None, separators=(",", ":"), allow_nan=False)
     _write_borrow_history_payload(hist_payload, context="borrow_only")
 
     print(f"[OK] Borrow-only refresh wrote {OUTPUT_FILE}")
@@ -4097,9 +4111,9 @@ def rebuild_borrow_stats_from_history() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=None, separators=(",", ":"))
+        json.dump(_sanitize_for_json(output), f, indent=None, separators=(",", ":"), allow_nan=False)
     with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
-        json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
+        json.dump(_sanitize_for_json(borrow_spike_risk), f, indent=None, separators=(",", ":"), allow_nan=False)
     _bp = write_borrow_spike_predictions_snapshot(
         borrow_spike_risk, pred_dir=BORROW_SPIKE_PREDICTIONS_DIR, as_of_date=today_utc,
     )
@@ -5339,12 +5353,12 @@ def build():
     # 7. Write JSON
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w") as f:
-        json.dump(output, f, indent=None, separators=(",", ":"))
+        json.dump(_sanitize_for_json(output), f, indent=None, separators=(",", ":"), allow_nan=False)
     with open(VOL_SHAPE_HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(vol_shape_history_payload, f, indent=None, separators=(",", ":"))
+        json.dump(_sanitize_for_json(vol_shape_history_payload), f, indent=None, separators=(",", ":"), allow_nan=False)
     _write_borrow_history_payload(borrow_history, context="full_build")
     with open(BORROW_SPIKE_RISK_FILE, "w", encoding="utf-8") as f:
-        json.dump(borrow_spike_risk, f, indent=None, separators=(",", ":"))
+        json.dump(_sanitize_for_json(borrow_spike_risk), f, indent=None, separators=(",", ":"), allow_nan=False)
     _bp = write_borrow_spike_predictions_snapshot(
         borrow_spike_risk, pred_dir=BORROW_SPIKE_PREDICTIONS_DIR, as_of_date=today_utc,
     )

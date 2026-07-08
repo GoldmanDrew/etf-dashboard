@@ -50,6 +50,33 @@ ALERT_TIER_THRESHOLDS = {
 }
 
 
+def _attach_boosting_scores(sym_payload: dict, sym_u: str, lf: dict) -> None:
+    """Shadow/production boosting spike scores when bundle + registry allow."""
+    try:
+        from pathlib import Path
+        import json
+        from borrow_boosting_model import load_bundle, score_spike
+
+        root = Path(__file__).resolve().parent.parent
+        reg_path = root / "data" / "borrow_model_registry.json"
+        if not reg_path.exists():
+            return
+        reg = json.loads(reg_path.read_text(encoding="utf-8"))
+        if reg.get("spike_l2", {}).get("winner") != "boosting" and not reg.get("boosting", {}).get("gate_pass"):
+            return
+        bundle = load_bundle(root / "data" / "borrow_boosting_bundle.pkl")
+        if bundle is None or bundle.spike_model is None:
+            return
+        row = pd.DataFrame([{**lf, "symbol": sym_u}])
+        p = float(score_spike(bundle, row)[0])
+        p_cal = bundle.calibrator.transform(p) if bundle.calibrator else p
+        sym_payload["p_spike_5d_l2_boosting"] = round(p, 6)
+        sym_payload["p_spike_5d_l2_boosting_calibrated"] = round(p_cal, 6)
+        sym_payload["alert_tier_boosting"] = alert_tier(p_cal)
+    except Exception:
+        return
+
+
 @dataclass(frozen=True)
 class IsotonicCalibrator:
     bin_edges: tuple[float, ...]
@@ -363,6 +390,7 @@ def build_extended_risk_payload(
             symbols[sym_u]["alert_tier"] = alert_tier(p2c)
             symbols[sym_u]["supply_data_grade"] = supply.get("supply_data_grade")
             symbols[sym_u]["risk_band"] = symbols[sym_u]["alert_tier"]
+            _attach_boosting_scores(symbols[sym_u], sym_u, lf)
         else:
             symbols[sym_u]["p_spike_5d_l2"] = None
             symbols[sym_u]["p_spike_5d_l2_calibrated"] = None

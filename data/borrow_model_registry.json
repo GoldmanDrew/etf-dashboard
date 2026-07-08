@@ -1,0 +1,59 @@
+{
+  "version": "1",
+  "policy": "v2_spike_boosting_drift",
+  "drift": {
+    "method": "boosting_lightgbm_huber",
+    "winner": "boosting",
+    "artifact": "data/borrow_boosting_bundle.pkl"
+  },
+  "spike_l2": {
+    "method": "logistic_v2_l2_isotonic",
+    "winner": "logistic_v2",
+    "shadow": "boosting",
+    "artifact": null
+  },
+  "fallback": {
+    "drift": "pooled_ols",
+    "spike_l2": "logistic_v2"
+  },
+  "gates": {
+    "precision_at_10_lift_floor": 2.0,
+    "primary_eval_label": "L2",
+    "spike_production": "logistic_v2"
+  },
+  "build_time": "2026-07-08T17:46:15.950808Z",
+  "boosting": {
+    "backend": "lightgbm",
+    "spike_replay": {
+      "status": "ok",
+      "n_rows": 38486,
+      "positives": 868,
+      "positive_rate": 0.022554,
+      "precision_at_10": 0.150485,
+      "precision_at_10_lift": 6.6723
+    },
+    "drift_replay": {
+      "status": "ok",
+      "mae": 0.033672,
+      "rmse": 0.100498,
+      "r2": -0.033425,
+      "n": 38486,
+      "full_panel": {
+        "mae": 0.027819,
+        "rmse": 0.077887,
+        "r2": 0.39223,
+        "n": 38900
+      }
+    },
+    "drift_gate_pass": true
+  },
+  "cnn": {
+    "spike_replay": {
+      "status": "skipped"
+    },
+    "drift_replay": {
+      "status": "skipped"
+    }
+  },
+  "cnn_artifact": "data/borrow_cnn_model.pkl"
+}

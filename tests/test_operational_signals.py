@@ -55,3 +55,25 @@ def test_enrich_borrow_spike_forecast_and_moc_flow(tmp_path):
     assert rec["borrow_forecast_5d_p50"] == 0.23
     assert rec["borrow_stress_borrow_annual"] == 0.23
     assert rec["net_edge_stress_p50_annual"] == -0.03
+
+
+def test_enrich_strips_nan_forecast_level(tmp_path):
+    records = [{"symbol": "XYZ", "bucket": "bucket_2"}]
+    forecast_path = tmp_path / "borrow_forecast_latest.json"
+    forecast_path.write_text(
+        json.dumps(
+            {
+                "by_symbol": {
+                    "XYZ": {
+                        "delta_borrow_5d_p50": 0.04,
+                        "borrow_forecast_5d_p50": float("nan"),
+                    }
+                }
+            },
+            allow_nan=True,
+        ),
+        encoding="utf-8",
+    )
+    enrich_records_with_operational_signals(records, borrow_spike_risk={}, data_dir=tmp_path)
+    assert records[0]["borrow_forecast_delta_5d_p50"] == 0.04
+    assert records[0]["borrow_forecast_5d_p50"] is None

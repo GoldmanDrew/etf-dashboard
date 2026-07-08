@@ -1436,7 +1436,34 @@ def test_is_directly_shortable_flags():
     assert is_directly_shortable({"exclude_no_shares": True}) is False
     assert is_directly_shortable({"strategy_blacklisted": True}) is False
     assert is_directly_shortable({"exclude_borrow_spike": True}) is False
+    assert is_directly_shortable({"borrow_ops_spike_block": True}) is False
     assert is_directly_shortable(None) is False
+
+
+def test_compute_short_signal_stress_and_disagree_downgrade():
+    stress_neg = compute_short_signal(
+        0.20, 0.05,
+        effective_net_edge_p50=0.20,
+        net_edge_stress_p50=-0.01,
+    )
+    assert stress_neg["tier"] == "stress_neg"
+    assert stress_neg["label"] == "Stress−"
+
+    downgraded = compute_short_signal(
+        0.20, 0.10,
+        effective_net_edge_p50=0.20,
+        borrow_ops_model_disagree=True,
+        borrow_ops_drift_tightening=True,
+    )
+    assert downgraded["tier"] == "good"
+    assert downgraded["label"] == "Good"
+
+    watch_down = compute_short_signal(
+        0.20, 0.10,
+        effective_net_edge_p50=0.20,
+        borrow_ops_spike_watch=True,
+    )
+    assert watch_down["tier"] == "good"
 
 
 def test_evaluate_quote_sync_flags_stale_underlying():

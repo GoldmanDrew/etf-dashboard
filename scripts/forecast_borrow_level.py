@@ -16,7 +16,7 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
-from borrow_model_common import shrink_delta  # noqa: E402
+from borrow_model_common import finite_optional, round_optional, shrink_delta  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
@@ -119,22 +119,34 @@ def build_forecast_payload(repo_root: Path) -> dict[str, Any]:
             obs = row.get("obs_count")
             if boosting_by and sym in boosting_by:
                 rec = dict(boosting_by[sym])
-                p50 = float(rec.get("delta_borrow_5d_p50") or 0)
+                p50 = finite_optional(rec.get("delta_borrow_5d_p50"))
                 half_iqr = 0.67 * resid_std
-                rec["delta_borrow_5d_p25"] = round(p50 - half_iqr, 6)
-                rec["delta_borrow_5d_p75"] = round(p50 + half_iqr, 6)
+                rec["delta_borrow_5d_p50"] = round_optional(p50)
+                rec["delta_borrow_5d_p25"] = round_optional(
+                    (p50 - half_iqr) if p50 is not None else None
+                )
+                rec["delta_borrow_5d_p75"] = round_optional(
+                    (p50 + half_iqr) if p50 is not None else None
+                )
+                rec["borrow_current"] = round_optional(rec.get("borrow_current"))
+                rec["borrow_forecast_5d_p50"] = round_optional(rec.get("borrow_forecast_5d_p50"))
                 by_symbol[sym] = rec
                 continue
             p50_raw = _predict_row(row, coef)
             p50 = shrink_delta(p50_raw, obs)
-            cur = float(row.get("borrow_current") or 0)
+            cur = finite_optional(row.get("borrow_current"))
             half_iqr = 0.67 * resid_std
+            p50_f = finite_optional(p50)
             by_symbol[sym] = {
-                "delta_borrow_5d_p50": round(p50, 6),
-                "delta_borrow_5d_p25": round(p50 - half_iqr, 6),
-                "delta_borrow_5d_p75": round(p50 + half_iqr, 6),
-                "borrow_current": round(cur, 6),
-                "borrow_forecast_5d_p50": round(cur + p50, 6),
+                "delta_borrow_5d_p50": round_optional(p50_f),
+                "delta_borrow_5d_p25": round_optional(
+                    (p50_f - half_iqr) if p50_f is not None else None
+                ),
+                "delta_borrow_5d_p75": round_optional(
+                    (p50_f + half_iqr) if p50_f is not None else None
+                ),
+                "borrow_current": round_optional(cur),
+                "borrow_forecast_5d_p50": round_optional(cur + p50 if cur is not None else None),
                 "obs_count": int(obs) if obs is not None and np.isfinite(obs) else None,
                 "as_of_date": row["date"].strftime("%Y-%m-%d") if pd.notna(row.get("date")) else None,
                 "method": method,
@@ -167,7 +179,7 @@ def main() -> None:
     out = repo_root / "data" / "borrow_forecast_latest.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(payload, f, indent=2, allow_nan=False)
     print(f"[OK] borrow_forecast_latest.json: {payload.get('n_symbols')} symbols ({payload.get('method')})")
 
 
