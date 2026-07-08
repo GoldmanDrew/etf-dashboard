@@ -1,45 +1,81 @@
 {
-  "build_time": "2026-07-08T13:21:29.512866Z",
-  "label_variant": "L0",
-  "label": {
-    "name": "production",
-    "description": "future_max > max(1.0, 3*med60, p99_180) and jump > 0.25",
-    "mult_med": 3.0,
-    "jump_min": 0.25,
-    "abs_floor": 1.0,
-    "use_p99": true
-  },
-  "horizon_days": 5,
-  "refit_cadence_days": 7,
-  "panel_rows": 31238,
-  "replay_rows": 29869,
-  "replay_positives": 1,
-  "replay_date_min": "2026-03-31",
-  "replay_date_max": "2026-07-03",
-  "symbols_scored": 465,
-  "l2_replay": {
-    "panel_rows": 35996,
-    "replay_rows": 35454,
-    "replay_positives": 840,
-    "replay_date_min": "2026-03-02",
-    "replay_date_max": "2026-07-03"
-  },
+  "build_time": "2026-07-08T14:28:03.961622Z",
   "label_grid": {
     "L0": {
+      "build_time": "2026-07-08T14:27:19.746440Z",
+      "label_variant": "L0",
+      "label": {
+        "name": "production",
+        "description": "future_max > max(1.0, 3*med60, p99_180) and jump > 0.25",
+        "mult_med": 3.0,
+        "jump_min": 0.25,
+        "abs_floor": 1.0,
+        "use_p99": true
+      },
+      "horizon_days": 5,
+      "refit_cadence_days": 7,
       "panel_rows": 31238,
-      "positives": 4
+      "replay_rows": 29869,
+      "replay_positives": 1,
+      "replay_date_min": "2026-03-31",
+      "replay_date_max": "2026-07-03",
+      "symbols_scored": 465
     },
     "L1": {
+      "build_time": "2026-07-08T14:27:34.821110Z",
+      "label_variant": "L1",
+      "label": {
+        "name": "moderate",
+        "description": "future_max > max(1.0, 2*med60, p99_180) and jump > 0.15",
+        "mult_med": 2.0,
+        "jump_min": 0.15,
+        "abs_floor": 1.0,
+        "use_p99": true
+      },
+      "horizon_days": 5,
+      "refit_cadence_days": 7,
       "panel_rows": 31238,
-      "positives": 14
+      "replay_rows": 29869,
+      "replay_positives": 9,
+      "replay_date_min": "2026-03-31",
+      "replay_date_max": "2026-07-03",
+      "symbols_scored": 465
     },
     "L2": {
+      "build_time": "2026-07-08T14:27:49.329047Z",
+      "label_variant": "L2",
+      "label": {
+        "name": "p90_relative",
+        "description": "future_max > p90_60 and jump > 0.10",
+        "jump_min": 0.1,
+        "use_p90": true
+      },
+      "horizon_days": 5,
+      "refit_cadence_days": 7,
       "panel_rows": 35996,
-      "positives": 859
+      "replay_rows": 35454,
+      "replay_positives": 845,
+      "replay_date_min": "2026-03-02",
+      "replay_date_max": "2026-07-03",
+      "symbols_scored": 488
     },
     "L3": {
+      "build_time": "2026-07-08T14:28:03.952021Z",
+      "label_variant": "L3",
+      "label": {
+        "name": "absolute_5pct",
+        "description": "future_max > 0.05 and jump > 0.10",
+        "jump_min": 0.1,
+        "abs_borrow_min": 0.05
+      },
+      "horizon_days": 5,
+      "refit_cadence_days": 7,
       "panel_rows": 35996,
-      "positives": 1223
+      "replay_rows": 35454,
+      "replay_positives": 1206,
+      "replay_date_min": "2026-03-02",
+      "replay_date_max": "2026-07-03",
+      "symbols_scored": 488
     }
   }
 }
