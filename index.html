@@ -1471,6 +1471,7 @@ const AUTH_SESSION_MS = 7 * 86400000;
 const BORROW_HISTORY_URL = "data/borrow_history.json";
 const BORROW_SPIKE_RISK_URL = "data/borrow_spike_risk.json";
 const BORROW_SPIKE_EVAL_URL = "data/borrow_spike_eval.json";
+const BORROW_SPIKE_TRACKING_URL = "data/borrow_spike_tracking.json";
 const OPTIONS_CACHE_URL = "data/options_cache.json";
 const INTRADAY_SPOT_URL = "data/underlying_intraday_spot.json";
 const OPTIONS_POLL_MS = 10 * 60 * 1000;
@@ -1483,11 +1484,12 @@ const VOL_SHAPE_HISTORY_URL = "data/vol_shape_history.json";
 const VRP_LIVE_URL = "data/vrp_live.json";
 const VRP_HEALTH_URL = "data/vrp_health.json";
 function borrowSpikeBadge(r) {
-  const p = Number(r?.borrow_spike_p_5d);
-  const band = String(r?.borrow_spike_risk_band || '').toLowerCase();
+  const tier = String(r?.borrow_spike_alert_tier || r?.borrow_spike_risk_band || '').toLowerCase();
+  const pCal = Number(r?.borrow_spike_p_5d_l2_calibrated);
+  const p = Number.isFinite(pCal) ? pCal : Number(r?.borrow_spike_p_5d);
   if (!Number.isFinite(p) || r?.borrow_spike_scoring_eligible === false) return null;
-  if (band === 'high' || p >= 0.30) return { label: 'SPIKE', cls: 'badge-stale', title: `P(borrow spike 5d)=${fmt(p)} (${band || 'high'})` };
-  if (band === 'elevated' || p >= 0.10) return { label: '↑', cls: 'badge-warn', title: `P(borrow spike 5d)=${fmt(p)} (${band || 'elevated'})` };
+  if (tier === 'high' || p >= 0.25) return { label: 'SPIKE', cls: 'badge-stale', title: `Borrow stress (L2 cal)=${fmt(p)} (${tier || 'high'})` };
+  if (tier === 'elevated' || tier === 'watch' || p >= 0.12) return { label: '↑', cls: 'badge-warn', title: `Borrow stress (L2 cal)=${fmt(p)} (${tier || 'elevated'})` };
   return null;
 }
 
@@ -7733,8 +7735,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     return Number.isFinite(c) ? c : null;
   })();
   const etfSpikeRisk = borrowSpikeRiskMap?.[etfSym] || null;
-  const etfSpikeProb = Number(etfSpikeRisk?.p_spike_5d);
-  const etfSpikeBand = String(etfSpikeRisk?.risk_band || 'unknown').toLowerCase();
+  const etfSpikeProbCal = Number(etfSpikeRisk?.p_spike_5d_l2_calibrated ?? r?.borrow_spike_p_5d_l2_calibrated);
+  const etfSpikeProb = Number.isFinite(etfSpikeProbCal) ? etfSpikeProbCal : Number(etfSpikeRisk?.p_spike_5d);
+  const etfSpikeBand = String(etfSpikeRisk?.alert_tier || etfSpikeRisk?.risk_band || r?.borrow_spike_alert_tier || 'unknown').toLowerCase();
+  const etfSpikeProbL0 = Number(etfSpikeRisk?.p_spike_5d);
+  const etfBorrowForecastDelta = Number(r?.borrow_forecast_delta_5d_p50);
+  const etfBorrowForecastLevel = Number(r?.borrow_forecast_5d_p50);
   const etfSpikeBandCls = etfSpikeBand === 'high'
     ? 'val-negative'
     : etfSpikeBand === 'elevated'
@@ -7750,8 +7756,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     : 'val-negative';
   const spikeAccuracy = borrowSpikeRiskMeta?.accuracy_tracking || null;
   const spikeStudyGuidance = spikeStudyGuidanceLines(borrowSpikeRiskMeta?.predictor_study_guidance);
-  const spikeReplayMetrics = borrowSpikeEval?.metrics?.replay || null;
-  const spikeReplayWindow = borrowSpikeEval?.replay_window || null;
+  const spikeReplayMetrics = borrowSpikeEval?.metrics?.replay_l2 || borrowSpikeEval?.metrics?.replay || null;
+  const spikeReplayWindow = borrowSpikeEval?.replay_window_l2 || borrowSpikeEval?.replay_window || null;
+  const spikeFindings = borrowSpikeEval?.findings_summary || null;
+  const spikeModelCmp = borrowSpikeEval?.model_comparison || null;
   const annualCarryDragRaw = Number.isFinite(avgBorrowFromHistory)
     ? avgBorrowFromHistory
     : (Number.isFinite(Number(r.borrow_avg_annual))
@@ -11301,7 +11309,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="trade-card" style={{ marginTop: 10 }}>
                   <div className="trade-head">
                     <div className="scenario-title">Spike Risk (5D)</div>
-                    <div className="scenario-sub">P(jump in borrow, 5D)</div>
+                    <div className="scenario-sub">L2 stress (calibrated) · L0 catastrophic in tooltip</div>
                   </div>
                   {borrowSpikeRiskLoading ? (
                     <div className="scenario-warning">Loading spike risk…</div>
@@ -11317,12 +11325,22 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     <>
                       <div className="chart-stats">
                         <div className="stat-pill">
-                          <div className="k">P_spike_5d</div>
+                          <div className="k">Stress (L2 cal)</div>
                           <div className={cls('v', etfSpikeBandCls)}>{fmt(etfSpikeProb)}</div>
                         </div>
                         <div className="stat-pill">
-                          <div className="k">Risk Band</div>
+                          <div className="k">Alert Tier</div>
                           <div className={cls('v', etfSpikeBandCls)}>{etfSpikeBand.toUpperCase()}</div>
+                        </div>
+                      </div>
+                      <div className="chart-stats" style={{ marginTop: 8 }}>
+                        <div className="stat-pill">
+                          <div className="k">L0 P(spike)</div>
+                          <div className="v">{Number.isFinite(etfSpikeProbL0) ? fmt(etfSpikeProbL0) : '—'}</div>
+                        </div>
+                        <div className="stat-pill">
+                          <div className="k">Δborrow 5D (est)</div>
+                          <div className="v">{Number.isFinite(etfBorrowForecastDelta) ? fmtSignedPctDecimal(etfBorrowForecastDelta, 1) : '—'}</div>
                         </div>
                       </div>
                       <div className="chart-stats" style={{ marginTop: 8 }}>
@@ -11359,6 +11377,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <span className="val-muted">Replay eval pending — rerun nightly build.</span>
                         )}
                       </div>
+                      {spikeFindings?.best_estimate_borrow && (
+                        <div className="borrow-meta" style={{ marginTop: 6 }}>
+                          <strong>Best estimate:</strong> {spikeFindings.best_estimate_borrow}
+                        </div>
+                      )}
                       {spikeStudyGuidance.length > 0 && (
                         <div className="borrow-meta" style={{ marginTop: 6 }}>
                           {spikeStudyGuidance.map((line, idx) => (

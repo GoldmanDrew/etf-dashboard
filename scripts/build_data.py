@@ -60,9 +60,9 @@ from income_schedule import (
     structural_pair_gross_log_annual,
 )
 from borrow_spike_model import (  # noqa: E402
-    build_borrow_spike_risk_payload,
     compute_borrow_spike_event_by_date,
 )
+from borrow_spike_v2 import build_extended_risk_payload  # noqa: E402
 
 # schema_v=4 + weekly-rebalanced compound MC: tunable knobs for the new
 # headline forward edge and Scenarios-tab heatmap. See AGENTS.md
@@ -4072,7 +4072,7 @@ def rebuild_borrow_stats_from_history() -> None:
     output["refresh_type"] = "borrow_restore_stats"
     today_utc = dt.datetime.now(dt.UTC).date().isoformat()
 
-    borrow_spike_risk = build_borrow_spike_risk_payload(hist_symbols, today_utc)
+    borrow_spike_risk = build_extended_risk_payload(hist_symbols, today_utc)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
@@ -5235,7 +5235,7 @@ def build():
 
     write_spa_export(OUTPUT_DIR / "product_taxonomy.json")
 
-    borrow_spike_risk = build_borrow_spike_risk_payload(
+    borrow_spike_risk = build_extended_risk_payload(
         borrow_history_symbols=borrow_history_symbols,
         as_of_date=today_utc,
         horizon_days=5,

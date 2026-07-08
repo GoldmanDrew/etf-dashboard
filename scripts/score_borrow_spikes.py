@@ -93,6 +93,7 @@ def score_prediction_file(
     horizon_days: int,
     require_mature: bool = True,
     today: date | None = None,
+    label_cache: dict[tuple[str, int], dict[str, float | None]] | None = None,
 ) -> list[dict]:
     payload = _load_json(pred_path)
     pred_date = str(payload.get("as_of") or pred_path.stem)
@@ -111,7 +112,15 @@ def score_prediction_file(
         hist = borrow_symbols.get(sym) or borrow_symbols.get(sym_raw)
         if not isinstance(hist, list) or not hist:
             continue
-        labels = compute_borrow_spike_event_by_date(hist, horizon_days=horizon_days)
+        cache_key = (sym, horizon_days)
+        if label_cache is not None:
+            if cache_key not in label_cache:
+                label_cache[cache_key] = compute_borrow_spike_event_by_date(
+                    hist, horizon_days=horizon_days,
+                )
+            labels = label_cache[cache_key]
+        else:
+            labels = compute_borrow_spike_event_by_date(hist, horizon_days=horizon_days)
         y = labels.get(pred_date)
         if y is None:
             continue
@@ -208,6 +217,7 @@ def _collect_all_scores(
     today: date | None = None,
 ) -> list[dict]:
     all_rows: list[dict] = []
+    label_cache: dict[tuple[str, int], dict[str, float | None]] = {}
     if not pred_dir.exists():
         return all_rows
     for pred_path in sorted(pred_dir.glob("*.json")):
@@ -223,6 +233,7 @@ def _collect_all_scores(
                 horizon_days=h,
                 require_mature=require_mature,
                 today=today,
+                label_cache=label_cache,
             )
         )
     return all_rows
