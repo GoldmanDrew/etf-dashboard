@@ -1487,6 +1487,8 @@ async function fetchJsonSafe(url, { cache = 'no-store' } = {}) {
 const INTRADAY_SPOT_URL = "data/underlying_intraday_spot.json";
 const OPTIONS_POLL_MS = 10 * 60 * 1000;
 const ETF_METRICS_DAILY_URL = "data/etf_metrics_daily.json";
+/** Pair backtest warns when joint metrics tail is older than this many calendar days. */
+const METRICS_STALE_CALENDAR_DAYS = 5;
 const LETF_REBALANCE_FLOWS_DAILY_URL = "data/letf_rebalance_flows_daily.json";
 const LETF_REBALANCE_FLOWS_LATEST_URL = "data/letf_rebalance_flows_latest.json";
 const LETF_INTRADAY_FLOWS_URL = "data/letf_rebalance_flows_intraday_latest.json";
@@ -1835,6 +1837,7 @@ function OpsPage({ data, freshnessSummary, vrpHealth, onBack }) {
   const vrp = fs.vrp || {};
   const flow = fs.flow || {};
   const met = fs.metrics || {};
+  const metStale = fs.metrics_staleness || {};
   const prem = met.prem_disc || {};
   return (
     <div className="info-page" style={{ padding: '24px 32px', maxWidth: 960 }}>
@@ -1857,9 +1860,28 @@ function OpsPage({ data, freshnessSummary, vrpHealth, onBack }) {
         <SummaryCard label="Options cache" value={opt.build_time ? 'live' : '—'} sub={opt.oldest_symbol_age_minutes != null ? `oldest ${opt.oldest_symbol_age_minutes}m` : ''} color={opt.stale_enforced_symbols?.length ? 'var(--warning)' : 'var(--positive)'} />
         <SummaryCard label="VRP IV coverage" value={vrp.iv_coverage_front_pct != null ? `${Number(vrp.iv_coverage_front_pct).toFixed(1)}%` : '—'} sub={vrp.worst_underlying_symbol ? `worst ${vrp.worst_underlying_symbol}` : ''} />
         <SummaryCard label="Flow latest" value={flow.latest_date || '—'} sub={flow.actionable_stale_pct != null ? `${Number(flow.actionable_stale_pct).toFixed(1)}% stale` : ''} />
-        <SummaryCard label="Metrics session" value={met.latest_date || '—'} sub={met.latest_ok === false ? 'stale' : 'ok'} color={met.latest_ok === false ? 'var(--warning)' : 'var(--positive)'} />
+        <SummaryCard label="Metrics session" value={met.latest_date || metStale.global_max || '—'} sub={metStale.universe_stale != null ? `${metStale.universe_stale} stale tail(s)` : (met.latest_ok === false ? 'stale' : 'ok')} color={(metStale.universe_stale || 0) > 0 ? 'var(--warning)' : (met.latest_ok === false ? 'var(--warning)' : 'var(--positive)')} />
         <SummaryCard label="REX NAV div >50bp" value={prem.rex_nav_vs_implied_div_bps_gt50 ?? '—'} sub={`lockstep ${prem.lockstep_nav_close_pct != null ? `${Number(prem.lockstep_nav_close_pct).toFixed(0)}%` : '—'}`} color={(prem.rex_nav_vs_implied_div_bps_gt50 || 0) > 0 ? 'var(--warning)' : undefined} />
       </div>
+      {Array.isArray(metStale.worst) && metStale.worst.length > 0 && (
+        <details className="decay-methodology" style={{ marginBottom: 12 }}>
+          <summary>Metrics tail staleness ({metStale.universe_stale ?? metStale.worst.length} ticker(s))</summary>
+          <div className="dm-body">
+            <table className="scenario-table">
+              <thead><tr><th>Ticker</th><th>Last date</th><th>Days behind</th></tr></thead>
+              <tbody>
+                {metStale.worst.map((row) => (
+                  <tr key={row.ticker}>
+                    <td>{row.ticker}</td>
+                    <td>{row.last_date}</td>
+                    <td>{row.days_behind}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
       <details open className="decay-methodology">
         <summary>Raw freshness blocks</summary>
         <div className="dm-body">
@@ -7970,7 +7992,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     }),
     [r, volShapeHistory, dashboardBuildTime, etfMetricsMap],
   );
-  const pairBacktestCoverageHint = useMemo(() => {
+  const pairBacktestDataWarnings = useMemo(() => {
     const raw = Array.isArray(etfMetricsMap?.[etfSym]) ? etfMetricsMap[etfSym] : [];
     const hasEtfPx = (row) => {
       const pl = Number(row?.close_price) || Number(row?.nav);
@@ -7978,13 +8000,31 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       return Boolean(ds) && Number.isFinite(pl) && pl > 0;
     };
     const dated = raw.filter(hasEtfPx).sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
-    if (!dated.length || !etfBacktestSeries.length) return null;
-    const firstEtf = String(dated[0]?.date || '').trim();
-    const firstJoint = String(etfBacktestSeries[0]?.date || '').trim();
-    if (firstEtf && firstJoint && firstJoint.localeCompare(firstEtf) > 0) {
-      return { firstEtf, firstJoint };
+    const warnings = [];
+    if (dated.length && etfBacktestSeries.length) {
+      const firstEtf = String(dated[0]?.date || '').trim();
+      const firstJoint = String(etfBacktestSeries[0]?.date || '').trim();
+      if (firstEtf && firstJoint && firstJoint.localeCompare(firstEtf) > 0) {
+        warnings.push({
+          key: 'start_gap',
+          text: `ETF prices exist from ${firstEtf}, but underlying_adj_close is missing before ${firstJoint}, so the replay starts on the first joint day.`,
+        });
+      }
+      const lastJoint = String(etfBacktestSeries[etfBacktestSeries.length - 1]?.date || '').trim();
+      if (lastJoint) {
+        const lastMs = Date.parse(`${lastJoint}T12:00:00`);
+        if (Number.isFinite(lastMs)) {
+          const daysBehind = Math.floor((Date.now() - lastMs) / 86400000);
+          if (daysBehind > METRICS_STALE_CALENDAR_DAYS) {
+            warnings.push({
+              key: 'stale_tail',
+              text: `etf_metrics_daily ends ${lastJoint} (${daysBehind} calendar day(s) ago). Backtest x-axis may stop early until nightly metrics ingest catches up.`,
+            });
+          }
+        }
+      }
     }
-    return null;
+    return warnings;
   }, [etfMetricsMap, etfSym, etfBacktestSeries]);
   const etfFlowSeries = useMemo(() => {
     const sym = String(etfSym || '').toUpperCase();
@@ -10753,11 +10793,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           {!etfMetricsLoading && !etfMetricsError && pairBacktestResult?.ok && (
             <>
               <TrCoverageBadge coverage={decayTrCoverage} etfLabel={etfSym} />
-              {pairBacktestCoverageHint ? (
-                <div className="scenario-warning" style={{ marginTop: 10 }}>
-                  <strong>Data range note:</strong> ETF prices exist from <code>{pairBacktestCoverageHint.firstEtf}</code>, but <code>underlying_adj_close</code> is missing before <code>{pairBacktestCoverageHint.firstJoint}</code>, so the replay starts on the first <strong>joint</strong> day.
+              {pairBacktestDataWarnings.map((w) => (
+                <div key={w.key} className="scenario-warning" style={{ marginTop: 10 }}>
+                  <strong>Data range note:</strong> {w.text}
                 </div>
-              ) : null}
+              ))}
               <div className="chart-stats" style={{ marginTop: 12 }}>
                 <div className="chart-stat">
                   <div className="cs-label">Net PnL</div>
