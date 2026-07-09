@@ -192,9 +192,10 @@ def test_extend_metrics_session_coverage_adds_issuer_session_extend():
         tickers=["NOW"],
         max_lag_bdays=2,
     )
-    session_rows = out[out["date"] == pd.Timestamp("2026-05-29")]
+    session_rows = out[out["date"] == date(2026, 5, 29)]
     assert len(session_rows) == 1
     assert session_rows.iloc[0]["stale_kind"] == "issuer_session_extend"
+    assert isinstance(session_rows.iloc[0]["date"], date)
 
 
 def test_prune_expired_carry_forward_rows():

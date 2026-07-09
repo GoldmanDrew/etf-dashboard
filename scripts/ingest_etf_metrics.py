@@ -725,26 +725,25 @@ def extend_metrics_session_coverage(
     if df.empty or max_lag_bdays <= 0:
         return df
     out = ensure_stale_kind_column(df.copy())
-    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.normalize()
-    session_ts = pd.Timestamp(session_date).normalize()
+    out["date"] = _as_python_dates(out["date"])
     session_rows: list[dict[str, object]] = []
 
     for ticker in tickers:
         sym = str(ticker).upper()
         hist = out[out["ticker"].astype(str).str.upper() == sym].sort_values("date")
-        if hist.empty or not hist[hist["date"] == session_ts].empty:
+        if hist.empty or not hist[hist["date"] == session_date].empty:
             continue
-        prior = hist[hist["date"] < session_ts]
+        prior = hist[hist["date"] < session_date]
         if prior.empty:
             continue
         last = prior.iloc[-1]
-        gap = _metrics_busday_gap(last["date"], session_ts)
+        gap = _metrics_busday_gap(last["date"], session_date)
         if gap is None or gap < 1 or gap > max_lag_bdays:
             continue
         if str(last.get("status") or "") not in {"ok", "partial"}:
             continue
         row = last.to_dict()
-        row["date"] = session_ts
+        row["date"] = session_date
         row["stale"] = True
         row["stale_age_bdays"] = int(gap)
         row["stale_kind"] = STALE_KIND_ISSUER_SESSION_EXTEND
@@ -902,6 +901,15 @@ def dedupe_metric_rows(df: pd.DataFrame, *, context: str) -> tuple[pd.DataFrame,
 # Persistence
 # ---------------------------------------------------------------------------
 
+def _as_python_dates(series: pd.Series) -> pd.Series:
+    """Normalize a date-like Series to plain ``datetime.date`` values.
+
+    Parquet / most ingest paths store ``date``; some helpers emit ``Timestamp``.
+    Mixing the two breaks ``sort_values`` / ``drop_duplicates`` on the column.
+    """
+    return pd.to_datetime(series, errors="coerce").dt.date
+
+
 def load_existing(parquet_path: Path = PARQUET_PATH) -> pd.DataFrame:
     if parquet_path.exists():
         df = pd.read_parquet(parquet_path)
@@ -914,6 +922,9 @@ def load_existing(parquet_path: Path = PARQUET_PATH) -> pd.DataFrame:
     for c in REQUIRED_COLUMNS:
         if c not in df.columns:
             df[c] = None
+    if "date" in df.columns and not df.empty:
+        df = df.copy()
+        df["date"] = _as_python_dates(df["date"])
     return df
 
 
@@ -975,6 +986,8 @@ def collapse_redundant_consecutive_rows(df: pd.DataFrame) -> tuple[pd.DataFrame,
 def upsert(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
     if existing.empty:
         first = incoming.copy()
+        if "date" in first.columns and not first.empty:
+            first["date"] = _as_python_dates(first["date"])
         first["ingested_at_utc"] = pd.to_datetime(first["ingested_at_utc"], errors="coerce", utc=True)
         first = first.drop_duplicates(subset=["date", "ticker"], keep="last")
         return enforce_status_consistency(first.sort_values(["date", "ticker"]).reset_index(drop=True))
@@ -983,7 +996,14 @@ def upsert(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
     # pandas warning about dtype-widening behavior.
     _ex = existing.dropna(axis=1, how="all") if len(existing) else existing
     _in = incoming.dropna(axis=1, how="all") if len(incoming) else incoming
+    if "date" in _ex.columns and not _ex.empty:
+        _ex = _ex.copy()
+        _ex["date"] = _as_python_dates(_ex["date"])
+    if "date" in _in.columns and not _in.empty:
+        _in = _in.copy()
+        _in["date"] = _as_python_dates(_in["date"])
     combo = pd.concat([_ex, _in], ignore_index=True)
+    combo["date"] = _as_python_dates(combo["date"])
     combo["ingested_at_utc"] = pd.to_datetime(combo["ingested_at_utc"], errors="coerce", utc=True)
     combo = combo.sort_values("ingested_at_utc")
     combo = combo.drop_duplicates(subset=["date", "ticker"], keep="last")

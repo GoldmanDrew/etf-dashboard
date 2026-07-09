@@ -257,8 +257,9 @@ def test_session_extend_enables_flow_on_global_session():
         max_lag_bdays=2,
     )
     assert len(extended) == 2
-    row = extended[extended["date"] == pd.Timestamp("2026-05-29")].iloc[0]
+    row = extended[extended["date"] == date(2026, 5, 29)].iloc[0]
     assert row["stale_kind"] == "issuer_session_extend"
+    assert isinstance(row["date"], date)
     assert float(row["aum"]) == pytest.approx(218_023_700.0)
 
 

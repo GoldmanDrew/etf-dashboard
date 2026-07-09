@@ -84,3 +84,38 @@ def test_bootstrap_rows_upsert_before_existing_min():
     pre = merged.loc[merged["date"] == date(2024, 6, 3)].iloc[0]
     assert pre["status"] == "missing"
     assert pre["source_provider"] == "yahoo_bootstrap"
+
+
+def test_upsert_mixed_date_and_timestamp_sorts():
+    """Regression: nightly crashed when parquet dates mixed with Timestamp incoming."""
+    ingested = "2026-07-09T14:00:00+00:00"
+
+    def _row(d, ticker, *, nav=10.0):
+        return {
+            "date": d,
+            "ticker": ticker,
+            "nav": nav,
+            "aum": 1e8,
+            "shares_outstanding": 1e7,
+            "shares_traded": 1e6,
+            "close_price": nav,
+            "underlying_adj_close": 100.0,
+            "stale": False,
+            "stale_age_bdays": None,
+            "source_provider": "test",
+            "source_url": None,
+            "ingested_at_utc": ingested,
+            "status": "ok",
+        }
+
+    existing = pd.DataFrame(
+        [_row(date(2026, 7, 8), "AAA")],
+    )
+    incoming = pd.DataFrame(
+        [_row(pd.Timestamp("2026-07-08"), "BBB"), _row(pd.Timestamp("2026-07-09"), "AAA")],
+    )
+    merged = iem.upsert(existing, incoming)
+    assert len(merged) == 3
+    assert all(isinstance(d, date) for d in merged["date"])
+    assert set(merged["date"]) == {date(2026, 7, 8), date(2026, 7, 9)}
+    assert list(merged.sort_values(["date", "ticker"])["ticker"]) == ["AAA", "BBB", "AAA"]
