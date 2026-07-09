@@ -1453,7 +1453,7 @@
 <script src="assets/trade_lab_spots.js?v=tl-spots-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v4"></script>
 <script src="assets/pair_backtest.js?v=pb-v9"></script>
-<script src="assets/bucket4_backtest.js?v=b4-v1"></script>
+<script src="assets/bucket4_backtest.js?v=b4-v2"></script>
 <script src="assets/bucket5_insurance_backtest.js?v=b5-v1"></script>
 <script src="assets/realized_decay.js?v=rd-v7"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
@@ -7303,16 +7303,19 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   }, [etfSym]);
 
   const mapDefaultPanel = (panel) => (
-    panel === 'backtest' ? 'backtest'
-      : panel === 'flow' ? 'flow'
-        : panel === 'trade' ? 'trade'
-          : panel === 'decay' ? 'decay'
-            : panel === 'basket' ? 'basket'
-              : panel === 'vrp' ? 'vrp'
-                : panel === 'borrow' ? 'borrow'
-                  : panel === 'stats' ? 'stats'
-                    : panel === 'scenarios' ? 'scenarios'
-                      : 'chart'
+    typeof window.Bucket4Backtest?.mapChartDefaultPanel === 'function'
+      ? window.Bucket4Backtest.mapChartDefaultPanel(panel)
+      : (panel === 'backtest' ? 'backtest'
+        : panel === 'backtest-flow' ? 'backtest-flow'
+          : panel === 'flow' ? 'flow'
+            : panel === 'trade' ? 'trade'
+              : panel === 'decay' ? 'decay'
+                : panel === 'basket' ? 'basket'
+                  : panel === 'vrp' ? 'vrp'
+                    : panel === 'borrow' ? 'borrow'
+                      : panel === 'stats' ? 'stats'
+                        : panel === 'scenarios' ? 'scenarios'
+                          : 'chart')
   );
   useEffect(() => {
     setActivePanel(mapDefaultPanel(defaultPanel));
@@ -9092,10 +9095,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <button className={cls('chart-view-btn', activePanel === 'basket' && 'active')} onClick={() => navigateChartPanel('basket')}>Basket</button>
           )}
           {showBacktestPanel && (
-            <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => navigateChartPanel('backtest')}>Backtest</button>
+            <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => navigateChartPanel('backtest')} title="Hedged pair what-if replay">Backtest</button>
           )}
           {showBacktestPanel && (
-            <button className={cls('chart-view-btn', activePanel === 'flow' && 'active')} onClick={() => navigateChartPanel('flow')}>Flow</button>
+            <button className={cls('chart-view-btn', activePanel === 'backtest-flow' && 'active')} onClick={() => navigateChartPanel('backtest-flow')} title="Add a fixed short $ every N trading days (drip / DCA)">Drip</button>
+          )}
+          {showBacktestPanel && (
+            <button className={cls('chart-view-btn', activePanel === 'flow' && 'active')} onClick={() => navigateChartPanel('flow')} title="LETF issuer close-rebalance flow (not the drip simulator)">Flow</button>
           )}
         </div>
 
@@ -10734,13 +10740,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           <div className="scenario-title">Pair backtest — ETF vs underlying replay</div>
           {isB4Row ? (
             <div className="scenario-sub" style={{ marginBottom: 10 }}>
-              <strong>Bucket 4 row</strong> — chart replay uses the editable generic pair simulator.
+              <strong>Chart Backtest</strong> — editable hedged pair what-if (not the production B4 path).
               Default <strong>h</strong> is prefilled from the production Bucket 4 policy snapshot when available
               {b4CadenceHint?.hLast != null ? <> (last h = <strong>{fmtNum(b4CadenceHint.hLast)}</strong></> : null}
               {b4CadenceHint?.lastIntervalDays != null ? <>, cadence ≈ <strong>{b4CadenceHint.lastIntervalDays}d</strong></> : null}.
-              <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 6 }} onClick={() => { window.location.hash = `/bucket-4/pair/${encodeURIComponent(etfSym)}`; }}>Pair Report</button>
+              Production path: <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 6 }} onClick={() => { window.location.hash = `/bucket-4/pair/${encodeURIComponent(etfSym)}`; }}>Pair Report</button>
               <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/bucket-4/backtest/${encodeURIComponent(etfSym)}`; }}>B4 Book</button>
-              <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/backtest-flow/${encodeURIComponent(etfSym)}`; }}>B4 Flow Program</button>.
+              · add-$ every N days: chart <strong>Drip</strong> tab or <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/backtest-flow/${encodeURIComponent(etfSym)}`; }}>Flow Program</button>.
             </div>
           ) : null}
           {(
@@ -10883,11 +10889,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
       {activePanel === 'backtest-flow' && showBacktestPanel && (
         <div className="chart-section">
-          <div className="scenario-title">Backtest Flow — recurring inverse ETF shorts</div>
+          <div className="scenario-title">Drip — add short $ every N days</div>
           <div className="scenario-sub" style={{ marginBottom: 10 }}>
-            Add a fixed short notional to selected inverse ETFs every <strong>N</strong> valid trading days.
+            Add a fixed short notional to selected inverse ETFs every <strong>N</strong> valid trading days (add-only; no hedge).
+            Distinct from chart <strong>Flow</strong> (issuer LETF rebalance into the close) and from <strong>Backtest</strong> (hedged pair replay).
             Each ETF begins on its own first tradable row in <code>etf_metrics_daily</code>; no position is backfilled before that date.
             Short PnL uses the same split-aware total-return path as the Pair Backtest. Borrow is fee-only from history when available, else dashboard borrow fallback.
+            Multi-leg basket: <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px' }} onClick={() => { window.location.hash = `/backtest-flow/${encodeURIComponent(etfSym)}`; }}>Inverse Flow Program</button>.
           </div>
 
           <div className="trade-card" style={{ marginBottom: 12 }}>
@@ -13609,23 +13617,6 @@ function isBucket4Record(record) {
   return Boolean(record?.protected) && String(record?.product_class || '').toLowerCase() === 'inverse';
 }
 
-function bucket4ShardRows(shard) {
-  const d = shard?.daily || {};
-  const dates = Array.isArray(d.dates) ? d.dates : [];
-  return dates.map((date, i) => ({
-    date,
-    equity: toFiniteNum(d.equity?.[i]),
-    netPnl: toFiniteNum(d.net_pnl?.[i]),
-    drawdown: toFiniteNum(d.drawdown?.[i]),
-    h: toFiniteNum(d.h_used?.[i]),
-    gross: toFiniteNum(d.gross_exposure?.[i]),
-    totalGross: toFiniteNum(d.total_gross?.[i]),
-    borrow: toFiniteNum(d.borrow_cost_cum?.[i]),
-    tcost: toFiniteNum(d.tcost_cum?.[i]),
-    rebalance: Boolean(Number(d.rebalance?.[i])),
-  }));
-}
-
 function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
   const B4 = window.Bucket4Backtest || {};
   const sym = String(symbol || '').toUpperCase();
@@ -13633,6 +13624,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
   const [shard, setShard] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [gross, setGross] = useState(100000);
 
   useEffect(() => {
     let cancelled = false;
@@ -13657,12 +13649,35 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
     return () => { cancelled = true; };
   }, [sym]);
 
-  const rows = useMemo(() => bucket4ShardRows(shard), [shard]);
+  const chartResult = useMemo(() => {
+    if (!shard) return null;
+    if (typeof B4.pairChartResultFromShard === 'function') {
+      return B4.pairChartResultFromShard(shard, { gross });
+    }
+    if (typeof B4.pairChartResultFromArtifact === 'function' && artifact) {
+      const fromArt = B4.pairChartResultFromArtifact(artifact, sym, { gross });
+      if (fromArt?.ok) return fromArt;
+    }
+    return { ok: false, error: 'Pair path scaler unavailable.' };
+  }, [shard, artifact, sym, gross, B4]);
+
+  const riskSeries = useMemo(() => {
+    const fn = window.PairBacktest?.computePairBacktestRiskSeries;
+    if (typeof fn !== 'function' || !chartResult?.ok) return [];
+    return fn(chartResult.rows, Number(gross) || 100000);
+  }, [chartResult, gross]);
+
   const summary = shard?.summary || {};
+  const scaled = chartResult?.summary || {};
   const prod = Boolean(shard?.in_production_book);
   const und = String(shard?.underlying || summary.underlying || '').toUpperCase();
   const fmtPctAnn = (x, digits = 1) => (typeof B4.fmtPctAnnual === 'function' ? B4.fmtPctAnnual(x, digits) : fmt(x));
   const statusText = prod ? 'Production' : 'Gated / Research';
+  const rows = chartResult?.ok ? chartResult.rows : [];
+  const rebalanceLog = Array.isArray(chartResult?.rebalanceLog)
+    ? chartResult.rebalanceLog
+    : (Array.isArray(shard?.rebalance_log) ? shard.rebalance_log : []);
+  const notional = Number(gross) > 0 ? Number(gross) : 100000;
 
   return (
     <div className="backtest-page">
@@ -13675,6 +13690,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
         </div>
         <div className="chart-header-right">
           <button type="button" className="chart-view-btn" onClick={() => { window.location.hash = `/chart/${encodeURIComponent(sym)}/backtest`; }}>Chart Backtest</button>
+          <button type="button" className="chart-view-btn" onClick={() => { window.location.hash = `/chart/${encodeURIComponent(sym)}/backtest-flow`; }}>Drip</button>
           <button type="button" className="chart-view-btn" onClick={() => { window.location.hash = `/backtest-flow/${encodeURIComponent(sym)}`; }}>Flow Program</button>
         </div>
       </div>
@@ -13684,44 +13700,89 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
       {!loading && shard && (
         <>
           <div className="scenario-sub" style={{ marginBottom: 12 }}>
-            Entered backtest on <strong>{summary.entry_date || '—'}</strong> · latest <strong>{summary.latest_date || '—'}</strong> ·
+            <strong>Pair Report</strong> — production-faithful Bucket 4 path (short ETF + short underlying, policy <strong>h</strong> / VCR cadence).
+            Unit-capital replay scaled to your notional for $ PnL. For editable what-if use Chart <strong>Backtest</strong>; for add-$ every N days use chart <strong>Drip</strong>.
+            Entered <strong>{summary.entry_date || '—'}</strong> · latest <strong>{summary.latest_date || '—'}</strong> ·
             gate <strong>{summary.gate_reason || shard.gate_reason || '—'}</strong> · model <strong>{summary.model_status || shard.model_status || '—'}</strong>.
             {artifact?.generated_at_utc ? <> Artifact: <code>{artifact.generated_at_utc}</code>.</> : null}
           </div>
 
-          <div className="chart-stats" style={{ marginBottom: 12 }}>
-            <div className="chart-stat"><div className="cs-label">CAGR</div><div className="cs-value">{summary.cagr != null ? fmtPctAnn(summary.cagr) : '—'}</div><div className="cs-sub">{summary.price_rows ?? 0} priced rows</div></div>
-            <div className="chart-stat"><div className="cs-label">Ann. vol / Sharpe</div><div className="cs-value">{summary.ann_vol != null ? fmtPctAnn(summary.ann_vol) : '—'} / {summary.sharpe != null ? Number(summary.sharpe).toFixed(2) : '—'}</div><div className="cs-sub">daily replay returns</div></div>
-            <div className="chart-stat"><div className="cs-label">Max drawdown</div><div className="cs-value">{summary.max_drawdown != null ? fmtPctAnn(summary.max_drawdown) : '—'}</div><div className="cs-sub">peak-to-trough equity</div></div>
-            <div className="chart-stat"><div className="cs-label">Production weight</div><div className="cs-value">{summary.portfolio_weight != null ? fmtPctAnn(summary.portfolio_weight, 1) : '—'}</div><div className="cs-sub">{prod ? 'production book' : 'not in production book'}</div></div>
-            <div className="chart-stat"><div className="cs-label">h last / rebals</div><div className="cs-value">{summary.h_last != null ? Number(summary.h_last).toFixed(3) : '—'} / {fmtNum(summary.n_rebalances || 0)}</div><div className="cs-sub">dynamic hedge cadence</div></div>
+          <div className="backtest-controls" style={{ marginBottom: 12 }}>
+            <div className="backtest-control">
+              <label>Notional $</label>
+              <input type="number" min={1000} step={1000} value={gross} onChange={(e) => setGross(Number(e.target.value) || 0)} title="Scales unit-capital pair path into dollars (same default as B4 Book)." />
+            </div>
           </div>
 
-          {!rows.length ? (
-            <div className="scenario-warning">No chartable pair path for this row yet. Gate reason: {summary.gate_reason || shard.gate_reason || '—'}.</div>
+          <div className="chart-stats" style={{ marginBottom: 12 }}>
+            <div className="chart-stat"><div className="cs-label">CAGR</div><div className="cs-value">{(scaled.cagr != null ? fmtPctAnn(scaled.cagr) : (summary.cagr != null ? fmtPctAnn(summary.cagr) : '—'))}</div><div className="cs-sub">{scaled.nDays || summary.price_rows || 0} days · {fmtMoney(notional)} notional</div></div>
+            <div className="chart-stat"><div className="cs-label">Ann. vol / Sharpe</div><div className="cs-value">{(scaled.annVol != null ? fmtPctAnn(scaled.annVol) : (summary.ann_vol != null ? fmtPctAnn(summary.ann_vol) : '—'))} / {(scaled.sharpe != null ? Number(scaled.sharpe).toFixed(2) : (summary.sharpe != null ? Number(summary.sharpe).toFixed(2) : '—'))}</div><div className="cs-sub">daily replay returns</div></div>
+            <div className="chart-stat"><div className="cs-label">Max drawdown</div><div className="cs-value">{(scaled.maxDrawdown != null ? fmtPctAnn(scaled.maxDrawdown) : (summary.max_drawdown != null ? fmtPctAnn(summary.max_drawdown) : '—'))}</div><div className="cs-sub">peak-to-trough equity</div></div>
+            <div className="chart-stat"><div className="cs-label">Net PnL / Gross leg</div><div className="cs-value">{chartResult?.ok ? fmtMoney(scaled.netPnl) : '—'} / {chartResult?.ok ? fmtMoney(scaled.totalGross) : '—'}</div><div className="cs-sub">scaled to notional</div></div>
+            <div className="chart-stat"><div className="cs-label">Borrow / T-costs</div><div className="cs-value">{chartResult?.ok ? fmtMoney(scaled.borrowPaid) : '—'} / {chartResult?.ok ? fmtMoney(scaled.tCosts) : '—'}</div><div className="cs-sub">{fmtNum(scaled.nRebalances || summary.n_rebalances || 0)} rebals · h last {summary.h_last != null ? Number(summary.h_last).toFixed(3) : '—'}</div></div>
+            <div className="chart-stat"><div className="cs-label">Production weight</div><div className="cs-value">{summary.portfolio_weight != null ? fmtPctAnn(summary.portfolio_weight, 1) : '—'}</div><div className="cs-sub">{prod ? 'production book' : 'not in production book'}</div></div>
+          </div>
+
+          {!chartResult?.ok ? (
+            <div className="scenario-warning">{chartResult?.error || 'No chartable pair path for this row yet.'} Gate: {summary.gate_reason || shard.gate_reason || '—'}.</div>
           ) : (
             <>
               <div className="trade-card" style={{ marginBottom: 12 }}>
-                <div className="trade-head"><div><div className="scenario-title">Equity and PnL</div><div className="scenario-sub">Production-style Bucket 4 pair path for this ETF.</div></div></div>
-                <SimpleSeriesPlot series={rows} valueKey="netPnl" color="rgba(34,211,238,0.95)" label="Net PnL" formatValue={(v) => fmtMoney(v)} overlayValueKey="totalGross" overlayColor="rgba(52,211,153,0.9)" overlayLabel="Gross leg PnL" />
+                <div className="trade-head"><div><div className="scenario-title">Equity and PnL ($)</div><div className="scenario-sub">Unit-capital production path × notional. Gross leg PnL = ETF + underlying cumulative legs (before borrow/t-costs).</div></div></div>
+                <PairBacktestChart result={chartResult} />
               </div>
-              <div className="trade-card" style={{ marginBottom: 12 }}>
+              <PairBacktestRiskMetricsStats riskSeries={riskSeries} pairResult={chartResult} />
+              <div className="trade-card" style={{ marginBottom: 12, marginTop: 12 }}>
                 <div className="trade-head"><div className="scenario-title">Risk path</div></div>
                 <SimpleSeriesPlot series={rows} valueKey="drawdown" color="rgba(248,113,113,0.95)" label="Drawdown" formatValue={(v) => fmt(v)} includeZero />
               </div>
               <div className="trade-card" style={{ marginBottom: 12 }}>
-                <div className="trade-head"><div className="scenario-title">Hedge and gross exposure</div></div>
+                <div className="trade-head"><div className="scenario-title">Hedge and gross exposure</div><div className="scenario-sub">h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>| policy path; gross exposure is normalized book multiple (not $).</div></div>
                 <SimpleSeriesPlot series={rows} valueKey="h" color="rgba(139,92,246,0.95)" label="h" formatValue={(v) => Number(v).toFixed(3)} overlayValueKey="gross" overlayColor="rgba(245,158,11,0.95)" overlayLabel="Gross exposure" includeZero={false} />
               </div>
             </>
           )}
 
+          {rebalanceLog.length > 0 && (
+            <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 220, overflow: 'auto' }}>
+              <div className="scenario-title" style={{ marginBottom: 6 }}>Rebalance log</div>
+              <table className="scenario-table">
+                <thead><tr><th>Date</th><th>h</th><th>Executed</th><th>Fee (unit)</th><th>Fee ($)</th><th>Skipped</th></tr></thead>
+                <tbody>
+                  {[...rebalanceLog].slice().reverse().map((ev, i) => {
+                    const feeU = Number(ev?.rebalance_fee);
+                    const fee$ = Number.isFinite(feeU) ? feeU * notional : null;
+                    return (
+                      <tr key={`${ev?.date || 'rb'}-${i}`}>
+                        <td>{ev?.date || '—'}</td>
+                        <td>{ev?.h != null ? Number(ev.h).toFixed(3) : '—'}</td>
+                        <td>{ev?.executed ? 'yes' : '—'}</td>
+                        <td>{Number.isFinite(feeU) ? feeU.toFixed(4) : '—'}</td>
+                        <td>{fee$ != null ? fmtMoney(fee$) : '—'}</td>
+                        <td>{ev?.skipped_below_drift ? 'below drift' : '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
           <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 280, overflow: 'auto' }}>
             <table className="scenario-table">
-              <thead><tr><th>Date</th><th>Net PnL</th><th>Gross PnL</th><th>Drawdown</th><th>h</th><th>Borrow</th><th>T-costs</th><th>Rebal</th></tr></thead>
+              <thead><tr><th>Date</th><th>Net PnL</th><th>Gross leg PnL</th><th>Drawdown</th><th>h</th><th>Borrow</th><th>T-costs</th><th>Rebal</th></tr></thead>
               <tbody>
                 {[...rows].slice(-32).reverse().map((r) => (
-                  <tr key={r.date}><td>{r.date}</td><td>{fmtMoney(r.netPnl)}</td><td>{fmtMoney(r.totalGross)}</td><td>{r.drawdown != null ? fmt(r.drawdown) : '—'}</td><td>{r.h != null ? Number(r.h).toFixed(3) : '—'}</td><td>{fmtMoney(r.borrow)}</td><td>{fmtMoney(r.tcost)}</td><td>{r.rebalance ? 'yes' : '—'}</td></tr>
+                  <tr key={r.date}>
+                    <td>{r.date}</td>
+                    <td>{fmtMoney(r.netPnl)}</td>
+                    <td>{r.totalGross != null ? fmtMoney(r.totalGross) : '—'}</td>
+                    <td>{r.drawdown != null ? fmt(r.drawdown) : '—'}</td>
+                    <td>{r.h != null ? Number(r.h).toFixed(3) : '—'}</td>
+                    <td>{fmtMoney(r.borrow)}</td>
+                    <td>{fmtMoney(r.transactionCosts)}</td>
+                    <td>{r.rebalance ? 'yes' : '—'}</td>
+                  </tr>
                 ))}
               </tbody>
             </table>
@@ -13845,7 +13906,7 @@ function InverseFlowProgramPage({ records = [], preloadSymbol = '' }) {
         <div className="chart-header-left">
           <button className="chart-view-btn" onClick={() => { window.location.hash = '/'; }}>← Dashboard</button>
           <span className="etf-sym">Inverse Flow Program</span>
-          <span className="chart-und">recurring inverse ETF shorts</span>
+          <span className="chart-und">Drip — add short $ every N days (multi-leg)</span>
         </div>
         <div className="chart-header-right">
           <button className="chart-view-btn" onClick={() => { window.location.hash = '/bucket-4/backtest'; }}>B4 Book</button>
@@ -14089,16 +14150,23 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
       },
     }));
   };
-  const displayBook = customBook?.ok ? customBook : portfolioChart;
+  const displayBook = useMemo(() => {
+    if (customBook?.ok && typeof B4.overlayBookChartResult === 'function') {
+      return B4.overlayBookChartResult(portfolioChart, customBook);
+    }
+    if (customBook?.ok) return customBook;
+    return portfolioChart;
+  }, [customBook, portfolioChart, B4]);
   const displaySummary = displayBook?.summary || {};
   const activePairCount = pairs.filter((p) => p.enabled && Number(p.customWeight) > 0).length;
+  const prodSummary = portfolioChart?.summary || realized;
 
   return (
     <div className="backtest-page">
       <div className="chart-header">
         <div className="chart-header-left">
-          <span className="etf-sym">Bucket 4 — inverse decay</span>
-          <span className="chart-und">Production-faithful portfolio replay (short ETF + short underlying)</span>
+          <span className="etf-sym">B4 Book — inverse decay</span>
+          <span className="chart-und">Production-faithful portfolio lab (short ETF + short underlying)</span>
         </div>
         <div className="chart-header-right">
           <button type="button" className="chart-view-btn" onClick={() => { window.location.hash = '/'; }}>← Dashboard</button>
@@ -14106,9 +14174,10 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
       </div>
 
       <div className="scenario-sub" style={{ marginBottom: 12, maxWidth: 920 }}>
-        Uses the ls-algo production <strong>inverse_decay_bucket4</strong> method: Kelly/QCQP weights on
+        <strong>B4 Book</strong> — ls-algo production <strong>inverse_decay_bucket4</strong> method: Kelly/QCQP weights on
         <code> bucket4_net_edge_annual − borrow</code>, VCR-driven dynamic hedge <strong>h</strong>, TR/VCR cadence,
-        and the sim-only ratchet overlay. Custom weights below reblend the precomputed pair paths client-side.
+        and the sim-only ratchet overlay. Custom weights reblend precomputed pair paths client-side (no Kelly/QCQP rerun).
+        Per-ticker production path: Pair Report. Add-$ every N days: chart <strong>Drip</strong> tab or <code>#/backtest-flow</code>.
         Universe: {b4UniverseCount} screener B4 rows · {artifact?.n_pairs ?? '—'} production pairs in replay.
         {dashboardBuildTime ? <> Dashboard data: <code>{dashboardBuildTime}</code>.</> : null}
       </div>
@@ -14205,8 +14274,13 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
             <div className="trade-card" style={{ marginBottom: 12 }}>
               <div className="trade-head">
                 <div>
-                  <div className="scenario-title">Portfolio equity (custom B4 book)</div>
-                  <div className="scenario-sub">Net mark from precomputed Bucket 4 pair returns; the legacy inverse ticker flow simulator remains available on each chart's Backtest Flow tab.</div>
+                  <div className="scenario-title">Portfolio equity (custom vs production)</div>
+                  <div className="scenario-sub">
+                    Custom book net (teal) overlaid with production book net when available.
+                    Prod CAGR {prodSummary?.cagr != null ? fmtPctAnn(prodSummary.cagr) : (realized.cagr != null ? fmtPctAnn(realized.cagr) : '—')}
+                    {' · '}custom {displaySummary.cagr != null ? fmtPctAnn(displaySummary.cagr) : '—'}.
+                    Drip / add-$ every N days lives on each chart&apos;s <strong>Drip</strong> tab (or <code>#/backtest-flow</code>).
+                  </div>
                 </div>
               </div>
               <PairBacktestChart result={displayBook} />
@@ -14909,9 +14983,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <button
             className={cls('topbar-btn', showBacktestFlow && !chartRecord && 'active')}
             onClick={() => { if (showBacktestFlow) navigateBack(); else navigateToBacktestFlow(); }}
-            title="Bucket 4 inverse-decay portfolio backtest (production method)"
+            title="B4 Book — production inverse-decay portfolio lab (custom weight reblend)"
           >
-            B4 Backtest
+            B4 Book
           </button>
           <button
             className={cls('topbar-btn', showBucket5 && !chartRecord && 'active')}

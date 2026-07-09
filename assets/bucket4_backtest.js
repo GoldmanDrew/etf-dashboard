@@ -51,6 +51,22 @@
       : { matches: false, symbol: '' };
   }
 
+  /** Chart-page hash panel → activePanel. Keeps drip (`backtest-flow`) distinct from issuer `flow`. */
+  function mapChartDefaultPanel(panel) {
+    const p = String(panel || '').trim().toLowerCase();
+    if (p === 'backtest') return 'backtest';
+    if (p === 'backtest-flow') return 'backtest-flow';
+    if (p === 'flow') return 'flow';
+    if (p === 'trade') return 'trade';
+    if (p === 'decay') return 'decay';
+    if (p === 'basket') return 'basket';
+    if (p === 'vrp') return 'vrp';
+    if (p === 'borrow') return 'borrow';
+    if (p === 'stats') return 'stats';
+    if (p === 'scenarios') return 'scenarios';
+    return 'chart';
+  }
+
   async function loadArtifact({ force = false } = {}) {
     if (!force && _artifactCache) return _artifactCache;
     if (!force && _artifactPromise) return _artifactPromise;
@@ -231,11 +247,18 @@
     };
   }
 
-  function pairChartResultFromArtifact(artifact, etf, { startDate = '', endDate = '', gross = 100000 } = {}) {
-    const pair = pairSeriesFromArtifact(artifact, etf);
-    const daily = pair?.daily;
-    if (!pair || !daily) {
-      return { ok: false, error: 'Production-book path unavailable here. Open the Bucket 4 Pair Report for the full screener row.' };
+  /**
+   * Scale a unit-capital B4 daily path (`initial_capital: 1.0`) into dollar chart rows.
+   * Accepts either an inline `pair_series` block or a full `bucket4_pairs/{ETF}.json` shard.
+   */
+  function pairChartResultFromDaily(pairMeta, daily, {
+    startDate = '',
+    endDate = '',
+    gross = 100000,
+    rebalanceLog = null,
+  } = {}) {
+    if (!daily || !Array.isArray(daily.dates) || !daily.dates.length) {
+      return { ok: false, error: 'Missing pair daily series.' };
     }
     const win = sliceDailyPath(daily, startDate, endDate);
     if (win.error || win.dates.length < 2) {
@@ -249,6 +272,13 @@
     const fees = (Array.isArray(daily.rebalance_fee) ? daily.rebalance_fee : []).slice(win.i0, win.i1 + 1).map(Number);
     const rebalance = (Array.isArray(daily.rebalance) ? daily.rebalance : []).slice(win.i0, win.i1 + 1);
     const hUsed = (Array.isArray(daily.h_used) ? daily.h_used : []).slice(win.i0, win.i1 + 1).map(Number);
+    const drawdown = (Array.isArray(daily.drawdown) ? daily.drawdown : []).slice(win.i0, win.i1 + 1).map(Number);
+    const grossExp = (Array.isArray(daily.gross_exposure) ? daily.gross_exposure : []).slice(win.i0, win.i1 + 1).map(Number);
+    const totalGrossU = (Array.isArray(daily.total_gross) ? daily.total_gross : []).slice(win.i0, win.i1 + 1).map(Number);
+    const etfLegU = (Array.isArray(daily.etf_leg_pnl_cum) ? daily.etf_leg_pnl_cum : []).slice(win.i0, win.i1 + 1).map(Number);
+    const undLegU = (Array.isArray(daily.underlying_leg_pnl_cum) ? daily.underlying_leg_pnl_cum : []).slice(win.i0, win.i1 + 1).map(Number);
+    const borrowCumU = (Array.isArray(daily.borrow_cost_cum) ? daily.borrow_cost_cum : []).slice(win.i0, win.i1 + 1).map(Number);
+    const tcostCumU = (Array.isArray(daily.tcost_cum) ? daily.tcost_cum : []).slice(win.i0, win.i1 + 1).map(Number);
     const baseEq = Number(eq[0]);
     const scale = Number.isFinite(baseEq) && baseEq > 0 ? notional / baseEq : notional;
     let cumBorrow = 0;
@@ -256,46 +286,128 @@
     const rows = win.dates.map((date, i) => {
       const equity = Number(eq[i]);
       const ret = Number(rets[i]);
-      cumBorrow += Number.isFinite(borrow[i]) ? borrow[i] * scale : 0;
-      cumFees += Number.isFinite(fees[i]) ? fees[i] * scale : 0;
+      const dayBorrow = Number.isFinite(borrow[i]) ? borrow[i] * scale : 0;
+      const dayFee = Number.isFinite(fees[i]) ? fees[i] * scale : 0;
+      cumBorrow += dayBorrow;
+      cumFees += dayFee;
       const netPnl = Number.isFinite(equity) && Number.isFinite(baseEq) ? (equity - baseEq) * scale : 0;
+      const etfLeg = Number.isFinite(etfLegU[i]) ? etfLegU[i] * scale : null;
+      const undLeg = Number.isFinite(undLegU[i]) ? undLegU[i] * scale : null;
+      const totalGross = Number.isFinite(totalGrossU[i])
+        ? totalGrossU[i] * scale
+        : (Number.isFinite(etfLeg) && Number.isFinite(undLeg) ? etfLeg + undLeg : null);
+      const borrowScaled = Number.isFinite(borrowCumU[i]) ? borrowCumU[i] * scale : cumBorrow;
+      const tcostScaled = Number.isFinite(tcostCumU[i]) ? tcostCumU[i] * scale : cumFees;
       return {
         date,
         netPnl,
-        longPnl: netPnl + cumBorrow + cumFees,
-        shortPnl: 0,
-        borrow: cumBorrow,
+        longPnl: Number.isFinite(etfLeg) ? etfLeg : (netPnl + borrowScaled + tcostScaled),
+        shortPnl: Number.isFinite(undLeg) ? undLeg : 0,
+        borrow: borrowScaled,
         distributions: 0,
-        transactionCosts: cumFees,
+        transactionCosts: tcostScaled,
+        totalGross,
+        drawdown: Number.isFinite(drawdown[i]) ? drawdown[i] : null,
+        h: Number.isFinite(hUsed[i]) ? hUsed[i] : null,
+        gross: Number.isFinite(grossExp[i]) ? grossExp[i] : null,
         rebalance: Boolean(rebalance[i]),
         rebalanceReason: Boolean(rebalance[i]) ? 'B4 policy' : '',
         exposureRatio: Number.isFinite(hUsed[i]) ? hUsed[i] : null,
         dailyRet: Number.isFinite(ret) ? ret : null,
+        equityUnit: Number.isFinite(equity) ? equity : null,
+        equityDollars: Number.isFinite(equity) ? equity * scale : null,
       };
     });
     const stats = summaryFromReturns(win.dates, rets);
     const last = rows[rows.length - 1] || {};
+    const log = Array.isArray(rebalanceLog)
+      ? rebalanceLog
+      : (Array.isArray(pairMeta?.rebalance_log) ? pairMeta.rebalance_log : []);
     return {
       ok: true,
+      notional,
+      scale,
       rows,
       inception: win.dates[0],
       end: win.dates[win.dates.length - 1],
-      legChartLabels: { etf: 'B4 net before costs', und: 'Underlying leg' },
+      legChartLabels: { etf: 'ETF leg PnL', und: 'Underlying leg PnL' },
       summary: {
         netPnl: last.netPnl || 0,
         longPnl: last.longPnl || 0,
-        shortPnl: 0,
-        borrowPaid: cumBorrow,
+        shortPnl: last.shortPnl || 0,
+        totalGross: last.totalGross || 0,
+        borrowPaid: last.borrow || cumBorrow,
         distributionsPaid: 0,
-        tCosts: cumFees,
+        tCosts: last.transactionCosts || cumFees,
         nRebalances: rows.filter((r) => r.rebalance).length,
+        nDays: rows.length,
         cagr: stats.cagr,
         annVol: stats.annVol,
         sharpe: stats.sharpe,
         maxDrawdown: stats.maxDrawdown,
       },
-      pairSummary: pair.summary || {},
-      rebalanceLog: Array.isArray(pair.rebalance_log) ? pair.rebalance_log : [],
+      pairSummary: pairMeta?.summary || pairMeta || {},
+      rebalanceLog: log,
+    };
+  }
+
+  function pairChartResultFromArtifact(artifact, etf, { startDate = '', endDate = '', gross = 100000 } = {}) {
+    const pair = pairSeriesFromArtifact(artifact, etf);
+    const daily = pair?.daily;
+    if (!pair || !daily) {
+      return { ok: false, error: 'Production-book path unavailable here. Open the Bucket 4 Pair Report for the full screener row.' };
+    }
+    return pairChartResultFromDaily(pair, daily, {
+      startDate,
+      endDate,
+      gross,
+      rebalanceLog: pair.rebalance_log,
+    });
+  }
+
+  /** Scale a loaded `bucket4_pairs/{ETF}.json` shard (gated or production) into dollar chart rows. */
+  function pairChartResultFromShard(shard, { startDate = '', endDate = '', gross = 100000 } = {}) {
+    if (!shard || !shard.daily) {
+      return { ok: false, error: 'Pair shard unavailable.' };
+    }
+    return pairChartResultFromDaily(shard, shard.daily, {
+      startDate,
+      endDate,
+      gross,
+      rebalanceLog: shard.rebalance_log,
+    });
+  }
+
+  /** Overlay production portfolio equity vs custom book on one PairBacktestChart result. */
+  function overlayBookChartResult(productionResult, customResult) {
+    if (!customResult?.ok || !Array.isArray(customResult.rows) || customResult.rows.length < 2) {
+      return productionResult?.ok ? productionResult : { ok: false, error: customResult?.error || 'Custom book unavailable.' };
+    }
+    if (!productionResult?.ok || !Array.isArray(productionResult.rows)) {
+      return {
+        ...customResult,
+        legChartLabels: { etf: 'Custom book', und: '—' },
+      };
+    }
+    const prodByDate = new Map(productionResult.rows.map((r) => [r.date, r]));
+    const rows = customResult.rows.map((r) => {
+      const prod = prodByDate.get(r.date);
+      const prodNet = prod && Number.isFinite(Number(prod.netPnl)) ? Number(prod.netPnl) : null;
+      return {
+        ...r,
+        // Net = custom; longPnl series = production overlay; suppress cost lines.
+        longPnl: prodNet != null ? prodNet : r.netPnl,
+        shortPnl: NaN,
+        borrow: 0,
+        distributions: 0,
+        transactionCosts: 0,
+      };
+    });
+    return {
+      ...customResult,
+      rows,
+      legChartLabels: { etf: 'Production book', und: '—' },
+      overlayMode: 'prod_vs_custom',
     };
   }
 
@@ -461,13 +573,17 @@
     isBucket4Record,
     parseBucket4BacktestRoute,
     parseBucket4PairRoute,
+    mapChartDefaultPanel,
     loadArtifact,
     pairShardUrl,
     loadPairShard,
     sliceEquityWindow,
     portfolioEquityChartResult,
     pairSeriesFromArtifact,
+    pairChartResultFromDaily,
     pairChartResultFromArtifact,
+    pairChartResultFromShard,
+    overlayBookChartResult,
     defaultBookConfig,
     normalizeBookWeights,
     recomputeBookFromPairs,

@@ -49,6 +49,72 @@ test("bucket 4 routes do not capture restored inverse flow route", () => {
   assert.equal(pairRoute.symbol, "SNDQ");
 });
 
+test("chart mapChartDefaultPanel keeps drip distinct from issuer flow", () => {
+  assert.equal(Bucket4Backtest.mapChartDefaultPanel("backtest-flow"), "backtest-flow");
+  assert.equal(Bucket4Backtest.mapChartDefaultPanel("flow"), "flow");
+  assert.equal(Bucket4Backtest.mapChartDefaultPanel("backtest"), "backtest");
+  assert.equal(Bucket4Backtest.mapChartDefaultPanel("unknown"), "chart");
+});
+
+test("pairChartResultFromShard scales unit-capital PnL to notional dollars", () => {
+  const shard = {
+    etf: "TEST",
+    underlying: "UND",
+    summary: { cagr: 0.1 },
+    rebalance_log: [{ date: "2026-01-05", h: 0.5, executed: true, rebalance_fee: 0.001 }],
+    daily: {
+      dates: ["2026-01-02", "2026-01-05", "2026-01-06"],
+      equity: [1.0, 1.1, 1.5],
+      ret: [0, 0.1, 0.363636],
+      drawdown: [0, 0, -0.05],
+      h_used: [0.5, 0.5, 0.55],
+      rebalance: [0, 1, 0],
+      borrow_cost: [0, 0.001, 0.001],
+      rebalance_fee: [0, 0.001, 0],
+      net_pnl: [0, 0.1, 0.5],
+      total_gross: [0, 0.12, 0.55],
+      etf_leg_pnl_cum: [0, 0.08, 0.35],
+      underlying_leg_pnl_cum: [0, 0.04, 0.2],
+      borrow_cost_cum: [0, 0.001, 0.002],
+      tcost_cum: [0, 0.001, 0.001],
+      gross_exposure: [1.0, 1.05, 1.1],
+    },
+  };
+  const out = Bucket4Backtest.pairChartResultFromShard(shard, { gross: 100000 });
+  assert.equal(out.ok, true);
+  assert.equal(out.notional, 100000);
+  assert.equal(Math.round(out.rows[2].netPnl), 50000);
+  assert.equal(Math.round(out.rows[2].totalGross), 55000);
+  assert.equal(Math.round(out.rows[2].borrow), 200);
+  assert.equal(Math.round(out.rows[2].transactionCosts), 100);
+  assert.equal(out.rows[2].drawdown, -0.05);
+  assert.equal(out.summary.nRebalances, 1);
+  assert.equal(out.rebalanceLog.length, 1);
+});
+
+test("overlayBookChartResult puts production on longPnl series", () => {
+  const prod = {
+    ok: true,
+    rows: [
+      { date: "2026-01-02", netPnl: 0 },
+      { date: "2026-01-05", netPnl: 1000 },
+    ],
+  };
+  const custom = {
+    ok: true,
+    rows: [
+      { date: "2026-01-02", netPnl: 0, longPnl: 0, shortPnl: 0, borrow: 0, distributions: 0, transactionCosts: 0 },
+      { date: "2026-01-05", netPnl: 2500, longPnl: 2500, shortPnl: 0, borrow: 0, distributions: 0, transactionCosts: 0 },
+    ],
+    summary: { netPnl: 2500 },
+  };
+  const out = Bucket4Backtest.overlayBookChartResult(prod, custom);
+  assert.equal(out.ok, true);
+  assert.equal(out.rows[1].netPnl, 2500);
+  assert.equal(out.rows[1].longPnl, 1000);
+  assert.equal(out.legChartLabels.etf, "Production book");
+});
+
 test("flat pair accrues borrow on short leg", () => {
   const rows = [
     row("2026-01-02", 100),
