@@ -1,4 +1,4 @@
-"""Bucket 4 backtest engine (ported from diamond-creek-quant for static-site artifacts)."""
+"""Bucket 4 backtest engine (ported from ls-algo for static-site artifacts)."""
 
 from .bucket4_dynamic_bt import run_bucket4_backtest_dynamic_h
 from .bucket4_hedge_cadence import (

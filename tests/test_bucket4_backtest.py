@@ -158,6 +158,13 @@ def test_builder_on_synthetic_fixture(tmp_path):
     assert built["n_obs"] > 10
     assert len(built["port_daily_returns"]) == built["n_obs"]
     assert "h_state" in built
+    assert built["default_weights"]
+    assert set(built["pair_series"]) == {"INV1", "INV2"}
+    inv1 = built["pair_series"]["INV1"]
+    assert inv1["schema"] == "bucket4_pair.v1"
+    assert len(inv1["daily"]["dates"]) == len(inv1["daily"]["ret"])
+    assert "summary" in inv1
+    assert "rebalance_log" in inv1
 
     out = tmp_path / "out.json"
     out.write_text(json.dumps(built), encoding="utf-8")

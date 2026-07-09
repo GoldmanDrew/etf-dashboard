@@ -47,6 +47,7 @@ OUT_STATE = REPO / "data" / "bucket4_backtest_state.json"
 OUT_HASH = REPO / "data" / "bucket4_backtest_policy_hash.txt"
 VOL_SHAPE_HISTORY = REPO / "data" / "vol_shape_history.json"
 RET_FLOOR = -0.95
+SCHEMA = "bucket4_backtest.v2"
 
 
 def _norm(x: object) -> str:
@@ -62,6 +63,55 @@ def _bool_series(s: pd.Series) -> pd.Series:
 def _finite_float(val, default: float = 0.0) -> float:
     v = float(pd.to_numeric(val, errors="coerce"))
     return default if not np.isfinite(v) else v
+
+
+def _round_or_none(val, ndigits: int = 6):
+    v = float(pd.to_numeric(val, errors="coerce"))
+    if not np.isfinite(v):
+        return None
+    return round(v, ndigits)
+
+
+def _compact_series(s: pd.Series, ndigits: int = 6) -> list:
+    return [_round_or_none(x, ndigits) for x in s.to_numpy()]
+
+
+def _rebalance_log(bt: pd.DataFrame, max_rows: int = 160) -> list[dict]:
+    if bt.empty or "rebalance_scheduled" not in bt.columns:
+        return []
+    rows = bt.loc[bt["rebalance_scheduled"].fillna(False).astype(bool)].tail(max_rows)
+    out: list[dict] = []
+    for dt, row in rows.iterrows():
+        out.append(
+            {
+                "date": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                "h": _round_or_none(row.get("h_used"), 4),
+                "drift_share": _round_or_none(row.get("drift_share_of_gross"), 6),
+                "skipped_below_drift": bool(row.get("rebalance_skipped_below_drift", False)),
+                "executed": bool(row.get("rebalance", False)),
+                "rebalance_fee": _round_or_none(row.get("rebalance_fee"), 6),
+            }
+        )
+    return out
+
+
+def _pair_daily_payload(bt: pd.DataFrame) -> dict:
+    return {
+        "dates": [pd.Timestamp(d).strftime("%Y-%m-%d") for d in bt.index],
+        "ret": _compact_series(bt["ret"]),
+        "equity": _compact_series(bt["equity"]),
+        "drawdown": _compact_series(bt["drawdown"]),
+        "h_used": _compact_series(bt["h_used"], 4),
+        "rebalance": [1 if bool(x) else 0 for x in bt.get("rebalance", pd.Series(False, index=bt.index)).to_numpy()],
+        "rebalance_scheduled": [
+            1 if bool(x) else 0
+            for x in bt.get("rebalance_scheduled", pd.Series(False, index=bt.index)).to_numpy()
+        ],
+        "borrow_cost": _compact_series(bt["borrow_cost"]),
+        "financing_pnl": _compact_series(bt["financing_pnl"]),
+        "rebalance_fee": _compact_series(bt["rebalance_fee"]),
+        "slippage_cost": _compact_series(bt["slippage_cost"]),
+    }
 
 
 def policy_hash(policy_path: Path) -> str:
@@ -176,6 +226,7 @@ def build_backtest(
     uni, weights_arr = score_weights(uni, policy)
     ret_cols: dict[str, pd.Series] = {}
     pair_meta: list[dict] = []
+    pair_series: dict[str, dict] = {}
     h_state: dict[str, dict] = {}
 
     for i, (_, row) in enumerate(uni.iterrows()):
@@ -226,12 +277,19 @@ def build_backtest(
         )
         ret_cols[etf] = bt["ret"]
         stats = perf_stats(bt)
+        mean_h = float(h_daily.dropna().mean()) if len(h_daily.dropna()) else float(knobs.h_mid)
         last_h = float(h_daily.dropna().iloc[-1]) if len(h_daily.dropna()) else float(knobs.h_mid)
+        n_rebal = int(bt["rebalance"].sum()) if "rebalance" in bt.columns else 0
+        n_skip = int(bt["rebalance_skipped_below_drift"].sum()) if "rebalance_skipped_below_drift" in bt.columns else 0
+        total_borrow = float(bt["borrow_cost"].sum()) if "borrow_cost" in bt.columns else 0.0
+        total_fees = float(bt["rebalance_fee"].sum()) if "rebalance_fee" in bt.columns else 0.0
         h_state[f"{etf}|{und}"] = {
             "etf": etf,
             "underlying": und,
             "h_last": round(last_h, 4),
-            "n_rebalances": int(bt["rebalance"].sum()) if "rebalance" in bt.columns else 0,
+            "mean_h": round(mean_h, 4),
+            "n_rebalances": n_rebal,
+            "n_rebalances_skipped": n_skip,
             "h_series_tail": [round(float(x), 4) for x in h_daily.dropna().tail(5).tolist()],
         }
         if len(rb_diag):
@@ -249,13 +307,52 @@ def build_backtest(
             "concentration_score": round(float(concentration_scores(pd.DataFrame([row])).iloc[0]), 4),
             "n_days": int(len(cal)),
             "cagr": round(float(stats.get("cagr", np.nan)), 4) if np.isfinite(stats.get("cagr", np.nan)) else None,
+            "ann_vol": round(float(stats.get("annual_vol", np.nan)), 4) if np.isfinite(stats.get("annual_vol", np.nan)) else None,
+            "sharpe": round(float(stats.get("sharpe", np.nan)), 3) if np.isfinite(stats.get("sharpe", np.nan)) else None,
             "max_drawdown": round(float(stats.get("max_drawdown", np.nan)), 4) if np.isfinite(stats.get("max_drawdown", np.nan)) else None,
+            "mean_h": round(mean_h, 4),
+            "h_last": round(last_h, 4),
+            "n_rebalances": n_rebal,
+            "n_rebalances_skipped": n_skip,
+            "total_borrow": round(total_borrow, 6),
+            "total_fees": round(total_fees, 6),
+            "final_equity": round(float(bt["equity"].iloc[-1]), 6) if len(bt) else None,
             "ratchet": {
                 "trim_lambda": round(rat_res.trim_lambda, 4),
                 "binding": rat_res.binding,
                 "source": rat_res.source,
             },
         })
+        pair_series[etf] = {
+            "schema": "bucket4_pair.v1",
+            "etf": etf,
+            "underlying": und,
+            "in_production_book": True,
+            "summary": {
+                "cagr": pair_meta[-1]["cagr"],
+                "ann_vol": pair_meta[-1]["ann_vol"],
+                "sharpe": pair_meta[-1]["sharpe"],
+                "max_drawdown": pair_meta[-1]["max_drawdown"],
+                "n_rebalances": n_rebal,
+                "n_rebalances_skipped": n_skip,
+                "mean_h": round(mean_h, 4),
+                "h_last": round(last_h, 4),
+                "total_borrow": round(total_borrow, 6),
+                "total_fees": round(total_fees, 6),
+                "final_equity": pair_meta[-1]["final_equity"],
+            },
+            "screener": {
+                "bucket4_net_edge_annual": round(edge, 4),
+                "borrow": round(borrow, 4),
+                "beta": round(beta, 4),
+                "vol_underlying_annual": pair_meta[-1]["vol_underlying_annual"],
+                "init_pct_short": _round_or_none(row.get("init_pct_short"), 4),
+                "maint_pct_short": _round_or_none(row.get("maint_pct_short"), 4),
+                "purgatory": str(row.get("purgatory", "")).strip().lower() in {"1", "true", "t", "yes", "y"},
+            },
+            "daily": _pair_daily_payload(bt),
+            "rebalance_log": _rebalance_log(bt),
+        }
         ratchet_sim.record_rebalance(etf, und, eff_w)
 
     if not ret_cols:
@@ -271,12 +368,27 @@ def build_backtest(
     perf = perf_stats(pd.DataFrame({"equity": eq, "ret": prv, "drawdown": eq / eq.cummax() - 1.0}))
 
     total_w = float(gross_w.sum())
+    default_weights: dict[str, float] = {}
     for p in pair_meta:
         g = float(gross_w.get(p["etf"], 0.0))
         p["portfolio_weight"] = round(g / total_w, 4) if total_w > 0 else 0.0
+        default_weights[p["etf"]] = p["portfolio_weight"]
 
     return {
         "pairs": pair_meta,
+        "universes": {
+            "production_book": {
+                "pairs": [p["etf"] for p in pair_meta],
+                "count": len(pair_meta),
+            },
+            "screener_b4": {
+                "pairs": [p["etf"] for p in pair_meta],
+                "count": len(pair_meta),
+                "note": "Current artifact contains production-book pairs with full daily paths.",
+            },
+        },
+        "default_weights": default_weights,
+        "pair_series": pair_series,
         "n_pairs": len(pair_meta),
         "n_obs": int(len(arr)),
         "window_start": start,
@@ -343,7 +455,7 @@ def main(argv=None) -> int:
         return 1
 
     payload = {
-        "schema": "bucket4_backtest.v1",
+        "schema": SCHEMA,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "policy_version": phash[:16],
         "policy_path": str(policy_path.relative_to(REPO)).replace("\\", "/"),

@@ -41,12 +41,16 @@ def test_bucket4_artifact_schema_when_present():
     if not path.is_file():
         return
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload.get("schema") == "bucket4_backtest.v1"
+    assert payload.get("schema") in {"bucket4_backtest.v1", "bucket4_backtest.v2"}
     assert isinstance(payload.get("pairs"), list)
     assert payload.get("n_pairs", 0) == len(payload["pairs"])
     assert isinstance(payload.get("sim_dates"), list)
     assert isinstance(payload.get("port_equity"), list)
     assert len(payload["sim_dates"]) == len(payload["port_equity"])
+    if payload.get("schema") == "bucket4_backtest.v2":
+        assert isinstance(payload.get("default_weights"), dict)
+        assert isinstance(payload.get("pair_series"), dict)
+        assert isinstance(payload.get("universes"), dict)
 
 
 def test_index_html_wires_bucket4_module():
