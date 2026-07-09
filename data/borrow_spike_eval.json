@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-07-09T03:48:29.664992Z",
+  "as_of": "2026-07-09T13:16:43.271678Z",
   "label": {
     "name": "production",
     "description": "future_max > max(1.0, 3*med60, p99_180) and jump > 0.25",
@@ -236,54 +236,54 @@
       "n_rows": 35872,
       "positive_rate": 0.023695,
       "positives": 850,
-      "brier_score": 0.022701,
-      "brier_skill_score": 0.018692,
+      "brier_score": 0.022695,
+      "brier_skill_score": 0.018971,
       "log_loss": 0.113281,
-      "auroc": 0.780118,
-      "pr_auc": 0.103128,
+      "auroc": 0.780387,
+      "pr_auc": 0.103394,
       "lift_top_decile": 4.271588,
       "capture_rate_p_ge_0p10": 0.251765,
       "precision_at_k": {
-        "precision_at_5": 0.202128,
-        "precision_at_10": 0.164894,
-        "precision_at_20": 0.134043
+        "precision_at_5": 0.206383,
+        "precision_at_10": 0.169149,
+        "precision_at_20": 0.133511
       },
       "calibration_bins": [
         {
           "bin": 0,
-          "count": 33757,
-          "avg_pred": 0.011984,
+          "count": 33758,
+          "avg_pred": 0.011993,
           "realized_rate": 0.016885
         },
         {
           "bin": 1,
-          "count": 1231,
-          "avg_pred": 0.104876,
-          "realized_rate": 0.110479
+          "count": 1257,
+          "avg_pred": 0.105545,
+          "realized_rate": 0.109785
         },
         {
           "bin": 2,
-          "count": 378,
-          "avg_pred": 0.142164,
-          "realized_rate": 0.121693
+          "count": 354,
+          "avg_pred": 0.14254,
+          "realized_rate": 0.124294
         },
         {
           "bin": 3,
           "count": 175,
-          "avg_pred": 0.251027,
+          "avg_pred": 0.251131,
           "realized_rate": 0.091429
         },
         {
           "bin": 4,
-          "count": 153,
-          "avg_pred": 0.287577,
-          "realized_rate": 0.254902
+          "count": 140,
+          "avg_pred": 0.283472,
+          "realized_rate": 0.25
         },
         {
           "bin": 5,
-          "count": 64,
-          "avg_pred": 0.362924,
-          "realized_rate": 0.234375
+          "count": 74,
+          "avg_pred": 0.359651,
+          "realized_rate": 0.256757
         },
         {
           "bin": 8,
@@ -298,29 +298,29 @@
           "realized_rate": 0.192308
         }
       ],
-      "ece": 0.007377,
+      "ece": 0.007264,
       "mce": 0.474359,
       "calibration_by_band": [
         {
           "band": "elevated",
-          "count": 1446,
-          "avg_pred": 0.152497,
-          "realized_rate": 0.113416
+          "count": 1448,
+          "avg_pred": 0.152562,
+          "realized_rate": 0.11326
         },
         {
           "band": "high",
-          "count": 207,
-          "avg_pred": 0.501401,
-          "realized_rate": 0.241546
+          "count": 204,
+          "avg_pred": 0.504136,
+          "realized_rate": 0.245098
         },
         {
           "band": "low",
-          "count": 34219,
-          "avg_pred": 0.013023,
+          "count": 34220,
+          "avg_pred": 0.01303,
           "realized_rate": 0.018586
         }
       ],
-      "precision_at_10_lift_vs_base": 6.9589
+      "precision_at_10_lift_vs_base": 7.1385
     },
     "live_predictions": {
       "source": "live_predictions",
@@ -415,7 +415,7 @@
       "precision_at_10_lift_vs_base": 39.883
     },
     "production_rollup": {
-      "build_time": "2026-07-09T03:46:30.850394Z",
+      "build_time": "2026-07-09T13:13:44.846298Z",
       "n_rows": 18742,
       "brier_score": 0.000585,
       "log_loss": 0.02311,
@@ -518,12 +518,12 @@
   },
   "model_comparison": {
     "v1_l0_auroc": 0.952682,
-    "v2_l2_auroc": 0.780118,
-    "v2_auroc_delta": -0.172564,
+    "v2_l2_auroc": 0.780387,
+    "v2_auroc_delta": -0.172295,
     "v1_l0_positives": 1,
     "v2_l2_positives": 850,
-    "v2_ece": 0.007377,
-    "v2_elevated_realized": 0.113416,
+    "v2_ece": 0.007264,
+    "v2_elevated_realized": 0.11326,
     "recommendation": "Continue monitoring v2; v1 remains primary until v2 AUROC stable."
   },
   "label_grid_summary": {
@@ -761,7 +761,7 @@
       "pred_date": "2026-07-04",
       "symbol": "IREZ",
       "y_spike": 1,
-      "p_calibrated": 0.041638,
+      "p_calibrated": 0.041581,
       "alert_tier": "low",
       "borrow_current": 0.801951,
       "utilization_proxy": 0.9898,
@@ -771,7 +771,7 @@
       "pred_date": "2026-07-04",
       "symbol": "MPG",
       "y_spike": 1,
-      "p_calibrated": 0.020052,
+      "p_calibrated": 0.020065,
       "alert_tier": "low",
       "borrow_current": 0.36125,
       "utilization_proxy": 0.9423,
@@ -781,7 +781,7 @@
       "pred_date": "2026-07-04",
       "symbol": "ONX",
       "y_spike": 1,
-      "p_calibrated": 0.020052,
+      "p_calibrated": 0.020065,
       "alert_tier": "low",
       "borrow_current": 0.250481,
       "utilization_proxy": 0.8868,
@@ -791,7 +791,7 @@
       "pred_date": "2026-07-04",
       "symbol": "SOXL",
       "y_spike": 1,
-      "p_calibrated": 0.006651,
+      "p_calibrated": 0.006656,
       "alert_tier": "low",
       "borrow_current": 0.056981,
       "utilization_proxy": 0.9797,
@@ -821,7 +821,7 @@
       "pred_date": "2026-07-03",
       "symbol": "IREZ",
       "y_spike": 1,
-      "p_calibrated": 0.042156,
+      "p_calibrated": 0.041422,
       "alert_tier": "low",
       "borrow_current": 0.801951,
       "utilization_proxy": 0.9592,
@@ -831,7 +831,7 @@
       "pred_date": "2026-07-03",
       "symbol": "MPG",
       "y_spike": 1,
-      "p_calibrated": 0.01998,
+      "p_calibrated": 0.019823,
       "alert_tier": "low",
       "borrow_current": 0.36125,
       "utilization_proxy": 0.9423,
@@ -841,7 +841,7 @@
       "pred_date": "2026-07-03",
       "symbol": "ONX",
       "y_spike": 1,
-      "p_calibrated": 0.01998,
+      "p_calibrated": 0.019823,
       "alert_tier": "low",
       "borrow_current": 0.250481,
       "utilization_proxy": 0.8868,
@@ -851,7 +851,7 @@
       "pred_date": "2026-07-03",
       "symbol": "SOXL",
       "y_spike": 1,
-      "p_calibrated": 0.006208,
+      "p_calibrated": 0.006309,
       "alert_tier": "low",
       "borrow_current": 0.056981,
       "utilization_proxy": 0.9797,
@@ -861,7 +861,7 @@
       "pred_date": "2026-07-03",
       "symbol": "STLU",
       "y_spike": 1,
-      "p_calibrated": 0.194969,
+      "p_calibrated": 0.191083,
       "alert_tier": "elevated",
       "borrow_current": 1.497311,
       "utilization_proxy": 0.9889,
@@ -871,7 +871,7 @@
       "pred_date": "2026-07-03",
       "symbol": "STSM",
       "y_spike": 1,
-      "p_calibrated": 0.194969,
+      "p_calibrated": 0.191083,
       "alert_tier": "elevated",
       "borrow_current": 2.097284,
       "utilization_proxy": 0.8588,
@@ -881,7 +881,7 @@
       "pred_date": "2026-07-02",
       "symbol": "AMZO",
       "y_spike": 1,
-      "p_calibrated": 0.01998,
+      "p_calibrated": 0.019823,
       "alert_tier": "low",
       "borrow_current": 0.311238,
       "utilization_proxy": 0.85,
@@ -891,7 +891,7 @@
       "pred_date": "2026-07-02",
       "symbol": "AXPG",
       "y_spike": 1,
-      "p_calibrated": 0.106275,
+      "p_calibrated": 0.106599,
       "alert_tier": "watch",
       "borrow_current": 0.51697,
       "utilization_proxy": 0.996,
@@ -901,7 +901,7 @@
       "pred_date": "2026-07-02",
       "symbol": "AXTU",
       "y_spike": 1,
-      "p_calibrated": 0.006208,
+      "p_calibrated": 0.006309,
       "alert_tier": "low",
       "borrow_current": 0.288292,
       "utilization_proxy": 0.883,
@@ -911,7 +911,7 @@
       "pred_date": "2026-07-02",
       "symbol": "BULG",
       "y_spike": 1,
-      "p_calibrated": 0.0328,
+      "p_calibrated": 0.032835,
       "alert_tier": "low",
       "borrow_current": 0.122453,
       "utilization_proxy": 0.979,
@@ -921,7 +921,7 @@
       "pred_date": "2026-07-02",
       "symbol": "CIFU",
       "y_spike": 1,
-      "p_calibrated": 0.0328,
+      "p_calibrated": 0.032835,
       "alert_tier": "low",
       "borrow_current": 0.537605,
       "utilization_proxy": 0.9444,
@@ -931,7 +931,7 @@
       "pred_date": "2026-07-02",
       "symbol": "CRCD",
       "y_spike": 1,
-      "p_calibrated": 0.106275,
+      "p_calibrated": 0.106599,
       "alert_tier": "watch",
       "borrow_current": 1.164727,
       "utilization_proxy": 0.7674,
@@ -941,7 +941,7 @@
       "pred_date": "2026-07-02",
       "symbol": "IREZ",
       "y_spike": 1,
-      "p_calibrated": 0.042156,
+      "p_calibrated": 0.041422,
       "alert_tier": "low",
       "borrow_current": 0.845629,
       "utilization_proxy": 0.9592,
@@ -951,7 +951,7 @@
       "pred_date": "2026-07-02",
       "symbol": "SMST",
       "y_spike": 1,
-      "p_calibrated": 0.106275,
+      "p_calibrated": 0.106599,
       "alert_tier": "watch",
       "borrow_current": 1.26217,
       "utilization_proxy": 0.9541,
@@ -961,7 +961,7 @@
       "pred_date": "2026-07-02",
       "symbol": "SNDG",
       "y_spike": 1,
-      "p_calibrated": 0.006208,
+      "p_calibrated": 0.006309,
       "alert_tier": "low",
       "borrow_current": 0.32413,
       "utilization_proxy": 0.8588,
@@ -971,7 +971,7 @@
       "pred_date": "2026-07-02",
       "symbol": "SSPC",
       "y_spike": 1,
-      "p_calibrated": 0.042156,
+      "p_calibrated": 0.041422,
       "alert_tier": "low",
       "borrow_current": 0.490627,
       "utilization_proxy": 0.955,
@@ -981,7 +981,7 @@
       "pred_date": "2026-07-01",
       "symbol": "ARCX",
       "y_spike": 1,
-      "p_calibrated": 0.001604,
+      "p_calibrated": 0.001602,
       "alert_tier": "low",
       "borrow_current": 0.050142,
       "utilization_proxy": 0.9774,
@@ -991,7 +991,7 @@
       "pred_date": "2026-07-01",
       "symbol": "AXPG",
       "y_spike": 1,
-      "p_calibrated": 0.058601,
+      "p_calibrated": 0.059899,
       "alert_tier": "watch",
       "borrow_current": 0.603637,
       "utilization_proxy": 0.996,
@@ -1001,7 +1001,7 @@
       "pred_date": "2026-07-01",
       "symbol": "AXTU",
       "y_spike": 1,
-      "p_calibrated": 0.01998,
+      "p_calibrated": 0.019823,
       "alert_tier": "low",
       "borrow_current": 0.288292,
       "utilization_proxy": 0.6429,
@@ -1050,8 +1050,8 @@
       {
         "feature": "log_aum",
         "target": "y_spike_5",
-        "rank_corr": -0.073863,
-        "abs_rank_corr": 0.073863
+        "rank_corr": -0.069233,
+        "abs_rank_corr": 0.069233
       },
       {
         "feature": "delta",
@@ -1079,8 +1079,8 @@
       }
     ],
     "study_summary": {
-      "build_time": "2026-07-09T00:17:50.527742Z",
-      "panel_rows": 45919,
+      "build_time": "2026-07-09T03:49:49.840348Z",
+      "panel_rows": 46421,
       "panel_symbols": 502,
       "recommended_v2_features": [
         "borrow_current",
@@ -1094,116 +1094,116 @@
         "prem_disc_bps",
         "peer_shares_avail_sum",
         "shares_drop5",
+        "rebalance_pct_adv",
         "turnover_20d",
         "tradable_float_shares",
         "shares_drop3",
         "peer_borrow_z_mean",
-        "rebalance_pct_adv",
         "forecast_vol_underlying_annual",
         "gross_decay_annual",
         "shares_drop1",
         "utilization_proxy"
       ],
-      "guidance_for_spike_model": "Use recommended_v2_features for logistic_v2 candidate set. Prioritize supply (utilization_proxy, shares_drop3) and peer_borrow_z_mean when re-running borrow_spike_eval; keep L0 labels and out-of-time splits. Best ablation block: full_plus_screener (AUROC 0.9948).",
+      "guidance_for_spike_model": "Use recommended_v2_features for logistic_v2 candidate set. Prioritize supply (utilization_proxy, shares_drop3) and peer_borrow_z_mean when re-running borrow_spike_eval; keep L0 labels and out-of-time splits. Best ablation block: full_plus_screener (AUROC 0.9946).",
       "key_findings": [
         "Top rank-corr predictors at h=5: borrow_current, borrow_vol10, log_aum."
       ],
       "best_block_ablation": "full_plus_screener",
       "block_auroc_lifts": {
-        "supply_vs_borrow_only": 0.0027,
-        "peer_vs_borrow_only": -0.00468,
-        "full_vs_borrow_only": 0.00306
+        "supply_vs_borrow_only": 0.002693,
+        "peer_vs_borrow_only": -0.00341,
+        "full_vs_borrow_only": 0.002962
       },
       "top_predictors_h5": [
         {
           "feature": "borrow_current",
-          "mean_abs_rank_corr": 0.129187
+          "mean_abs_rank_corr": 0.128781
         },
         {
           "feature": "borrow_vol10",
-          "mean_abs_rank_corr": 0.121193
+          "mean_abs_rank_corr": 0.121074
         },
         {
           "feature": "log_aum",
-          "mean_abs_rank_corr": 0.108317
+          "mean_abs_rank_corr": 0.106525
         },
         {
           "feature": "shares_available",
-          "mean_abs_rank_corr": 0.09698
+          "mean_abs_rank_corr": 0.096977
         },
         {
           "feature": "forecast_vol_underlying_annual",
-          "mean_abs_rank_corr": 0.074594
+          "mean_abs_rank_corr": 0.073774
         },
         {
           "feature": "gross_decay_annual",
-          "mean_abs_rank_corr": 0.065668
-        },
-        {
-          "feature": "turnover_20d",
-          "mean_abs_rank_corr": 0.060639
+          "mean_abs_rank_corr": 0.064887
         },
         {
           "feature": "borrow_z60",
-          "mean_abs_rank_corr": 0.059819
+          "mean_abs_rank_corr": 0.060664
+        },
+        {
+          "feature": "turnover_20d",
+          "mean_abs_rank_corr": 0.059629
         }
       ]
     },
     "feature_importance": {
-      "build_time": "2026-07-09T00:17:48.197072Z",
+      "build_time": "2026-07-09T03:49:48.009281Z",
       "target": "y_spike_5",
       "split": "out_of_time_80_20",
       "blocks": {
         "borrow_only": {
           "status": "ok",
-          "auroc": 0.99172,
+          "auroc": 0.991652,
           "precision_at_10": 0.004348,
-          "precision_lift_vs_base": 2.7074,
+          "precision_lift_vs_base": 2.7471,
           "test_positives": 1
         },
         "borrow_plus_supply": {
           "status": "ok",
-          "auroc": 0.99442,
+          "auroc": 0.994345,
           "precision_at_10": 0.004348,
-          "precision_lift_vs_base": 2.7074,
-          "auroc_delta_vs_borrow_only": 0.0027,
+          "precision_lift_vs_base": 2.7471,
+          "auroc_delta_vs_borrow_only": 0.002693,
           "test_positives": 1
         },
         "borrow_plus_scale": {
           "status": "ok",
-          "auroc": 0.991,
-          "precision_at_10": 0.0,
-          "precision_lift_vs_base": 0.0,
-          "auroc_delta_vs_borrow_only": -0.00072,
+          "auroc": 0.991652,
+          "precision_at_10": 0.004348,
+          "precision_lift_vs_base": 2.7471,
+          "auroc_delta_vs_borrow_only": 0.0,
           "test_positives": 1
         },
         "borrow_plus_float": {
           "status": "ok",
-          "auroc": 0.98821,
-          "precision_at_10": 0.0,
-          "precision_lift_vs_base": 0.0,
-          "auroc_delta_vs_borrow_only": -0.00351,
+          "auroc": 0.989319,
+          "precision_at_10": 0.004348,
+          "precision_lift_vs_base": 2.7471,
+          "auroc_delta_vs_borrow_only": -0.002334,
           "test_positives": 1
         },
         "borrow_plus_peer": {
           "status": "ok",
-          "auroc": 0.98704,
+          "auroc": 0.988242,
           "precision_at_10": 0.0,
           "precision_lift_vs_base": 0.0,
-          "auroc_delta_vs_borrow_only": -0.00468,
+          "auroc_delta_vs_borrow_only": -0.003411,
           "test_positives": 1
         },
         "full_plus_screener": {
           "status": "ok",
-          "auroc": 0.99478,
+          "auroc": 0.994614,
           "precision_at_10": 0.004348,
-          "precision_lift_vs_base": 2.7074,
-          "auroc_delta_vs_borrow_only": 0.00306,
+          "precision_lift_vs_base": 2.7471,
+          "auroc_delta_vs_borrow_only": 0.002962,
           "test_positives": 1
         },
         "logistic_v1_reference": {
           "status": "ok",
-          "auroc": 0.99415,
+          "auroc": 0.993896,
           "precision_at_10": 0.004348
         }
       }
@@ -1697,7 +1697,7 @@
       "primary_eval_label": "L2",
       "spike_production": "logistic_v2"
     },
-    "build_time": "2026-07-09T03:48:24.687825Z",
+    "build_time": "2026-07-09T13:16:34.903384Z",
     "boosting": {
       "backend": "unavailable",
       "spike_replay": {
