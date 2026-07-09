@@ -8,6 +8,7 @@ Usage::
 
     python scripts/repair_metrics_staleness.py --apply
     python scripts/repair_metrics_staleness.py --apply --catchup-days 14
+    python scripts/repair_metrics_staleness.py --apply --targeted-catchup --min-days-behind 2
     python scripts/repair_metrics_staleness.py --apply --skip-ingest
 """
 from __future__ import annotations
@@ -17,12 +18,13 @@ import json
 import logging
 import subprocess
 import sys
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_REPORT_PATH = ROOT / "data" / "metrics_staleness_report.json"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from ingest_etf_metrics import (  # noqa: E402
@@ -32,6 +34,7 @@ from ingest_etf_metrics import (  # noqa: E402
     backfill_underlying_adj_close_gaps,
     collapse_redundant_consecutive_rows,
     enforce_status_consistency,
+    fill_missing_shares_outstanding_from_aum_nav,
     load_existing,
     load_universe_tickers,
     load_universe_underlying_map,
@@ -40,7 +43,7 @@ from ingest_etf_metrics import (  # noqa: E402
     save_outputs,
     validate_df,
 )
-from market_calendar import is_nyse_session, nyse_sessions, previous_nyse_session  # noqa: E402
+from market_calendar import is_nyse_session, next_nyse_session, nyse_sessions, previous_nyse_session  # noqa: E402
 
 LOGGER = logging.getLogger("repair_metrics_staleness")
 
@@ -54,25 +57,41 @@ def _run(cmd: list[str], *, label: str) -> int:
     return int(proc.returncode)
 
 
-def tail_staleness_report(df: pd.DataFrame, universe: set[str]) -> dict:
+def list_stale_tickers(
+    df: pd.DataFrame,
+    universe: set[str],
+    *,
+    min_days_behind: int = 1,
+    limit: int | None = None,
+) -> list[dict]:
     if df.empty:
-        return {"global_max": None, "universe_stale": 0, "worst": []}
+        return []
     work = df.copy()
     work["date"] = pd.to_datetime(work["date"], errors="coerce").dt.normalize()
     global_max = work["date"].max()
-    rows = []
+    rows: list[dict] = []
     for ticker, g in work.groupby("ticker"):
         if ticker not in universe:
             continue
         last = g["date"].max()
         behind = int((global_max - last).days) if pd.notna(last) else 999
-        if behind > 0:
+        if behind >= min_days_behind:
             rows.append({"ticker": ticker, "last_date": str(last.date()), "days_behind": behind})
     rows.sort(key=lambda x: (-x["days_behind"], x["ticker"]))
+    if limit is not None:
+        return rows[:limit]
+    return rows
+
+
+def tail_staleness_report(df: pd.DataFrame, universe: set[str], *, min_days_behind: int = 2) -> dict:
+    stale = list_stale_tickers(df, universe, min_days_behind=min_days_behind)
+    if df.empty:
+        return {"global_max": None, "universe_stale": 0, "worst": []}
+    global_max = pd.to_datetime(df["date"], errors="coerce").max()
     return {
         "global_max": str(global_max.date()),
-        "universe_stale": len(rows),
-        "worst": rows[:25],
+        "universe_stale": len(stale),
+        "worst": stale[:25],
     }
 
 
@@ -87,6 +106,29 @@ def resolve_catchup_range(catchup_days: int, *, end: date | None = None) -> tupl
         return end_session, end_session
     want = sessions[-catchup_days:] if len(sessions) >= catchup_days else sessions
     return want[0], want[-1]
+
+
+def resolve_targeted_catchup_sessions(
+    df: pd.DataFrame,
+    universe: set[str],
+    *,
+    min_days_behind: int,
+    end: date | None = None,
+) -> list[date]:
+    """NYSE sessions to ingest: day after earliest stale tail through global max."""
+    stale = list_stale_tickers(df, universe, min_days_behind=min_days_behind)
+    if not stale:
+        return []
+    end_d = end or date.today()
+    if is_nyse_session(end_d):
+        end_session = end_d
+    else:
+        end_session = previous_nyse_session(end_d)
+    earliest_last = min(date.fromisoformat(r["last_date"]) for r in stale)
+    start_session = next_nyse_session(earliest_last)
+    if start_session > end_session:
+        return []
+    return nyse_sessions(start_session, end_session)
 
 
 def apply_tail_repairs(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -106,6 +148,9 @@ def apply_tail_repairs(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     before_und = int(pd.to_numeric(df["underlying_adj_close"], errors="coerce").notna().sum())
     summary["underlying_adj_close_delta"] = after_und - before_und
 
+    out, n_shares = fill_missing_shares_outstanding_from_aum_nav(out)
+    summary["shares_outstanding_from_aum_nav"] = n_shares
+
     out = enforce_status_consistency(out)
     out, _ = collapse_redundant_consecutive_rows(out)
     out, _ = repair_close_price_split_basis_mismatch(out)
@@ -121,9 +166,24 @@ def main() -> int:
         action="store_true",
         help="Only run in-process tail repairs (no subprocess pipeline)",
     )
+    parser.add_argument(
+        "--targeted-catchup",
+        action="store_true",
+        help="Ingest only NYSE sessions needed to extend stale ticker tails",
+    )
+    parser.add_argument(
+        "--min-days-behind",
+        type=int,
+        default=2,
+        help="Min calendar days behind global max to count as stale (default 2)",
+    )
     parser.add_argument("--catchup-days", type=int, default=10, help="NYSE sessions to re-ingest (default 10)")
     parser.add_argument("--end-date", default=None, help="YYYY-MM-DD catch-up end (default: latest NYSE session)")
-    parser.add_argument("--report-out", default=None, help="Write before/after JSON report")
+    parser.add_argument(
+        "--report-out",
+        default=None,
+        help="Write before/after JSON report (default: data/metrics_staleness_report.json when --apply)",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -134,36 +194,56 @@ def main() -> int:
     end_arg = None
     if args.end_date:
         end_arg = date.fromisoformat(args.end_date)
-    start_d, end_d = resolve_catchup_range(args.catchup_days, end=end_arg)
     universe = set(load_universe_tickers())
 
     before = load_existing()
     before_report = tail_staleness_report(before, universe)
     LOGGER.info("Before: global_max=%s universe_stale=%d", before_report["global_max"], before_report["universe_stale"])
 
-    if not args.minimal:
-        if not args.skip_ingest:
-            sessions = nyse_sessions(start_d, end_d)
-            LOGGER.info("Single-day ingest for %d NYSE session(s): %s .. %s", len(sessions), start_d, end_d)
-            for session in sessions:
-                rc = _run(
-                    [
-                        sys.executable,
-                        "scripts/ingest_etf_metrics.py",
-                        "--start-date",
-                        session.isoformat(),
-                        "--end-date",
-                        session.isoformat(),
-                        "--lookback-days",
-                        "10",
-                        "--polygon-lookback-days",
-                        "5",
-                    ],
-                    label=f"ingest {session}",
+    ingest_sessions: list[date] = []
+    if not args.minimal and not args.skip_ingest:
+        if args.targeted_catchup:
+            ingest_sessions = resolve_targeted_catchup_sessions(
+                before,
+                universe,
+                min_days_behind=args.min_days_behind,
+                end=end_arg,
+            )
+            if ingest_sessions:
+                LOGGER.info(
+                    "Targeted catchup: %d session(s) for tickers >=%d day(s) behind: %s .. %s",
+                    len(ingest_sessions),
+                    args.min_days_behind,
+                    ingest_sessions[0],
+                    ingest_sessions[-1],
                 )
-                if rc != 0:
-                    LOGGER.warning("Ingest %s returned %d; continuing", session, rc)
+            else:
+                LOGGER.info("Targeted catchup: no stale tickers need session ingest")
+        else:
+            start_d, end_d = resolve_catchup_range(args.catchup_days, end=end_arg)
+            ingest_sessions = nyse_sessions(start_d, end_d)
+            LOGGER.info("Single-day ingest for %d NYSE session(s): %s .. %s", len(ingest_sessions), start_d, end_d)
 
+        for session in ingest_sessions:
+            rc = _run(
+                [
+                    sys.executable,
+                    "scripts/ingest_etf_metrics.py",
+                    "--start-date",
+                    session.isoformat(),
+                    "--end-date",
+                    session.isoformat(),
+                    "--lookback-days",
+                    "10",
+                    "--polygon-lookback-days",
+                    "5",
+                ],
+                label=f"ingest {session}",
+            )
+            if rc != 0:
+                LOGGER.warning("Ingest %s returned %d; continuing", session, rc)
+
+    if not args.minimal:
         _run(
             [sys.executable, "scripts/repair_rex_session_nav_close.py", "--lookback-days", "21", "--apply"],
             label="repair REX NAV/close",
@@ -187,11 +267,17 @@ def main() -> int:
     else:
         LOGGER.info("Dry-run: pass --apply to persist tail repairs")
 
-    after_report = tail_staleness_report(repaired if args.apply else load_existing(), universe)
+    after_df = repaired if args.apply else load_existing()
+    after_report = tail_staleness_report(after_df, universe)
+    stale_full = list_stale_tickers(after_df, universe, min_days_behind=args.min_days_behind, limit=50)
     report = {
-        "catchup_range": [start_d.isoformat(), end_d.isoformat()],
+        "build_time": datetime.now(UTC).isoformat(),
+        "catchup_mode": "targeted" if args.targeted_catchup else ("full" if ingest_sessions else "none"),
+        "ingest_sessions": [s.isoformat() for s in ingest_sessions],
+        "min_days_behind": args.min_days_behind,
         "before": before_report,
         "after": after_report,
+        "stale_tickers": stale_full,
         "tail_repairs": fix_summary,
         "applied": bool(args.apply),
     }
@@ -201,9 +287,11 @@ def main() -> int:
         after_report["universe_stale"],
         before_report["universe_stale"],
     )
-    if args.report_out:
-        Path(args.report_out).write_text(json.dumps(report, indent=2), encoding="utf-8")
-        LOGGER.info("Wrote report %s", args.report_out)
+    report_path = Path(args.report_out) if args.report_out else (DEFAULT_REPORT_PATH if args.apply else None)
+    if report_path:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        LOGGER.info("Wrote report %s", report_path)
 
     return 0
 

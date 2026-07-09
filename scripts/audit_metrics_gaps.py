@@ -28,6 +28,7 @@ from ingest_etf_metrics import (  # noqa: E402
     backfill_shares_traded_gaps,
     collapse_redundant_consecutive_rows,
     enforce_status_consistency,
+    fill_missing_shares_outstanding_from_aum_nav,
     load_existing,
     repair_close_price_split_basis_mismatch,
     repair_stale_issuer_close_from_market,
@@ -239,6 +240,9 @@ def apply_easy_fixes(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     out, n_stale_close = repair_stale_issuer_close_from_market(out)
     summary["stale_issuer_close"] = n_stale_close
+
+    out, n_shares = fill_missing_shares_outstanding_from_aum_nav(out)
+    summary["shares_outstanding_from_aum_nav"] = n_shares
 
     out, n_adj2 = backfill_etf_adj_close_from_close_gaps(out)
     summary["etf_adj_close_post_polygon"] = n_adj2

@@ -242,6 +242,28 @@ def _check_metrics(health: dict) -> tuple[dict, list[str]]:
     }, violations
 
 
+def _check_metrics_staleness_report(report: dict) -> tuple[dict, list[str]]:
+    violations: list[str] = []
+    after = report.get("after") if isinstance(report.get("after"), dict) else {}
+    stale = int(after.get("universe_stale") or 0)
+    worst = after.get("worst") if isinstance(after.get("worst"), list) else []
+    severe = [r for r in worst if int(r.get("days_behind") or 0) >= 6]
+    if len(severe) >= 20:
+        sample = ", ".join(str(r.get("ticker") or "?") for r in severe[:8])
+        violations.append(
+            f"metrics tail: {len(severe)} ticker(s) >=6 calendar day(s) behind "
+            f"{after.get('global_max') or 'global max'} (sample: {sample})",
+        )
+    return {
+        "global_max": after.get("global_max"),
+        "universe_stale": stale,
+        "severe_tail_count": len(severe),
+        "worst": worst[:10],
+        "stale_tickers_sample": (report.get("stale_tickers") or [])[:10],
+        "build_time": report.get("build_time"),
+    }, violations
+
+
 def build_summary(
     *,
     max_underlying_hours: float = 48.0,
@@ -252,12 +274,14 @@ def build_summary(
     vrp = _load_json(DATA / "vrp_health.json")
     flow = _load_json(DATA / "letf_rebalance_flows_latest.json")
     metrics = _load_json(DATA / "etf_metrics_health.json")
+    staleness = _load_json(DATA / "metrics_staleness_report.json")
 
     opt_block, opt_v = _check_options(options, max_underlying_hours=max_underlying_hours)
     vrp_block, vrp_v = _check_vrp(vrp, max_underlying_hours=max_underlying_hours)
     flow_block, flow_v = _check_flow(flow, max_stale_pct=max_flow_stale_pct)
     met_block, met_v = _check_metrics(metrics)
-    violations = opt_v + vrp_v + flow_v + met_v
+    stale_block, stale_v = _check_metrics_staleness_report(staleness)
+    violations = opt_v + vrp_v + flow_v + met_v + stale_v
 
     return {
         "build_time": now.isoformat().replace("+00:00", "Z"),
@@ -269,6 +293,7 @@ def build_summary(
         "vrp": vrp_block,
         "flow": flow_block,
         "metrics": met_block,
+        "metrics_staleness": stale_block,
         "violations": violations,
         "ok": not violations,
     }

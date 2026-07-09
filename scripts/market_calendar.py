@@ -103,6 +103,13 @@ def previous_nyse_session(value: object) -> date:
     return d
 
 
+def next_nyse_session(value: object) -> date:
+    d = _as_date(value) + timedelta(days=1)
+    while not is_nyse_session(d):
+        d += timedelta(days=1)
+    return d
+
+
 def nyse_sessions(start: object, end: object) -> list[date]:
     """NYSE sessions in the inclusive range [start, end]."""
     s = _as_date(start)

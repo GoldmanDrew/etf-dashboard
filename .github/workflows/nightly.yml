@@ -170,7 +170,12 @@ jobs:
 
       - name: Repair stale issuer closes from market
         continue-on-error: true
-        run: python scripts/repair_metrics_staleness.py --apply --skip-ingest --minimal
+        run: python scripts/repair_metrics_staleness.py --apply --skip-ingest --minimal --report-out data/metrics_staleness_report.json
+
+      - name: Targeted metrics tail session catchup (Monday)
+        if: needs.resolve-slot.outputs.monday_catchup == 'true'
+        continue-on-error: true
+        run: python scripts/repair_metrics_staleness.py --apply --targeted-catchup --min-days-behind 2 --report-out data/metrics_staleness_report.json
 
       - name: Bootstrap Yahoo prices before first stored metrics row
         continue-on-error: true
@@ -277,6 +282,7 @@ jobs:
             data/letf_intraday_flow_metrics.json
             data/letf_intraday_remaining_backtest.json
             data/freshness_summary.json
+            data/metrics_staleness_report.json
             data/earnings_seed_audit.json
             data/earnings_calendar_seed.json
           commit_message: "${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday metrics catch-up ingest' || 'chore: nightly metrics ingest' }}"

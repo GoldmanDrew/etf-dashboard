@@ -247,6 +247,23 @@ def repair_shares_vs_aum_nav(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return out, n_bad
 
 
+def fill_missing_shares_outstanding_from_aum_nav(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Derive ``shares_outstanding`` from ``aum / nav`` when both exist but shares are null."""
+    if df.empty or "shares_outstanding" not in df.columns:
+        return df, 0
+    out = df.copy()
+    nav = pd.to_numeric(out["nav"], errors="coerce")
+    aum = pd.to_numeric(out["aum"], errors="coerce")
+    shares = pd.to_numeric(out["shares_outstanding"], errors="coerce")
+    missing = shares.isna() | (shares <= 0)
+    ok = nav.notna() & (nav > 0) & aum.notna() & (aum > 0)
+    fill = missing & ok
+    n = int(fill.sum())
+    if n:
+        out.loc[fill, "shares_outstanding"] = np.round((aum[fill] / nav[fill]))
+    return out, n
+
+
 def repair_nav_only_partial_aum(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     """Fill AUM/shares on partial rows that only have NAV using Yahoo fallback."""
     if df.empty:
