@@ -482,11 +482,25 @@ def _flow_stale_summary(
     }
 
 
+def _dates_as_yyyy_mm_dd(series: pd.Series) -> pd.Series:
+    """Format date-like values as YYYY-MM-DD without requiring a datetime64 dtype.
+
+    Metrics may arrive as ``datetime64``, ``Timestamp``, or plain ``datetime.date``
+    (``extend_metrics_session_coverage`` / parquet object columns). Calling
+    ``series.dt.strftime`` on object-dtype python dates raises AttributeError.
+    """
+    return pd.to_datetime(series, errors="coerce").dt.strftime("%Y-%m-%d")
+
+
 def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bdays: int = 3) -> pd.DataFrame:
     if universe.empty or metrics.empty:
         return pd.DataFrame()
 
     df = metrics.merge(universe, on="ticker", how="left")
+    # Session-extend and some parquet paths leave python ``date`` objects; coerce
+    # before sort/shift so downstream .dt access and busday gaps stay consistent.
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
     df["underlying"] = df["underlying"].fillna("")
     df["leverage"] = pd.to_numeric(df["leverage"], errors="coerce")
     df["aum"] = pd.to_numeric(df.get("aum"), errors="coerce")
@@ -572,7 +586,7 @@ def build_fund_flows(universe: pd.DataFrame, metrics: pd.DataFrame, *, stale_bda
         if col not in df.columns:
             df[col] = None
     out = df[cols].copy()
-    out["date"] = out["date"].dt.strftime("%Y-%m-%d")
+    out["date"] = _dates_as_yyyy_mm_dd(out["date"])
     return out
 
 

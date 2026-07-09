@@ -263,6 +263,44 @@ def test_session_extend_enables_flow_on_global_session():
     assert float(row["aum"]) == pytest.approx(218_023_700.0)
 
 
+def test_build_fund_flows_accepts_python_date_after_session_extend():
+    """Regression: nightly failed when session-extend left object-dtype dates.
+
+    ``extend_metrics_session_coverage`` stores plain ``datetime.date`` values.
+    ``build_fund_flows`` must coerce before formatting (not call ``.dt`` on object).
+    """
+    from ingest_etf_metrics import extend_metrics_session_coverage
+
+    metrics = _metrics().copy()
+    # Drop the later session so extend can synthesize it as python date.
+    metrics = metrics[metrics["date"] < pd.Timestamp("2026-05-19")].reset_index(drop=True)
+    extended = extend_metrics_session_coverage(
+        metrics,
+        session_date=date(2026, 5, 19),
+        tickers=["UPRO", "SPXU", "YSPY", "SPY"],
+        max_lag_bdays=2,
+    )
+    assert extended["date"].map(lambda d: isinstance(d, date)).all()
+
+    # Patch underlying prices on the extended session so return is computable.
+    mask = extended["date"].eq(date(2026, 5, 19))
+    extended.loc[mask, "underlying_adj_close"] = 101.0
+    extended.loc[mask, "nav"] = 101.0
+
+    fund = flows.build_fund_flows(_universe(), extended)
+    assert not fund.empty
+    assert fund["date"].eq("2026-05-19").any()
+    upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
+    assert upro["quality_flag"] == "ok"
+    assert float(upro["rebalance_signed_dollars"]) == pytest.approx(60_000_000.0)
+
+
+def test_dates_as_yyyy_mm_dd_handles_mixed_date_types():
+    s = pd.Series([date(2026, 5, 19), pd.Timestamp("2026-05-20"), "2026-05-21"])
+    out = flows._dates_as_yyyy_mm_dd(s)
+    assert out.tolist() == ["2026-05-19", "2026-05-20", "2026-05-21"]
+
+
 def test_load_universe_excludes_yieldboost_and_uses_delta_when_leverage_missing(tmp_path: Path):
     csv_path = tmp_path / "universe.csv"
     csv_path.write_text(
