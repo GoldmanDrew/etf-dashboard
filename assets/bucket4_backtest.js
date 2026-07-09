@@ -7,9 +7,12 @@
 
   const BUCKET4_BACKTEST_URL = 'data/bucket4_backtest.json';
   const BUCKET4_STATE_URL = 'data/bucket4_backtest_state.json';
+  const BUCKET4_PAIR_BASE_URL = 'data/bucket4_pairs';
 
   let _artifactCache = null;
   let _artifactPromise = null;
+  const _pairShardCache = new Map();
+  const _pairShardPromises = new Map();
 
   function normSym(x) {
     return String(x || '').trim().toUpperCase().replace(/\./g, '-');
@@ -37,24 +40,15 @@
         legacy: false,
       };
     }
-    const legacy = /^#\/backtest-flow(?:\/([^/?#]+))?$/i.exec(h);
-    if (legacy) {
-      return {
-        matches: true,
-        preloadSymbol: legacy[1] ? decodeURIComponent(legacy[1]).toUpperCase() : '',
-        legacy: true,
-      };
-    }
-    const chartCompat = /^#\/chart\/([^/?#]+)\/backtest-flow$/i.exec(h);
-    if (chartCompat) {
-      return {
-        matches: true,
-        preloadSymbol: decodeURIComponent(chartCompat[1]).toUpperCase(),
-        legacy: true,
-        compatibility: true,
-      };
-    }
     return { matches: false, preloadSymbol: '', legacy: false, compatibility: false };
+  }
+
+  function parseBucket4PairRoute(hash) {
+    const h = String(hash || '').trim();
+    const m = /^#\/bucket-4\/pair\/([^/?#]+)$/i.exec(h);
+    return m
+      ? { matches: true, symbol: decodeURIComponent(m[1]).toUpperCase() }
+      : { matches: false, symbol: '' };
   }
 
   async function loadArtifact({ force = false } = {}) {
@@ -72,6 +66,36 @@
       return await _artifactPromise;
     } catch (e) {
       _artifactPromise = null;
+      throw e;
+    }
+  }
+
+  function pairShardUrl(symbol, artifact) {
+    const sym = normSym(symbol);
+    const rows = Array.isArray(artifact?.pair_manifest) ? artifact.pair_manifest : [];
+    const hit = rows.find((p) => normSym(p?.etf) === sym);
+    return hit?.shard_url || `${BUCKET4_PAIR_BASE_URL}/${encodeURIComponent(sym)}.json`;
+  }
+
+  async function loadPairShard(symbol, { force = false, artifact = null } = {}) {
+    const sym = normSym(symbol);
+    if (!sym) throw new Error('missing pair symbol');
+    if (!force && _pairShardCache.has(sym)) return _pairShardCache.get(sym);
+    if (!force && _pairShardPromises.has(sym)) return _pairShardPromises.get(sym);
+    const url = pairShardUrl(sym, artifact);
+    const promise = (async () => {
+      const sep = url.includes('?') ? '&' : '?';
+      const res = await fetch(`${url}${sep}t=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`bucket4 pair ${sym} HTTP ${res.status}`);
+      const data = JSON.parse(await res.text());
+      _pairShardCache.set(sym, data);
+      return data;
+    })();
+    _pairShardPromises.set(sym, promise);
+    try {
+      return await promise;
+    } catch (e) {
+      _pairShardPromises.delete(sym);
       throw e;
     }
   }
@@ -211,7 +235,7 @@
     const pair = pairSeriesFromArtifact(artifact, etf);
     const daily = pair?.daily;
     if (!pair || !daily) {
-      return { ok: false, error: 'This ticker is not in the current Bucket 4 replay artifact.' };
+      return { ok: false, error: 'Production-book path unavailable here. Open the Bucket 4 Pair Report for the full screener row.' };
     }
     const win = sliceDailyPath(daily, startDate, endDate);
     if (win.error || win.dates.length < 2) {
@@ -401,12 +425,45 @@
     return `${(v * 100).toFixed(digits)}%`;
   }
 
+  function pairManifestRows(artifact) {
+    if (Array.isArray(artifact?.pair_manifest)) return artifact.pair_manifest;
+    return (Array.isArray(artifact?.pairs) ? artifact.pairs : []).map((p) => ({
+      ...p,
+      etf: normSym(p?.etf),
+      underlying: normSym(p?.underlying),
+      in_production_book: true,
+      production_status: 'production',
+      gate_reason: 'production_book',
+      model_status: 'ok',
+      shard_url: `${BUCKET4_PAIR_BASE_URL}/${encodeURIComponent(normSym(p?.etf))}.json`,
+      production_weight: p?.portfolio_weight,
+    }));
+  }
+
+  function exportPairManifestCsv(rows) {
+    const cols = [
+      'etf', 'underlying', 'production_status', 'gate_reason', 'model_status', 'entry_date',
+      'latest_date', 'production_weight', 'cagr', 'ann_vol', 'sharpe', 'max_drawdown',
+      'bucket4_net_edge_annual', 'borrow', 'beta', 'vol_underlying_annual', 'n_rebalances',
+    ];
+    const esc = (v) => {
+      if (v == null) return '';
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    return [cols.join(','), ...(Array.isArray(rows) ? rows : []).map((r) => cols.map((c) => esc(r?.[c])).join(','))].join('\n');
+  }
+
   const exported = {
     BUCKET4_BACKTEST_URL,
     BUCKET4_STATE_URL,
+    BUCKET4_PAIR_BASE_URL,
     isBucket4Record,
     parseBucket4BacktestRoute,
+    parseBucket4PairRoute,
     loadArtifact,
+    pairShardUrl,
+    loadPairShard,
     sliceEquityWindow,
     portfolioEquityChartResult,
     pairSeriesFromArtifact,
@@ -417,6 +474,8 @@
     pairHFromArtifact,
     pairCadenceHint,
     fmtPctAnnual,
+    pairManifestRows,
+    exportPairManifestCsv,
     pairKey,
     normSym,
   };

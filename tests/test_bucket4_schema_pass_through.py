@@ -41,7 +41,7 @@ def test_bucket4_artifact_schema_when_present():
     if not path.is_file():
         return
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload.get("schema") in {"bucket4_backtest.v1", "bucket4_backtest.v2"}
+    assert payload.get("schema") == "bucket4_backtest.v2"
     assert isinstance(payload.get("pairs"), list)
     assert payload.get("n_pairs", 0) == len(payload["pairs"])
     assert isinstance(payload.get("sim_dates"), list)
@@ -51,6 +51,20 @@ def test_bucket4_artifact_schema_when_present():
         assert isinstance(payload.get("default_weights"), dict)
         assert isinstance(payload.get("pair_series"), dict)
         assert isinstance(payload.get("universes"), dict)
+        assert isinstance(payload.get("pair_manifest"), list)
+        assert payload.get("universes", {}).get("screener_b4", {}).get("count", 0) >= payload.get("n_pairs", 0)
+        if payload["pair_manifest"]:
+            first = payload["pair_manifest"][0]
+            assert "shard_url" in first
+            assert "gate_reason" in first
+            assert "model_status" in first
+        sndq = [p for p in payload.get("pair_manifest", []) if p.get("etf") == "SNDQ"]
+        if sndq:
+            shard_path = REPO / "data" / "bucket4_pairs" / "SNDQ.json"
+            assert shard_path.is_file()
+            shard = json.loads(shard_path.read_text(encoding="utf-8"))
+            assert shard.get("summary", {}).get("entry_date")
+            assert "cagr" in shard.get("summary", {})
 
 
 def test_index_html_wires_bucket4_module():

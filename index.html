@@ -8255,23 +8255,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       underlyingSplitEvents: decayUndSplitEvents,
     });
   })();
-  const b4PairBacktestResult = useMemo(() => {
-    if (!isB4Row || !b4Artifact || typeof B4Fns.pairChartResultFromArtifact !== 'function') return null;
-    return B4Fns.pairChartResultFromArtifact(b4Artifact, etfSym, {
-      startDate: btStartDate,
-      gross: Number(btGross) || 0,
-    });
-  }, [isB4Row, b4Artifact, B4Fns, etfSym, btStartDate, btGross]);
-  const effectivePairBacktestResult = isB4Row && b4PairBacktestResult?.ok
-    ? b4PairBacktestResult
-    : pairBacktestResult;
   const pairRiskSeries = (() => {
     const fn = typeof window !== 'undefined' && window.PairBacktest
       && typeof window.PairBacktest.computePairBacktestRiskSeries === 'function'
       ? window.PairBacktest.computePairBacktestRiskSeries
       : null;
-    if (!fn || !effectivePairBacktestResult?.ok || !Array.isArray(effectivePairBacktestResult.rows)) return [];
-    return fn(effectivePairBacktestResult.rows, Number(btGross) || 0);
+    if (!fn || !pairBacktestResult?.ok || !Array.isArray(pairBacktestResult.rows)) return [];
+    return fn(pairBacktestResult.rows, Number(btGross) || 0);
   })();
   const recordsBySymbol = useMemo(() => {
     const out = {};
@@ -10744,18 +10734,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           <div className="scenario-title">Pair backtest — ETF vs underlying replay</div>
           {isB4Row ? (
             <div className="scenario-sub" style={{ marginBottom: 10 }}>
-              <strong>Bucket 4 row</strong> — chart replay uses short ETF + short underlying (same leg convention as production).
-              Default <strong>h</strong> prefilled from <code>data/bucket4_backtest.json</code>
+              <strong>Bucket 4 row</strong> — chart replay uses the editable generic pair simulator.
+              Default <strong>h</strong> is prefilled from the production Bucket 4 policy snapshot when available
               {b4CadenceHint?.hLast != null ? <> (last h = <strong>{fmtNum(b4CadenceHint.hLast)}</strong></> : null}
               {b4CadenceHint?.lastIntervalDays != null ? <>, cadence ≈ <strong>{b4CadenceHint.lastIntervalDays}d</strong></> : null}.
-              Portfolio-weighted multi-pair replay lives on <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/bucket-4/backtest/${encodeURIComponent(etfSym)}`; }}>B4 Backtest</button>.
+              <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 6 }} onClick={() => { window.location.hash = `/bucket-4/pair/${encodeURIComponent(etfSym)}`; }}>Pair Report</button>
+              <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/bucket-4/backtest/${encodeURIComponent(etfSym)}`; }}>B4 Book</button>
+              <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/backtest-flow/${encodeURIComponent(etfSym)}`; }}>B4 Flow Program</button>.
             </div>
           ) : null}
-          {isB4Row ? (
-            <div className="scenario-sub" style={{ marginBottom: 10 }}>
-              B4 chart mode loads the precomputed <strong>inverse_decay_bucket4</strong> path when this ticker is present in <code>data/bucket4_backtest.json</code>. Gross and start date are display controls; hedge, cadence, slippage, and fees come from policy.
-            </div>
-          ) : (
+          {(
             <div className="scenario-sub" style={{ marginBottom: 10 }}>
               Strategy from screener <strong>β</strong>: {pairBtShortEtfLongUnd
                 ? <>short <strong>{etfSym}</strong>, long <strong>{String(undSym || '').toUpperCase()}</strong> (ETF short borrow only).</>
@@ -10768,16 +10756,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
           <div className="trade-card" style={{ marginBottom: 12 }}>
             <div className="trade-head">
-              <div className="scenario-title">{isB4Row ? 'Display controls' : 'Parameters'}</div>
+              <div className="scenario-title">Parameters</div>
             </div>
             <div className="backtest-controls">
               <div className="backtest-control"><label>ETF (short)</label><input type="text" value={etfSym} readOnly disabled style={{ opacity: 0.85 }} /></div>
               <div className="backtest-control"><label>{pairBtShortEtfLongUnd ? 'Underlying (long)' : 'Underlying (short)'}</label><input type="text" value={String(undSym || '').toUpperCase()} readOnly disabled style={{ opacity: 0.85 }} /></div>
               <div className="backtest-control"><label>Gross $</label><input type="number" min={1000} step={1000} value={btGross} onChange={(e) => setBtGross(Number(e.target.value) || 0)} /></div>
-              <div className="backtest-control"><label>Hedge h (|MV<sub>ETF</sub>| / |MV<sub>und</sub>|)</label><input type="number" min={0.01} step={0.01} value={btHedgeRatio} onChange={(e) => setBtHedgeRatio(Number(e.target.value) || 1)} disabled={isB4Row} title={isB4Row ? 'B4 uses the policy h path from the artifact.' : 'At rebalance: ETF dollar MV divided by underlying dollar MV. Default 1/|β| from this row (rough |β|·MV_ETF ≈ MV_und at rebalance).'} /></div>
-              <div className="backtest-control"><label>Every N days</label><input type="number" min={1} step={1} value={btEveryN} onChange={(e) => setBtEveryN(Number(e.target.value) || 1)} disabled={isB4Row} title={isB4Row ? 'B4 cadence is VCR/TR policy-driven.' : 'Check β-adj net/gross vs anchor on this cadence (trading days since last rebalance).'} /></div>
-              <div className="backtest-control"><label>Max |β-adj drift| (pp)</label><input type="number" min={0.1} step={0.5} value={btNetGrossTol} onChange={(e) => setBtNetGrossTol(Number(e.target.value) || 0)} disabled={isB4Row} title={isB4Row ? 'B4 drift gates are set by policy.' : 'Breach if |β-adj net/gross ratio minus anchor| exceeds this (percentage points on 0-100 scale). Defaults: inverse 10, regular 5, YieldBOOST 2.'} /></div>
-              <div className="backtest-control"><label>Slippage (bps)</label><input type="number" min={0} step={1} value={btSlippageBps} onChange={(e) => setBtSlippageBps(Number(e.target.value) || 0)} disabled={isB4Row} title={isB4Row ? 'B4 slippage comes from the policy snapshot.' : 'Per-rebalance transaction cost: slippage x traded notional / 10,000.'} /></div>
+              <div className="backtest-control"><label>Hedge h (|MV<sub>ETF</sub>| / |MV<sub>und</sub>|)</label><input type="number" min={0.01} step={0.01} value={btHedgeRatio} onChange={(e) => setBtHedgeRatio(Number(e.target.value) || 1)} title="At rebalance: ETF dollar MV divided by underlying dollar MV. Default 1/|β| from this row, with Bucket 4 prefilled from policy h when available." /></div>
+              <div className="backtest-control"><label>Every N days</label><input type="number" min={1} step={1} value={btEveryN} onChange={(e) => setBtEveryN(Number(e.target.value) || 1)} title="Check β-adj net/gross vs anchor on this cadence (trading days since last rebalance)." /></div>
+              <div className="backtest-control"><label>Max |β-adj drift| (pp)</label><input type="number" min={0.1} step={0.5} value={btNetGrossTol} onChange={(e) => setBtNetGrossTol(Number(e.target.value) || 0)} title="Breach if |β-adj net/gross ratio minus anchor| exceeds this (percentage points on 0-100 scale). Defaults: inverse 10, regular 5, YieldBOOST 2." /></div>
+              <div className="backtest-control"><label>Slippage (bps)</label><input type="number" min={0} step={1} value={btSlippageBps} onChange={(e) => setBtSlippageBps(Number(e.target.value) || 0)} title="Per-rebalance transaction cost: slippage x traded notional / 10,000." /></div>
               <div className="backtest-control">
                 <label>Start date</label>
                 <input
@@ -10797,68 +10785,66 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             {pairBacktestWindow.startHint ? (
               <div className="scenario-warning" style={{ marginTop: 8 }}>{pairBacktestWindow.startHint}</div>
             ) : null}
-            {!isB4Row ? <div className="trade-note">
+            <div className="trade-note">
               Rebalance at close on each <strong>N</strong>th day when <strong>|β-adj net/gross − anchor|</strong> exceeds your tolerance; anchor resets at inception and after each rebalance. T-cost: slippage bps × traded notional.
-            </div> : null}
+              {isB4Row ? <> The dedicated Pair Report uses the static production-style B4 path; this chart tab remains editable for what-if pair replay.</> : null}
+            </div>
           </div>
 
-          {!isB4Row && etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics for backtest…</div>}
-          {!isB4Row && etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
-          {isB4Row && b4PairBacktestResult && !b4PairBacktestResult.ok && (
-            <div className="scenario-warning">{b4PairBacktestResult.error || 'This B4 ticker is not in the current production replay artifact.'}</div>
+          {etfMetricsLoading && <div className="scenario-warning">Loading ETF metrics for backtest…</div>}
+          {etfMetricsError && <div className="scenario-warning">{etfMetricsError}</div>}
+          {!etfMetricsLoading && !etfMetricsError && !pairBacktestResult?.ok && (
+            <div className="scenario-warning">{pairBacktestResult?.error || 'Backtest unavailable.'}</div>
           )}
-          {!isB4Row && !etfMetricsLoading && !etfMetricsError && !effectivePairBacktestResult?.ok && (
-            <div className="scenario-warning">{effectivePairBacktestResult?.error || 'Backtest unavailable.'}</div>
-          )}
-          {(isB4Row ? effectivePairBacktestResult?.ok : (!etfMetricsLoading && !etfMetricsError && effectivePairBacktestResult?.ok)) && (
+          {!etfMetricsLoading && !etfMetricsError && pairBacktestResult?.ok && (
             <>
-              {!isB4Row ? <TrCoverageBadge coverage={decayTrCoverage} etfLabel={etfSym} /> : null}
-              {!isB4Row ? pairBacktestDataWarnings.map((w) => (
+              <TrCoverageBadge coverage={decayTrCoverage} etfLabel={etfSym} />
+              {pairBacktestDataWarnings.map((w) => (
                 <div key={w.key} className="scenario-warning" style={{ marginTop: 10 }}>
                   <strong>Data range note:</strong> {w.text}
                 </div>
-              )) : null}
+              ))}
               <div className="chart-stats" style={{ marginTop: 12 }}>
                 <div className="chart-stat">
                   <div className="cs-label">Net PnL</div>
-                  <div className="cs-value">{fmtMoney(effectivePairBacktestResult.summary.netPnl)}</div>
-                  <div className="cs-sub">{effectivePairBacktestResult.inception} → {effectivePairBacktestResult.end}</div>
+                  <div className="cs-value">{fmtMoney(pairBacktestResult.summary.netPnl)}</div>
+                  <div className="cs-sub">{pairBacktestResult.inception} → {pairBacktestResult.end}</div>
                 </div>
                 <div className="chart-stat">
                   <div className="cs-label">ETF leg / Und leg</div>
                   <div className="cs-value">
-                    {fmtMoney(effectivePairBacktestResult.summary.longPnl)} / {fmtMoney(effectivePairBacktestResult.summary.shortPnl)}
+                    {fmtMoney(pairBacktestResult.summary.longPnl)} / {fmtMoney(pairBacktestResult.summary.shortPnl)}
                   </div>
                   <div className="cs-sub">Cumulative mark-to-market (before borrow &amp; costs)</div>
                 </div>
                 <div className="chart-stat">
                   <div className="cs-label">Borrow cost</div>
-                  <div className="cs-value">{fmtMoney(effectivePairBacktestResult.summary.borrowPaid)}</div>
+                  <div className="cs-value">{fmtMoney(pairBacktestResult.summary.borrowPaid)}</div>
                   <div className="cs-sub">rate/252 × trapezoid ETF short MV (ETF leg only)</div>
                 </div>
-                {(Number(effectivePairBacktestResult.summary.distributionsPaid) || 0) > 0 ? (
+                {(Number(pairBacktestResult.summary.distributionsPaid) || 0) > 0 ? (
                   <div className="chart-stat">
                     <div className="cs-label">Distributions (short)</div>
-                    <div className="cs-value">{fmtMoney(effectivePairBacktestResult.summary.distributionsPaid)}</div>
+                    <div className="cs-value">{fmtMoney(pairBacktestResult.summary.distributionsPaid)}</div>
                     <div className="cs-sub">Explicit ex-date debits (fallback when adj. close missing)</div>
                   </div>
                 ) : null}
                 <div className="chart-stat">
                   <div className="cs-label">T-costs</div>
-                  <div className="cs-value">{fmtMoney(effectivePairBacktestResult.summary.tCosts)}</div>
-                  <div className="cs-sub">{fmtNum(effectivePairBacktestResult.summary.nRebalances)} rebalance marks</div>
+                  <div className="cs-value">{fmtMoney(pairBacktestResult.summary.tCosts)}</div>
+                  <div className="cs-sub">{fmtNum(pairBacktestResult.summary.nRebalances)} rebalance marks</div>
                 </div>
               </div>
               <div className="trade-card" style={{ marginTop: 12 }}>
                 <div className="trade-head">
                   <div>
                     <div className="scenario-title">{etfSym} vs {String(undSym || '').toUpperCase()} — PnL breakdown</div>
-                    <div className="scenario-sub">{isB4Row ? 'Bucket 4 mode uses the precomputed inverse_decay_bucket4 path and VCR/TR rebalance cadence.' : 'Net = ETF leg + und leg − borrow cost − distributions (explicit fallback only) − transaction costs. Borrow cost is a positive dollar drag subtracted from net.'}</div>
+                    <div className="scenario-sub">{isB4Row ? 'Editable pair replay. Use Pair Report for the static production-style Bucket 4 path and cadence.' : 'Net = ETF leg + und leg − borrow cost − distributions (explicit fallback only) − transaction costs. Borrow cost is a positive dollar drag subtracted from net.'}</div>
                   </div>
                 </div>
-                <PairBacktestChart result={effectivePairBacktestResult} />
-                {!isB4Row ? <PairBacktestExposureChart result={effectivePairBacktestResult} /> : null}
-                <PairBacktestRiskMetricsStats riskSeries={pairRiskSeries} pairResult={effectivePairBacktestResult} />
+                <PairBacktestChart result={pairBacktestResult} />
+                <PairBacktestExposureChart result={pairBacktestResult} />
+                <PairBacktestRiskMetricsStats riskSeries={pairRiskSeries} pairResult={pairBacktestResult} />
               </div>
               <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 280, overflow: 'auto' }}>
                 <table className="scenario-table">
@@ -10866,8 +10852,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     <tr>
                       <th>Date</th>
                       <th>Net PnL</th>
-                      <th>{effectivePairBacktestResult?.legChartLabels?.etf || 'ETF'}</th>
-                      <th>{effectivePairBacktestResult?.legChartLabels?.und || 'Und'}</th>
+                      <th>{pairBacktestResult?.legChartLabels?.etf || 'ETF'}</th>
+                      <th>{pairBacktestResult?.legChartLabels?.und || 'Und'}</th>
                       <th>Borrow cost</th>
                       <th>T-costs</th>
                       <th>Net/gross</th>
@@ -10875,7 +10861,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                     </tr>
                   </thead>
                   <tbody>
-                    {[...(effectivePairBacktestResult.rows || [])].slice(-24).reverse().map((row) => (
+                    {[...(pairBacktestResult.rows || [])].slice(-24).reverse().map((row) => (
                       <tr key={row.date}>
                         <td>{row.date}</td>
                         <td>{fmtMoney(row.netPnl)}</td>
@@ -13623,6 +13609,297 @@ function isBucket4Record(record) {
   return Boolean(record?.protected) && String(record?.product_class || '').toLowerCase() === 'inverse';
 }
 
+function bucket4ShardRows(shard) {
+  const d = shard?.daily || {};
+  const dates = Array.isArray(d.dates) ? d.dates : [];
+  return dates.map((date, i) => ({
+    date,
+    equity: toFiniteNum(d.equity?.[i]),
+    netPnl: toFiniteNum(d.net_pnl?.[i]),
+    drawdown: toFiniteNum(d.drawdown?.[i]),
+    h: toFiniteNum(d.h_used?.[i]),
+    gross: toFiniteNum(d.gross_exposure?.[i]),
+    totalGross: toFiniteNum(d.total_gross?.[i]),
+    borrow: toFiniteNum(d.borrow_cost_cum?.[i]),
+    tcost: toFiniteNum(d.tcost_cum?.[i]),
+    rebalance: Boolean(Number(d.rebalance?.[i])),
+  }));
+}
+
+function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
+  const B4 = window.Bucket4Backtest || {};
+  const sym = String(symbol || '').toUpperCase();
+  const [artifact, setArtifact] = useState(null);
+  const [shard, setShard] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const art = typeof B4.loadArtifact === 'function' ? await B4.loadArtifact() : null;
+        const pair = typeof B4.loadPairShard === 'function'
+          ? await B4.loadPairShard(sym, { artifact: art })
+          : null;
+        if (cancelled) return;
+        setArtifact(art);
+        setShard(pair);
+      } catch (e) {
+        if (!cancelled) setError(e?.message || 'Bucket 4 pair report unavailable');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, [sym]);
+
+  const rows = useMemo(() => bucket4ShardRows(shard), [shard]);
+  const summary = shard?.summary || {};
+  const prod = Boolean(shard?.in_production_book);
+  const und = String(shard?.underlying || summary.underlying || '').toUpperCase();
+  const fmtPctAnn = (x, digits = 1) => (typeof B4.fmtPctAnnual === 'function' ? B4.fmtPctAnnual(x, digits) : fmt(x));
+  const statusText = prod ? 'Production' : 'Gated / Research';
+
+  return (
+    <div className="backtest-page">
+      <div className="chart-header">
+        <div className="chart-header-left">
+          <button className="chart-view-btn" onClick={() => { window.location.hash = '/bucket-4/backtest'; }}>← B4 Book</button>
+          <span className="etf-sym">{sym || 'Bucket 4 Pair'}</span>
+          <span className="chart-und">vs {und || '—'}</span>
+          <span className={cls('bucket-pill', prod ? 'bucket_3_inverse' : '')}>{statusText}</span>
+        </div>
+        <div className="chart-header-right">
+          <button type="button" className="chart-view-btn" onClick={() => { window.location.hash = `/chart/${encodeURIComponent(sym)}/backtest`; }}>Chart Backtest</button>
+          <button type="button" className="chart-view-btn" onClick={() => { window.location.hash = `/backtest-flow/${encodeURIComponent(sym)}`; }}>Flow Program</button>
+        </div>
+      </div>
+
+      {loading && <div className="scenario-warning">Loading pair report…</div>}
+      {error && !loading && <div className="error-banner">{error}</div>}
+      {!loading && shard && (
+        <>
+          <div className="scenario-sub" style={{ marginBottom: 12 }}>
+            Entered backtest on <strong>{summary.entry_date || '—'}</strong> · latest <strong>{summary.latest_date || '—'}</strong> ·
+            gate <strong>{summary.gate_reason || shard.gate_reason || '—'}</strong> · model <strong>{summary.model_status || shard.model_status || '—'}</strong>.
+            {artifact?.generated_at_utc ? <> Artifact: <code>{artifact.generated_at_utc}</code>.</> : null}
+          </div>
+
+          <div className="chart-stats" style={{ marginBottom: 12 }}>
+            <div className="chart-stat"><div className="cs-label">CAGR</div><div className="cs-value">{summary.cagr != null ? fmtPctAnn(summary.cagr) : '—'}</div><div className="cs-sub">{summary.price_rows ?? 0} priced rows</div></div>
+            <div className="chart-stat"><div className="cs-label">Ann. vol / Sharpe</div><div className="cs-value">{summary.ann_vol != null ? fmtPctAnn(summary.ann_vol) : '—'} / {summary.sharpe != null ? Number(summary.sharpe).toFixed(2) : '—'}</div><div className="cs-sub">daily replay returns</div></div>
+            <div className="chart-stat"><div className="cs-label">Max drawdown</div><div className="cs-value">{summary.max_drawdown != null ? fmtPctAnn(summary.max_drawdown) : '—'}</div><div className="cs-sub">peak-to-trough equity</div></div>
+            <div className="chart-stat"><div className="cs-label">Production weight</div><div className="cs-value">{summary.portfolio_weight != null ? fmtPctAnn(summary.portfolio_weight, 1) : '—'}</div><div className="cs-sub">{prod ? 'production book' : 'not in production book'}</div></div>
+            <div className="chart-stat"><div className="cs-label">h last / rebals</div><div className="cs-value">{summary.h_last != null ? Number(summary.h_last).toFixed(3) : '—'} / {fmtNum(summary.n_rebalances || 0)}</div><div className="cs-sub">dynamic hedge cadence</div></div>
+          </div>
+
+          {!rows.length ? (
+            <div className="scenario-warning">No chartable pair path for this row yet. Gate reason: {summary.gate_reason || shard.gate_reason || '—'}.</div>
+          ) : (
+            <>
+              <div className="trade-card" style={{ marginBottom: 12 }}>
+                <div className="trade-head"><div><div className="scenario-title">Equity and PnL</div><div className="scenario-sub">Production-style Bucket 4 pair path for this ETF.</div></div></div>
+                <SimpleSeriesPlot series={rows} valueKey="netPnl" color="rgba(34,211,238,0.95)" label="Net PnL" formatValue={(v) => fmtMoney(v)} overlayValueKey="totalGross" overlayColor="rgba(52,211,153,0.9)" overlayLabel="Gross leg PnL" />
+              </div>
+              <div className="trade-card" style={{ marginBottom: 12 }}>
+                <div className="trade-head"><div className="scenario-title">Risk path</div></div>
+                <SimpleSeriesPlot series={rows} valueKey="drawdown" color="rgba(248,113,113,0.95)" label="Drawdown" formatValue={(v) => fmt(v)} includeZero />
+              </div>
+              <div className="trade-card" style={{ marginBottom: 12 }}>
+                <div className="trade-head"><div className="scenario-title">Hedge and gross exposure</div></div>
+                <SimpleSeriesPlot series={rows} valueKey="h" color="rgba(139,92,246,0.95)" label="h" formatValue={(v) => Number(v).toFixed(3)} overlayValueKey="gross" overlayColor="rgba(245,158,11,0.95)" overlayLabel="Gross exposure" includeZero={false} />
+              </div>
+            </>
+          )}
+
+          <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 280, overflow: 'auto' }}>
+            <table className="scenario-table">
+              <thead><tr><th>Date</th><th>Net PnL</th><th>Gross PnL</th><th>Drawdown</th><th>h</th><th>Borrow</th><th>T-costs</th><th>Rebal</th></tr></thead>
+              <tbody>
+                {[...rows].slice(-32).reverse().map((r) => (
+                  <tr key={r.date}><td>{r.date}</td><td>{fmtMoney(r.netPnl)}</td><td>{fmtMoney(r.totalGross)}</td><td>{r.drawdown != null ? fmt(r.drawdown) : '—'}</td><td>{r.h != null ? Number(r.h).toFixed(3) : '—'}</td><td>{fmtMoney(r.borrow)}</td><td>{fmtMoney(r.tcost)}</td><td>{r.rebalance ? 'yes' : '—'}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function InverseFlowProgramPage({ records = [], preloadSymbol = '' }) {
+  const [metricsBySymbol, setMetricsBySymbol] = useState({});
+  const [borrowBySymbol, setBorrowBySymbol] = useState({});
+  const [distBySymbol, setDistBySymbol] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [legs, setLegs] = useState([]);
+  const [addSymbol, setAddSymbol] = useState('');
+  const [everyN, setEveryN] = useState(5);
+  const [slippageBps, setSlippageBps] = useState(27);
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+
+  const recordsBySymbol = useMemo(() => {
+    const out = {};
+    (Array.isArray(records) ? records : []).forEach((r) => {
+      const sym = String(r?.symbol || '').toUpperCase();
+      if (sym) out[sym] = r;
+    });
+    return out;
+  }, [records]);
+
+  const choices = useMemo(() => (
+    (Array.isArray(records) ? records : [])
+      .filter((r) => isBucket4Record(r) || r?.bucket === 'bucket_3_inverse' || String(r?.product_class || '').toLowerCase() === 'inverse' || Number(r?.delta) < 0)
+      .map((r) => ({ symbol: String(r?.symbol || '').toUpperCase(), underlying: String(r?.underlying || '').toUpperCase(), delta: Number(r?.delta) }))
+      .filter((x) => x.symbol)
+      .sort((a, b) => (a.underlying || '').localeCompare(b.underlying || '') || a.symbol.localeCompare(b.symbol))
+  ), [records]);
+
+  const addLeg = useCallback((symbol, amount = 10000) => {
+    const sym = String(symbol || '').toUpperCase();
+    if (!sym) return;
+    setLegs((cur) => cur.some((x) => String(x.symbol).toUpperCase() === sym)
+      ? cur
+      : [...cur, { symbol: sym, flowDollars: amount, enabled: true }]);
+  }, []);
+
+  useEffect(() => {
+    const sym = String(preloadSymbol || '').toUpperCase();
+    const first = sym || choices[0]?.symbol || '';
+    if (first) {
+      setAddSymbol(first);
+      setLegs([{ symbol: first, flowDollars: 10000, enabled: true }]);
+    }
+  }, [preloadSymbol, choices.length]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadDistributions = async () => {
+      if (ETF_DISTRIBUTIONS_CACHE?.bySymbol) return ETF_DISTRIBUTIONS_CACHE.bySymbol;
+      const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+      const res = await fetch(`${ETF_DISTRIBUTIONS_URL}${cacheBust}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`etf distributions HTTP ${res.status}`);
+      const payload = await res.json();
+      const bySymbol = {};
+      (Array.isArray(payload?.rows) ? payload.rows : []).forEach((row) => {
+        const sym = String(row?.ticker || row?.symbol || '').toUpperCase();
+        if (!sym) return;
+        if (!bySymbol[sym]) bySymbol[sym] = [];
+        bySymbol[sym].push(row);
+      });
+      ETF_DISTRIBUTIONS_CACHE = { bySymbol };
+      return bySymbol;
+    };
+    Promise.all([
+      loadEtfMetricsCache(),
+      loadBorrowHistoryCache(),
+      loadDistributions().catch(() => ({})),
+    ]).then(([metrics, borrow, dists]) => {
+      if (cancelled) return;
+      setMetricsBySymbol(metrics?.bySymbol || {});
+      setBorrowBySymbol(borrow || {});
+      setDistBySymbol(dists || {});
+      setLoading(false);
+    }).catch((e) => {
+      if (!cancelled) {
+        setError(e?.message || 'Flow data unavailable');
+        setLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const result = useMemo(() => {
+    const sim = window.PairBacktest?.simulateShortFlowBacktest;
+    if (typeof sim !== 'function') return { ok: false, error: 'Flow backtest module unavailable', rows: [], bySymbol: {}, summary: {} };
+    return sim({
+      legs,
+      metricsBySymbol,
+      recordsBySymbol,
+      borrowHistoryBySymbol: borrowBySymbol,
+      distributionsBySymbol: distBySymbol,
+      splitEventsBySymbol: {},
+      everyNDays: Number(everyN) || 5,
+      startDate,
+      endDate,
+      slippageBps: Number(slippageBps) || 0,
+    });
+  }, [legs, metricsBySymbol, recordsBySymbol, borrowBySymbol, distBySymbol, everyN, startDate, endDate, slippageBps]);
+
+  const riskSeries = useMemo(() => {
+    const fn = window.PairBacktest?.computePairBacktestRiskSeries;
+    const gross = Number(result?.summary?.cumulativeFlowAdded) || 0;
+    return typeof fn === 'function' && result?.ok && gross > 0 ? fn(result.rows || [], gross) : [];
+  }, [result]);
+
+  return (
+    <div className="backtest-page">
+      <div className="chart-header">
+        <div className="chart-header-left">
+          <button className="chart-view-btn" onClick={() => { window.location.hash = '/'; }}>← Dashboard</button>
+          <span className="etf-sym">Inverse Flow Program</span>
+          <span className="chart-und">recurring inverse ETF shorts</span>
+        </div>
+        <div className="chart-header-right">
+          <button className="chart-view-btn" onClick={() => { window.location.hash = '/bucket-4/backtest'; }}>B4 Book</button>
+        </div>
+      </div>
+      <div className="scenario-sub" style={{ marginBottom: 12 }}>
+        Add fixed short notional to selected inverse/Bucket 4 ETFs every N valid trading days. Each ETF begins on its own first tradable row.
+      </div>
+
+      <div className="trade-card" style={{ marginBottom: 12 }}>
+        <div className="trade-head"><div className="scenario-title">Parameters</div></div>
+        <div className="backtest-controls">
+          <div className="backtest-control"><label>Every N days</label><input type="number" min={1} step={1} value={everyN} onChange={(e) => setEveryN(Number(e.target.value) || 1)} /></div>
+          <div className="backtest-control"><label>Slippage (bps)</label><input type="number" min={0} step={1} value={slippageBps} onChange={(e) => setSlippageBps(Number(e.target.value) || 0)} /></div>
+          <div className="backtest-control"><label>Start date</label><input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></div>
+          <div className="backtest-control"><label>End date</label><input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></div>
+          <div className="backtest-control"><label>Add ETF</label><select value={addSymbol} onChange={(e) => setAddSymbol(e.target.value)}><option value="">Choose ETF</option>{choices.map((x) => <option key={x.symbol} value={x.symbol}>{x.symbol}{x.underlying ? ` / ${x.underlying}` : ''}</option>)}</select></div>
+          <div className="backtest-control" style={{ alignSelf: 'flex-end' }}><button className="chart-view-btn" onClick={() => addLeg(addSymbol, 10000)} disabled={!addSymbol}>Add ETF</button></div>
+          <div className="backtest-control" style={{ alignSelf: 'flex-end' }}><button className="chart-view-btn" onClick={() => choices.forEach((x) => addLeg(x.symbol, 10000))}>Add all</button></div>
+        </div>
+        <div className="scenario-table-wrap" style={{ marginTop: 10, maxHeight: 240, overflow: 'auto' }}>
+          <table className="scenario-table"><thead><tr><th>On</th><th>ETF</th><th>Underlying</th><th>Flow $</th><th></th></tr></thead><tbody>
+            {legs.map((leg) => {
+              const sym = String(leg.symbol || '').toUpperCase();
+              const rec = recordsBySymbol[sym] || {};
+              return <tr key={sym}><td><input type="checkbox" checked={leg.enabled !== false} onChange={(e) => setLegs((arr) => arr.map((x) => String(x.symbol).toUpperCase() === sym ? { ...x, enabled: e.target.checked } : x))} /></td><td>{sym}</td><td>{String(rec.underlying || '').toUpperCase() || '—'}</td><td><input type="number" min={0} step={1000} value={leg.flowDollars} onChange={(e) => setLegs((arr) => arr.map((x) => String(x.symbol).toUpperCase() === sym ? { ...x, flowDollars: Number(e.target.value) || 0 } : x))} style={{ width: 110 }} /></td><td><button className="chart-view-btn" onClick={() => setLegs((arr) => arr.filter((x) => String(x.symbol).toUpperCase() !== sym))}>Remove</button></td></tr>;
+            })}
+          </tbody></table>
+        </div>
+      </div>
+
+      {loading && <div className="scenario-warning">Loading flow data…</div>}
+      {error && !loading && <div className="scenario-warning">{error}</div>}
+      {!loading && !error && !result?.ok && <div className="scenario-warning">{result?.error || 'Flow backtest unavailable.'}</div>}
+      {!loading && !error && result?.ok && (
+        <>
+          <div className="chart-stats" style={{ marginBottom: 12 }}>
+            <div className="chart-stat"><div className="cs-label">Net PnL</div><div className="cs-value">{fmtMoney(result.summary.netPnl)}</div><div className="cs-sub">{result.inception} → {result.end}</div></div>
+            <div className="chart-stat"><div className="cs-label">Total flow added</div><div className="cs-value">{fmtMoney(result.summary.cumulativeFlowAdded)}</div><div className="cs-sub">{fmtNum(result.summary.nFlowOrders)} orders</div></div>
+            <div className="chart-stat"><div className="cs-label">Current short MV</div><div className="cs-value">{fmtMoney(result.summary.currentShortMarketValue)}</div><div className="cs-sub">{fmtNum(result.summary.nSymbols)} ETFs</div></div>
+            <div className="chart-stat"><div className="cs-label">Borrow / T-costs</div><div className="cs-value">{fmtMoney(result.summary.borrowPaid)} / {fmtMoney(result.summary.tCosts)}</div><div className="cs-sub">fee-only borrow history</div></div>
+          </div>
+          <div className="trade-card" style={{ marginBottom: 12 }}>
+            <div className="trade-head"><div><div className="scenario-title">Flow portfolio</div><div className="scenario-sub">Net = short ETF mark-to-market minus borrow and transaction costs.</div></div></div>
+            <PairBacktestChart result={result} />
+            <SimpleSeriesPlot series={result.rows} valueKey="currentShortMarketValue" color="rgba(16,185,129,0.95)" label="Current short MV" formatValue={(v) => fmtMoney(v)} overlayValueKey="cumulativeFlowAdded" overlayColor="rgba(96,165,250,0.95)" overlayLabel="Total flow" />
+            <PairBacktestRiskMetricsStats riskSeries={riskSeries} pairResult={result} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime = null, onNavigateToChart = null }) {
   const B4 = window.Bucket4Backtest || {};
   const [artifact, setArtifact] = useState(null);
@@ -13634,6 +13911,7 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
   const [highlightEtf, setHighlightEtf] = useState('');
   const [bookConfig, setBookConfig] = useState({});
   const [bookSort, setBookSort] = useState('weight');
+  const [pairFilter, setPairFilter] = useState('all');
 
   useEffect(() => {
     let cancelled = false;
@@ -13704,7 +13982,10 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
   ), [artifact, bookConfig, startDate, endDate, gross, B4]);
 
   const pairs = useMemo(() => {
-    const rows = Array.isArray(artifact?.pairs) ? artifact.pairs : [];
+    const rows = typeof B4.pairManifestRows === 'function'
+      ? B4.pairManifestRows(artifact)
+      : (Array.isArray(artifact?.pairs) ? artifact.pairs : []);
+    const prodRows = new Set((Array.isArray(artifact?.pairs) ? artifact.pairs : []).map((p) => String(p.etf || '').toUpperCase()));
     const normCfg = typeof B4.normalizeBookWeights === 'function'
       ? B4.normalizeBookWeights(bookConfig)
       : bookConfig;
@@ -13721,24 +14002,33 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
         ...p,
         etf,
         und,
+        inProduction: Boolean(p.in_production_book || prodRows.has(etf)),
         hLast: hState.h_last,
         meanH: hState.mean_h ?? p.mean_h,
         lastInterval: hState.last_interval_days,
-        nRebalances: hState.n_rebalances,
+        nRebalances: hState.n_rebalances ?? p.n_rebalances,
         enabled: cfg.enabled !== false,
         customWeight: Number(cfg.weight) || 0,
         contribution: contrib,
       };
+    }).filter((p) => {
+      if (pairFilter === 'production') return p.inProduction;
+      if (pairFilter === 'research') return !p.inProduction;
+      return true;
     });
     const key = String(bookSort || 'weight');
     return mapped.sort((a, b) => {
       if (key === 'edge') return (Number(b.bucket4_net_edge_annual) || -Infinity) - (Number(a.bucket4_net_edge_annual) || -Infinity);
       if (key === 'cagr') return (Number(b.cagr) || -Infinity) - (Number(a.cagr) || -Infinity);
+      if (key === 'vol') return (Number(a.ann_vol ?? a.vol_annual) || Infinity) - (Number(b.ann_vol ?? b.vol_annual) || Infinity);
+      if (key === 'sharpe') return (Number(b.sharpe) || -Infinity) - (Number(a.sharpe) || -Infinity);
+      if (key === 'maxdd') return (Number(b.max_drawdown) || -Infinity) - (Number(a.max_drawdown) || -Infinity);
+      if (key === 'gate') return String(a.gate_reason || '').localeCompare(String(b.gate_reason || ''));
       if (key === 'contribution') return (Number(b.contribution) || -Infinity) - (Number(a.contribution) || -Infinity);
       if (key === 'borrow') return (Number(a.borrow) || Infinity) - (Number(b.borrow) || Infinity);
-      return (Number(b.customWeight || b.portfolio_weight) || 0) - (Number(a.customWeight || a.portfolio_weight) || 0);
+      return (Number(b.customWeight || b.production_weight || b.portfolio_weight) || 0) - (Number(a.customWeight || a.production_weight || a.portfolio_weight) || 0);
     });
-  }, [artifact, B4, bookConfig, customBook, bookSort]);
+  }, [artifact, B4, bookConfig, customBook, bookSort, pairFilter]);
 
   const b4UniverseCount = useMemo(
     () => (Array.isArray(records) ? records : []).filter(isBucket4Record).length,
@@ -13771,6 +14061,21 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
     }).filter(([sym]) => sym);
     const total = vals.reduce((s, [, v]) => s + v, 0) || vals.length || 1;
     setBookConfig(Object.fromEntries(vals.map(([sym, v]) => [sym, { enabled: true, weight: total > 0 ? v / total : 0 }])));
+  };
+  const downloadPairCsv = () => {
+    const csv = typeof B4.exportPairManifestCsv === 'function'
+      ? B4.exportPairManifestCsv(pairs)
+      : '';
+    if (!csv) return;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'bucket4_pair_summary.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   };
   const updatePairConfig = (sym, patch) => {
     const s = String(sym || '').toUpperCase();
@@ -13872,12 +14177,27 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
                   <option value="contribution">Contribution</option>
                   <option value="edge">B4 net edge</option>
                   <option value="cagr">Pair CAGR</option>
+                  <option value="vol">Vol</option>
+                  <option value="sharpe">Sharpe</option>
+                  <option value="maxdd">Max DD</option>
+                  <option value="gate">Gate reason</option>
                   <option value="borrow">Borrow</option>
                 </select>
               </div>
+              <div className="backtest-control">
+                <label>Pair universe</label>
+                <select value={pairFilter} onChange={(e) => setPairFilter(e.target.value)}>
+                  <option value="all">All B4</option>
+                  <option value="production">Production</option>
+                  <option value="research">Gated / Research</option>
+                </select>
+              </div>
+              <div className="backtest-control" style={{ alignSelf: 'flex-end' }}>
+                <button type="button" className="chart-view-btn" onClick={downloadPairCsv}>Export CSV</button>
+              </div>
             </div>
             <div className="trade-note">
-              Production mode uses baked portfolio equity. Custom mode reblends each pair's precomputed unit returns, so it is fast and faithful to the path, but it does not rerun the Kelly/QCQP solver or ratchet.
+              Production mode uses baked portfolio equity. Custom weights are a what-if reblend of available production pair paths; they do not rerun the Kelly/QCQP solver, gates, or ratchet.
             </div>
           </div>
 
@@ -13902,6 +14222,8 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
                   <th>Use</th>
                   <th>ETF</th>
                   <th>Und</th>
+                  <th>Status</th>
+                  <th>Entry</th>
                   <th>Custom wt</th>
                   <th>Prod wt</th>
                   <th>B4 net edge</th>
@@ -13912,6 +14234,7 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
                   <th>Pair CAGR</th>
                   <th>Vol / Sharpe</th>
                   <th>MaxDD</th>
+                  <th>Gate</th>
                   <th>Contrib</th>
                   <th></th>
                 </tr>
@@ -13925,10 +14248,13 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
                         checked={p.enabled}
                         onChange={(e) => updatePairConfig(p.etf, { enabled: e.target.checked })}
                         title={`Include ${p.etf} in the custom book`}
+                        disabled={!p.inProduction}
                       />
                     </td>
                     <td><strong>{p.etf}</strong></td>
                     <td>{p.und}</td>
+                    <td>{p.inProduction ? 'Production' : 'Research'}</td>
+                    <td>{p.entry_date || p.first_metrics_date || '—'}</td>
                     <td>
                       <input
                         type="number"
@@ -13938,22 +14264,30 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
                         value={Number.isFinite(Number(p.customWeight)) ? (Number(p.customWeight) * 100).toFixed(1) : '0.0'}
                         onChange={(e) => updatePairConfig(p.etf, { weight: Math.max(0, Number(e.target.value) || 0) / 100, enabled: true })}
                         style={{ width: 76 }}
+                        disabled={!p.inProduction}
                       />
                     </td>
-                    <td>{p.portfolio_weight != null ? fmtPctAnn(p.portfolio_weight, 1) : '—'}</td>
+                    <td>{(p.production_weight ?? p.portfolio_weight) != null ? fmtPctAnn(p.production_weight ?? p.portfolio_weight, 1) : '—'}</td>
                     <td>{p.bucket4_net_edge_annual != null ? fmtPctAnn(p.bucket4_net_edge_annual) : '—'}</td>
                     <td>{p.borrow != null ? fmtPctAnn(p.borrow) : '—'}</td>
                     <td>{p.beta != null ? Number(p.beta).toFixed(2) : '—'}</td>
                     <td>{p.hLast != null ? Number(p.hLast).toFixed(3) : '—'} / {p.meanH != null ? Number(p.meanH).toFixed(3) : '—'}</td>
                     <td>{p.lastInterval != null ? `${p.lastInterval}d` : '—'}</td>
                     <td>{p.cagr != null ? fmtPctAnn(p.cagr) : '—'}</td>
-                    <td>{p.ann_vol != null ? fmtPctAnn(p.ann_vol) : '—'} / {p.sharpe != null ? Number(p.sharpe).toFixed(2) : '—'}</td>
+                    <td>{(p.ann_vol ?? p.vol_annual) != null ? fmtPctAnn(p.ann_vol ?? p.vol_annual) : '—'} / {p.sharpe != null ? Number(p.sharpe).toFixed(2) : '—'}</td>
                     <td>{p.max_drawdown != null ? fmtPctAnn(p.max_drawdown) : '—'}</td>
+                    <td>{p.gate_reason || '—'}</td>
                     <td className={Number(p.contribution) >= 0 ? 'val-positive' : 'val-negative'}>{fmtMoney((Number(p.contribution) || 0) * (Number(gross) || 100000))}</td>
                     <td>
                       <button type="button" className="chart-view-btn" onClick={() => {
+                        window.location.hash = `#/bucket-4/pair/${encodeURIComponent(p.etf)}`;
+                      }}>Report</button>
+                      <button type="button" className="chart-view-btn" onClick={() => {
                         window.location.hash = `#/chart/${encodeURIComponent(p.etf)}/backtest`;
                       }}>Chart ↗</button>
+                      <button type="button" className="chart-view-btn" onClick={() => {
+                        window.location.hash = `#/backtest-flow/${encodeURIComponent(p.etf)}`;
+                      }}>Flow</button>
                     </td>
                   </tr>
                 ))}
@@ -13983,8 +14317,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [showYbEdge, setShowYbEdge] = useState(false);
   const [showOps, setShowOps] = useState(false);
   const [showBacktestFlow, setShowBacktestFlow] = useState(false);
+  const [showInverseFlowProgram, setShowInverseFlowProgram] = useState(false);
+  const [showBucket4PairReport, setShowBucket4PairReport] = useState(false);
   const [showBucket5, setShowBucket5] = useState(false);
   const [backtestFlowPreloadSymbol, setBacktestFlowPreloadSymbol] = useState('');
+  const [inverseFlowPreloadSymbol, setInverseFlowPreloadSymbol] = useState('');
+  const [bucket4PairSymbol, setBucket4PairSymbol] = useState('');
   const [eventCalendar, setEventCalendar] = useState(null);
   const [letfFlowsCache, setLetfFlowsCache] = useState(LETF_REBALANCE_FLOWS_CACHE);
   const [letfIntradayCache, setLetfIntradayCache] = useState(LETF_INTRADAY_FLOWS_CACHE);
@@ -14162,6 +14500,46 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   useEffect(() => {
     const handleHash = () => {
       const hash = window.location.hash;
+      const b4PairRoute = window.Bucket4Backtest && typeof window.Bucket4Backtest.parseBucket4PairRoute === 'function'
+        ? window.Bucket4Backtest.parseBucket4PairRoute(hash)
+        : { matches: false };
+      if (b4PairRoute?.matches) {
+        setChartRecord(null);
+        setShowInfo(false);
+        setShowNews(false);
+        setShowFlow(false);
+        setShowYbEdge(false);
+        setShowOps(false);
+        setShowBacktestFlow(false);
+        setShowInverseFlowProgram(false);
+        setShowBucket4PairReport(true);
+        setShowBucket5(false);
+        setBacktestFlowPreloadSymbol('');
+        setInverseFlowPreloadSymbol('');
+        setBucket4PairSymbol(String(b4PairRoute.symbol || '').toUpperCase());
+        setChartDefaultPanel('chart');
+        return;
+      }
+      const inverseFlowRoute = window.PairBacktest && typeof window.PairBacktest.parseShortFlowBacktestRoute === 'function'
+        ? window.PairBacktest.parseShortFlowBacktestRoute(hash)
+        : { matches: false };
+      if (inverseFlowRoute?.matches && !inverseFlowRoute.compatibility) {
+        setChartRecord(null);
+        setShowInfo(false);
+        setShowNews(false);
+        setShowFlow(false);
+        setShowYbEdge(false);
+        setShowOps(false);
+        setShowBacktestFlow(false);
+        setShowInverseFlowProgram(true);
+        setShowBucket4PairReport(false);
+        setShowBucket5(false);
+        setBacktestFlowPreloadSymbol('');
+        setInverseFlowPreloadSymbol(String(inverseFlowRoute.preloadSymbol || '').toUpperCase());
+        setBucket4PairSymbol('');
+        setChartDefaultPanel('chart');
+        return;
+      }
       const b4Route = window.Bucket4Backtest && typeof window.Bucket4Backtest.parseBucket4BacktestRoute === 'function'
         ? window.Bucket4Backtest.parseBucket4BacktestRoute(hash)
         : { matches: false };
@@ -14173,8 +14551,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(false);
         setShowOps(false);
         setShowBacktestFlow(true);
+        setShowInverseFlowProgram(false);
+        setShowBucket4PairReport(false);
         setShowBucket5(false);
         setBacktestFlowPreloadSymbol(String(b4Route.preloadSymbol || '').toUpperCase());
+        setInverseFlowPreloadSymbol('');
+        setBucket4PairSymbol('');
         setChartDefaultPanel('chart');
         return;
       }
@@ -14190,16 +14572,21 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           setShowYbEdge(false);
           setShowOps(false);
           setShowBacktestFlow(false);
+          setShowInverseFlowProgram(false);
+          setShowBucket4PairReport(false);
           setShowBucket5(false);
           setBacktestFlowPreloadSymbol('');
+          setInverseFlowPreloadSymbol('');
+          setBucket4PairSymbol('');
           const panel = String(chartMatch[2] || '').toLowerCase();
           setChartDefaultPanel(
-            panel === 'backtest' ? 'backtest'
-              : panel === 'flow' ? 'flow'
-                : panel === 'trade' ? 'trade'
-                  : panel === 'vrp' ? 'vrp'
-                    : panel === 'decay' ? 'decay'
-                      : 'chart',
+            panel === 'backtest-flow' ? 'backtest-flow'
+              : panel === 'backtest' ? 'backtest'
+                : panel === 'flow' ? 'flow'
+                  : panel === 'trade' ? 'trade'
+                    : panel === 'vrp' ? 'vrp'
+                      : panel === 'decay' ? 'decay'
+                        : 'chart',
           );
           return;
         }
@@ -14212,8 +14599,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(false);
         setShowOps(false);
         setShowBacktestFlow(false);
+        setShowInverseFlowProgram(false);
+        setShowBucket4PairReport(false);
         setShowBucket5(true);
         setBacktestFlowPreloadSymbol('');
+        setInverseFlowPreloadSymbol('');
+        setBucket4PairSymbol('');
         return;
       }
       if (hash === '#/news') {
@@ -14224,8 +14615,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(false);
         setShowOps(false);
         setShowBacktestFlow(false);
+        setShowInverseFlowProgram(false);
+        setShowBucket4PairReport(false);
         setShowBucket5(false);
         setBacktestFlowPreloadSymbol('');
+        setInverseFlowPreloadSymbol('');
+        setBucket4PairSymbol('');
         return;
       }
       if (hash === '#/flow') {
@@ -14236,8 +14631,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(false);
         setShowOps(false);
         setShowBacktestFlow(false);
+        setShowInverseFlowProgram(false);
+        setShowBucket4PairReport(false);
         setShowBucket5(false);
         setBacktestFlowPreloadSymbol('');
+        setInverseFlowPreloadSymbol('');
+        setBucket4PairSymbol('');
         return;
       }
       if (hash === '#/yb-edge') {
@@ -14248,8 +14647,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(true);
         setShowOps(false);
         setShowBacktestFlow(false);
+        setShowInverseFlowProgram(false);
+        setShowBucket4PairReport(false);
         setShowBucket5(false);
         setBacktestFlowPreloadSymbol('');
+        setInverseFlowPreloadSymbol('');
+        setBucket4PairSymbol('');
         return;
       }
       if (hash === '#/ops') {
@@ -14260,8 +14663,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowYbEdge(false);
         setShowOps(true);
         setShowBacktestFlow(false);
+        setShowInverseFlowProgram(false);
+        setShowBucket4PairReport(false);
         setShowBucket5(false);
         setBacktestFlowPreloadSymbol('');
+        setInverseFlowPreloadSymbol('');
+        setBucket4PairSymbol('');
         return;
       }
       if (hash === '#/backtest') {
@@ -14274,8 +14681,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       setShowYbEdge(false);
       setShowOps(false);
       setShowBacktestFlow(false);
+      setShowInverseFlowProgram(false);
+      setShowBucket4PairReport(false);
       setShowBucket5(false);
       setBacktestFlowPreloadSymbol('');
+      setInverseFlowPreloadSymbol('');
+      setBucket4PairSymbol('');
       setChartDefaultPanel('chart');
     };
     handleHash();
@@ -14568,6 +14979,16 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         ) : (
           <div className="backtest-page"><p style={{ padding: 24, color: 'var(--text-muted)' }}>Bucket 5 module not loaded.</p></div>
         )
+      ) : showBucket4PairReport ? (
+        <Bucket4PairReportPage
+          symbol={bucket4PairSymbol}
+          onNavigateToChart={navigateToChart}
+        />
+      ) : showInverseFlowProgram ? (
+        <InverseFlowProgramPage
+          records={records}
+          preloadSymbol={inverseFlowPreloadSymbol}
+        />
       ) : showBacktestFlow ? (
         <BacktestFlowPage
           records={records}

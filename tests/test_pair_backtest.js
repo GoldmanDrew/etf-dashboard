@@ -16,6 +16,7 @@ const {
   parseShortFlowBacktestRoute,
   MIN_TRADING_DAYS_FOR_CAGR,
 } = require("../assets/pair_backtest.js");
+const Bucket4Backtest = require("../assets/bucket4_backtest.js");
 
 function row(date, value, extra = {}) {
   return {
@@ -37,6 +38,16 @@ function businessDates(startIso, count) {
   }
   return out;
 }
+
+test("bucket 4 routes do not capture restored inverse flow route", () => {
+  assert.equal(parseShortFlowBacktestRoute("#/backtest-flow").matches, true);
+  assert.equal(parseShortFlowBacktestRoute("#/backtest-flow/SNDQ").preloadSymbol, "SNDQ");
+  assert.equal(Bucket4Backtest.parseBucket4BacktestRoute("#/backtest-flow").matches, false);
+  assert.equal(Bucket4Backtest.parseBucket4BacktestRoute("#/chart/SNDQ/backtest-flow").matches, false);
+  const pairRoute = Bucket4Backtest.parseBucket4PairRoute("#/bucket-4/pair/SNDQ");
+  assert.equal(pairRoute.matches, true);
+  assert.equal(pairRoute.symbol, "SNDQ");
+});
 
 test("flat pair accrues borrow on short leg", () => {
   const rows = [
