@@ -165,17 +165,24 @@ The UI (both the YB-Edge ranking page and the per-ETF Vol/VRP tab) consumes only
 
 We have **five** different "expected decay" values in play. Knowing which one drives which UI cell saves a huge amount of debugging time.
 
-### 4.1 Realized log-drag (always shown)
+### 4.1 Realized pair drag (always shown)
 
 For every ETF with ≥ 40 days of overlapping history with its underlying:
 
 ```
-daily_drag_t = β · log(R_und_t) − log(R_etf_t)
+R_u,t = U_t / U_{t-1} − 1
+R_etf,t = L_t / L_{t-1} − 1
+daily_drag_t = log1p(β · R_u,t − R_etf,t)   # 0 when ETF tracks β× exactly
 gross_decay_annual = mean(daily_drag_t) · 252
 ```
 
-- Lives in `gross_decay_annual` (CSV) → `Gross (realized)` column on the main table.
+Calendar gaps larger than 5 days (after dropping `carry_forward` rows) are skipped so multi-week feed holes are not counted as a single trading day.
+
+- Lives in `gross_decay_annual` (CSV / metrics) → `Gross (realized)` column on the main table.
+- Trailing period gross (Decay tab / `realized_pair_gross_20d`) is `expm1(Σ daily_drag)` over the window — **not** annualized.
 - This is **always** shown if available. It is the only number we ship for `passive_low_delta` and `other_structured` rows where the model-based expected decay is meaningless.
+
+(Legacy note: older builds used `β · log(U) − log(L)`, which is **not** zero under perfect simple −2× tracking on large moves.)
 
 ### 4.2 Simple Itô identity (legacy fallback)
 

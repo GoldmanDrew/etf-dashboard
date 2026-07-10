@@ -12,8 +12,16 @@
   const DEFAULT_HORIZONS = [5, 20, 60, 120, 251];
   const MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45;
   const HARD_LIFECYCLE_GAP_DAYS = 365;
+  // Skip pair-drag across holes larger than a long weekend. Carry-forward rows are
+  // already dropped upstream; without this, May29→Jun16-style stitches count as one "day".
+  const MAX_PAIR_DRAG_GAP_DAYS = 5;
   const ORPHAN_LEG_LOG_THRESHOLD = 0.35;
   const ORPHAN_LEG_COMPANION_MAX = 0.15;
+  // Daily pair P&L uses simple leverage tracking, then log1p for compounding:
+  //   simple_pnl = β·R_u − R_etf  (0 when ETF tracks β× underlying exactly)
+  //   drag = log1p(simple_pnl)
+  // Legacy β·log U − log L is NOT zero under perfect −2× on large moves.
+  const PAIR_DRAG_BASIS = "simple_levered_log1p";
 
   function isOrphanLegJump(rU, rL) {
     if (!Number.isFinite(rU) || !Number.isFinite(rL)) return false;
@@ -96,6 +104,9 @@
       const prevSrc = sourceKey(dated[i - 1].row);
       const curSrc = sourceKey(dated[i].row);
       const sourceChanged = Boolean(prevSrc || curSrc) && prevSrc !== curSrc;
+      // Lifecycle / ticker-reuse: cut on huge gaps always, or mid-size gaps when the
+      // feed source flips. Shorter post-carry-forward stitches are skipped in
+      // buildDailyLogDragSeries (MAX_PAIR_DRAG_GAP_DAYS) without discarding history.
       if (
         Number.isFinite(gap)
         && (gap > HARD_LIFECYCLE_GAP_DAYS || (gap > maxGap && sourceChanged))
@@ -159,6 +170,16 @@
     return toNum(row && row.underlying_adj_close);
   }
 
+  function pairDragFromSimpleReturns(beta, rUndSimple, rEtfSimple) {
+    const b = toNum(beta);
+    const rU = toNum(rUndSimple);
+    const rL = toNum(rEtfSimple);
+    if (!Number.isFinite(b) || !Number.isFinite(rU) || !Number.isFinite(rL)) return NaN;
+    const simplePnl = b * rU - rL;
+    if (!Number.isFinite(simplePnl) || simplePnl <= -1) return NaN;
+    return Math.log1p(simplePnl);
+  }
+
   function buildDailyLogDragSeries(rows, beta) {
     const b = toNum(beta);
     if (!Number.isFinite(b)) return [];
@@ -176,16 +197,24 @@
     const out = [];
     for (let i = 1; i < clean.length; i += 1) {
       const gap = dateGapDays(clean[i - 1].date, clean[i].date);
-      if (Number.isFinite(gap) && gap > HARD_LIFECYCLE_GAP_DAYS) continue;
+      // Skip lifecycle deserts and post-carry-forward stitches (e.g. 13–19d holes).
+      if (Number.isFinite(gap) && gap > MAX_PAIR_DRAG_GAP_DAYS) continue;
+      const rUSimple = clean[i].undPx / clean[i - 1].undPx - 1;
+      const rLSimple = clean[i].etfPx / clean[i - 1].etfPx - 1;
       const rU = Math.log(clean[i].undPx / clean[i - 1].undPx);
       const rL = Math.log(clean[i].etfPx / clean[i - 1].etfPx);
       if (!Number.isFinite(rU) || !Number.isFinite(rL)) continue;
       if (isOrphanLegJump(rU, rL)) continue;
+      const drag = pairDragFromSimpleReturns(b, rUSimple, rLSimple);
+      if (!Number.isFinite(drag)) continue;
       out.push({
         date: clean[i].date,
-        drag: b * rU - rL,
+        drag,
+        simplePnl: b * rUSimple - rLSimple,
         rU,
         rL,
+        rUSimple,
+        rLSimple,
         etfPx: clean[i].etfPx,
         undPx: clean[i].undPx,
         etfPxPrev: clean[i - 1].etfPx,
@@ -301,12 +330,15 @@
     DEFAULT_HORIZONS,
     MAX_CONTIGUOUS_METRICS_GAP_DAYS,
     HARD_LIFECYCLE_GAP_DAYS,
+    MAX_PAIR_DRAG_GAP_DAYS,
+    PAIR_DRAG_BASIS,
     parseSplitEventsFromCorp,
     parseDecaySplitEvents,
     prepareDecayTrRows,
     latestContiguousRows,
     hasUsableMetricPrices,
     summarizeTrCoverage,
+    pairDragFromSimpleReturns,
     buildDailyLogDragSeries,
     computeHorizonPeriodReturns,
     buildRollingPeriodReturnSeries,

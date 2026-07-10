@@ -26,10 +26,18 @@ DEFAULT_MIN_OBS = 40
 REALIZED_PAIR_GROSS_20D_HORIZON = 20
 MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45
 HARD_LIFECYCLE_GAP_DAYS = 365
+# Skip pair-drag across holes larger than a long weekend. Carry-forward rows are
+# already dropped upstream; without this, May29→Jun16-style stitches count as one "day".
+MAX_PAIR_DRAG_GAP_DAYS = 5
 # Skip daily pair-drag when one leg jumps and the other is flat — bad underlying
 # backfill (HON ~2× discontinuity) or pre-split ETF prints (VRTL adj vs close).
 ORPHAN_LEG_LOG_THRESHOLD = 0.35
 ORPHAN_LEG_COMPANION_MAX = 0.15
+# Daily pair P&L uses simple leverage tracking, then log1p for compounding:
+#   simple_pnl = β·R_u − R_etf  (0 when ETF tracks β× underlying exactly)
+#   drag = log1p(simple_pnl)
+# Legacy β·log U − log L is NOT zero under perfect −2× on large moves.
+PAIR_DRAG_BASIS = "simple_levered_log1p"
 
 
 def _is_orphan_leg_jump(r_u: float, r_l: float) -> bool:
@@ -40,6 +48,16 @@ def _is_orphan_leg_jump(r_u: float, r_l: float) -> bool:
     if abs(r_l) > ORPHAN_LEG_LOG_THRESHOLD and abs(r_u) < ORPHAN_LEG_COMPANION_MAX:
         return True
     return False
+
+
+def pair_drag_from_simple_returns(beta: float, r_und_simple: float, r_etf_simple: float) -> float | None:
+    """Return log1p(β·R_u − R_etf), or None if undefined / wiped out."""
+    if not math.isfinite(beta) or not math.isfinite(r_und_simple) or not math.isfinite(r_etf_simple):
+        return None
+    simple_pnl = beta * r_und_simple - r_etf_simple
+    if not math.isfinite(simple_pnl) or simple_pnl <= -1.0:
+        return None
+    return math.log1p(simple_pnl)
 
 
 def _log_to_simple_period(log_ret: float | None) -> float | None:
@@ -89,6 +107,7 @@ def latest_contiguous_metrics_segment(
     dated.sort(key=lambda x: x[0])
     start_idx = 0
     max_gap = max(1, int(max_gap_days))
+
     def source_key(row: dict[str, Any]) -> str:
         return "|".join(
             str(row.get(k) or "").strip().lower()
@@ -100,6 +119,9 @@ def latest_contiguous_metrics_segment(
         prev_src = source_key(dated[i - 1][1])
         cur_src = source_key(dated[i][1])
         source_changed = bool(prev_src or cur_src) and prev_src != cur_src
+        # Lifecycle / ticker-reuse: cut on huge gaps always, or mid-size gaps when the
+        # feed source flips. Shorter post-carry-forward stitches are skipped in
+        # build_daily_log_drag_series (MAX_PAIR_DRAG_GAP_DAYS) without discarding history.
         if gap > HARD_LIFECYCLE_GAP_DAYS or (gap > max_gap and source_changed):
             start_idx = i
     return [r for _d, r in dated[start_idx:]]
@@ -109,11 +131,18 @@ def build_daily_log_drag_series(
     tr_rows: list[dict[str, Any]],
     beta: float,
     *,
-    max_gap_days: int = MAX_CONTIGUOUS_METRICS_GAP_DAYS,
+    max_gap_days: int = MAX_PAIR_DRAG_GAP_DAYS,
 ) -> list[dict[str, Any]]:
-    """Daily log-drag: beta * log(U_t/U_{t-1}) - log(L_t/L_{t-1}) on split-aware TR."""
+    """Daily pair drag on split-aware TR: log1p(β·R_u − R_etf).
+
+    ``R`` are simple returns. This is zero when the ETF tracks β× the underlying
+    exactly (including large −2× days). Calendar gaps larger than
+    ``max_gap_days`` (default ``MAX_PAIR_DRAG_GAP_DAYS``) are skipped so
+    carry-forward deserts do not count as a single trading day.
+    """
     if not math.isfinite(beta):
         return []
+    max_gap = max(1, int(max_gap_days))
     clean = [
         {
             "date": str(row.get("date") or "")[:10],
@@ -132,20 +161,26 @@ def build_daily_log_drag_series(
     for i in range(1, len(clean)):
         d0 = _parse_iso_date(clean[i - 1]["date"])
         d1 = _parse_iso_date(clean[i]["date"])
-        if d0 is not None and d1 is not None and (d1 - d0).days > HARD_LIFECYCLE_GAP_DAYS:
+        if d0 is not None and d1 is not None and (d1 - d0).days > max_gap:
             continue
         u0, u1 = clean[i - 1]["und_px"], clean[i]["und_px"]
         e0, e1 = clean[i - 1]["etf_px"], clean[i]["etf_px"]
-        r_u = math.log(u1 / u0)
-        r_l = math.log(e1 / e0)
-        if not math.isfinite(r_u) or not math.isfinite(r_l):
+        r_u_log = math.log(u1 / u0)
+        r_l_log = math.log(e1 / e0)
+        if not math.isfinite(r_u_log) or not math.isfinite(r_l_log):
             continue
-        if _is_orphan_leg_jump(r_u, r_l):
+        if _is_orphan_leg_jump(r_u_log, r_l_log):
+            continue
+        r_u_simple = u1 / u0 - 1.0
+        r_l_simple = e1 / e0 - 1.0
+        drag = pair_drag_from_simple_returns(beta, r_u_simple, r_l_simple)
+        if drag is None:
             continue
         out.append(
             {
                 "date": clean[i]["date"],
-                "drag": beta * r_u - r_l,
+                "drag": drag,
+                "simple_pnl": beta * r_u_simple - r_l_simple,
                 "etf_px": e1,
                 "und_px": u1,
                 "etf_px_prev": e0,
@@ -366,7 +401,7 @@ def compute_gross_decay_annual(
     underlying_split_events: list[tuple[dt.date, float]] | None = None,
     min_obs: int = DEFAULT_MIN_OBS,
 ) -> dict[str, Any] | None:
-    """Mean daily log-drag annualized: beta * log(R_u) - log(R_etf) on split-aware TR."""
+    """Mean daily pair drag annualized: log1p(β·R_u − R_etf) × 252 on split-aware TR."""
     if not math.isfinite(beta):
         return None
     rows = latest_contiguous_metrics_segment(
@@ -411,29 +446,34 @@ def compute_gross_decay_annual(
             for delta in range(-2, 3):
                 skip_dates.add(bnd + dt.timedelta(days=delta))
 
+    daily = build_daily_log_drag_series(tr, float(beta))
     drags: list[float] = []
-    for i in range(1, len(tr)):
-        ds = str(tr[i].get("date") or "")[:10]
-        try:
-            d0 = dt.date.fromisoformat(ds)
-        except ValueError:
-            d0 = None
-        u0, u1 = tr[i - 1]["tr_und_px"], tr[i]["tr_und_px"]
-        e0, e1 = tr[i - 1]["tr_etf_px"], tr[i]["tr_etf_px"]
-        if u0 > 0 and u1 > 0 and e0 > 0 and e1 > 0:
-            lr_e = abs(math.log(e1 / e0))
-            lr_u = abs(math.log(u1 / u0))
-            if d0 in skip_dates and lr_e > 0.35 and lr_u < 0.15:
-                continue
-            drags.append(beta * math.log(u1 / u0) - math.log(e1 / e0))
+    for day in daily:
+        d0 = _parse_iso_date(day.get("date"))
+        if d0 is not None and d0 in skip_dates:
+            # Near known split boundaries, only drop orphan-sized ETF cliffs.
+            e0 = float(day.get("etf_px_prev") or 0)
+            e1 = float(day.get("etf_px") or 0)
+            u0 = float(day.get("und_px_prev") or 0)
+            u1 = float(day.get("und_px") or 0)
+            if e0 > 0 and e1 > 0 and u0 > 0 and u1 > 0:
+                lr_e = abs(math.log(e1 / e0))
+                lr_u = abs(math.log(u1 / u0))
+                if lr_e > 0.35 and lr_u < 0.15:
+                    continue
+        drag = day.get("drag")
+        if drag is None or not math.isfinite(float(drag)):
+            continue
+        drags.append(float(drag))
     if len(drags) < min_obs:
         return None
     mean_drag = sum(drags) / len(drags)
     return {
         "gross_decay_annual": round(mean_drag * TRADING_DAYS, 6),
         "n_obs": len(drags),
-        "start_date": tr[1]["date"],
-        "end_date": tr[-1]["date"],
+        "start_date": daily[0]["date"] if daily else None,
+        "end_date": daily[-1]["date"] if daily else None,
+        "pair_drag_basis": PAIR_DRAG_BASIS,
     }
 
 

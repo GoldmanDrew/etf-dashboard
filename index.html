@@ -1510,7 +1510,7 @@
 <script src="assets/pair_backtest.js?v=pb-v9"></script>
 <script src="assets/bucket4_backtest.js?v=b4-v2"></script>
 <script src="assets/bucket5_insurance_backtest.js?v=b5-v1"></script>
-<script src="assets/realized_decay.js?v=rd-v7"></script>
+<script src="assets/realized_decay.js?v=rd-v8"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="assets/fof_chart.js?v=fof-v3"></script>
@@ -2210,6 +2210,8 @@ function latestContiguousMetricsRows(rows, maxGapDays = MAX_CONTIGUOUS_METRICS_G
     const prevSrc = sourceKey(dated[i - 1]);
     const curSrc = sourceKey(dated[i]);
     const sourceChanged = Boolean(prevSrc || curSrc) && prevSrc !== curSrc;
+    // Lifecycle / ticker-reuse cut. Shorter post-carry-forward stitches are skipped
+    // in RealizedDecay.buildDailyLogDragSeries (MAX_PAIR_DRAG_GAP_DAYS).
     if (
       Number.isFinite(gap)
       && (gap > HARD_LIFECYCLE_GAP_DAYS || (gap > maxGapDays && sourceChanged))
@@ -3384,7 +3386,7 @@ function fmtGrossRealizedLog(r, v) {
 function realizedPairGross20dTooltip(r) {
   const v = Number(r?.realized_pair_gross_20d);
   const partial = Number(r?.realized_pair_gross_partial);
-  if (!Number.isFinite(v) && !Number.isFinite(partial)) return `${REALIZED_PAIR_GROSS_GRID_HORIZON} trading-day gross pair return (δ·log U − log L), period not annualized. Same as Decay tab 20d Gross. Requires joint ETF+underlying history in etf_metrics_daily.`;
+  if (!Number.isFinite(v) && !Number.isFinite(partial)) return `${REALIZED_PAIR_GROSS_GRID_HORIZON} trading-day gross pair return (Σ log1p(δ·R_u − R_etf)), period not annualized. Same as Decay tab 20d Gross. Requires joint ETF+underlying history in etf_metrics_daily.`;
   const isPartial = !Number.isFinite(v) && Number.isFinite(partial);
   const shown = isPartial ? partial : v;
   const lines = [
@@ -3392,7 +3394,7 @@ function realizedPairGross20dTooltip(r) {
       ? `Partial realized pair return: fewer than ${REALIZED_PAIR_GROSS_GRID_HORIZON} aligned observations, not ranked as a full ${REALIZED_PAIR_GROSS_GRID_HORIZON}d value.`
       : `Trailing ${REALIZED_PAIR_GROSS_GRID_HORIZON} trading-day gross pair return (period, not annualized).`,
     'Same metric as Decay tab → 20d → Gross.',
-    'Formula: Σ daily (δ·log U − log L) over the window; short-favorable +.',
+    'Formula: Σ daily log1p(δ·R_u − R_etf) over usable days (calendar gaps >5d skipped); short-favorable +.',
     `Value: ${fmt(shown)} gross`,
   ];
   const obs = Number(r?.realized_pair_gross_20d_obs);
@@ -4927,7 +4929,7 @@ const COLS = [
     sublabel: '20d · gross · pair',
     w: 118,
     numeric: true,
-    hint: 'Trailing 20 trading-day gross pair return (δ·log U − log L), period not annualized. Same as Decay tab 20d Gross. Short-favorable +. Not Gross (realiz.) annual.',
+    hint: 'Trailing 20 trading-day gross pair return (Σ log1p(δ·R_u − R_etf)), period not annualized. Same as Decay tab 20d Gross. Short-favorable +. Not Gross (realiz.) annual.',
   },
   {
     key: SCENARIO_ETF_1M_FLAT_SORT_KEY,
@@ -10714,8 +10716,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <>
                 Period return over the trailing window (not annualized) on <strong>total-return</strong> prices
                 (ETF: Yahoo adj close / NAV TR; underlying: split-adj close).{' '}
-                <code>gross = β·log(U<sub>end</sub>/U<sub>start</sub>) − log(L<sub>end</sub>/L<sub>start</sub>)</code>,{' '}
-                <code>net = gross − borrow<sub>avg</sub> × (N/252)</code>.
+                Daily pair P&amp;L uses simple leverage tracking:{' '}
+                <code>drag = log1p(β·R<sub>u</sub> − R<sub>etf</sub>)</code> (zero when the ETF tracks β× exactly),
+                then <code>gross = Σ drag</code> over usable days (calendar gaps &gt;5d skipped).{' '}
+                <code>net = gross − borrow<sub>avg</sub> × (N/252) × (365/360)</code>.
                 Split-aware TR from <code>price_basis.js</code> (same rules as chart windows): scale pre-split issuer closes only when raw price jumps; Yahoo-continuous series use adj close; distributions via NAV TR when scaling applies.
               </>
             )}

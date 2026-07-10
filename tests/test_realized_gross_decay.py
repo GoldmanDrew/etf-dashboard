@@ -162,6 +162,33 @@ def test_build_daily_log_drag_skips_orphan_leg_jumps():
     assert daily2[0]["date"] == "2026-06-23"
 
 
+def test_perfect_simple_leverage_tracking_zero_drag_on_large_move():
+    """β=-2 with perfect simple tracking must not invent ~+76% log-drag."""
+    from realized_gross_decay import PAIR_DRAG_BASIS, MAX_PAIR_DRAG_GAP_DAYS
+
+    tr = [
+        {"date": "2026-05-07", "tr_etf_px": 12.84, "tr_und_px": 78.58},
+        {"date": "2026-05-08", "tr_etf_px": 4.05, "tr_und_px": 105.47},
+    ]
+    daily = build_daily_log_drag_series(tr, -2.0)
+    assert len(daily) == 1
+    assert abs(daily[0]["drag"]) < 1e-3
+    assert abs(daily[0]["simple_pnl"]) < 1e-3
+    assert PAIR_DRAG_BASIS == "simple_levered_log1p"
+    assert MAX_PAIR_DRAG_GAP_DAYS == 5
+
+
+def test_build_daily_log_drag_skips_calendar_gaps_over_5_days():
+    tr = [
+        {"date": "2026-05-28", "tr_etf_px": 1.73, "tr_und_px": 148.03},
+        {"date": "2026-05-29", "tr_etf_px": 1.84, "tr_und_px": 143.48},
+        {"date": "2026-06-16", "tr_etf_px": 2.83, "tr_und_px": 104.63},
+        {"date": "2026-06-17", "tr_etf_px": 2.65, "tr_und_px": 107.98},
+    ]
+    daily = build_daily_log_drag_series(tr, -2.0)
+    assert [d["date"] for d in daily] == ["2026-05-29", "2026-06-17"]
+
+
 def test_compute_realized_pair_gross_20d_from_metrics_rows():
     joint = _flat_joint_rows(REALIZED_PAIR_GROSS_20D_HORIZON + 5)
     out = compute_realized_pair_gross_20d(joint, 2.0, [], borrow_annual=0.1)

@@ -46,6 +46,33 @@ test("flat prices → zero period return", () => {
   assert.ok(Math.abs(h.horizons[0].grossSimple) < 1e-10);
 });
 
+test("perfect simple leverage tracking → zero daily drag even on large moves", () => {
+  // β=-2, und +34.22% simple ⇒ ETF −68.44% simple ⇒ drag must be ~0
+  // (legacy β·log U − log L printed ~+76% on this day).
+  const rows = [
+    { date: "2026-05-07", close_price: 12.84, etf_adj_close: 12.84, underlying_adj_close: 78.58 },
+    { date: "2026-05-08", close_price: 4.05, etf_adj_close: 4.05, underlying_adj_close: 105.47 },
+  ];
+  const daily = buildDailyLogDragSeries(prepareDecayTrRows(rows, []), -2);
+  assert.equal(daily.length, 1);
+  assert.ok(Math.abs(daily[0].drag) < 1e-3, `drag ${daily[0].drag}`);
+  assert.ok(Math.abs(daily[0].simplePnl) < 1e-3, `simplePnl ${daily[0].simplePnl}`);
+  assert.equal(RD.PAIR_DRAG_BASIS, "simple_levered_log1p");
+});
+
+test("calendar gaps >5d are skipped (no carry-forward stitch day)", () => {
+  const rows = [
+    { date: "2026-05-28", close_price: 1.73, etf_adj_close: 1.73, underlying_adj_close: 148.03 },
+    { date: "2026-05-29", close_price: 1.84, etf_adj_close: 1.84, underlying_adj_close: 143.48 },
+    // 18 calendar days — must not become one drag observation
+    { date: "2026-06-16", close_price: 2.83, etf_adj_close: 2.83, underlying_adj_close: 104.63 },
+    { date: "2026-06-17", close_price: 2.65, etf_adj_close: 2.65, underlying_adj_close: 107.98 },
+  ];
+  const daily = buildDailyLogDragSeries(prepareDecayTrRows(rows, []), -2);
+  assert.deepEqual(daily.map((d) => d.date), ["2026-05-29", "2026-06-17"]);
+  assert.equal(RD.MAX_PAIR_DRAG_GAP_DAYS, 5);
+});
+
 test("net subtracts borrow over the period", () => {
   const daily = buildDailyLogDragSeries(prepareDecayTrRows(makeFlatSeries(20, -0.005, 0), []), 2);
   const borrow = 0.252; // 25.2% annual; Act/360 drag over the held window = borrow × obs/252 × 365/360
@@ -59,20 +86,18 @@ test("net subtracts borrow over the period", () => {
   assert.equal(RD.BORROW_ACT360_FACTOR, 365 / 360);
 });
 
-test("period gross equals endpoint log drag", () => {
+test("period gross compounds daily simple pair P&L via log1p", () => {
   const rows = makeFlatSeries(25, -0.01, 0.002);
   const beta = 2;
   const tr = prepareDecayTrRows(rows, []);
   const daily = buildDailyLogDragSeries(tr, beta);
   const h = computeHorizonPeriodReturns(daily, [20], 0);
   const row = h.horizons[0];
-  const start = tr[tr.length - 21];
-  const end = tr[tr.length - 1];
-  const endpoint = beta * Math.log(end.trUndPx / start.trUndPx)
-    - Math.log(end.trEtfPx / start.trEtfPx);
-  assert.ok(Math.abs(row.grossLog - endpoint) < 1e-9);
-  assert.ok(Math.abs(row.etfStartPx - start.trEtfPx) < 1e-9);
-  assert.ok(Math.abs(row.etfEndPx - end.trEtfPx) < 1e-9);
+  const slice = daily.slice(-20);
+  const expectedLog = slice.reduce((a, d) => a + d.drag, 0);
+  assert.ok(Math.abs(row.grossLog - expectedLog) < 1e-9);
+  assert.ok(Math.abs(row.etfStartPx - slice[0].etfPxPrev) < 1e-9);
+  assert.ok(Math.abs(row.etfEndPx - slice[slice.length - 1].etfPx) < 1e-9);
 });
 
 test("rolling period series length", () => {
@@ -128,7 +153,10 @@ test("prefers etf_adj_close over raw close for TR drag", () => {
   const tr = prepareDecayTrRows(rows, []);
   const daily = buildDailyLogDragSeries(tr, 2);
   assert.equal(daily.length, 1);
-  assert.ok(Math.abs(daily[0].drag - (2 * Math.log(50 / 50) - Math.log(99 / 100))) < 1e-9);
+  const rU = 50 / 50 - 1;
+  const rL = 99 / 100 - 1;
+  const expected = Math.log1p(2 * rU - rL);
+  assert.ok(Math.abs(daily[0].drag - expected) < 1e-9);
 });
 
 test("cumSplitFactor scales pre-split close to latest basis", () => {
