@@ -33,11 +33,12 @@ MAX_PAIR_DRAG_GAP_DAYS = 5
 # backfill (HON ~2× discontinuity) or pre-split ETF prints (VRTL adj vs close).
 ORPHAN_LEG_LOG_THRESHOLD = 0.35
 ORPHAN_LEG_COMPANION_MAX = 0.15
-# Daily pair P&L uses simple leverage tracking, then log1p for compounding:
-#   simple_pnl = β·R_u − R_etf  (0 when ETF tracks β× underlying exactly)
-#   drag = log1p(simple_pnl)
-# Legacy β·log U − log L is NOT zero under perfect −2× on large moves.
-PAIR_DRAG_BASIS = "simple_levered_log1p"
+# |log-drag| above this with near-perfect simple tracking ⇒ convexity_day flag.
+CONVEXITY_DRAG_LOG_THRESHOLD = 0.35
+CONVEXITY_SIMPLE_TRACK_EPS = 0.02
+# Canonical period engine: log-drag (endpoint identity). Keep in sync with
+# assets/realized_decay.js::PAIR_DRAG_BASIS.
+PAIR_DRAG_BASIS = "beta_log_minus_etf_log"
 
 
 def _is_orphan_leg_jump(r_u: float, r_l: float) -> bool:
@@ -50,14 +51,13 @@ def _is_orphan_leg_jump(r_u: float, r_l: float) -> bool:
     return False
 
 
-def pair_drag_from_simple_returns(beta: float, r_und_simple: float, r_etf_simple: float) -> float | None:
-    """Return log1p(β·R_u − R_etf), or None if undefined / wiped out."""
-    if not math.isfinite(beta) or not math.isfinite(r_und_simple) or not math.isfinite(r_etf_simple):
-        return None
-    simple_pnl = beta * r_und_simple - r_etf_simple
-    if not math.isfinite(simple_pnl) or simple_pnl <= -1.0:
-        return None
-    return math.log1p(simple_pnl)
+def _is_convexity_day(beta: float, r_u_simple: float, r_l_simple: float, drag_log: float) -> bool:
+    if not math.isfinite(beta) or not math.isfinite(drag_log):
+        return False
+    if abs(drag_log) < CONVEXITY_DRAG_LOG_THRESHOLD:
+        return False
+    track_err = abs(r_l_simple - beta * r_u_simple)
+    return math.isfinite(track_err) and track_err < CONVEXITY_SIMPLE_TRACK_EPS
 
 
 def _log_to_simple_period(log_ret: float | None) -> float | None:
@@ -127,21 +127,43 @@ def latest_contiguous_metrics_segment(
     return [r for _d, r in dated[start_idx:]]
 
 
+class _DragSeries(list):
+    """list subclass so diagnostics can live on ``._meta`` (builtins disallow attrs)."""
+
+    _meta: dict[str, Any]
+
+
 def build_daily_log_drag_series(
     tr_rows: list[dict[str, Any]],
     beta: float,
     *,
     max_gap_days: int = MAX_PAIR_DRAG_GAP_DAYS,
 ) -> list[dict[str, Any]]:
-    """Daily pair drag on split-aware TR: log1p(β·R_u − R_etf).
+    """Daily log-drag: beta * log(U_t/U_{t-1}) - log(L_t/L_{t-1}) on split-aware TR.
 
-    ``R`` are simple returns. This is zero when the ETF tracks β× the underlying
-    exactly (including large −2× days). Calendar gaps larger than
-    ``max_gap_days`` (default ``MAX_PAIR_DRAG_GAP_DAYS``) are skipped so
-    carry-forward deserts do not count as a single trading day.
+    Calendar gaps larger than ``max_gap_days`` are skipped so carry-forward deserts
+    do not count as a single trading day. The returned list has ``._meta`` with
+    ``skipped_gaps`` / ``convexity_days``.
     """
+    result = build_daily_log_drag_series_with_meta(tr_rows, beta, max_gap_days=max_gap_days)
+    series = _DragSeries(result["series"])
+    series._meta = result["meta"]
+    return series
+
+
+def build_daily_log_drag_series_with_meta(
+    tr_rows: list[dict[str, Any]],
+    beta: float,
+    *,
+    max_gap_days: int = MAX_PAIR_DRAG_GAP_DAYS,
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "skipped_gaps": [],
+        "convexity_days": [],
+        "pair_drag_basis": PAIR_DRAG_BASIS,
+    }
     if not math.isfinite(beta):
-        return []
+        return {"series": [], "meta": meta}
     max_gap = max(1, int(max_gap_days))
     clean = [
         {
@@ -156,38 +178,57 @@ def build_daily_log_drag_series(
     ]
     clean.sort(key=lambda x: x["date"])
     if len(clean) < 2:
-        return []
+        return {"series": [], "meta": meta}
     out: list[dict[str, Any]] = []
     for i in range(1, len(clean)):
         d0 = _parse_iso_date(clean[i - 1]["date"])
         d1 = _parse_iso_date(clean[i]["date"])
         if d0 is not None and d1 is not None and (d1 - d0).days > max_gap:
+            meta["skipped_gaps"].append(
+                {
+                    "from": clean[i - 1]["date"],
+                    "to": clean[i]["date"],
+                    "calendar_gap": (d1 - d0).days,
+                }
+            )
             continue
         u0, u1 = clean[i - 1]["und_px"], clean[i]["und_px"]
         e0, e1 = clean[i - 1]["etf_px"], clean[i]["etf_px"]
-        r_u_log = math.log(u1 / u0)
-        r_l_log = math.log(e1 / e0)
-        if not math.isfinite(r_u_log) or not math.isfinite(r_l_log):
+        r_u = math.log(u1 / u0)
+        r_l = math.log(e1 / e0)
+        if not math.isfinite(r_u) or not math.isfinite(r_l):
             continue
-        if _is_orphan_leg_jump(r_u_log, r_l_log):
+        if _is_orphan_leg_jump(r_u, r_l):
             continue
         r_u_simple = u1 / u0 - 1.0
         r_l_simple = e1 / e0 - 1.0
-        drag = pair_drag_from_simple_returns(beta, r_u_simple, r_l_simple)
-        if drag is None:
+        drag = beta * r_u - r_l
+        if not math.isfinite(drag):
             continue
+        convexity = _is_convexity_day(beta, r_u_simple, r_l_simple, drag)
+        if convexity:
+            meta["convexity_days"].append(
+                {
+                    "date": clean[i]["date"],
+                    "drag": drag,
+                    "r_u_simple": r_u_simple,
+                    "r_l_simple": r_l_simple,
+                    "simple_track_err": r_l_simple - beta * r_u_simple,
+                }
+            )
         out.append(
             {
                 "date": clean[i]["date"],
                 "drag": drag,
                 "simple_pnl": beta * r_u_simple - r_l_simple,
+                "convexity_day": convexity,
                 "etf_px": e1,
                 "und_px": u1,
                 "etf_px_prev": e0,
                 "und_px_prev": u0,
             }
         )
-    return out
+    return {"series": out, "meta": meta}
 
 
 def _slice_period_metrics(
@@ -213,12 +254,17 @@ def _slice_period_metrics(
             "etf_end_px": None,
             "und_start_px": None,
             "und_end_px": None,
+            "convexity_days": 0,
+            "convexity_drag_log": 0.0,
         }
     gross_log = float(sum(drag_slice))
     borrow_log = _period_borrow_log(borrow_annual, obs)
     net_log = gross_log - borrow_log
     start_row = daily_series[start_idx] if 0 <= start_idx < len(daily_series) else {}
     end_row = daily_series[end_idx] if 0 <= end_idx < len(daily_series) else {}
+    window_rows = daily_series[start_idx : end_idx + 1]
+    convexity_rows = [r for r in window_rows if r.get("convexity_day")]
+    convexity_drag = float(sum(float(r.get("drag") or 0) for r in convexity_rows))
     return {
         "gross_log": gross_log,
         "gross_simple": _log_to_simple_period(gross_log),
@@ -232,6 +278,8 @@ def _slice_period_metrics(
         "etf_end_px": end_row.get("etf_px"),
         "und_start_px": start_row.get("und_px_prev"),
         "und_end_px": end_row.get("und_px"),
+        "convexity_days": len(convexity_rows),
+        "convexity_drag_log": convexity_drag,
     }
 
 
@@ -246,6 +294,7 @@ def compute_horizon_period_returns(
     drags = [float(x["drag"]) for x in series]
     n = len(series)
     end_date = str(series[n - 1]["date"])[:10] if n else None
+    meta = getattr(series, "_meta", None) or {}
     rows: list[dict[str, Any]] = []
     for h_raw in hs:
         h = max(1, int(h_raw))
@@ -261,7 +310,33 @@ def compute_horizon_period_returns(
                 "sufficient": m["obs"] >= h,
             }
         )
-    return {"horizons": rows, "n_days": n, "end_date": end_date, "borrow_annual": borrow_annual}
+    return {
+        "horizons": rows,
+        "n_days": n,
+        "end_date": end_date,
+        "borrow_annual": borrow_annual,
+        "pair_drag_basis": PAIR_DRAG_BASIS,
+        "skipped_gaps": meta.get("skipped_gaps") or [],
+        "convexity_days": meta.get("convexity_days") or [],
+    }
+
+
+def collapse_partial_horizons(horizon_result: dict[str, Any] | None) -> dict[str, Any]:
+    """Collapse duplicate partial longer horizons into one available-history row."""
+    if not horizon_result:
+        return {"horizons": [], "n_days": 0}
+    rows = list(horizon_result.get("horizons") or [])
+    if not rows:
+        return horizon_result
+    full = [h for h in rows if h.get("sufficient")]
+    partial = [h for h in rows if not h.get("sufficient") and int(h.get("obs") or 0) > 0]
+    if not partial:
+        return horizon_result
+    partial.sort(key=lambda h: int(h.get("horizon_days") or 0))
+    rep = {**partial[0], "available_history": True}
+    out = full + [rep]
+    out.sort(key=lambda h: int(h.get("horizon_days") or 0))
+    return {**horizon_result, "horizons": out, "collapsed_partials": len(partial)}
 
 
 def _normalize_horizon_row(horizon_row: dict[str, Any]) -> dict[str, Any]:
@@ -401,7 +476,7 @@ def compute_gross_decay_annual(
     underlying_split_events: list[tuple[dt.date, float]] | None = None,
     min_obs: int = DEFAULT_MIN_OBS,
 ) -> dict[str, Any] | None:
-    """Mean daily pair drag annualized: log1p(β·R_u − R_etf) × 252 on split-aware TR."""
+    """Mean daily log-drag annualized: beta * log(R_u) - log(R_etf) on split-aware TR."""
     if not math.isfinite(beta):
         return None
     rows = latest_contiguous_metrics_segment(

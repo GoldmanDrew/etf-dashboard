@@ -1,4 +1,17 @@
 /* global window, module */
+/**
+ * Realized pair decay contract (keep in sync with scripts/realized_gross_decay.py):
+ *
+ *   daily_drag_t = β · log(U_t/U_{t-1}) − log(L_t/L_{t-1})   on split-aware TR
+ *   period_gross_log = Σ daily_drag over usable days in the window
+ *     (= endpoint β·log(U_end/U_start) − log(L_end/L_start) when no interior skips)
+ *   period_gross_simple = expm1(period_gross_log)   // short-favorable +
+ *   period_net_log = period_gross_log − borrow × (N/252) × (365/360)
+ *
+ * Calendar gaps > MAX_PAIR_DRAG_GAP_DAYS do not form a drag day (carry-forward stitches).
+ * Large |drag| with near-perfect simple leverage tracking is flagged convexity_day
+ * (log measure ≠ 0 under perfect −2× on huge moves) — never silently zeroed.
+ */
 (function initRealizedDecay(globalObj) {
   const TRADING_DAYS_PER_YEAR = 252;
   // Borrow fees accrue Act/360 on collateral market value. Confirmed conventions:
@@ -17,11 +30,11 @@
   const MAX_PAIR_DRAG_GAP_DAYS = 5;
   const ORPHAN_LEG_LOG_THRESHOLD = 0.35;
   const ORPHAN_LEG_COMPANION_MAX = 0.15;
-  // Daily pair P&L uses simple leverage tracking, then log1p for compounding:
-  //   simple_pnl = β·R_u − R_etf  (0 when ETF tracks β× underlying exactly)
-  //   drag = log1p(simple_pnl)
-  // Legacy β·log U − log L is NOT zero under perfect −2× on large moves.
-  const PAIR_DRAG_BASIS = "simple_levered_log1p";
+  // |log-drag| above this with near-perfect simple tracking ⇒ convexity_day flag.
+  const CONVEXITY_DRAG_LOG_THRESHOLD = 0.35;
+  const CONVEXITY_SIMPLE_TRACK_EPS = 0.02;
+  // Canonical period engine: log-drag (endpoint identity). Not simple log1p.
+  const PAIR_DRAG_BASIS = "beta_log_minus_etf_log";
 
   function isOrphanLegJump(rU, rL) {
     if (!Number.isFinite(rU) || !Number.isFinite(rL)) return false;
@@ -170,19 +183,23 @@
     return toNum(row && row.underlying_adj_close);
   }
 
-  function pairDragFromSimpleReturns(beta, rUndSimple, rEtfSimple) {
+  function isConvexityDay(beta, rUSimple, rLSimple, dragLog) {
     const b = toNum(beta);
-    const rU = toNum(rUndSimple);
-    const rL = toNum(rEtfSimple);
-    if (!Number.isFinite(b) || !Number.isFinite(rU) || !Number.isFinite(rL)) return NaN;
-    const simplePnl = b * rU - rL;
-    if (!Number.isFinite(simplePnl) || simplePnl <= -1) return NaN;
-    return Math.log1p(simplePnl);
+    if (!Number.isFinite(b) || !Number.isFinite(dragLog)) return false;
+    if (Math.abs(dragLog) < CONVEXITY_DRAG_LOG_THRESHOLD) return false;
+    const trackErr = Math.abs(rLSimple - b * rUSimple);
+    return Number.isFinite(trackErr) && trackErr < CONVEXITY_SIMPLE_TRACK_EPS;
   }
 
-  function buildDailyLogDragSeries(rows, beta) {
+  /**
+   * Build daily log-drag series. Also returns meta.skippedGaps / meta.convexityDays
+   * when called via buildDailyLogDragSeriesWithMeta; the plain export returns the array
+   * and attaches ._meta for callers that want diagnostics.
+   */
+  function buildDailyLogDragSeriesWithMeta(rows, beta) {
     const b = toNum(beta);
-    if (!Number.isFinite(b)) return [];
+    const meta = { skippedGaps: [], convexityDays: [], pairDragBasis: PAIR_DRAG_BASIS };
+    if (!Number.isFinite(b)) return { series: [], meta };
     const clean = (Array.isArray(rows) ? rows : [])
       .map((row) => {
         const date = parseDate(row && row.date);
@@ -192,21 +209,37 @@
       })
       .filter((x) => x.date && x.etfPx > 0 && x.undPx > 0)
       .sort((a, b2) => a.date.localeCompare(b2.date));
-    if (clean.length < 2) return [];
+    if (clean.length < 2) return { series: [], meta };
 
     const out = [];
     for (let i = 1; i < clean.length; i += 1) {
       const gap = dateGapDays(clean[i - 1].date, clean[i].date);
-      // Skip lifecycle deserts and post-carry-forward stitches (e.g. 13–19d holes).
-      if (Number.isFinite(gap) && gap > MAX_PAIR_DRAG_GAP_DAYS) continue;
+      if (Number.isFinite(gap) && gap > MAX_PAIR_DRAG_GAP_DAYS) {
+        meta.skippedGaps.push({
+          from: clean[i - 1].date,
+          to: clean[i].date,
+          calendarGap: gap,
+        });
+        continue;
+      }
       const rUSimple = clean[i].undPx / clean[i - 1].undPx - 1;
       const rLSimple = clean[i].etfPx / clean[i - 1].etfPx - 1;
       const rU = Math.log(clean[i].undPx / clean[i - 1].undPx);
       const rL = Math.log(clean[i].etfPx / clean[i - 1].etfPx);
       if (!Number.isFinite(rU) || !Number.isFinite(rL)) continue;
       if (isOrphanLegJump(rU, rL)) continue;
-      const drag = pairDragFromSimpleReturns(b, rUSimple, rLSimple);
+      const drag = b * rU - rL;
       if (!Number.isFinite(drag)) continue;
+      const convexity = isConvexityDay(b, rUSimple, rLSimple, drag);
+      if (convexity) {
+        meta.convexityDays.push({
+          date: clean[i].date,
+          drag,
+          rUSimple,
+          rLSimple,
+          simpleTrackErr: rLSimple - b * rUSimple,
+        });
+      }
       out.push({
         date: clean[i].date,
         drag,
@@ -215,20 +248,26 @@
         rL,
         rUSimple,
         rLSimple,
+        convexityDay: convexity,
         etfPx: clean[i].etfPx,
         undPx: clean[i].undPx,
         etfPxPrev: clean[i - 1].etfPx,
         undPxPrev: clean[i - 1].undPx,
       });
     }
-    return out;
+    return { series: out, meta };
+  }
+
+  function buildDailyLogDragSeries(rows, beta) {
+    const { series, meta } = buildDailyLogDragSeriesWithMeta(rows, beta);
+    series._meta = meta;
+    return series;
   }
 
   function periodBorrowLog(borrowAnnual, obsDays) {
     const b = toNum(borrowAnnual);
     const n = Math.max(0, Math.floor(toNum(obsDays) || 0));
     if (!Number.isFinite(b) || n <= 0) return 0;
-    // Act/360 borrow drag for a held window of n trading days (IBKR / Clear Street).
     return b * (n / TRADING_DAYS_PER_YEAR) * BORROW_ACT360_FACTOR;
   }
 
@@ -247,6 +286,8 @@
         etfEndPx: null,
         undStartPx: null,
         undEndPx: null,
+        convexityDays: 0,
+        convexityDragLog: 0,
       };
     }
     const grossLog = slice.reduce((a, x) => a + x, 0);
@@ -254,6 +295,9 @@
     const netLog = grossLog - borrowLog;
     const startRow = dailySeries[startIdx] || {};
     const endRow = dailySeries[endIdx] || {};
+    const windowRows = dailySeries.slice(startIdx, endIdx + 1);
+    const convexityRows = windowRows.filter((r) => r && r.convexityDay);
+    const convexityDragLog = convexityRows.reduce((a, r) => a + toNum(r.drag), 0);
     return {
       grossLog,
       grossSimple: logToSimplePeriod(grossLog),
@@ -267,6 +311,8 @@
       etfEndPx: toNum(endRow.etfPx),
       undStartPx: toNum(startRow.undPxPrev),
       undEndPx: toNum(endRow.undPx),
+      convexityDays: convexityRows.length,
+      convexityDragLog: Number.isFinite(convexityDragLog) ? convexityDragLog : 0,
     };
   }
 
@@ -276,6 +322,7 @@
     const drags = series.map((x) => toNum(x && x.drag)).filter(Number.isFinite);
     const n = drags.length;
     const endDate = n ? String(series[n - 1].date || "") : null;
+    const meta = series._meta || {};
     const rows = hs.map((hRaw) => {
       const h = Math.max(1, Math.floor(toNum(hRaw) || 0));
       const startIdx = Math.max(0, n - h);
@@ -287,7 +334,35 @@
         sufficient: m.obs >= h,
       };
     });
-    return { horizons: rows, nDays: n, endDate, borrowAnnual: toNum(borrowAnnual) };
+    return {
+      horizons: rows,
+      nDays: n,
+      endDate,
+      borrowAnnual: toNum(borrowAnnual),
+      pairDragBasis: PAIR_DRAG_BASIS,
+      skippedGaps: meta.skippedGaps || [],
+      convexityDays: meta.convexityDays || [],
+    };
+  }
+
+  /**
+   * Collapse duplicate partial longer horizons into a single "available history" row
+   * so thin listings (e.g. CBRZ ~25d) don't show identical 60/120/251 bars.
+   */
+  function collapsePartialHorizons(horizonResult) {
+    const rows = Array.isArray(horizonResult && horizonResult.horizons)
+      ? horizonResult.horizons.slice()
+      : [];
+    if (!rows.length) return horizonResult;
+    const full = rows.filter((h) => h && h.sufficient);
+    const partial = rows.filter((h) => h && !h.sufficient && Number(h.obs) > 0);
+    if (!partial.length) return horizonResult;
+    // Keep the shortest requested partial horizon as the representative available-history row.
+    partial.sort((a, b) => Number(a.horizonDays) - Number(b.horizonDays));
+    const rep = { ...partial[0], availableHistory: true };
+    const out = full.concat([rep]);
+    out.sort((a, b) => Number(a.horizonDays) - Number(b.horizonDays));
+    return { ...horizonResult, horizons: out, collapsedPartials: partial.length };
   }
 
   function buildRollingPeriodReturnSeries(dailySeries, windowDays, borrowAnnual) {
@@ -331,6 +406,8 @@
     MAX_CONTIGUOUS_METRICS_GAP_DAYS,
     HARD_LIFECYCLE_GAP_DAYS,
     MAX_PAIR_DRAG_GAP_DAYS,
+    CONVEXITY_DRAG_LOG_THRESHOLD,
+    CONVEXITY_SIMPLE_TRACK_EPS,
     PAIR_DRAG_BASIS,
     parseSplitEventsFromCorp,
     parseDecaySplitEvents,
@@ -338,9 +415,11 @@
     latestContiguousRows,
     hasUsableMetricPrices,
     summarizeTrCoverage,
-    pairDragFromSimpleReturns,
+    isConvexityDay,
+    buildDailyLogDragSeriesWithMeta,
     buildDailyLogDragSeries,
     computeHorizonPeriodReturns,
+    collapsePartialHorizons,
     buildRollingPeriodReturnSeries,
     logToSimplePeriod,
     periodBorrowLog,

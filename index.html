@@ -1510,7 +1510,7 @@
 <script src="assets/pair_backtest.js?v=pb-v9"></script>
 <script src="assets/bucket4_backtest.js?v=b4-v2"></script>
 <script src="assets/bucket5_insurance_backtest.js?v=b5-v1"></script>
-<script src="assets/realized_decay.js?v=rd-v8"></script>
+<script src="assets/realized_decay.js?v=rd-v9"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="assets/fof_chart.js?v=fof-v3"></script>
@@ -3386,7 +3386,7 @@ function fmtGrossRealizedLog(r, v) {
 function realizedPairGross20dTooltip(r) {
   const v = Number(r?.realized_pair_gross_20d);
   const partial = Number(r?.realized_pair_gross_partial);
-  if (!Number.isFinite(v) && !Number.isFinite(partial)) return `${REALIZED_PAIR_GROSS_GRID_HORIZON} trading-day gross pair return (Σ log1p(δ·R_u − R_etf)), period not annualized. Same as Decay tab 20d Gross. Requires joint ETF+underlying history in etf_metrics_daily.`;
+  if (!Number.isFinite(v) && !Number.isFinite(partial)) return `${REALIZED_PAIR_GROSS_GRID_HORIZON} trading-day gross pair return (Σ δ·log U − log L), period not annualized. Same as Decay tab 20d Gross. Requires joint ETF+underlying history in etf_metrics_daily.`;
   const isPartial = !Number.isFinite(v) && Number.isFinite(partial);
   const shown = isPartial ? partial : v;
   const lines = [
@@ -3394,7 +3394,7 @@ function realizedPairGross20dTooltip(r) {
       ? `Partial realized pair return: fewer than ${REALIZED_PAIR_GROSS_GRID_HORIZON} aligned observations, not ranked as a full ${REALIZED_PAIR_GROSS_GRID_HORIZON}d value.`
       : `Trailing ${REALIZED_PAIR_GROSS_GRID_HORIZON} trading-day gross pair return (period, not annualized).`,
     'Same metric as Decay tab → 20d → Gross.',
-    'Formula: Σ daily log1p(δ·R_u − R_etf) over usable days (calendar gaps >5d skipped); short-favorable +.',
+    'Formula: Σ daily (δ·log U − log L) over usable days (calendar gaps >5d skipped); short-favorable +.',
     `Value: ${fmt(shown)} gross`,
   ];
   const obs = Number(r?.realized_pair_gross_20d_obs);
@@ -4876,7 +4876,7 @@ function RealizedDecayHorizonsBarChart({ horizons, beta, borrowAnnual, etfLabel,
             Number.isFinite(Number(borrowAnnual))
               ? `Borrow drag: ${fmt(Number(borrowAnnual) * (p.obs / 252) * BORROW_ACT360_FACTOR)} over period (Act/360)`
               : null,
-            !p.sufficient ? '(partial window — history shorter than horizon)' : null,
+            !p.sufficient ? (p.availableHistory ? '(available history — listing shorter than longer horizons)' : '(partial window — history shorter than horizon)') : null,
           ].filter(Boolean).join('\n');
           return (
             <div key={p.horizonDays} className="decay-horizon-col" title={tip}>
@@ -4892,7 +4892,9 @@ function RealizedDecayHorizonsBarChart({ horizons, beta, borrowAnnual, etfLabel,
                 <MiniBar value={p.grossSimple} kind="gross" insufficient={!p.sufficient} />
                 <MiniBar value={p.netSimple} kind="net" insufficient={!p.sufficient} />
               </div>
-              <div className="decay-horizon-label">{p.horizonDays}d</div>
+              <div className="decay-horizon-label">
+                {p.availableHistory ? `${p.obs}d*` : `${p.horizonDays}d`}
+              </div>
             </div>
           );
         })}
@@ -4929,7 +4931,7 @@ const COLS = [
     sublabel: '20d · gross · pair',
     w: 118,
     numeric: true,
-    hint: 'Trailing 20 trading-day gross pair return (Σ log1p(δ·R_u − R_etf)), period not annualized. Same as Decay tab 20d Gross. Short-favorable +. Not Gross (realiz.) annual.',
+    hint: 'Trailing 20 trading-day gross pair return (Σ δ·log U − log L), period not annualized. Same as Decay tab 20d Gross. Short-favorable +. Gaps >5d skipped. Not Gross (realiz.) annual.',
   },
   {
     key: SCENARIO_ETF_1M_FLAT_SORT_KEY,
@@ -8138,7 +8140,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     const c = Number(getBorrowRate(r));
     return Number.isFinite(c) ? c : 0;
   }, [etfBorrowSeries, r]);
-  const realizedDecayHorizons = useMemo(() => (
+  const realizedDecayHorizonsRaw = useMemo(() => (
     typeof RealizedDecayFns.computeHorizonPeriodReturns === 'function'
       ? RealizedDecayFns.computeHorizonPeriodReturns(
         realizedDailyDragSeries,
@@ -8147,6 +8149,14 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       )
       : { horizons: [], nDays: 0, endDate: null }
   ), [realizedDailyDragSeries, decayBorrowAnnual]);
+  const realizedDecayHorizons = useMemo(() => (
+    typeof RealizedDecayFns.collapsePartialHorizons === 'function'
+      ? RealizedDecayFns.collapsePartialHorizons(realizedDecayHorizonsRaw)
+      : realizedDecayHorizonsRaw
+  ), [realizedDecayHorizonsRaw]);
+  const decayDragMeta = realizedDailyDragSeries?._meta || realizedDecayHorizonsRaw || {};
+  const decaySkippedGaps = decayDragMeta.skippedGaps || realizedDecayHorizonsRaw?.skippedGaps || [];
+  const decayConvexityDays = decayDragMeta.convexityDays || realizedDecayHorizonsRaw?.convexityDays || [];
   const fofDecayHorizons = useMemo(() => {
     if (!isFoF || !fofRealizedPair?.ok) return null;
     const horizons = (fofRealizedPair.horizons || []).map((h) => ({
@@ -10716,11 +10726,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <>
                 Period return over the trailing window (not annualized) on <strong>total-return</strong> prices
                 (ETF: Yahoo adj close / NAV TR; underlying: split-adj close).{' '}
-                Daily pair P&amp;L uses simple leverage tracking:{' '}
-                <code>drag = log1p(β·R<sub>u</sub> − R<sub>etf</sub>)</code> (zero when the ETF tracks β× exactly),
-                then <code>gross = Σ drag</code> over usable days (calendar gaps &gt;5d skipped).{' '}
-                <code>net = gross − borrow<sub>avg</sub> × (N/252) × (365/360)</code>.
-                Split-aware TR from <code>price_basis.js</code> (same rules as chart windows): scale pre-split issuer closes only when raw price jumps; Yahoo-continuous series use adj close; distributions via NAV TR when scaling applies.
+                <code>gross<sub>log</sub> = Σ (β·log U − log L)</code> over usable days
+                (= endpoint <code>β·log(U<sub>end</sub>/U<sub>start</sub>) − log(L<sub>end</sub>/L<sub>start</sub>)</code> when no interior skips);
+                calendar gaps &gt;5d are skipped. <code>net = gross − borrow<sub>avg</sub> × (N/252) × (365/360)</code>.
+                Large days with near-perfect simple leverage tracking are flagged as log-convexity (not zeroed).
+                Split-aware TR from <code>price_basis.js</code>.
               </>
             )}
           </div>
@@ -10744,6 +10754,29 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           ) : (
             <>
               {!isFoF ? <TrCoverageBadge coverage={decayTrCoverage} etfLabel={etfSym} /> : null}
+              {!isFoF && Array.isArray(decaySkippedGaps) && decaySkippedGaps.length > 0 ? (
+                <div className="scenario-warning">
+                  Skipped {decaySkippedGaps.length} calendar gap{decaySkippedGaps.length === 1 ? '' : 's'} &gt;5d
+                  (not counted as trading days):{' '}
+                  {decaySkippedGaps.slice(0, 3).map((g) => `${g.from}→${g.to} (${g.calendarGap || g.calendar_gap}d)`).join('; ')}
+                  {decaySkippedGaps.length > 3 ? '…' : ''}.
+                </div>
+              ) : null}
+              {!isFoF && Array.isArray(decayConvexityDays) && decayConvexityDays.length > 0 ? (
+                <div className="scenario-warning">
+                  {decayConvexityDays.length} large log-convexity day{decayConvexityDays.length === 1 ? '' : 's'}
+                  (near-perfect simple leverage tracking; log-drag still nonzero):{' '}
+                  {decayConvexityDays.slice(0, 4).map((d) => d.date).join(', ')}
+                  {decayConvexityDays.length > 4 ? '…' : ''}.
+                </div>
+              ) : null}
+              {!isFoF && Number(realizedDecayHorizons?.nDays) > 0 && Number(realizedDecayHorizons?.nDays) < 60 ? (
+                <div className="scenario-warning">
+                  Only {realizedDecayHorizons.nDays} usable drag days of joint history
+                  {realizedDecayHorizons.endDate ? ` through ${realizedDecayHorizons.endDate}` : ''}
+                  — longer horizons are collapsed to available history.
+                </div>
+              ) : null}
 
               <RealizedDecayHorizonsBarChart
                 horizons={decayHorizonsDisplay.horizons}
@@ -10767,8 +10800,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 </thead>
                 <tbody>
                   {(decayHorizonsDisplay.horizons || []).map((h) => (
-                    <tr key={`decay-h-${h.horizonDays}`}>
-                      <td>{h.horizonDays} trading days</td>
+                    <tr key={`decay-h-${h.horizonDays}-${h.availableHistory ? 'avail' : 'full'}`}>
+                      <td>
+                        {h.availableHistory
+                          ? `Available history (${h.obs}d)`
+                          : `${h.horizonDays} trading days`}
+                        {!h.sufficient && !h.availableHistory ? ' (partial)' : ''}
+                      </td>
                       <td style={{ color: h.grossSimple >= 0 ? 'var(--positive)' : 'var(--negative)', fontFamily: 'JetBrains Mono, monospace' }}>
                         {h.grossSimple != null && Number.isFinite(h.grossSimple) ? fmt(h.grossSimple) : '—'}
                       </td>

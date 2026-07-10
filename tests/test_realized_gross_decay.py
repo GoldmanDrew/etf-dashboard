@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import sys
 from pathlib import Path
 
@@ -9,8 +10,12 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from realized_gross_decay import (  # noqa: E402
+    MAX_PAIR_DRAG_GAP_DAYS,
+    PAIR_DRAG_BASIS,
     REALIZED_PAIR_GROSS_20D_HORIZON,
     build_daily_log_drag_series,
+    build_daily_log_drag_series_with_meta,
+    collapse_partial_horizons,
     compute_gross_decay_annual,
     compute_horizon_period_returns,
     compute_realized_pair_gross_20d,
@@ -40,6 +45,11 @@ def _flat_joint_rows(n: int, *, etf_drift: float = -0.005, und_drift: float = 0.
     return rows
 
 
+def test_pair_drag_basis_is_log_drag_contract():
+    assert PAIR_DRAG_BASIS == "beta_log_minus_etf_log"
+    assert MAX_PAIR_DRAG_GAP_DAYS == 5
+
+
 def test_compute_horizon_period_returns_60d():
     joint = _flat_joint_rows(80, etf_drift=-0.005, und_drift=0.001)
     tr = build_tr_series_from_metrics(joint, [])
@@ -52,6 +62,58 @@ def test_compute_horizon_period_returns_60d():
     assert h60["gross_log"] is not None and h60["gross_log"] > 0
     assert h60["net_simple"] < h60["gross_simple"]
     assert abs(h60["net_log"] - (h60["gross_log"] - _period_borrow_log(0.252, 60))) < 1e-12
+
+
+def test_period_gross_equals_endpoint_log_drag():
+    joint = _flat_joint_rows(25, etf_drift=-0.01, und_drift=0.002)
+    tr = build_tr_series_from_metrics(joint, [])
+    daily = build_daily_log_drag_series(tr, 2.0)
+    out = compute_horizon_period_returns(daily, [20], borrow_annual=0.0)
+    row = out["horizons"][0]
+    start = tr[-21]
+    end = tr[-1]
+    endpoint = 2.0 * math.log(end["tr_und_px"] / start["tr_und_px"]) - math.log(
+        end["tr_etf_px"] / start["tr_etf_px"]
+    )
+    assert abs(row["gross_log"] - endpoint) < 1e-9
+
+
+def test_perfect_simple_neg2x_large_day_flagged_convexity_not_zeroed():
+    tr = [
+        {"date": "2026-05-07", "tr_etf_px": 12.84, "tr_und_px": 78.58},
+        {"date": "2026-05-08", "tr_etf_px": 4.05, "tr_und_px": 105.47},
+    ]
+    result = build_daily_log_drag_series_with_meta(tr, -2.0)
+    series = result["series"]
+    meta = result["meta"]
+    assert len(series) == 1
+    assert abs(series[0]["simple_pnl"]) < 0.01
+    assert abs(series[0]["drag"]) > 0.3
+    assert series[0]["convexity_day"] is True
+    assert len(meta["convexity_days"]) == 1
+
+
+def test_build_daily_log_drag_skips_calendar_gaps_over_5_days():
+    tr = [
+        {"date": "2026-05-28", "tr_etf_px": 1.73, "tr_und_px": 148.03},
+        {"date": "2026-05-29", "tr_etf_px": 1.84, "tr_und_px": 143.48},
+        {"date": "2026-06-16", "tr_etf_px": 2.83, "tr_und_px": 104.63},
+        {"date": "2026-06-17", "tr_etf_px": 2.65, "tr_und_px": 107.98},
+    ]
+    result = build_daily_log_drag_series_with_meta(tr, -2.0)
+    assert [d["date"] for d in result["series"]] == ["2026-05-29", "2026-06-17"]
+    assert len(result["meta"]["skipped_gaps"]) == 1
+
+
+def test_collapse_partial_horizons_dedupes():
+    joint = _flat_joint_rows(26, etf_drift=-0.002, und_drift=0.001)
+    tr = build_tr_series_from_metrics(joint, [])
+    daily = build_daily_log_drag_series(tr, -2.0)
+    raw = compute_horizon_period_returns(daily, [5, 20, 60, 120, 251], borrow_annual=0.1)
+    collapsed = collapse_partial_horizons(raw)
+    partials = [h for h in collapsed["horizons"] if not h.get("sufficient")]
+    assert len(partials) == 1
+    assert partials[0].get("available_history") is True
 
 
 def test_realized_pair_gross_20d_fields():
@@ -160,33 +222,6 @@ def test_build_daily_log_drag_skips_orphan_leg_jumps():
     daily2 = build_daily_log_drag_series(tr_etf_cliff, 2.0)
     assert len(daily2) == 1
     assert daily2[0]["date"] == "2026-06-23"
-
-
-def test_perfect_simple_leverage_tracking_zero_drag_on_large_move():
-    """β=-2 with perfect simple tracking must not invent ~+76% log-drag."""
-    from realized_gross_decay import PAIR_DRAG_BASIS, MAX_PAIR_DRAG_GAP_DAYS
-
-    tr = [
-        {"date": "2026-05-07", "tr_etf_px": 12.84, "tr_und_px": 78.58},
-        {"date": "2026-05-08", "tr_etf_px": 4.05, "tr_und_px": 105.47},
-    ]
-    daily = build_daily_log_drag_series(tr, -2.0)
-    assert len(daily) == 1
-    assert abs(daily[0]["drag"]) < 1e-3
-    assert abs(daily[0]["simple_pnl"]) < 1e-3
-    assert PAIR_DRAG_BASIS == "simple_levered_log1p"
-    assert MAX_PAIR_DRAG_GAP_DAYS == 5
-
-
-def test_build_daily_log_drag_skips_calendar_gaps_over_5_days():
-    tr = [
-        {"date": "2026-05-28", "tr_etf_px": 1.73, "tr_und_px": 148.03},
-        {"date": "2026-05-29", "tr_etf_px": 1.84, "tr_und_px": 143.48},
-        {"date": "2026-06-16", "tr_etf_px": 2.83, "tr_und_px": 104.63},
-        {"date": "2026-06-17", "tr_etf_px": 2.65, "tr_und_px": 107.98},
-    ]
-    daily = build_daily_log_drag_series(tr, -2.0)
-    assert [d["date"] for d in daily] == ["2026-05-29", "2026-06-17"]
 
 
 def test_compute_realized_pair_gross_20d_from_metrics_rows():

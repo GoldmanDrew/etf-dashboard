@@ -1,0 +1,71 @@
+{
+  "contract": {
+    "pair_drag_basis": "beta_log_minus_etf_log",
+    "max_pair_drag_gap_days": 5,
+    "daily_drag": "beta * log(U_t/U_{t-1}) - log(L_t/L_{t-1})",
+    "period_identity": "sum(daily_drag) == beta*log(U_end/U_start) - log(L_end/L_start) when no interior skips"
+  },
+  "cases": [
+    {
+      "id": "flat_zero",
+      "beta": 2.0,
+      "points": [
+        {"date": "2026-01-02", "tr_etf_px": 100, "tr_und_px": 50},
+        {"date": "2026-01-03", "tr_etf_px": 100, "tr_und_px": 50},
+        {"date": "2026-01-04", "tr_etf_px": 100, "tr_und_px": 50}
+      ],
+      "expect": {
+        "n_drags": 2,
+        "gross_log_abs_max": 1e-12,
+        "skipped_gaps": 0,
+        "convexity_days": 0
+      }
+    },
+    {
+      "id": "rklz_may8_convexity",
+      "beta": -2.0,
+      "points": [
+        {"date": "2026-05-07", "tr_etf_px": 12.84, "tr_und_px": 78.58},
+        {"date": "2026-05-08", "tr_etf_px": 4.05, "tr_und_px": 105.47}
+      ],
+      "expect": {
+        "n_drags": 1,
+        "simple_pnl_abs_max": 0.01,
+        "drag_abs_min": 0.3,
+        "convexity_days": 1,
+        "skipped_gaps": 0
+      }
+    },
+    {
+      "id": "gap_stitch_skipped",
+      "beta": -2.0,
+      "points": [
+        {"date": "2026-05-28", "tr_etf_px": 1.73, "tr_und_px": 148.03},
+        {"date": "2026-05-29", "tr_etf_px": 1.84, "tr_und_px": 143.48},
+        {"date": "2026-06-16", "tr_etf_px": 2.83, "tr_und_px": 104.63},
+        {"date": "2026-06-17", "tr_etf_px": 2.65, "tr_und_px": 107.98}
+      ],
+      "expect": {
+        "n_drags": 2,
+        "drag_dates": ["2026-05-29", "2026-06-17"],
+        "skipped_gaps": 1
+      }
+    },
+    {
+      "id": "endpoint_identity_path",
+      "beta": 2.0,
+      "points": [
+        {"date": "2026-03-01", "tr_etf_px": 100.0, "tr_und_px": 50.0},
+        {"date": "2026-03-02", "tr_etf_px": 98.0, "tr_und_px": 50.5},
+        {"date": "2026-03-03", "tr_etf_px": 97.0, "tr_und_px": 51.0},
+        {"date": "2026-03-04", "tr_etf_px": 95.5, "tr_und_px": 51.8},
+        {"date": "2026-03-05", "tr_etf_px": 94.0, "tr_und_px": 52.2}
+      ],
+      "expect": {
+        "n_drags": 4,
+        "check_endpoint_identity": true,
+        "horizon_days": 4
+      }
+    }
+  ]
+}

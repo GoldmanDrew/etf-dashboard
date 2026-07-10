@@ -170,19 +170,23 @@ We have **five** different "expected decay" values in play. Knowing which one dr
 For every ETF with ≥ 40 days of overlapping history with its underlying:
 
 ```
-R_u,t = U_t / U_{t-1} − 1
-R_etf,t = L_t / L_{t-1} − 1
-daily_drag_t = log1p(β · R_u,t − R_etf,t)   # 0 when ETF tracks β× exactly
+daily_drag_t = β · log(U_t / U_{t-1}) − log(L_t / L_{t-1})   # split-aware TR
 gross_decay_annual = mean(daily_drag_t) · 252
 ```
 
-Calendar gaps larger than 5 days (after dropping `carry_forward` rows) are skipped so multi-week feed holes are not counted as a single trading day.
+Period Gross on the Decay tab / `realized_pair_gross_20d` is `expm1(Σ daily_drag)` over the trailing window (**not** annualized). When no interior days are skipped, this equals the endpoint identity:
+
+```
+Σ daily_drag = β · log(U_end / U_start) − log(L_end / L_start)
+```
+
+**Gap rule:** after dropping `carry_forward` metrics rows, calendar gaps **> 5 days** between successive TR points do **not** form a drag day (prevents May29→Jun16-style stitches). History on both sides of the hole is kept.
+
+**Log convexity:** on a huge day with near-perfect simple leverage tracking (`R_etf ≈ β · R_u`), log-drag is still nonzero. Those days are flagged `convexity_day` for disclosure — they are **not** zeroed (zeroing would break the endpoint identity).
 
 - Lives in `gross_decay_annual` (CSV / metrics) → `Gross (realized)` column on the main table.
-- Trailing period gross (Decay tab / `realized_pair_gross_20d`) is `expm1(Σ daily_drag)` over the window — **not** annualized.
 - This is **always** shown if available. It is the only number we ship for `passive_low_delta` and `other_structured` rows where the model-based expected decay is meaningless.
-
-(Legacy note: older builds used `β · log(U) − log(L)`, which is **not** zero under perfect simple −2× tracking on large moves.)
+- Client (`assets/realized_decay.js`) and server (`scripts/realized_gross_decay.py`) must stay in lockstep; golden fixtures in `tests/fixtures/decay_golden.json`.
 
 ### 4.2 Simple Itô identity (legacy fallback)
 
