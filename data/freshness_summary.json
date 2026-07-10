@@ -1,25 +1,25 @@
 {
-  "build_time": "2026-07-09T19:03:33.201434Z",
+  "build_time": "2026-07-10T14:45:18.566537Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-07-09T16:20:31.812551Z",
+    "build_time": "2026-07-09T23:21:02.453384Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
     "yieldboost_underlyings_refreshed_count": 30,
     "yieldboost_underlyings_prefetched_count": 30,
     "yieldboost_underlyings_skipped_fresh_count": 0,
     "yieldboost_refresh_order_head": [
-      "MSTR",
-      "TLT",
       "PLTR",
-      "AMD",
-      "ETHA",
-      "TSLA",
+      "QBTS",
+      "NVDA",
+      "SOXX",
+      "XLK",
+      "TLT",
       "META",
-      "NVDA"
+      "SPY"
     ],
     "monitored_symbols_count": 301,
     "freshness_enforced_count": 61,
@@ -27,20 +27,20 @@
     "missing_monitored_symbols": [],
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
-    "oldest_symbol": "PTIR",
-    "oldest_symbol_age_minutes": 322,
-    "oldest_enforced_symbol": "PTIR",
-    "oldest_enforced_symbol_age_minutes": 322
+    "oldest_symbol": "NUGT",
+    "oldest_symbol_age_minutes": 1113,
+    "oldest_enforced_symbol": "NUGT",
+    "oldest_enforced_symbol_age_minutes": 1113
   },
   "vrp": {
     "worst_underlying_symbol": "AMD",
     "worst_underlying_options_age_minutes": 16,
-    "underlying_options_as_of_min": "2026-07-09T16:20:31.812551Z",
+    "underlying_options_as_of_min": "2026-07-09T23:21:02.453384Z",
     "iv_coverage_front_pct": 0.9032
   },
   "flow": {
-    "latest_date": "2026-07-09",
-    "build_time": "2026-07-09T19:03:29.380275Z",
+    "latest_date": "2026-07-10",
+    "build_time": "2026-07-10T14:45:14.698974Z",
     "underlyings_total": 249,
     "underlyings_stale": 5,
     "underlyings_stale_pct": 2.01,
@@ -48,91 +48,92 @@
     "underlyings_actionable_stale": 5,
     "underlyings_actionable_stale_pct": 2.01,
     "underlyings_stale_by_reason": {
-      "missing_metrics": 3,
-      "quality_excluded": 2
+      "missing_metrics": 5
     },
-    "fund_rows_on_latest_date": 536,
+    "fund_rows_on_latest_date": 538,
     "fund_quality_counts": {
-      "income_overlay": 30,
+      "income_overlay": 31,
       "missing_prior_aum": 34,
-      "missing_underlying_return": 1,
-      "ok": 408,
-      "product_class:passive_low_delta": 63
+      "ok": 409,
+      "product_class:passive_low_delta": 63,
+      "stale_aum": 1
     },
-    "stale_aum_by_prior_kind": {},
+    "stale_aum_by_prior_kind": {
+      "anchor_lag": 1
+    },
     "top_stale_by_abs_net_moc": [
-      {
-        "underlying": "LMND",
-        "date": "2026-07-02",
-        "abs_net_moc_dollars": 1234438.16,
-        "reason": "missing_metrics"
-      },
       {
         "underlying": "SATS",
         "date": "2026-07-06",
         "abs_net_moc_dollars": 559280.47,
-        "reason": "quality_excluded"
-      },
-      {
-        "underlying": "XPEV",
-        "date": "2026-07-02",
-        "abs_net_moc_dollars": 97051.05,
         "reason": "missing_metrics"
       },
       {
-        "underlying": "FCX",
-        "date": "2026-07-02",
-        "abs_net_moc_dollars": 46048.85,
+        "underlying": "RKT",
+        "date": "2026-07-07",
+        "abs_net_moc_dollars": 232626.57,
         "reason": "missing_metrics"
       },
       {
-        "underlying": "XOM",
-        "date": "2026-07-02",
-        "abs_net_moc_dollars": 45591.61,
-        "reason": "quality_excluded"
+        "underlying": "BLSH",
+        "date": "2026-07-07",
+        "abs_net_moc_dollars": 24516.16,
+        "reason": "missing_metrics"
+      },
+      {
+        "underlying": "TXN",
+        "date": "2026-07-07",
+        "abs_net_moc_dollars": 14370.61,
+        "reason": "missing_metrics"
+      },
+      {
+        "underlying": "GEMI",
+        "date": "2026-07-07",
+        "abs_net_moc_dollars": 12568.19,
+        "reason": "missing_metrics"
       }
     ]
   },
   "metrics": {
-    "latest_date": "2026-07-08",
-    "latest_ok": 508,
-    "latest_stale_ok": 241,
+    "latest_date": "2026-07-09",
+    "latest_ok": 497,
+    "latest_stale_ok": 303,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "carry_forward": 238,
-      "anchor_lag": 2,
-      "issuer_lag": 1
+      "carry_forward": 265,
+      "issuer_lag": 35,
+      "anchor_lag": 3
     },
-    "flow_blockers_prior_stale": 2,
+    "flow_blockers_prior_stale": 3,
     "prem_disc": {
       "rows_with_close": 556,
       "rows_with_nav_and_close": 556,
-      "median_prem_disc_bps": -0.0001011057155993121,
-      "lockstep_nav_close_count": 74,
-      "lockstep_nav_close_pct": 13.31,
-      "rex_nav_vs_implied_div_bps_gt5": 27,
-      "rex_nav_vs_implied_div_bps_gt50": 5,
-      "rex_nav_vs_implied_div_bps_max": 172.74472168905922,
+      "median_prem_disc_bps": -0.11995351937896048,
+      "lockstep_nav_close_count": 59,
+      "lockstep_nav_close_pct": 10.61,
+      "rex_nav_vs_implied_div_bps_gt5": 0,
+      "rex_nav_vs_implied_div_bps_gt50": 0,
+      "rex_nav_vs_implied_div_bps_max": null,
       "by_provider": {
         "carry_forward": {
-          "rows": 238,
-          "median_prem_disc_bps": -311.2797860245644,
-          "lockstep_count": 8
+          "rows": 265,
+          "median_prem_disc_bps": -166.00388746995264,
+          "lockstep_count": 11
         },
         "polygon": {
-          "rows": 45,
-          "median_prem_disc_bps": 3.8300172493573e-05,
-          "lockstep_count": 40
+          "rows": 28,
+          "median_prem_disc_bps": 8.345698824435188e-05,
+          "lockstep_count": 25
         },
         "tradr_axs": {
           "rows": 65,
-          "median_prem_disc_bps": -4.0795613470346055,
-          "lockstep_count": 3
+          "median_prem_disc_bps": 7.621686821066966,
+          "lockstep_count": 1
         },
         "merged": {
-          "rows": 46,
-          "median_prem_disc_bps": 0.5687602505813705,
-          "lockstep_count": 7
+          "rows": 57,
+          "median_prem_disc_bps": -1.7685193302446656,
+          "lockstep_count": 6
         },
         "direxion": {
           "rows": 35,
@@ -141,33 +142,28 @@
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 4.204907054294793,
-          "lockstep_count": 3
+          "median_prem_disc_bps": -2.5834131674000163,
+          "lockstep_count": 2
         },
         "rex_shares": {
           "rows": 35,
           "median_prem_disc_bps": 0.0,
-          "lockstep_count": 6
+          "lockstep_count": 5
         },
         "yieldmax": {
-          "rows": 28,
-          "median_prem_disc_bps": 13.447747631728838,
-          "lockstep_count": 2
+          "rows": 9,
+          "median_prem_disc_bps": 36.29764065335675,
+          "lockstep_count": 0
         },
         "yfinance": {
           "rows": 6,
-          "median_prem_disc_bps": 11.55257363619866,
+          "median_prem_disc_bps": 0.0,
           "lockstep_count": 3
         },
         "proshares": {
           "rows": 30,
-          "median_prem_disc_bps": -0.19789805724747733,
-          "lockstep_count": 0
-        },
-        "defiance": {
-          "rows": 2,
-          "median_prem_disc_bps": 18.62623332307355,
-          "lockstep_count": 0
+          "median_prem_disc_bps": -0.9939769896167514,
+          "lockstep_count": 4
         },
         "fof_child_synthetic": {
           "rows": 2,
@@ -178,117 +174,115 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-07-09",
-    "universe_stale": 21,
-    "severe_tail_count": 11,
+    "global_max": "2026-07-10",
+    "universe_stale": 67,
+    "severe_tail_count": 0,
     "worst": [
       {
-        "ticker": "ADBG",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "AEHG",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "FCXG",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "APPC",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "HMYY",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "BLSG",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "LMNX",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "BOEG",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "MSFL",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "BRKC",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "MSFO",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "GEMG",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "NFXL",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "RKTL",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "TPLX",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "SATG",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "XOMX",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "TXNU",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "XPEG",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "AAPX",
+        "last_date": "2026-07-08",
+        "days_behind": 2
       }
     ],
     "stale_tickers_sample": [
       {
-        "ticker": "ADBG",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "AEHG",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "FCXG",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "APPC",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "HMYY",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "BLSG",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "LMNX",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "BOEG",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "MSFL",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "BRKC",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "MSFO",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "GEMG",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "NFXL",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "RKTL",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "TPLX",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "SATG",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "XOMX",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "TXNU",
+        "last_date": "2026-07-07",
+        "days_behind": 3
       },
       {
-        "ticker": "XPEG",
-        "last_date": "2026-07-02",
-        "days_behind": 7
+        "ticker": "AAPX",
+        "last_date": "2026-07-08",
+        "days_behind": 2
       }
     ],
-    "build_time": "2026-07-09T18:57:07.791530+00:00"
+    "build_time": "2026-07-10T14:37:28.581479+00:00"
   },
-  "violations": [
-    "metrics: 5 rex row(s) with published NAV vs AUM/shares divergence >50bp (27 >5bp)"
-  ],
-  "ok": false
+  "violations": [],
+  "ok": true
 }
