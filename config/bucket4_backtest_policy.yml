@@ -1,8 +1,9 @@
-# Snapshot of ls-algo production Bucket 4 hedge/cadence/sizing rules (2026-06-30).
-# Source: config/strategy_config.yml inverse_decay_bucket4 + config/sizing.yaml bucket_4*
+# Snapshot of ls-algo production Bucket 4 hedge/cadence/sizing rules (2026-07-10).
+# Source: config/strategy_config.yml inverse_decay_bucket4
+# Sizing: v6 opt2 (decay/borrow/cov) + conditional crash_budget (trim-only, no renorm).
 
 schema: bucket4_backtest_policy.v1
-snapshot_date: "2026-06-30"
+snapshot_date: "2026-07-10"
 
 inverse_decay_bucket4:
   enabled: true
@@ -16,6 +17,24 @@ inverse_decay_bucket4:
       fee_bps: 1.0
       slippage_bps: 20.0
       borrow_multiplier: 1.0
+      pf_min_pairs: 5
+      decay_borrow_quad: 0
+      borrow_linear_aversion: 1.5
+      borrow_uncertainty_penalty: 3.0
+      borrow_aversion_source: posterior
+      min_weight: 0.005
+      max_weight: 0.35
+      cov_penalty: 0.85
+      cov_shrink: 0.35
+      vol_etp_weight_penalty: 0.0
+      crash_budget:
+        enabled: true
+        rho: 0.0075
+        theta: 0.5
+        phi: 0.5
+        l_floor: 0.02
+        missing_policy: book_quantile
+        missing_l_quantile: 0.75
       hedge_cadence_policy:
         source: tr_vcr
         hedge_ratio_model: v7
@@ -112,3 +131,7 @@ backtest:
   signal_window: 60
   initial_capital: 1.0
   gross_multiplier: 1.0
+  sleeve_budget_usd: 100000.0
+  sizing_method: v6_opt2_crash_budget
+  walk_forward: true
+  rebalance_freq: W-FRI

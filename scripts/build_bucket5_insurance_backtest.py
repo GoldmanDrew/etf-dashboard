@@ -21,6 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "data" / "bucket5_insurance_backtest.json"
 LS_ALGO_CANDIDATES = [
+    REPO / "ls-algo",
     REPO.parent / "ls-algo",
     Path.home() / "Projects" / "quant" / "ls-algo",
 ]

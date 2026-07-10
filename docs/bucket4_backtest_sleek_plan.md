@@ -9,7 +9,7 @@ Make Bucket 4 understandable at a glance: one page for the production book, one 
 - Keep the first screen focused on decisions: CAGR, drawdown, vol/Sharpe, active pairs, policy hash, and the equity path.
 - Use plain labels: "B4 Book", "Pair Report", "Production weights", "Custom book", "B4 net edge", and "VCR/TR cadence".
 - Avoid exposing old project names in user-facing copy. Use `ls-algo production method` or `inverse_decay_bucket4`.
-- Treat custom weights as a what-if tool. The UI reblends precomputed unit returns; it does not rerun Kelly/QCQP or the ratchet solver.
+- Treat custom weights as a what-if tool. The UI reblends precomputed unit returns; it does not rerun opt2 + crash-budget or the ratchet solver.
 - Keep the legacy inverse ticker drip simulator on chart pages under the **Drip** tab (`#/chart/{SYM}/backtest-flow`), distinct from issuer **Flow** (LETF close rebalance). Multi-leg: `#/backtest-flow`.
 - Pair Report scales unit-capital shard paths (`initial_capital: 1.0`) to a user notional (default $100k) before `$` formatting — never pass raw unit PnL through `fmtMoney`.
 

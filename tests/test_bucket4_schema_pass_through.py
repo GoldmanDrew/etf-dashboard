@@ -41,13 +41,13 @@ def test_bucket4_artifact_schema_when_present():
     if not path.is_file():
         return
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload.get("schema") == "bucket4_backtest.v2"
+    assert payload.get("schema") in {"bucket4_backtest.v2", "bucket4_backtest.v3"}
     assert isinstance(payload.get("pairs"), list)
     assert payload.get("n_pairs", 0) == len(payload["pairs"])
     assert isinstance(payload.get("sim_dates"), list)
     assert isinstance(payload.get("port_equity"), list)
     assert len(payload["sim_dates"]) == len(payload["port_equity"])
-    if payload.get("schema") == "bucket4_backtest.v2":
+    if payload.get("schema") in {"bucket4_backtest.v2", "bucket4_backtest.v3"}:
         assert isinstance(payload.get("default_weights"), dict)
         assert isinstance(payload.get("pair_series"), dict)
         assert isinstance(payload.get("universes"), dict)
@@ -58,6 +58,13 @@ def test_bucket4_artifact_schema_when_present():
             assert "shard_url" in first
             assert "gate_reason" in first
             assert "model_status" in first
+        if payload.get("schema") == "bucket4_backtest.v3":
+            assert payload.get("sizing_method") in {
+                "v6_opt2_crash_budget",
+                "legacy_concentration",
+            }
+            assert "cash_residual" in payload
+            assert "deployed_fraction" in payload
         sndq = [p for p in payload.get("pair_manifest", []) if p.get("etf") == "SNDQ"]
         if sndq:
             shard_path = REPO / "data" / "bucket4_pairs" / "SNDQ.json"

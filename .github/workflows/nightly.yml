@@ -305,7 +305,7 @@ jobs:
           TRADIER_CHAIN_SYMBOLS: "MSTU,MULL,TECL,TSLL"
         run: python scripts/build_data.py
 
-      - name: Checkout ls-algo (Bucket 5 insurance backtest)
+      - name: Checkout ls-algo (Bucket 4/5 backtests)
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
         uses: actions/checkout@v4
@@ -315,16 +315,21 @@ jobs:
           path: ls-algo
           token: ${{ secrets.LS_ALGO_TOKEN || secrets.GITHUB_TOKEN }}
 
+      - name: Install ls-algo deps (Bucket 4/5)
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: pip install -r ls-algo/requirements.txt
+
       - name: Build Bucket 5 insurance backtest panel
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
-        run: |
-          pip install -r ls-algo/requirements.txt
-          python scripts/build_bucket5_insurance_backtest.py --copy-ls-algo-panel
+        run: python scripts/build_bucket5_insurance_backtest.py --copy-ls-algo-panel
 
       - name: Build Bucket 4 inverse-decay backtest artifact
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
+        env:
+          LS_ALGO_ROOT: ${{ github.workspace }}/ls-algo
         run: python scripts/build_bucket4_backtest.py
 
       - name: Refresh YieldBOOST VRP (sleeves + Tradier OCC)
@@ -425,6 +430,11 @@ jobs:
             data/product_taxonomy.json
             data/fof_pipeline_report.json
             data/earnings_seed_audit.json
+            data/bucket4_backtest.json
+            data/bucket4_backtest_state.json
+            data/bucket4_backtest_policy_hash.txt
+            data/bucket4_pairs
+            data/bucket5_insurance_backtest.json
           commit_message: "${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday dashboard catch-up build' || 'chore: nightly dashboard build' }}"
 
   # Read-only, non-gating diagnostics run in parallel with the Pages deploy so

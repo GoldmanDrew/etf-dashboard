@@ -152,8 +152,10 @@ def test_builder_on_synthetic_fixture(tmp_path):
         warmup_bdays=5,
         signal_window=20,
         vol_history={},
+        legacy_concentration=True,
     )
     assert built is not None
+    assert built["sizing_method"] == "legacy_concentration"
     assert built["n_pairs"] == 2
     assert built["n_obs"] > 10
     assert len(built["port_daily_returns"]) == built["n_obs"]

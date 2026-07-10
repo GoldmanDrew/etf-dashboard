@@ -38,6 +38,13 @@ from bucket4.bucket4_sizing import (  # noqa: E402
     concentration_scores,
 )
 from bucket4.bucket4_vol_shape_signals import get_pair_signal, load_vol_shape_history  # noqa: E402
+from bucket4.ls_algo_sizing import (  # noqa: E402
+    build_walk_forward_weights,
+    expand_weights_to_calendar,
+    find_ls_algo,
+    port_returns_with_cash,
+    size_production_book,
+)
 from bucket4.policy_helpers import knobs_from_policy, load_policy, make_knobs  # noqa: E402
 
 DEFAULT_SCREENER = REPO / "data" / "etf_screened_today.csv"
@@ -48,9 +55,10 @@ OUT_HASH = REPO / "data" / "bucket4_backtest_policy_hash.txt"
 OUT_PAIR_DIR = REPO / "data" / "bucket4_pairs"
 VOL_SHAPE_HISTORY = REPO / "data" / "vol_shape_history.json"
 RET_FLOOR = -0.95
-SCHEMA = "bucket4_backtest.v2"
+SCHEMA = "bucket4_backtest.v3"
 PAIR_SCHEMA = "bucket4_pair.v2"
 PAIR_SHARD_MIN_DAYS = 20
+SIZING_METHOD = "v6_opt2_crash_budget"
 
 
 def _norm(x: object) -> str:
@@ -79,6 +87,32 @@ def _round_or_none(val, ndigits: int = 6):
     if not np.isfinite(v):
         return None
     return round(v, ndigits)
+
+
+def _json_safe(obj):
+    """Replace NaN/Inf with None and coerce pandas/numpy scalars for JSON."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, pd.Timestamp):
+        return obj.strftime("%Y-%m-%d")
+    if isinstance(obj, (np.datetime64,)):
+        return pd.Timestamp(obj).strftime("%Y-%m-%d")
+    if isinstance(obj, float):
+        return obj if np.isfinite(obj) else None
+    if isinstance(obj, (np.floating,)):
+        v = float(obj)
+        return v if np.isfinite(v) else None
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, Path):
+        return str(obj)
+    return obj
 
 
 def _compact_series(s: pd.Series, ndigits: int = 6) -> list:
@@ -226,7 +260,8 @@ def load_universe(screener_path: Path, policy: dict) -> pd.DataFrame:
     return b4.loc[b4["production_candidate"].fillna(False)].copy().reset_index(drop=True)
 
 
-def score_weights(df: pd.DataFrame, policy: dict) -> tuple[pd.DataFrame, np.ndarray]:
+def score_weights_legacy_concentration(df: pd.DataFrame, policy: dict) -> tuple[pd.DataFrame, np.ndarray]:
+    """Legacy (edge-borrow)/vol weights — only used with --legacy-concentration."""
     if df.empty:
         return df, np.array([])
     scores = concentration_scores(df)
@@ -249,6 +284,19 @@ def score_weights(df: pd.DataFrame, policy: dict) -> tuple[pd.DataFrame, np.ndar
     if tot > 1e-12:
         w = w / tot
     return df.reset_index(drop=True), w
+
+
+# Back-compat alias for tests that still import score_weights.
+score_weights = score_weights_legacy_concentration
+
+
+def _telemetry_by_etf(telemetry: list[dict] | None) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for row in telemetry or []:
+        etf = _norm(row.get("ETF") or row.get("etf"))
+        if etf:
+            out[etf] = row
+    return out
 
 
 def _pair_summary(
@@ -479,11 +527,13 @@ def pair_shard_from_result(
     }
 
 
-def port_returns(ret_df: pd.DataFrame, weights: pd.Series) -> pd.Series:
+def port_returns(ret_df: pd.DataFrame, weights: pd.Series, *, renormalize: bool = False) -> pd.Series:
+    """Blend pair returns. Production path keeps cash residual (renormalize=False)."""
     w = weights.reindex(ret_df.columns).fillna(0.0)
     if w.sum() <= 1e-12:
         return pd.Series(dtype=float)
-    w = w / w.sum()
+    if renormalize:
+        w = w / w.sum()
     pr = ret_df.mul(w, axis=1).sum(axis=1)
     return pr.clip(lower=RET_FLOOR, upper=0.95)
 
@@ -576,7 +626,7 @@ def write_pair_shards(shards: dict[str, dict], out_dir: Path = OUT_PAIR_DIR) -> 
         old.unlink()
     for sym, payload in sorted(shards.items()):
         (out_dir / f"{sym}.json").write_text(
-            json.dumps(payload, indent=2, allow_nan=False),
+            json.dumps(_json_safe(payload), indent=2, allow_nan=False),
             encoding="utf-8",
         )
 
@@ -591,6 +641,8 @@ def build_backtest(
     warmup_bdays: int,
     signal_window: int,
     vol_history: dict[str, pd.DataFrame],
+    screened_csv: str | Path | None = None,
+    legacy_concentration: bool = False,
 ) -> dict | None:
     if uni.empty:
         return None
@@ -605,18 +657,22 @@ def build_backtest(
     slippage_bps = float(opt2.get("slippage_bps", 20.0))
     fee_bps = float(opt2.get("fee_bps", 1.0))
     initial_capital = float(bt_cfg.get("initial_capital", 1.0))
+    sleeve_budget_usd = float(bt_cfg.get("sleeve_budget_usd", 100_000.0))
+    walk_forward = bool(bt_cfg.get("walk_forward", True))
 
     ratchet_cfg = RatchetConfig.from_cfg(rules.get("ratchet") or policy.get("bucket_4_ratchet"))
     ratchet_sim = SimRatchetState(cfg=ratchet_cfg)
 
-    uni, weights_arr = score_weights(uni, policy)
     ret_cols: dict[str, pd.Series] = {}
     pair_meta: list[dict] = []
     pair_series: dict[str, dict] = {}
     h_state: dict[str, dict] = {}
+    h_by_underlying: dict[str, pd.Series] = {}
+    row_by_etf: dict[str, pd.Series] = {}
 
-    for i, (_, row) in enumerate(uni.iterrows()):
-        etf, und = row["ETF"], row["Underlying"]
+    for _, row in uni.iterrows():
+        etf = _norm(row.get("ETF"))
+        und = _norm(row.get("Underlying"))
         px = panel.get(etf)
         if px is None or px.empty:
             continue
@@ -640,14 +696,6 @@ def build_backtest(
         borrow = _finite_float(row.get("borrow_current"), 0.0)
         beta = _finite_float(row.get("Delta"), -2.0)
         edge = _finite_float(row.get("bucket4_net_edge_annual"), 0.0)
-        w = float(weights_arr[i]) if i < len(weights_arr) else 0.0
-        if w <= 0:
-            continue
-
-        _gross_mult, rat_res = ratchet_sim.apply_gross_multiplier(
-            etf, und, w, fwd_edge=edge, borrow=borrow,
-        )
-        eff_w = w * _gross_mult
 
         bt = run_bucket4_backtest_dynamic_h(
             px.reindex(cal),
@@ -662,6 +710,9 @@ def build_backtest(
             fee_bps=fee_bps,
         )
         ret_cols[etf] = bt["ret"]
+        h_by_underlying[und] = h_daily
+        row_by_etf[etf] = row
+
         stats = perf_stats(bt)
         mean_h = float(h_daily.dropna().mean()) if len(h_daily.dropna()) else float(knobs.h_mid)
         last_h = float(h_daily.dropna().iloc[-1]) if len(h_daily.dropna()) else float(knobs.h_mid)
@@ -669,6 +720,8 @@ def build_backtest(
         n_skip = int(bt["rebalance_skipped_below_drift"].sum()) if "rebalance_skipped_below_drift" in bt.columns else 0
         total_borrow = float(bt["borrow_cost"].sum()) if "borrow_cost" in bt.columns else 0.0
         total_fees = float(bt["rebalance_fee"].sum()) if "rebalance_fee" in bt.columns else 0.0
+        conc = float(concentration_scores(pd.DataFrame([row])).iloc[0])
+
         h_state[f"{etf}|{und}"] = {
             "etf": etf,
             "underlying": und,
@@ -681,16 +734,17 @@ def build_backtest(
         if len(rb_diag):
             h_state[f"{etf}|{und}"]["last_interval_days"] = int(rb_diag["interval_days"].iloc[-1])
 
-        pair_meta.append({
+        meta = {
             "etf": etf,
             "underlying": und,
-            "weight": round(w, 4),
-            "effective_weight": round(eff_w, 4),
+            "weight": 0.0,
+            "effective_weight": 0.0,
+            "portfolio_weight": 0.0,
             "borrow": round(borrow, 4),
             "beta": round(beta, 4),
             "bucket4_net_edge_annual": round(edge, 4),
             "vol_underlying_annual": round(_finite_float(row.get("vol_underlying_annual"), np.nan), 4),
-            "concentration_score": round(float(concentration_scores(pd.DataFrame([row])).iloc[0]), 4),
+            "concentration_score": round(conc, 4) if np.isfinite(conc) else None,
             "n_days": int(len(cal)),
             "cagr": round(float(stats.get("cagr", np.nan)), 4) if np.isfinite(stats.get("cagr", np.nan)) else None,
             "ann_vol": round(float(stats.get("annual_vol", np.nan)), 4) if np.isfinite(stats.get("annual_vol", np.nan)) else None,
@@ -703,35 +757,32 @@ def build_backtest(
             "total_borrow": round(total_borrow, 6),
             "total_fees": round(total_fees, 6),
             "final_equity": round(float(bt["equity"].iloc[-1]), 6) if len(bt) else None,
-            "ratchet": {
-                "trim_lambda": round(rat_res.trim_lambda, 4),
-                "binding": rat_res.binding,
-                "source": rat_res.source,
-            },
-        })
+            "ratchet": None,
+        }
+        pair_meta.append(meta)
         pair_series[etf] = {
             "schema": "bucket4_pair.v1",
             "etf": etf,
             "underlying": und,
-            "in_production_book": True,
+            "in_production_book": False,
             "summary": {
-                "cagr": pair_meta[-1]["cagr"],
-                "ann_vol": pair_meta[-1]["ann_vol"],
-                "sharpe": pair_meta[-1]["sharpe"],
-                "max_drawdown": pair_meta[-1]["max_drawdown"],
+                "cagr": meta["cagr"],
+                "ann_vol": meta["ann_vol"],
+                "sharpe": meta["sharpe"],
+                "max_drawdown": meta["max_drawdown"],
                 "n_rebalances": n_rebal,
                 "n_rebalances_skipped": n_skip,
                 "mean_h": round(mean_h, 4),
                 "h_last": round(last_h, 4),
                 "total_borrow": round(total_borrow, 6),
                 "total_fees": round(total_fees, 6),
-                "final_equity": pair_meta[-1]["final_equity"],
+                "final_equity": meta["final_equity"],
             },
             "screener": {
                 "bucket4_net_edge_annual": round(edge, 4),
                 "borrow": round(borrow, 4),
                 "beta": round(beta, 4),
-                "vol_underlying_annual": pair_meta[-1]["vol_underlying_annual"],
+                "vol_underlying_annual": meta["vol_underlying_annual"],
                 "init_pct_short": _round_or_none(row.get("init_pct_short"), 4),
                 "maint_pct_short": _round_or_none(row.get("maint_pct_short"), 4),
                 "purgatory": str(row.get("purgatory", "")).strip().lower() in {"1", "true", "t", "yes", "y"},
@@ -739,33 +790,172 @@ def build_backtest(
             "daily": _pair_daily_payload(bt),
             "rebalance_log": _rebalance_log(bt),
         }
-        ratchet_sim.record_rebalance(etf, und, eff_w)
 
     if not ret_cols:
         return None
 
-    ret_df = pd.DataFrame(ret_cols).reindex(sorted(set().union(*[set(s.index) for s in ret_cols.values()])))
-    gross_w = pd.Series({p["etf"]: p["effective_weight"] for p in pair_meta})
-    pr = port_returns(ret_df, gross_w)
+    all_idx = sorted(set().union(*[set(s.index) for s in ret_cols.values()]))
+    ret_df = pd.DataFrame(ret_cols).reindex(all_idx)
+
+    weight_history: list[dict] | None = None
+    sizing_latest: dict | None = None
+    sizing_method = SIZING_METHOD
+    deployed_fraction = 0.0
+    cash_residual = 1.0
+    latest_w: dict[str, float] = {}
+    tele_by_etf: dict[str, dict] = {}
+
+    def _apply_ratchet_and_weights(w_map: dict[str, float], *, attach_crash: bool) -> dict[str, float]:
+        eff: dict[str, float] = {}
+        for p in pair_meta:
+            etf = p["etf"]
+            und = p["underlying"]
+            w = float(w_map.get(etf, 0.0))
+            if not np.isfinite(w) or w < 0:
+                w = 0.0
+            edge = _finite_float(p.get("bucket4_net_edge_annual"), 0.0)
+            borrow = _finite_float(p.get("borrow"), 0.0)
+            _gross_mult, rat_res = ratchet_sim.apply_gross_multiplier(
+                etf, und, w, fwd_edge=edge, borrow=borrow,
+            )
+            eff_w = float(w) * float(_gross_mult)
+            p["weight"] = round(w, 4)
+            p["effective_weight"] = round(eff_w, 4)
+            p["portfolio_weight"] = round(eff_w, 4)
+            p["ratchet"] = {
+                "trim_lambda": round(rat_res.trim_lambda, 4),
+                "binding": rat_res.binding,
+                "source": rat_res.source,
+            }
+            if attach_crash:
+                tel = tele_by_etf.get(etf) or {}
+                p["opt2_weight"] = _round_or_none(tel.get("weight_solved"), 6)
+                p["crash_budget_mult"] = _round_or_none(tel.get("crash_budget_mult"), 4)
+                p["cap_usd"] = _round_or_none(tel.get("cap_usd"), 2)
+                p["L"] = _round_or_none(tel.get("L"), 6)
+                p["C"] = _round_or_none(tel.get("C"), 6)
+                p["runup"] = _round_or_none(tel.get("runup"), 6)
+                p["tail"] = _round_or_none(tel.get("tail"), 6)
+                p["hedge_ratio_at_size"] = _round_or_none(tel.get("hedge_ratio"), 4)
+                p["crash_l_source"] = tel.get("crash_l_source")
+            if eff_w > 1e-12:
+                ratchet_sim.record_rebalance(etf, und, eff_w)
+                eff[etf] = eff_w
+            ps = pair_series.get(etf)
+            if ps is not None:
+                ps["in_production_book"] = eff_w > 1e-12
+                ps["summary"]["portfolio_weight"] = p["portfolio_weight"]
+                ps["summary"]["effective_weight"] = p["effective_weight"]
+        return eff
+
+    if legacy_concentration:
+        sizing_method = "legacy_concentration"
+        uni_sized, weights_arr = score_weights_legacy_concentration(uni, policy)
+        w_map: dict[str, float] = {}
+        for i, (_, row) in enumerate(uni_sized.iterrows()):
+            etf = _norm(row.get("ETF"))
+            w_map[etf] = float(weights_arr[i]) if i < len(weights_arr) else 0.0
+        eff_map = _apply_ratchet_and_weights(w_map, attach_crash=False)
+        gross_w = pd.Series({e: eff_map.get(e, 0.0) for e in ret_df.columns}).fillna(0.0)
+        deployed_fraction = float(gross_w.clip(lower=0.0).sum())
+        cash_residual = max(0.0, 1.0 - deployed_fraction)
+        pr = port_returns(ret_df, gross_w, renormalize=True)
+    else:
+        if find_ls_algo() is None:
+            raise RuntimeError(
+                "ls-algo not found (need scripts/bucket4_backtest_api.py). "
+                "Set LS_ALGO_ROOT, checkout ls-algo beside this repo, or pass --legacy-concentration."
+            )
+        csv_path = Path(screened_csv) if screened_csv is not None else DEFAULT_SCREENER
+        end_ts = pd.Timestamp(ret_df.index.max())
+
+        if walk_forward:
+            wdf, _tele_hist, latest_meta = build_walk_forward_weights(
+                uni.loc[uni["ETF"].map(_norm).isin(ret_cols.keys())].copy(),
+                panel,
+                h_by_underlying,
+                screened_csv=csv_path,
+                policy=policy,
+                start=start,
+                end=end_ts,
+                sleeve_budget_usd=sleeve_budget_usd,
+                warmup_bdays=warmup_bdays,
+            )
+            w_mat = expand_weights_to_calendar(wdf, pd.DatetimeIndex(ret_df.index))
+            pr = port_returns_with_cash(ret_df, w_mat, ret_floor=RET_FLOOR)
+            sizing_latest = {
+                k: v
+                for k, v in (latest_meta or {}).items()
+                if not isinstance(v, (pd.DataFrame, pd.Series))
+            }
+            latest_w = {
+                _norm(k): float(v)
+                for k, v in (latest_meta.get("weights_by_etf") or wdf.iloc[-1].to_dict()).items()
+            }
+            tele_by_etf = _telemetry_by_etf(latest_meta.get("telemetry"))
+            deployed_fraction = float(latest_meta.get("deployed_fraction", float(wdf.iloc[-1].sum())))
+            cash_residual = float(latest_meta.get("cash_residual", max(0.0, 1.0 - deployed_fraction)))
+            sizing_method = str(latest_meta.get("sizing_method") or SIZING_METHOD)
+            weight_history = []
+            for dt, row in wdf.iterrows():
+                entry: dict = {
+                    "date": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "cash": round(max(0.0, 1.0 - float(row.sum())), 4),
+                }
+                for etf, w in row.items():
+                    wf = float(w)
+                    if wf > 1e-12:
+                        entry[str(etf)] = round(wf, 6)
+                weight_history.append(entry)
+        else:
+            live = uni.loc[uni["ETF"].map(_norm).isin(ret_cols.keys())].copy()
+            sized = size_production_book(
+                live,
+                panel,
+                h_by_underlying,
+                screened_csv=csv_path,
+                policy=policy,
+                run_date=end_ts,
+                sleeve_budget_usd=sleeve_budget_usd,
+            )
+            latest_w = {_norm(k): float(v) for k, v in sized.weights_by_etf().items()}
+            tele_by_etf = _telemetry_by_etf(sized.telemetry)
+            deployed_fraction = float(sized.deployed_fraction)
+            cash_residual = float(sized.cash_residual)
+            sizing_method = str(sized.sizing_method or SIZING_METHOD)
+            sizing_latest = sized.to_dict()
+            w_series = pd.Series({e: latest_w.get(e, 0.0) for e in ret_df.columns}).fillna(0.0)
+            # Static deployed book with cash residual (no renorm).
+            pr = port_returns(ret_df, w_series, renormalize=False)
+
+        _apply_ratchet_and_weights(latest_w, attach_crash=True)
+
+    # default_weights = effective_weight WITHOUT renormalizing to 1
+    default_weights: dict[str, float] = {}
+    production_pairs: list[dict] = []
+    for p in pair_meta:
+        ew = float(p.get("effective_weight") or 0.0)
+        if ew > 1e-12:
+            default_weights[p["etf"]] = round(ew, 6)
+            production_pairs.append(p)
+
     prv = pr.dropna()
     arr = prv.to_numpy(dtype=float)
-
     eq = (1.0 + prv).cumprod()
     perf = perf_stats(pd.DataFrame({"equity": eq, "ret": prv, "drawdown": eq / eq.cummax() - 1.0}))
 
-    total_w = float(gross_w.sum())
-    default_weights: dict[str, float] = {}
-    for p in pair_meta:
-        g = float(gross_w.get(p["etf"], 0.0))
-        p["portfolio_weight"] = round(g / total_w, 4) if total_w > 0 else 0.0
-        default_weights[p["etf"]] = p["portfolio_weight"]
-
     return {
-        "pairs": pair_meta,
+        "sizing_method": sizing_method,
+        "deployed_fraction": round(float(deployed_fraction), 6),
+        "cash_residual": round(float(cash_residual), 6),
+        "sleeve_budget_usd": round(float(sleeve_budget_usd), 2),
+        "weight_history": weight_history,
+        "sizing_latest": sizing_latest,
+        "pairs": production_pairs,
         "universes": {
             "production_book": {
-                "pairs": [p["etf"] for p in pair_meta],
-                "count": len(pair_meta),
+                "pairs": [p["etf"] for p in production_pairs],
+                "count": len(production_pairs),
             },
             "screener_b4": {
                 "pairs": [p["etf"] for p in pair_meta],
@@ -775,7 +965,7 @@ def build_backtest(
         },
         "default_weights": default_weights,
         "pair_series": pair_series,
-        "n_pairs": len(pair_meta),
+        "n_pairs": len(production_pairs),
         "n_obs": int(len(arr)),
         "window_start": start,
         "sim_dates": [d.strftime("%Y-%m-%d") for d in prv.index],
@@ -810,6 +1000,11 @@ def main(argv=None) -> int:
     ap.add_argument("--min-days", type=int, default=None)
     ap.add_argument("--warmup-bdays", type=int, default=None)
     ap.add_argument("--signal-window", type=int, default=None)
+    ap.add_argument(
+        "--legacy-concentration",
+        action="store_true",
+        help="Use legacy (edge-borrow)/vol concentration weights instead of ls-algo opt2+crash sizing.",
+    )
     args = ap.parse_args(argv)
 
     policy_path = Path(args.policy)
@@ -836,6 +1031,8 @@ def main(argv=None) -> int:
         warmup_bdays=warmup_bdays,
         signal_window=signal_window,
         vol_history=vol_history,
+        screened_csv=args.screener,
+        legacy_concentration=bool(args.legacy_concentration),
     )
     if built is None:
         print("[bucket4-bt] no eligible pairs after gates", file=sys.stderr)
@@ -874,14 +1071,17 @@ def main(argv=None) -> int:
         "schema": "bucket4_backtest_state.v1",
         "generated_at_utc": payload["generated_at_utc"],
         "policy_version": phash[:16],
+        "sizing_method": built.get("sizing_method"),
+        "cash_residual": built.get("cash_residual"),
+        "deployed_fraction": built.get("deployed_fraction"),
         "h_by_pair": built.get("h_state", {}),
         "ratchet": built.get("ratchet_state", {}),
     }
 
     OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
     write_pair_shards(pair_shards)
-    OUT_JSON.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
-    OUT_STATE.write_text(json.dumps(state_payload, indent=2, allow_nan=False), encoding="utf-8")
+    OUT_JSON.write_text(json.dumps(_json_safe(payload), indent=2, allow_nan=False), encoding="utf-8")
+    OUT_STATE.write_text(json.dumps(_json_safe(state_payload), indent=2, allow_nan=False), encoding="utf-8")
     OUT_HASH.write_text(phash + "\n", encoding="utf-8")
 
     print(f"[bucket4-bt] wrote {OUT_JSON}")
@@ -890,6 +1090,10 @@ def main(argv=None) -> int:
     print(
         f"[bucket4-bt] pairs={built['n_pairs']} obs={built['n_obs']} "
         f"CAGR={built['realized'].get('cagr')} maxDD={built['realized'].get('maxdd')}"
+    )
+    print(
+        f"[bucket4-bt] sizing={built.get('sizing_method')} "
+        f"deployed={built.get('deployed_fraction')} cash={built.get('cash_residual')}"
     )
     return 0
 

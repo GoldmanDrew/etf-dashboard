@@ -1,6 +1,7 @@
 /**
  * Bucket 4 (inverse_decay_bucket4) dashboard helpers — precomputed artifact consumers.
- * Production method: short inverse ETF + short underlying, Kelly/QCQP weights, VCR cadence h.
+ * Production method: short inverse ETF + short underlying, v6 opt2 + crash-budget
+ * weights (trim-only, cash residual), VCR cadence h.
  */
 (function (globalObj) {
   'use strict';
@@ -424,17 +425,21 @@
     return out;
   }
 
-  function normalizeBookWeights(config) {
+  function normalizeBookWeights(config, opts) {
+    const preserveCash = opts?.preserveCash !== false;
     const entries = Object.entries(config || {})
       .map(([sym, cfg]) => [normSym(sym), { enabled: cfg?.enabled !== false, weight: Number(cfg?.weight) || 0 }])
       .filter(([sym]) => sym);
     const positive = entries.filter(([, cfg]) => cfg.enabled && cfg.weight > 0);
     const total = positive.reduce((s, [, cfg]) => s + cfg.weight, 0);
     const out = {};
+    // Production opt2+crash weights sum to <= 1 (cash residual). Preserve that
+    // unless the book is over-allocated (>1), in which case scale down.
+    const scale = total > 1 + 1e-9 ? (1 / total) : (preserveCash || total <= 1 + 1e-9 ? 1 : (total > 0 ? 1 / total : 0));
     entries.forEach(([sym, cfg]) => {
       out[sym] = {
         enabled: cfg.enabled,
-        weight: cfg.enabled && cfg.weight > 0 && total > 0 ? cfg.weight / total : 0,
+        weight: cfg.enabled && cfg.weight > 0 ? cfg.weight * scale : 0,
       };
     });
     return out;
