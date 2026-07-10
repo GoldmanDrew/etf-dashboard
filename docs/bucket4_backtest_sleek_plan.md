@@ -28,7 +28,7 @@ Production stays fully static on GitHub Pages:
 - B4 artifact schema v2 with per-pair daily returns, h path, costs, drawdown, and rebalance logs for production-book pairs.
 - B4 book lab controls: include/exclude, editable weights, production/equal/edge-weight presets, sorting, contribution, and persisted state.
 - Production vs custom equity overlay on the B4 Book chart.
-- Pair Report: notional-scaled `$` PnL, `PairBacktestChart`, risk metrics, rebalance log, borrow/t-cost summary.
+- Pair Report: notional-scaled `$` PnL, focused Net-PnL chart with visible rebalance marks, promoted dynamic-`h` path, drawdown, collapsible rebalance/daily tables, borrow/t-cost meta strip.
 - Chart **Drip** tab restored (add-$ every N days); chart **Flow** remains issuer rebalance.
 - Ticker headers show "Bucket 4 - Inverse decay" for `screener_bucket === "bucket_4"`.
 - User-facing old project references were removed from the B4 surfaces touched here.

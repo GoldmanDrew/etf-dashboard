@@ -977,7 +977,7 @@
     background: var(--bg-primary);
     padding: 10px;
   }
-  .backtest-page { padding: 0 24px 24px; }
+  .backtest-page { padding: 0 24px 32px; }
   .backtest-controls {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 10px; align-items: end; margin: 12px 0;
@@ -996,6 +996,61 @@
     font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
   }
   .backtest-legend-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+  .backtest-legend-mark {
+    width: 10px; height: 10px; display: inline-block; margin-right: 5px;
+    border-left: 2px dashed rgba(251, 191, 36, 0.95);
+    border-right: 0; vertical-align: -1px;
+  }
+  .pair-report-toolbar {
+    display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between;
+    gap: 12px 18px; margin: 0 0 16px;
+  }
+  .pair-report-toolbar .backtest-control { min-width: 140px; max-width: 180px; }
+  .pair-report-meta {
+    display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+    font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
+    line-height: 1.45;
+  }
+  .pair-report-meta strong { color: var(--text-secondary); font-weight: 600; }
+  .pair-report-kpis {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px; margin: 0 0 10px;
+  }
+  .pair-report-kpis .chart-stat { padding: 12px 14px; }
+  .pair-report-kpis .cs-value { font-size: 18px; }
+  .pair-report-strip {
+    display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+    margin: 0 0 22px; padding: 10px 14px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card);
+    font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
+  }
+  .pair-report-strip strong { color: var(--text-primary); font-weight: 600; }
+  .pair-report-section { margin: 0 0 24px; }
+  .pair-report-section .trade-card { padding: 14px 16px; }
+  .pair-report-section .trade-head { margin-bottom: 12px; }
+  .pair-report-layer-toggles {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  }
+  .pair-report-layer-toggles button {
+    padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg-card); color: var(--text-muted); cursor: pointer;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600;
+  }
+  .pair-report-layer-toggles button:hover { color: var(--text-primary); border-color: var(--border-active); }
+  .pair-report-layer-toggles button.is-on {
+    color: var(--text-primary); border-color: rgba(6, 182, 212, 0.55);
+    background: rgba(6, 182, 212, 0.12);
+  }
+  .pair-report-collapse {
+    width: 100%; text-align: left; margin: 0 0 8px; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: 7px; background: var(--bg-card);
+    color: var(--text-secondary); cursor: pointer;
+    font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600;
+  }
+  .pair-report-collapse:hover { border-color: var(--border-active); color: var(--text-primary); }
+  @media (max-width: 900px) {
+    .pair-report-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
   .trade-head {
     display: flex;
     align-items: center;
@@ -6161,22 +6216,38 @@ function medianSharesTraded(rows, lookback = 60) {
 }
 
 /** Full-width PnL chart for pair / inverse backtest (`result.rows` from `runPairBacktest` or `simulateInversePairBacktest`). */
-function PairBacktestChart({ result }) {
+function PairBacktestChart({ result, focused = false, rebalanceLog = null }) {
+  const [showLegs, setShowLegs] = useState(!focused);
+  const [showCosts, setShowCosts] = useState(!focused);
+  const rebalByDate = useMemo(() => {
+    const map = {};
+    (Array.isArray(rebalanceLog) ? rebalanceLog : []).forEach((ev) => {
+      const d = String(ev?.date || '');
+      if (d) map[d] = ev;
+    });
+    return map;
+  }, [rebalanceLog]);
   if (!result?.ok || !Array.isArray(result.rows) || result.rows.length < 2) {
     return <div className="scenario-warning">{result?.error || 'Run a backtest to see the PnL chart.'}</div>;
   }
   const series = result.rows;
   const legEtf = result?.legChartLabels?.etf || 'Long';
   const legUnd = result?.legChartLabels?.und || 'Short';
-  const keys = [
-    ['netPnl', 'Net PnL', 'rgba(6,182,212,0.98)'],
-    ['longPnl', `${legEtf} (cum)`, 'rgba(16,185,129,0.95)'],
-    ['shortPnl', `${legUnd} (cum)`, 'rgba(139,92,246,0.95)'],
-    ['borrow', 'Borrow cost', 'rgba(239,68,68,0.95)'],
-    ['distributions', 'Distributions (short)', 'rgba(244,114,182,0.95)'],
-    ['transactionCosts', 'T-costs', 'rgba(245,158,11,0.95)'],
+  const allKeys = [
+    ['netPnl', 'Net PnL', 'rgba(6,182,212,0.98)', 'net'],
+    ['longPnl', `${legEtf} (cum)`, 'rgba(16,185,129,0.95)', 'legs'],
+    ['shortPnl', `${legUnd} (cum)`, 'rgba(139,92,246,0.95)', 'legs'],
+    ['borrow', 'Borrow cost', 'rgba(239,68,68,0.95)', 'costs'],
+    ['distributions', 'Distributions (short)', 'rgba(244,114,182,0.95)', 'costs'],
+    ['transactionCosts', 'T-costs', 'rgba(245,158,11,0.95)', 'costs'],
   ];
+  const keys = allKeys.filter(([, , , layer]) => (
+    layer === 'net'
+    || (layer === 'legs' && showLegs)
+    || (layer === 'costs' && showCosts)
+  ));
   const costPlotKeys = new Set(['borrow', 'transactionCosts', 'distributions']);
+  const rebalIdx = series.map((r, i) => (r.rebalance ? i : -1)).filter((i) => i >= 0);
   const vals = [];
   series.forEach((r) => keys.forEach(([k]) => {
     const sign = costPlotKeys.has(k) ? -1 : 1;
@@ -6206,8 +6277,25 @@ function PairBacktestChart({ result }) {
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((q) => yMin + (yMax - yMin) * q).reverse();
   const dateStrs = series.map((r) => r.date);
   const xTicks = pickDistinctBacktestDateTickIndices(dateStrs);
+  const rebalTitle = (r) => {
+    const ev = rebalByDate[String(r?.date || '')];
+    const h = ev?.h != null ? Number(ev.h) : (r?.h != null ? Number(r.h) : null);
+    const feeU = Number(ev?.rebalance_fee);
+    const parts = [`Rebalance ${r?.date || ''}`];
+    if (Number.isFinite(h)) parts.push(`h=${h.toFixed(3)}`);
+    if (Number.isFinite(feeU)) parts.push(`fee=${feeU.toFixed(4)} unit`);
+    if (ev?.skipped_below_drift) parts.push('skipped below drift');
+    return parts.join(' · ');
+  };
   return (
     <div>
+      {focused ? (
+        <div className="pair-report-layer-toggles" style={{ marginBottom: 10 }}>
+          <button type="button" className={showLegs ? 'is-on' : ''} onClick={() => setShowLegs((v) => !v)}>Legs</button>
+          <button type="button" className={showCosts ? 'is-on' : ''} onClick={() => setShowCosts((v) => !v)}>Costs</button>
+          <span className="scenario-sub" style={{ margin: 0 }}>Default: Net PnL + rebalance marks</span>
+        </div>
+      ) : null}
       <div className="mc-plot" style={{ height: 328, marginBottom: 0 }}>
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
           <rect x={L} y={T} width={PW} height={PH} fill="rgba(11,19,34,0.16)" stroke="rgba(56,72,96,0.42)" />
@@ -6224,15 +6312,124 @@ function PairBacktestChart({ result }) {
           {keys.map(([k, _label, color]) => (
             <path key={k} d={pathFor(k)} fill="none" stroke={color} strokeWidth={k === 'netPnl' ? 3 : 2.2} strokeLinejoin="round" strokeLinecap="round" strokeDasharray={costPlotKeys.has(k) ? '5 4' : ''} />
           ))}
-          {series.map((r, i) => (r.rebalance ? (
-            <line key={`rb-${i}`} x1={x(i)} x2={x(i)} y1={T} y2={H - B} stroke="rgba(148,163,184,0.18)" />
-          ) : null))}
+          {rebalIdx.map((i) => {
+            const r = series[i];
+            const net = Number(r?.netPnl);
+            const cx = x(i);
+            const cy = Number.isFinite(net) ? y(net) : null;
+            return (
+              <g key={`rb-${i}`}>
+                <title>{rebalTitle(r)}</title>
+                <line x1={cx} x2={cx} y1={T} y2={H - B} stroke="rgba(251,191,36,0.42)" strokeWidth="1.25" strokeDasharray="4 3" />
+                <polygon points={`${cx},${T + 1} ${cx - 4.5},${T + 9} ${cx + 4.5},${T + 9}`} fill="rgba(251,191,36,0.95)" />
+                {cy != null ? <circle cx={cx} cy={cy} r="3.4" fill="rgba(251,191,36,0.98)" stroke="rgba(15,23,42,0.9)" strokeWidth="1.2" /> : null}
+              </g>
+            );
+          })}
         </svg>
       </div>
       <div className="backtest-chart-legend">
         {keys.map(([k, label, color]) => (
           <span key={k}><span className="backtest-legend-dot" style={{ background: color }} />{label}{costPlotKeys.has(k) ? ' (cost plotted negative)' : ''}</span>
         ))}
+        {rebalIdx.length > 0 ? (
+          <span><span className="backtest-legend-mark" />Rebalance ({rebalIdx.length})</span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** Dynamic hedge ratio h path with rebalance step markers (Pair Report). */
+function PairHedgePathChart({ rows, rebalanceLog = null }) {
+  if (!Array.isArray(rows) || rows.length < 2) {
+    return <div className="scenario-warning">No hedge path available.</div>;
+  }
+  const series = rows;
+  const hVals = series.map((r) => Number(r?.h)).filter((v) => Number.isFinite(v));
+  if (!hVals.length) {
+    return <div className="scenario-warning">No finite h values on this path.</div>;
+  }
+  const rebalByDate = {};
+  (Array.isArray(rebalanceLog) ? rebalanceLog : []).forEach((ev) => {
+    const d = String(ev?.date || '');
+    if (d) rebalByDate[d] = ev;
+  });
+  const rebalIdx = series.map((r, i) => (r.rebalance ? i : -1)).filter((i) => i >= 0);
+  const yMinRaw = Math.min(...hVals);
+  const yMaxRaw = Math.max(...hVals);
+  const span = yMaxRaw - yMinRaw || Math.max(0.05, Math.abs(yMaxRaw) * 0.1);
+  const pad = span * 0.18;
+  const yMin = yMinRaw - pad;
+  const yMax = yMaxRaw + pad;
+  const W = 980;
+  const H = 220;
+  const L = 74;
+  const R = 16;
+  const T = 16;
+  const B = 40;
+  const PW = W - L - R;
+  const PH = H - T - B;
+  const x = (i) => L + (i / Math.max(1, series.length - 1)) * PW;
+  const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, yMax - yMin))) * PH;
+  const path = series.map((r, i) => {
+    const v = Number(r?.h);
+    return Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : '';
+  }).filter(Boolean).join(' ');
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((q) => yMin + (yMax - yMin) * q).reverse();
+  const dateStrs = series.map((r) => r.date);
+  const xTicks = pickDistinctBacktestDateTickIndices(dateStrs);
+  const last = series[series.length - 1];
+  const lastH = Number(last?.h);
+  const labelEvery = Math.max(1, Math.ceil(rebalIdx.length / 6));
+  return (
+    <div>
+      <div className="mc-plot" style={{ height: 220, marginBottom: 0 }}>
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
+          <rect x={L} y={T} width={PW} height={PH} fill="rgba(11,19,34,0.16)" stroke="rgba(56,72,96,0.42)" />
+          {ticks.map((tick, i) => (
+            <g key={i}>
+              <line x1={L} y1={y(tick)} x2={W - R} y2={y(tick)} stroke="rgba(56,72,96,0.22)" />
+              <text x={L - 8} y={y(tick) + 4} textAnchor="end" fontSize="11" fill="#9db0d2" fontFamily="DM Sans">{Number(tick).toFixed(2)}</text>
+            </g>
+          ))}
+          {xTicks.map((idx) => (
+            <text key={idx} x={x(idx)} y={H - 10} textAnchor={idx === 0 ? 'start' : idx === series.length - 1 ? 'end' : 'middle'} fontSize="11" fill="#8b9cbb" fontFamily="DM Sans">{formatBacktestAxisDate(dateStrs[idx])}</text>
+          ))}
+          <path d={path} fill="none" stroke="rgba(167,139,250,0.98)" strokeWidth="2.4" strokeLinejoin="round" strokeLinecap="round" />
+          {rebalIdx.map((i, n) => {
+            const r = series[i];
+            const h = Number(r?.h);
+            if (!Number.isFinite(h)) return null;
+            const ev = rebalByDate[String(r.date || '')];
+            const cx = x(i);
+            const cy = y(h);
+            const showLabel = n % labelEvery === 0 || n === rebalIdx.length - 1;
+            const tip = [`h=${h.toFixed(3)}`, r.date, ev?.executed === false ? 'not executed' : 'executed'].filter(Boolean).join(' · ');
+            return (
+              <g key={`h-rb-${i}`}>
+                <title>{tip}</title>
+                <line x1={cx} x2={cx} y1={T} y2={H - B} stroke="rgba(251,191,36,0.28)" strokeWidth="1" strokeDasharray="3 3" />
+                <circle cx={cx} cy={cy} r="3.6" fill="rgba(251,191,36,0.98)" stroke="rgba(15,23,42,0.85)" strokeWidth="1.1" />
+                {showLabel ? (
+                  <text x={cx + 5} y={Math.max(T + 11, cy - 8)} fontSize="10" fill="#fde68a" fontFamily="DM Sans">{`h=${h.toFixed(2)}`}</text>
+                ) : null}
+              </g>
+            );
+          })}
+          {Number.isFinite(lastH) ? (
+            <>
+              <circle cx={x(series.length - 1)} cy={y(lastH)} r="3.2" fill="rgba(167,139,250,0.98)" />
+              <text x={W - R - 4} y={clampNum(y(lastH) - 7, T + 11, H - B - 4)} textAnchor="end" fontSize="11" fill="#ddd6fe" fontFamily="DM Sans">
+                {`h last: ${lastH.toFixed(3)}`}
+              </text>
+            </>
+          ) : null}
+        </svg>
+      </div>
+      <div className="backtest-chart-legend">
+        <span><span className="backtest-legend-dot" style={{ background: 'rgba(167,139,250,0.98)' }} />h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>|</span>
+        {rebalIdx.length > 0 ? <span><span className="backtest-legend-mark" />Rebalance ({rebalIdx.length})</span> : null}
       </div>
     </div>
   );
@@ -13625,6 +13822,8 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [gross, setGross] = useState(100000);
+  const [showRebalLog, setShowRebalLog] = useState(false);
+  const [showDailyTable, setShowDailyTable] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -13661,12 +13860,6 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
     return { ok: false, error: 'Pair path scaler unavailable.' };
   }, [shard, artifact, sym, gross, B4]);
 
-  const riskSeries = useMemo(() => {
-    const fn = window.PairBacktest?.computePairBacktestRiskSeries;
-    if (typeof fn !== 'function' || !chartResult?.ok) return [];
-    return fn(chartResult.rows, Number(gross) || 100000);
-  }, [chartResult, gross]);
-
   const summary = shard?.summary || {};
   const scaled = chartResult?.summary || {};
   const prod = Boolean(shard?.in_production_book);
@@ -13678,6 +13871,9 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
     ? chartResult.rebalanceLog
     : (Array.isArray(shard?.rebalance_log) ? shard.rebalance_log : []);
   const notional = Number(gross) > 0 ? Number(gross) : 100000;
+  const nRebals = scaled.nRebalances || summary.n_rebalances || rebalanceLog.length || 0;
+  const hLast = summary.h_last != null ? Number(summary.h_last) : (rows.length ? Number(rows[rows.length - 1]?.h) : null);
+  const hMean = summary.mean_h != null ? Number(summary.mean_h) : null;
 
   return (
     <div className="backtest-page">
@@ -13699,94 +13895,140 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
       {error && !loading && <div className="error-banner">{error}</div>}
       {!loading && shard && (
         <>
-          <div className="scenario-sub" style={{ marginBottom: 12 }}>
-            <strong>Pair Report</strong> — production-faithful Bucket 4 path (short ETF + short underlying, policy <strong>h</strong> / VCR cadence).
-            Unit-capital replay scaled to your notional for $ PnL. For editable what-if use Chart <strong>Backtest</strong>; for add-$ every N days use chart <strong>Drip</strong>.
-            Entered <strong>{summary.entry_date || '—'}</strong> · latest <strong>{summary.latest_date || '—'}</strong> ·
-            gate <strong>{summary.gate_reason || shard.gate_reason || '—'}</strong> · model <strong>{summary.model_status || shard.model_status || '—'}</strong>.
-            {artifact?.generated_at_utc ? <> Artifact: <code>{artifact.generated_at_utc}</code>.</> : null}
-          </div>
-
-          <div className="backtest-controls" style={{ marginBottom: 12 }}>
+          <div className="pair-report-toolbar">
             <div className="backtest-control">
               <label>Notional $</label>
               <input type="number" min={1000} step={1000} value={gross} onChange={(e) => setGross(Number(e.target.value) || 0)} title="Scales unit-capital pair path into dollars (same default as B4 Book)." />
             </div>
+            <div className="pair-report-meta">
+              <span>Entered <strong>{summary.entry_date || '—'}</strong></span>
+              <span>Latest <strong>{summary.latest_date || '—'}</strong></span>
+              <span>Gate <strong>{summary.gate_reason || shard.gate_reason || '—'}</strong></span>
+              <span>Model <strong>{summary.model_status || shard.model_status || '—'}</strong></span>
+            </div>
           </div>
 
-          <div className="chart-stats" style={{ marginBottom: 12 }}>
-            <div className="chart-stat"><div className="cs-label">CAGR</div><div className="cs-value">{(scaled.cagr != null ? fmtPctAnn(scaled.cagr) : (summary.cagr != null ? fmtPctAnn(summary.cagr) : '—'))}</div><div className="cs-sub">{scaled.nDays || summary.price_rows || 0} days · {fmtMoney(notional)} notional</div></div>
-            <div className="chart-stat"><div className="cs-label">Ann. vol / Sharpe</div><div className="cs-value">{(scaled.annVol != null ? fmtPctAnn(scaled.annVol) : (summary.ann_vol != null ? fmtPctAnn(summary.ann_vol) : '—'))} / {(scaled.sharpe != null ? Number(scaled.sharpe).toFixed(2) : (summary.sharpe != null ? Number(summary.sharpe).toFixed(2) : '—'))}</div><div className="cs-sub">daily replay returns</div></div>
-            <div className="chart-stat"><div className="cs-label">Max drawdown</div><div className="cs-value">{(scaled.maxDrawdown != null ? fmtPctAnn(scaled.maxDrawdown) : (summary.max_drawdown != null ? fmtPctAnn(summary.max_drawdown) : '—'))}</div><div className="cs-sub">peak-to-trough equity</div></div>
-            <div className="chart-stat"><div className="cs-label">Net PnL / Gross leg</div><div className="cs-value">{chartResult?.ok ? fmtMoney(scaled.netPnl) : '—'} / {chartResult?.ok ? fmtMoney(scaled.totalGross) : '—'}</div><div className="cs-sub">scaled to notional</div></div>
-            <div className="chart-stat"><div className="cs-label">Borrow / T-costs</div><div className="cs-value">{chartResult?.ok ? fmtMoney(scaled.borrowPaid) : '—'} / {chartResult?.ok ? fmtMoney(scaled.tCosts) : '—'}</div><div className="cs-sub">{fmtNum(scaled.nRebalances || summary.n_rebalances || 0)} rebals · h last {summary.h_last != null ? Number(summary.h_last).toFixed(3) : '—'}</div></div>
-            <div className="chart-stat"><div className="cs-label">Production weight</div><div className="cs-value">{summary.portfolio_weight != null ? fmtPctAnn(summary.portfolio_weight, 1) : '—'}</div><div className="cs-sub">{prod ? 'production book' : 'not in production book'}</div></div>
+          <div className="pair-report-kpis chart-stats">
+            <div className="chart-stat">
+              <div className="cs-label">CAGR</div>
+              <div className="cs-value">{(scaled.cagr != null ? fmtPctAnn(scaled.cagr) : (summary.cagr != null ? fmtPctAnn(summary.cagr) : '—'))}</div>
+              <div className="cs-sub">{scaled.nDays || summary.price_rows || 0} days · {fmtMoney(notional)}</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">Ann. vol / Sharpe</div>
+              <div className="cs-value">{(scaled.annVol != null ? fmtPctAnn(scaled.annVol) : (summary.ann_vol != null ? fmtPctAnn(summary.ann_vol) : '—'))} / {(scaled.sharpe != null ? Number(scaled.sharpe).toFixed(2) : (summary.sharpe != null ? Number(summary.sharpe).toFixed(2) : '—'))}</div>
+              <div className="cs-sub">daily replay returns</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">Max drawdown</div>
+              <div className="cs-value">{(scaled.maxDrawdown != null ? fmtPctAnn(scaled.maxDrawdown) : (summary.max_drawdown != null ? fmtPctAnn(summary.max_drawdown) : '—'))}</div>
+              <div className="cs-sub">peak-to-trough equity</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">Net PnL</div>
+              <div className="cs-value">{chartResult?.ok ? fmtMoney(scaled.netPnl) : '—'}</div>
+              <div className="cs-sub">gross leg {chartResult?.ok ? fmtMoney(scaled.totalGross) : '—'}</div>
+            </div>
+          </div>
+
+          <div className="pair-report-strip">
+            <span>Weight <strong>{summary.portfolio_weight != null ? fmtPctAnn(summary.portfolio_weight, 1) : '—'}</strong></span>
+            <span>Borrow <strong>{chartResult?.ok ? fmtMoney(scaled.borrowPaid) : '—'}</strong></span>
+            <span>T-costs <strong>{chartResult?.ok ? fmtMoney(scaled.tCosts) : '—'}</strong></span>
+            <span>h last <strong>{Number.isFinite(hLast) ? hLast.toFixed(3) : '—'}</strong></span>
+            <span>h mean <strong>{Number.isFinite(hMean) ? hMean.toFixed(3) : '—'}</strong></span>
+            <span>Rebalances <strong>{fmtNum(nRebals)}</strong></span>
           </div>
 
           {!chartResult?.ok ? (
             <div className="scenario-warning">{chartResult?.error || 'No chartable pair path for this row yet.'} Gate: {summary.gate_reason || shard.gate_reason || '—'}.</div>
           ) : (
             <>
-              <div className="trade-card" style={{ marginBottom: 12 }}>
-                <div className="trade-head"><div><div className="scenario-title">Equity and PnL ($)</div><div className="scenario-sub">Unit-capital production path × notional. Gross leg PnL = ETF + underlying cumulative legs (before borrow/t-costs).</div></div></div>
-                <PairBacktestChart result={chartResult} />
+              <div className="pair-report-section trade-card">
+                <div className="trade-head">
+                  <div>
+                    <div className="scenario-title">Equity and PnL ($)</div>
+                    <div className="scenario-sub">Production path × notional. Amber marks = policy rebalances.</div>
+                  </div>
+                </div>
+                <PairBacktestChart result={chartResult} focused rebalanceLog={rebalanceLog} />
               </div>
-              <PairBacktestRiskMetricsStats riskSeries={riskSeries} pairResult={chartResult} />
-              <div className="trade-card" style={{ marginBottom: 12, marginTop: 12 }}>
-                <div className="trade-head"><div className="scenario-title">Risk path</div></div>
+
+              <div className="pair-report-section trade-card">
+                <div className="trade-head">
+                  <div>
+                    <div className="scenario-title">Dynamic hedge ratio (h)</div>
+                    <div className="scenario-sub">Policy path h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>|; markers show rebalance steps.</div>
+                  </div>
+                </div>
+                <PairHedgePathChart rows={rows} rebalanceLog={rebalanceLog} />
+              </div>
+
+              <div className="pair-report-section trade-card">
+                <div className="trade-head"><div className="scenario-title">Drawdown</div></div>
                 <SimpleSeriesPlot series={rows} valueKey="drawdown" color="rgba(248,113,113,0.95)" label="Drawdown" formatValue={(v) => fmt(v)} includeZero />
-              </div>
-              <div className="trade-card" style={{ marginBottom: 12 }}>
-                <div className="trade-head"><div className="scenario-title">Hedge and gross exposure</div><div className="scenario-sub">h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>| policy path; gross exposure is normalized book multiple (not $).</div></div>
-                <SimpleSeriesPlot series={rows} valueKey="h" color="rgba(139,92,246,0.95)" label="h" formatValue={(v) => Number(v).toFixed(3)} overlayValueKey="gross" overlayColor="rgba(245,158,11,0.95)" overlayLabel="Gross exposure" includeZero={false} />
               </div>
             </>
           )}
 
           {rebalanceLog.length > 0 && (
-            <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 220, overflow: 'auto' }}>
-              <div className="scenario-title" style={{ marginBottom: 6 }}>Rebalance log</div>
-              <table className="scenario-table">
-                <thead><tr><th>Date</th><th>h</th><th>Executed</th><th>Fee (unit)</th><th>Fee ($)</th><th>Skipped</th></tr></thead>
-                <tbody>
-                  {[...rebalanceLog].slice().reverse().map((ev, i) => {
-                    const feeU = Number(ev?.rebalance_fee);
-                    const fee$ = Number.isFinite(feeU) ? feeU * notional : null;
-                    return (
-                      <tr key={`${ev?.date || 'rb'}-${i}`}>
-                        <td>{ev?.date || '—'}</td>
-                        <td>{ev?.h != null ? Number(ev.h).toFixed(3) : '—'}</td>
-                        <td>{ev?.executed ? 'yes' : '—'}</td>
-                        <td>{Number.isFinite(feeU) ? feeU.toFixed(4) : '—'}</td>
-                        <td>{fee$ != null ? fmtMoney(fee$) : '—'}</td>
-                        <td>{ev?.skipped_below_drift ? 'below drift' : '—'}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+            <div className="pair-report-section">
+              <button type="button" className="pair-report-collapse" onClick={() => setShowRebalLog((v) => !v)}>
+                {showRebalLog ? '▾' : '▸'} Rebalance log ({rebalanceLog.length})
+              </button>
+              {showRebalLog ? (
+                <div className="scenario-table-wrap" style={{ maxHeight: 260, overflow: 'auto' }}>
+                  <table className="scenario-table">
+                    <thead><tr><th>Date</th><th>h</th><th>Executed</th><th>Fee ($)</th><th>Skipped</th></tr></thead>
+                    <tbody>
+                      {[...rebalanceLog].slice().reverse().map((ev, i) => {
+                        const feeU = Number(ev?.rebalance_fee);
+                        const fee$ = Number.isFinite(feeU) ? feeU * notional : null;
+                        return (
+                          <tr key={`${ev?.date || 'rb'}-${i}`}>
+                            <td>{ev?.date || '—'}</td>
+                            <td>{ev?.h != null ? Number(ev.h).toFixed(3) : '—'}</td>
+                            <td>{ev?.executed ? 'yes' : '—'}</td>
+                            <td>{fee$ != null ? fmtMoney(fee$) : '—'}</td>
+                            <td>{ev?.skipped_below_drift ? 'below drift' : '—'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
             </div>
           )}
 
-          <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 280, overflow: 'auto' }}>
-            <table className="scenario-table">
-              <thead><tr><th>Date</th><th>Net PnL</th><th>Gross leg PnL</th><th>Drawdown</th><th>h</th><th>Borrow</th><th>T-costs</th><th>Rebal</th></tr></thead>
-              <tbody>
-                {[...rows].slice(-32).reverse().map((r) => (
-                  <tr key={r.date}>
-                    <td>{r.date}</td>
-                    <td>{fmtMoney(r.netPnl)}</td>
-                    <td>{r.totalGross != null ? fmtMoney(r.totalGross) : '—'}</td>
-                    <td>{r.drawdown != null ? fmt(r.drawdown) : '—'}</td>
-                    <td>{r.h != null ? Number(r.h).toFixed(3) : '—'}</td>
-                    <td>{fmtMoney(r.borrow)}</td>
-                    <td>{fmtMoney(r.transactionCosts)}</td>
-                    <td>{r.rebalance ? 'yes' : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {rows.length > 0 && (
+            <div className="pair-report-section">
+              <button type="button" className="pair-report-collapse" onClick={() => setShowDailyTable((v) => !v)}>
+                {showDailyTable ? '▾' : '▸'} Daily path (last 32)
+              </button>
+              {showDailyTable ? (
+                <div className="scenario-table-wrap" style={{ maxHeight: 280, overflow: 'auto' }}>
+                  <table className="scenario-table">
+                    <thead><tr><th>Date</th><th>Net PnL</th><th>Gross leg</th><th>Drawdown</th><th>h</th><th>Borrow</th><th>T-costs</th><th>Rebal</th></tr></thead>
+                    <tbody>
+                      {[...rows].slice(-32).reverse().map((r) => (
+                        <tr key={r.date}>
+                          <td>{r.date}</td>
+                          <td>{fmtMoney(r.netPnl)}</td>
+                          <td>{r.totalGross != null ? fmtMoney(r.totalGross) : '—'}</td>
+                          <td>{r.drawdown != null ? fmt(r.drawdown) : '—'}</td>
+                          <td>{r.h != null ? Number(r.h).toFixed(3) : '—'}</td>
+                          <td>{fmtMoney(r.borrow)}</td>
+                          <td>{fmtMoney(r.transactionCosts)}</td>
+                          <td>{r.rebalance ? 'yes' : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </div>
+          )}
         </>
       )}
     </div>
