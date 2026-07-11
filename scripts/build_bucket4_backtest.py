@@ -45,6 +45,11 @@ from bucket4.ls_algo_sizing import (  # noqa: E402
     port_returns_with_cash,
     size_production_book,
 )
+from bucket4.pit_inputs import (  # noqa: E402
+    borrow_series_for_calendar,
+    load_borrow_history,
+    pit_meta,
+)
 from bucket4.policy_helpers import knobs_from_policy, load_policy, make_knobs  # noqa: E402
 
 DEFAULT_SCREENER = REPO / "data" / "etf_screened_today.csv"
@@ -412,6 +417,32 @@ def _screener_payload(row: pd.Series) -> dict:
     }
 
 
+def _pair_engine_kwargs(policy: dict, row: pd.Series, cal: pd.DatetimeIndex, borrow_history: dict) -> dict:
+    """Shared pair-sim knobs: drift skip, force clock, PIT borrow series."""
+    rules = (policy.get("inverse_decay_bucket4") or {}).get("rules") or {}
+    bt_cfg = policy.get("backtest") or {}
+    opt2 = rules.get("bucket4_weekly_opt2") or {}
+    hcp = opt2.get("hedge_cadence_policy") or {}
+    spot_borrow = _finite_float(row.get("borrow_current"), 0.0)
+    etf = _norm(row.get("ETF"))
+    kwargs: dict = {
+        "borrow_a_annual": spot_borrow,
+        "slippage_bps": float(opt2.get("slippage_bps", 20.0)),
+        "fee_bps": float(opt2.get("fee_bps", 1.0)),
+        "opt2_h_base": float(hcp.get("h_mid", 0.45)),
+    }
+    drift = opt2.get("drift_threshold_share_of_gross")
+    if drift is not None and np.isfinite(float(drift)):
+        kwargs["drift_threshold_share_of_gross"] = float(drift)
+    if bool(hcp.get("force_on_max_interval", True)):
+        kwargs["force_rebalance_after_days"] = int(hcp.get("max_interval", 21))
+    if bool(bt_cfg.get("pit_borrow", True)) and borrow_history:
+        kwargs["borrow_a_series"] = borrow_series_for_calendar(
+            borrow_history, etf, cal, fallback=spot_borrow
+        )
+    return kwargs
+
+
 def run_pair_backtest_for_row(
     row: pd.Series,
     panel: dict[str, pd.DataFrame],
@@ -422,6 +453,7 @@ def run_pair_backtest_for_row(
     warmup_bdays: int,
     signal_window: int,
     vol_history: dict[str, pd.DataFrame],
+    borrow_history: dict | None = None,
 ) -> tuple[pd.DataFrame | None, pd.Series | None, pd.DataFrame | None, str]:
     etf = _norm(row.get("ETF"))
     und = _norm(row.get("Underlying"))
@@ -433,10 +465,12 @@ def run_pair_backtest_for_row(
         return None, None, None, "short_history"
     rules = (policy.get("inverse_decay_bucket4") or {}).get("rules") or {}
     bt_cfg = policy.get("backtest") or {}
-    opt2 = rules.get("bucket4_weekly_opt2") or {}
     blk = knobs_from_policy(policy)
     _knobs0, tilts, _source = load_policy_from_config(policy)
     knobs = make_knobs(blk)
+    hist = borrow_history if borrow_history is not None else (
+        load_borrow_history() if bool(bt_cfg.get("pit_borrow", True)) else {}
+    )
 
     sig = get_pair_signal(
         etf,
@@ -450,6 +484,7 @@ def run_pair_backtest_for_row(
     tilt = tilts.get(etf) or tilts.get(und)
     h_daily = build_h_series(sig, cal, knobs=knobs, name_tilt=tilt)
     rb, rb_diag = build_rebal_dates(sig, cal, knobs=knobs, name_tilt=tilt, warmup_bdays=warmup_bdays)
+    eng = _pair_engine_kwargs(policy, row, cal, hist)
     bt = run_bucket4_backtest_dynamic_h(
         px.reindex(cal),
         h_daily,
@@ -458,9 +493,7 @@ def run_pair_backtest_for_row(
         gross_multiplier=1.0,
         beta_a=-abs(_finite_float(row.get("Delta"), -2.0)),
         beta_b=1.0,
-        borrow_a_annual=_finite_float(row.get("borrow_current"), 0.0),
-        slippage_bps=float(opt2.get("slippage_bps", 20.0)),
-        fee_bps=float(opt2.get("fee_bps", 1.0)),
+        **eng,
     )
     return bt, h_daily, rb_diag, "ok"
 
@@ -571,6 +604,7 @@ def build_pair_shards(
             warmup_bdays=warmup_bdays,
             signal_window=signal_window,
             vol_history=vol_history,
+            borrow_history=None,  # loaded inside when pit_borrow enabled
         )
         shard = pair_shard_from_result(
             row,
@@ -662,6 +696,7 @@ def build_backtest(
 
     ratchet_cfg = RatchetConfig.from_cfg(rules.get("ratchet") or policy.get("bucket_4_ratchet"))
     ratchet_sim = SimRatchetState(cfg=ratchet_cfg)
+    borrow_history = load_borrow_history() if bool(bt_cfg.get("pit_borrow", True)) else {}
 
     ret_cols: dict[str, pd.Series] = {}
     pair_meta: list[dict] = []
@@ -696,6 +731,7 @@ def build_backtest(
         borrow = _finite_float(row.get("borrow_current"), 0.0)
         beta = _finite_float(row.get("Delta"), -2.0)
         edge = _finite_float(row.get("bucket4_net_edge_annual"), 0.0)
+        eng = _pair_engine_kwargs(policy, row, cal, borrow_history)
 
         bt = run_bucket4_backtest_dynamic_h(
             px.reindex(cal),
@@ -705,9 +741,7 @@ def build_backtest(
             gross_multiplier=1.0,
             beta_a=-abs(beta),
             beta_b=1.0,
-            borrow_a_annual=borrow,
-            slippage_bps=slippage_bps,
-            fee_bps=fee_bps,
+            **eng,
         )
         ret_cols[etf] = bt["ret"]
         h_by_underlying[und] = h_daily
@@ -804,8 +838,19 @@ def build_backtest(
     cash_residual = 1.0
     latest_w: dict[str, float] = {}
     tele_by_etf: dict[str, dict] = {}
+    latest_meta: dict = {}
 
-    def _apply_ratchet_and_weights(w_map: dict[str, float], *, attach_crash: bool) -> dict[str, float]:
+    def _apply_ratchet_and_weights(
+        w_map: dict[str, float],
+        *,
+        attach_crash: bool,
+        apply_ratchet: bool = True,
+    ) -> dict[str, float]:
+        """Attach latest weights to pair_meta.
+
+        When ``apply_ratchet`` is False (walk-forward path already ratcheted
+        inside ``build_walk_forward_weights``), weights are used as-is.
+        """
         eff: dict[str, float] = {}
         for p in pair_meta:
             etf = p["etf"]
@@ -815,18 +860,26 @@ def build_backtest(
                 w = 0.0
             edge = _finite_float(p.get("bucket4_net_edge_annual"), 0.0)
             borrow = _finite_float(p.get("borrow"), 0.0)
-            _gross_mult, rat_res = ratchet_sim.apply_gross_multiplier(
-                etf, und, w, fwd_edge=edge, borrow=borrow,
-            )
-            eff_w = float(w) * float(_gross_mult)
+            if apply_ratchet and w > 1e-12:
+                _gross_mult, rat_res = ratchet_sim.apply_gross_multiplier(
+                    etf, und, w, fwd_edge=edge, borrow=borrow,
+                )
+                eff_w = float(w) * float(_gross_mult)
+                p["ratchet"] = {
+                    "trim_lambda": round(rat_res.trim_lambda, 4),
+                    "binding": rat_res.binding,
+                    "source": rat_res.source,
+                }
+            else:
+                eff_w = float(w)
+                p["ratchet"] = {
+                    "trim_lambda": 0.0,
+                    "binding": False,
+                    "source": "walk_forward" if not apply_ratchet else "solve",
+                }
             p["weight"] = round(w, 4)
             p["effective_weight"] = round(eff_w, 4)
             p["portfolio_weight"] = round(eff_w, 4)
-            p["ratchet"] = {
-                "trim_lambda": round(rat_res.trim_lambda, 4),
-                "binding": rat_res.binding,
-                "source": rat_res.source,
-            }
             if attach_crash:
                 tel = tele_by_etf.get(etf) or {}
                 p["opt2_weight"] = _round_or_none(tel.get("weight_solved"), 6)
@@ -839,7 +892,8 @@ def build_backtest(
                 p["hedge_ratio_at_size"] = _round_or_none(tel.get("hedge_ratio"), 4)
                 p["crash_l_source"] = tel.get("crash_l_source")
             if eff_w > 1e-12:
-                ratchet_sim.record_rebalance(etf, und, eff_w)
+                if apply_ratchet:
+                    ratchet_sim.record_rebalance(etf, und, eff_w)
                 eff[etf] = eff_w
             ps = pair_series.get(etf)
             if ps is not None:
@@ -907,6 +961,14 @@ def build_backtest(
                     if wf > 1e-12:
                         entry[str(etf)] = round(wf, 6)
                 weight_history.append(entry)
+            # Walk-forward already applied smoothing + crash + ratchet.
+            _apply_ratchet_and_weights(latest_w, attach_crash=True, apply_ratchet=False)
+            if latest_meta.get("ratchet_state"):
+                # Prefer WF sim state for artifact persistence.
+                rs = latest_meta["ratchet_state"]
+                if isinstance(rs, dict):
+                    ratchet_sim.floors = dict(rs.get("inverse_short_usd_by_pair") or {})
+                    ratchet_sim.held_gross = dict(rs.get("held_gross_by_pair") or {})
         else:
             live = uni.loc[uni["ETF"].map(_norm).isin(ret_cols.keys())].copy()
             sized = size_production_book(
@@ -917,8 +979,12 @@ def build_backtest(
                 policy=policy,
                 run_date=end_ts,
                 sleeve_budget_usd=sleeve_budget_usd,
+                ratchet_sim=ratchet_sim,
+                borrow_history=borrow_history,
             )
             latest_w = {_norm(k): float(v) for k, v in sized.weights_by_etf().items()}
+            if sized.weights_capped:
+                latest_w = {_norm(k[0]): float(v) for k, v in sized.weights_capped.items()}
             tele_by_etf = _telemetry_by_etf(sized.telemetry)
             deployed_fraction = float(sized.deployed_fraction)
             cash_residual = float(sized.cash_residual)
@@ -927,8 +993,7 @@ def build_backtest(
             w_series = pd.Series({e: latest_w.get(e, 0.0) for e in ret_df.columns}).fillna(0.0)
             # Static deployed book with cash residual (no renorm).
             pr = port_returns(ret_df, w_series, renormalize=False)
-
-        _apply_ratchet_and_weights(latest_w, attach_crash=True)
+            _apply_ratchet_and_weights(latest_w, attach_crash=True, apply_ratchet=False)
 
     # default_weights = effective_weight WITHOUT renormalizing to 1
     default_weights: dict[str, float] = {}
@@ -989,6 +1054,16 @@ def build_backtest(
         },
         "h_state": h_state,
         "ratchet_state": ratchet_sim.as_dict(),
+        "parity": {
+            **((latest_meta or {}).get("parity_layers") or {}),
+            **pit_meta(borrow_history, enabled=bool(bt_cfg.get("pit_borrow", True))),
+            "drift_threshold_share_of_gross": opt2.get("drift_threshold_share_of_gross"),
+            "crash_rho": float((opt2.get("crash_budget") or {}).get("rho", 0.087)),
+            "custom_book_match_deployed_fraction": bool(
+                bt_cfg.get("custom_book_match_deployed_fraction", True)
+            ),
+            "max_weight": float(opt2.get("max_weight", 0.35)),
+        },
     }
 
 

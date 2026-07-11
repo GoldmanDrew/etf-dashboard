@@ -1,18 +1,18 @@
 {
   "schema": "bucket4_backtest_state.v1",
-  "generated_at_utc": "2026-07-10T19:31:19.920095+00:00",
-  "policy_version": "e99f9a7a198b2ef5",
+  "generated_at_utc": "2026-07-11T01:24:00.696975+00:00",
+  "policy_version": "17f9875b77700eeb",
   "sizing_method": "v6_opt2_crash_budget",
-  "cash_residual": 0.811302,
-  "deployed_fraction": 0.188698,
+  "cash_residual": 0.0,
+  "deployed_fraction": 1.0,
   "h_by_pair": {
     "MSTZ|MSTR": {
       "etf": "MSTZ",
       "underlying": "MSTR",
       "h_last": 0.3963,
       "mean_h": 0.4745,
-      "n_rebalances": 31,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 29,
+      "n_rebalances_skipped": 2,
       "h_series_tail": [
         0.4007,
         0.3994,
@@ -27,8 +27,8 @@
       "underlying": "COIN",
       "h_last": 0.3228,
       "mean_h": 0.4324,
-      "n_rebalances": 29,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 28,
+      "n_rebalances_skipped": 1,
       "h_series_tail": [
         0.3216,
         0.3209,
@@ -43,8 +43,8 @@
       "underlying": "ETHA",
       "h_last": 0.5013,
       "mean_h": 0.4636,
-      "n_rebalances": 33,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 31,
+      "n_rebalances_skipped": 2,
       "h_series_tail": [
         0.5053,
         0.5043,
@@ -75,8 +75,8 @@
       "underlying": "CRWV",
       "h_last": 0.3777,
       "mean_h": 0.4466,
-      "n_rebalances": 11,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 9,
+      "n_rebalances_skipped": 2,
       "h_series_tail": [
         0.3826,
         0.38,
@@ -91,8 +91,8 @@
       "underlying": "TSLA",
       "h_last": 0.386,
       "mean_h": 0.4773,
-      "n_rebalances": 45,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 38,
+      "n_rebalances_skipped": 7,
       "h_series_tail": [
         0.3905,
         0.3907,
@@ -107,8 +107,8 @@
       "underlying": "SOXX",
       "h_last": 0.4506,
       "mean_h": 0.4858,
-      "n_rebalances": 46,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 38,
+      "n_rebalances_skipped": 8,
       "h_series_tail": [
         0.4559,
         0.4538,
@@ -155,8 +155,8 @@
       "underlying": "QBTS",
       "h_last": 0.5077,
       "mean_h": 0.4491,
-      "n_rebalances": 11,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 9,
+      "n_rebalances_skipped": 2,
       "h_series_tail": [
         0.5043,
         0.5057,
@@ -187,8 +187,8 @@
       "underlying": "PLTR",
       "h_last": 0.384,
       "mean_h": 0.4405,
-      "n_rebalances": 17,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 14,
+      "n_rebalances_skipped": 3,
       "h_series_tail": [
         0.3851,
         0.3839,
@@ -203,8 +203,8 @@
       "underlying": "MSTR",
       "h_last": 0.4403,
       "mean_h": 0.4652,
-      "n_rebalances": 32,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 28,
+      "n_rebalances_skipped": 4,
       "h_series_tail": [
         0.4534,
         0.4492,
@@ -235,8 +235,8 @@
       "underlying": "AMD",
       "h_last": 0.3112,
       "mean_h": 0.4319,
-      "n_rebalances": 8,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 7,
+      "n_rebalances_skipped": 1,
       "h_series_tail": [
         0.3187,
         0.3171,
@@ -251,8 +251,8 @@
       "underlying": "RKLB",
       "h_last": 0.5981,
       "mean_h": 0.4797,
-      "n_rebalances": 9,
-      "n_rebalances_skipped": 0,
+      "n_rebalances": 8,
+      "n_rebalances_skipped": 1,
       "h_series_tail": [
         0.604,
         0.6034,
@@ -277,51 +277,41 @@
         0.481
       ],
       "last_interval_days": 12
-    },
-    "ASTN|ASTS": {
-      "etf": "ASTN",
-      "underlying": "ASTS",
-      "h_last": 0.448,
-      "mean_h": 0.4489,
-      "n_rebalances": 4,
-      "n_rebalances_skipped": 0,
-      "h_series_tail": [
-        0.447,
-        0.4467,
-        0.4473,
-        0.4473,
-        0.448
-      ],
-      "last_interval_days": 13
     }
   },
   "ratchet": {
     "enabled": true,
     "inverse_short_usd_by_pair": {
-      "CONI|COIN": 0.01104281879023502,
-      "CORD|CRWV": 0.010920976167705852,
-      "DAMD|AMD": 0.016110431517148364,
-      "ETHD|ETHA": 0.01804744335013848,
-      "MSTZ|MSTR": 0.01325596339341814,
-      "NBIZ|NBIS": 0.021804809673611873,
-      "PLTZ|PLTR": 0.019085802650411498,
-      "QBTZ|QBTS": 0.017938338858861147,
-      "RKLZ|RKLB": 0.02170670992259033,
-      "SOXS|SOXX": 0.02192507686506179,
-      "TSLQ|TSLA": 0.01685915912875453
+      "BEZ|BE": 0.06485160280768455,
+      "BMNZ|BMNR": 0.04381988974286368,
+      "CONI|COIN": 0.16008670509801562,
+      "CORD|CRWV": 0.11761252361028347,
+      "CRCD|CRCL": 0.056461875698378426,
+      "DAMD|AMD": 0.07952355374176688,
+      "ETHD|ETHA": 0.16918453648807608,
+      "MSTZ|MSTR": 0.2663902928480234,
+      "NBIZ|NBIS": 0.04413629659693529,
+      "PLTZ|PLTR": 0.15627612865101528,
+      "QBTZ|QBTS": 0.0988425099844504,
+      "RKLZ|RKLB": 0.08036019197415525,
+      "SOXS|SOXX": 0.20989009970490421,
+      "TSLQ|TSLA": 0.19444836586098088
     },
     "held_gross_by_pair": {
-      "CONI|COIN": 0.01104281879023502,
-      "CORD|CRWV": 0.010920976167705852,
-      "DAMD|AMD": 0.016110431517148364,
-      "ETHD|ETHA": 0.01804744335013848,
-      "MSTZ|MSTR": 0.01325596339341814,
-      "NBIZ|NBIS": 0.021804809673611873,
-      "PLTZ|PLTR": 0.019085802650411498,
-      "QBTZ|QBTS": 0.017938338858861147,
-      "RKLZ|RKLB": 0.02170670992259033,
-      "SOXS|SOXX": 0.02192507686506179,
-      "TSLQ|TSLA": 0.01685915912875453
+      "BEZ|BE": 0.05507454732444142,
+      "BMNZ|BMNR": 0.026498620547896826,
+      "CONI|COIN": 0.09099597577442566,
+      "CORD|CRWV": 0.06685293661742733,
+      "CRCD|CRCL": 0.03705834511306321,
+      "DAMD|AMD": 0.05269471934662197,
+      "ETHD|ETHA": 0.09616733615855547,
+      "MSTZ|MSTR": 0.15142072303692738,
+      "NBIZ|NBIS": 0.030749627200839957,
+      "PLTZ|PLTR": 0.08882998002952268,
+      "QBTZ|QBTS": 0.05618374516810494,
+      "RKLZ|RKLB": 0.05469900415034956,
+      "SOXS|SOXX": 0.11930506294289392,
+      "TSLQ|TSLA": 0.11052772170199286
     }
   }
 }

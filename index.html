@@ -14393,7 +14393,10 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
   const setEqualWeights = () => {
     const rows = Array.isArray(artifact?.pairs) ? artifact.pairs : [];
     const enabled = rows.map((p) => String(p.etf || '').toUpperCase()).filter(Boolean);
-    const w = enabled.length ? 1 / enabled.length : 0;
+    const deployed = Number.isFinite(Number(artifact?.deployed_fraction)) && Number(artifact.deployed_fraction) > 0
+      ? Number(artifact.deployed_fraction)
+      : 1;
+    const w = enabled.length ? deployed / enabled.length : 0;
     setBookConfig(Object.fromEntries(enabled.map((sym) => [sym, { enabled: true, weight: w }])));
   };
   const setEdgeWeights = () => {
@@ -14405,7 +14408,13 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
       return [sym, Math.max(0, edge - borrow)];
     }).filter(([sym]) => sym);
     const total = vals.reduce((s, [, v]) => s + v, 0) || vals.length || 1;
-    setBookConfig(Object.fromEntries(vals.map(([sym, v]) => [sym, { enabled: true, weight: total > 0 ? v / total : 0 }])));
+    const deployed = Number.isFinite(Number(artifact?.deployed_fraction)) && Number(artifact.deployed_fraction) > 0
+      ? Number(artifact.deployed_fraction)
+      : 1;
+    setBookConfig(Object.fromEntries(vals.map(([sym, v]) => [sym, {
+      enabled: true,
+      weight: total > 0 ? (v / total) * deployed : 0,
+    }])));
   };
   const downloadPairCsv = () => {
     const csv = typeof B4.exportPairManifestCsv === 'function'
@@ -14459,13 +14468,15 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
 
       <div className="scenario-sub" style={{ marginBottom: 12, maxWidth: 920 }}>
         <strong>B4 Book</strong> — ls-algo production <strong>inverse_decay_bucket4</strong> method: v6 opt2
-        (decay/borrow/cov) weights + conditional <strong>crash budget</strong> caps (trim-only; freed gross stays cash),
-        VCR-driven dynamic hedge <strong>h</strong>, TR/VCR cadence, and the sim-only ratchet overlay.
-        Custom weights reblend precomputed pair paths client-side (no opt2/crash-budget rerun).
-        Per-ticker production path: Pair Report. Add-$ every N days: chart <strong>Drip</strong> tab or <code>#/backtest-flow</code>.
+        (decay/borrow/cov) → trim-only <strong>weight smoothing</strong> → <strong>crash budget</strong> caps
+        (trim-only; freed gross stays cash) → grow-only <strong>ratchet</strong> on the walk-forward path,
+        VCR-driven dynamic hedge <strong>h</strong>, TR/VCR cadence, PIT borrow, and drift-gated rebalances.
+        Custom weights reblend pair paths with the same deployed-fraction / max-weight cash discipline
+        (no live opt2 re-solve). Per-ticker: Pair Report. Add-$ every N days: chart <strong>Drip</strong> or <code>#/backtest-flow</code>.
         Universe: {b4UniverseCount} screener B4 rows · {artifact?.n_pairs ?? '—'} production pairs in replay.
         {Number.isFinite(Number(artifact?.deployed_fraction)) ? <> Deployed {(Number(artifact.deployed_fraction) * 100).toFixed(1)}% · cash residual {(Number(artifact.cash_residual || Math.max(0, 1 - Number(artifact.deployed_fraction))) * 100).toFixed(1)}%.</> : null}
         {artifact?.sizing_method ? <> Sizing: <code>{artifact.sizing_method}</code>.</> : null}
+        {artifact?.parity?.crash_rho != null ? <> Crash ρ: <code>{Number(artifact.parity.crash_rho)}</code>.</> : null}
         {dashboardBuildTime ? <> Dashboard data: <code>{dashboardBuildTime}</code>.</> : null}
       </div>
 
@@ -14553,7 +14564,9 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
               </div>
             </div>
             <div className="trade-note">
-              Production mode uses baked portfolio equity. Custom weights are a what-if reblend of available production pair paths; they do not rerun the opt2 + crash-budget solver, gates, or ratchet.
+              Production mode uses baked portfolio equity (opt2 → smooth → crash → ratchet walk-forward).
+              Custom weights are a what-if reblend of pair paths scaled to the production deployed fraction
+              with per-name max-weight caps; they do not re-run the weekly solver.
             </div>
           </div>
 

@@ -1,6 +1,7 @@
 # Snapshot of ls-algo production Bucket 4 hedge/cadence/sizing rules (2026-07-10).
 # Source: config/strategy_config.yml inverse_decay_bucket4
-# Sizing: v6 opt2 (decay/borrow/cov) + conditional crash_budget (trim-only, no renorm).
+# Sizing: v6 opt2 (decay/borrow/cov) + weight_smoothing + crash_budget (trim-only)
+#         + grow-only ratchet on the walk-forward return path.
 
 schema: bucket4_backtest_policy.v1
 snapshot_date: "2026-07-10"
@@ -22,14 +23,23 @@ inverse_decay_bucket4:
       borrow_linear_aversion: 1.5
       borrow_uncertainty_penalty: 3.0
       borrow_aversion_source: posterior
+      # Continuous high-borrow ramp (same as live GTP / V6PfParams).
+      borrow_ramp_lo: 0.80
+      borrow_ramp_hi: 1.20
       min_weight: 0.005
       max_weight: 0.35
       cov_penalty: 0.85
       cov_shrink: 0.35
       vol_etp_weight_penalty: 0.0
+      # Trim-only EMA before crash budget (live GTP Phase 5).
+      weight_smoothing:
+        enabled: true
+        alpha: 0.5
+        state_json: data/b4_weight_ema_state.json
       crash_budget:
         enabled: true
-        rho: 0.0075
+        # Raised 2026-07-10 from 0.0075 so crash caps no longer leave ~83% cash.
+        rho: 0.087
         theta: 0.5
         phi: 0.5
         l_floor: 0.02
@@ -54,6 +64,9 @@ inverse_decay_bucket4:
         operator_check_days: 5
         force_on_max_interval: true
         name_tilt: {}
+      # Skip scheduled rebalances when share-of-gross drift is below this.
+      # Matches production operator cadence gate spirit (share-space).
+      drift_threshold_share_of_gross: 0.02
     ratchet:
       enabled: true
       state_json: data/b4_inverse_ratchet_state.json
@@ -135,3 +148,9 @@ backtest:
   sizing_method: v6_opt2_crash_budget
   walk_forward: true
   rebalance_freq: W-FRI
+  # Point-in-time: override borrow from borrow_history.json as-of each Friday;
+  # drop names whose as-of borrow exceeds max_borrow_current.
+  pit_borrow: true
+  # Custom-book presets (equal / edge) scale to this deployed fraction so they
+  # do not silently 100%-deploy vs production cash residual.
+  custom_book_match_deployed_fraction: true

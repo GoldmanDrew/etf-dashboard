@@ -425,28 +425,66 @@
     return out;
   }
 
+  function targetDeployedFraction(artifact) {
+    const d = Number(artifact?.deployed_fraction);
+    if (Number.isFinite(d) && d > 0) return Math.min(1, Math.max(0, d));
+    const parity = artifact?.parity || {};
+    if (parity.custom_book_match_deployed_fraction === false) return 1;
+    return 1;
+  }
+
+  function maxNameWeight(artifact) {
+    const m = Number(artifact?.parity?.max_weight);
+    if (Number.isFinite(m) && m > 0) return m;
+    return 0.35;
+  }
+
   function normalizeBookWeights(config, opts) {
     const preserveCash = opts?.preserveCash !== false;
+    const targetDeployed = opts?.targetDeployed;
+    const maxW = opts?.maxWeight;
     const entries = Object.entries(config || {})
       .map(([sym, cfg]) => [normSym(sym), { enabled: cfg?.enabled !== false, weight: Number(cfg?.weight) || 0 }])
       .filter(([sym]) => sym);
     const positive = entries.filter(([, cfg]) => cfg.enabled && cfg.weight > 0);
-    const total = positive.reduce((s, [, cfg]) => s + cfg.weight, 0);
+    let total = positive.reduce((s, [, cfg]) => s + cfg.weight, 0);
+    // Cap per-name (crash / opt2 max_weight spirit) before scaling.
+    if (Number.isFinite(maxW) && maxW > 0) {
+      positive.forEach(([, cfg]) => {
+        if (cfg.weight > maxW) cfg.weight = maxW;
+      });
+      total = positive.reduce((s, [, cfg]) => s + cfg.weight, 0);
+    }
+    let scale = 1;
+    if (total > 1 + 1e-9) {
+      scale = 1 / total;
+    } else if (
+      Number.isFinite(targetDeployed) &&
+      targetDeployed > 0 &&
+      total > 1e-12 &&
+      Math.abs(total - targetDeployed) > 1e-6
+    ) {
+      // Equal / edge presets: scale to production deployed fraction (keep cash).
+      scale = targetDeployed / total;
+    } else if (!preserveCash && total > 0) {
+      scale = 1 / total;
+    }
     const out = {};
-    // Production opt2+crash weights sum to <= 1 (cash residual). Preserve that
-    // unless the book is over-allocated (>1), in which case scale down.
-    const scale = total > 1 + 1e-9 ? (1 / total) : (preserveCash || total <= 1 + 1e-9 ? 1 : (total > 0 ? 1 / total : 0));
     entries.forEach(([sym, cfg]) => {
-      out[sym] = {
-        enabled: cfg.enabled,
-        weight: cfg.enabled && cfg.weight > 0 ? cfg.weight * scale : 0,
-      };
+      let w = cfg.enabled && cfg.weight > 0 ? cfg.weight * scale : 0;
+      if (Number.isFinite(maxW) && maxW > 0 && w > maxW) w = maxW;
+      out[sym] = { enabled: cfg.enabled, weight: w };
     });
     return out;
   }
 
   function recomputeBookFromPairs(artifact, config, { startDate = '', endDate = '', gross = 100000 } = {}) {
-    const normCfg = normalizeBookWeights(config || defaultBookConfig(artifact));
+    const matchDeployed = artifact?.parity?.custom_book_match_deployed_fraction !== false;
+    const normCfg = normalizeBookWeights(config || defaultBookConfig(artifact), {
+      preserveCash: true,
+      targetDeployed: matchDeployed ? targetDeployedFraction(artifact) : undefined,
+      maxWeight: maxNameWeight(artifact),
+    });
     const active = Object.entries(normCfg).filter(([, cfg]) => cfg.enabled && cfg.weight > 0);
     if (!active.length) return { ok: false, error: 'Select at least one Bucket 4 pair.' };
     const dateSet = new Set();
@@ -462,6 +500,7 @@
     const dateIndex = new Map(windowDates.map((d, i) => [d, i]));
     const returns = new Array(windowDates.length).fill(0);
     const contribution = {};
+    const deployed = active.reduce((s, [, cfg]) => s + cfg.weight, 0);
     active.forEach(([sym, cfg]) => {
       const daily = pairSeriesFromArtifact(artifact, sym)?.daily;
       const retByDate = new Map((daily?.dates || []).map((d, i) => [d, Number(daily?.ret?.[i])]));
@@ -502,6 +541,8 @@
       equity,
       contribution,
       normalizedWeights: normCfg,
+      deployedFraction: deployed,
+      cashResidual: Math.max(0, 1 - deployed),
       rows,
       inception: windowDates[0],
       end: windowDates[windowDates.length - 1],

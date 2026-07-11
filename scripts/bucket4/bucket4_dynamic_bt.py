@@ -19,6 +19,8 @@ def run_bucket4_backtest_dynamic_h(
     beta_b: float = 1.0,
     borrow_a_annual: float = 0.0,
     borrow_b_annual: float = 0.0,
+    borrow_a_series: pd.Series | None = None,
+    borrow_b_series: pd.Series | None = None,
     short_proceeds_annual: float = 0.0,
     fee_bps: float = 0.0,
     slippage_bps: float = 0.0,
@@ -26,7 +28,11 @@ def run_bucket4_backtest_dynamic_h(
     drift_threshold_share_of_gross: float | None = None,
     force_rebalance_after_days: int | None = None,
 ) -> pd.DataFrame:
-    """Mark-to-market two-leg short book with dynamic hedge *h* on rebalance days."""
+    """Mark-to-market two-leg short book with dynamic hedge *h* on rebalance days.
+
+    Optional ``borrow_a_series`` / ``borrow_b_series`` supply annualized borrow
+    per calendar day (point-in-time); otherwise constant ``borrow_*_annual``.
+    """
     h_base = float(opt2_h_base if opt2_h_base is not None else V6_OPT2_H_BASE)
     bt = prices.copy()
     h_aligned = h_daily.reindex(bt.index).ffill().fillna(h_base)
@@ -37,8 +43,30 @@ def run_bucket4_backtest_dynamic_h(
     cash = float(initial_capital)
     fee_rate = fee_bps / 10_000.0
     slip_rate = float(slippage_bps) / 10_000.0
-    borrow_a_daily = float(borrow_a_annual) / 252.0
-    borrow_b_daily = float(borrow_b_annual) / 252.0
+    borrow_a_const = float(borrow_a_annual) / 252.0
+    borrow_b_const = float(borrow_b_annual) / 252.0
+    if borrow_a_series is not None:
+        ba_ann = (
+            pd.Series(borrow_a_series)
+            .reindex(bt.index)
+            .ffill()
+            .fillna(float(borrow_a_annual))
+            .clip(lower=0.0)
+        )
+        ba_daily = ba_ann / 252.0
+    else:
+        ba_daily = None
+    if borrow_b_series is not None:
+        bb_ann = (
+            pd.Series(borrow_b_series)
+            .reindex(bt.index)
+            .ffill()
+            .fillna(float(borrow_b_annual))
+            .clip(lower=0.0)
+        )
+        bb_daily = bb_ann / 252.0
+    else:
+        bb_daily = None
     short_proceeds_daily = float(short_proceeds_annual) / 252.0
     beta_inv_abs = abs(float(beta_a))
 
@@ -57,6 +85,8 @@ def run_bucket4_backtest_dynamic_h(
         h = float(h_aligned.loc[dt])
         a_pos_notional = a_sh * ap
         b_pos_notional = b_sh * bp
+        borrow_a_daily = float(ba_daily.loc[dt]) if ba_daily is not None else borrow_a_const
+        borrow_b_daily = float(bb_daily.loc[dt]) if bb_daily is not None else borrow_b_const
         borrow_cost = 0.0
         short_proceeds_credit = 0.0
         rebalance_fee = 0.0
