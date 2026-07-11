@@ -1,7 +1,7 @@
 # Snapshot of ls-algo production Bucket 4 hedge/cadence/sizing rules (2026-07-10).
 # Source: config/strategy_config.yml inverse_decay_bucket4
-# Sizing: v6 opt2 (decay/borrow/cov) + weight_smoothing + crash_budget (trim-only)
-#         + grow-only ratchet on the walk-forward return path.
+# Sizing: v6 opt2 (decay/borrow/cov) + weight_smoothing + crash_budget
+#         (trim then scale_to_budget) + grow-only ratchet on the walk-forward path.
 
 schema: bucket4_backtest_policy.v1
 snapshot_date: "2026-07-10"
@@ -38,8 +38,9 @@ inverse_decay_bucket4:
         state_json: data/b4_weight_ema_state.json
       crash_budget:
         enabled: true
-        # Raised 2026-07-10 from 0.0075 so crash caps no longer leave ~83% cash.
-        rho: 0.087
+        # Relative crash-loss scale; scale_to_budget refills the 3% sleeve target.
+        rho: 0.0075
+        scale_to_budget: true
         theta: 0.5
         phi: 0.5
         l_floor: 0.02

@@ -1058,7 +1058,8 @@ def build_backtest(
             **((latest_meta or {}).get("parity_layers") or {}),
             **pit_meta(borrow_history, enabled=bool(bt_cfg.get("pit_borrow", True))),
             "drift_threshold_share_of_gross": opt2.get("drift_threshold_share_of_gross"),
-            "crash_rho": float((opt2.get("crash_budget") or {}).get("rho", 0.087)),
+            "crash_rho": float((opt2.get("crash_budget") or {}).get("rho", 0.0075)),
+            "scale_to_budget": bool((opt2.get("crash_budget") or {}).get("scale_to_budget", True)),
             "custom_book_match_deployed_fraction": bool(
                 bt_cfg.get("custom_book_match_deployed_fraction", True)
             ),

@@ -85,8 +85,9 @@ def opt2_cfg_from_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
     opt2["weight_smoothing"] = ws
     cb = dict(opt2.get("crash_budget") or {})
     cb.setdefault("enabled", True)
-    # Match live GTP (2026-07-10); never silently fall back to the old 0.0075.
-    cb.setdefault("rho", 0.087)
+    # Match live GTP (2026-07-10): relative rho + scale_to_budget refill.
+    cb.setdefault("rho", 0.0075)
+    cb.setdefault("scale_to_budget", True)
     cb.setdefault("theta", 0.5)
     cb.setdefault("phi", 0.5)
     cb.setdefault("l_floor", 0.02)
@@ -270,6 +271,7 @@ def size_production_book(
                 h_policy = opt2.get("hedge_cadence_policy") or {}
                 h_base = float(h_policy.get("h_mid", 0.45))
                 if cb_cfg.get("enabled", True):
+                    cb_params = CrashBudgetParams.from_config(cb_cfg)
                     caps = compute_crash_caps(
                         pair_cache=cache,
                         hedge_by_underlying=h_map,
@@ -277,10 +279,13 @@ def size_production_book(
                         hedge_base=h_base,
                         run_date=as_of.strftime("%Y-%m-%d"),
                         budget_usd=float(sleeve_budget_usd),
-                        params=CrashBudgetParams.from_config(cb_cfg),
+                        params=cb_params,
                     )
                     capped, budget_eff, tel = cap_pair_weights(
-                        smoothed, caps, float(sleeve_budget_usd)
+                        smoothed,
+                        caps,
+                        float(sleeve_budget_usd),
+                        scale_to_budget=bool(cb_params.scale_to_budget),
                     )
                     sized.weights_opt2 = {k: float(v) for k, v in smoothed.items()}
                     sized.weights_capped = {k: float(v) for k, v in capped.items()}
@@ -443,7 +448,8 @@ def build_walk_forward_weights(
                 "crash_budget": bool((opt2.get("crash_budget") or {}).get("enabled", True)),
                 "ratchet_walk_forward": bool(ratchet_cfg.enabled),
                 "pit_borrow": bool(bt_cfg.get("pit_borrow", True)),
-                "crash_rho": float((opt2.get("crash_budget") or {}).get("rho", 0.087)),
+                "crash_rho": float((opt2.get("crash_budget") or {}).get("rho", 0.0075)),
+                "scale_to_budget": bool((opt2.get("crash_budget") or {}).get("scale_to_budget", True)),
             },
         }
 

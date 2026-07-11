@@ -30,7 +30,8 @@ from bucket4.bucket4_dynamic_bt import run_bucket4_backtest_dynamic_h  # noqa: E
 def test_policy_crash_rho_matches_production():
     policy = yaml.safe_load((REPO / "config" / "bucket4_backtest_policy.yml").read_text(encoding="utf-8"))
     opt2 = opt2_cfg_from_policy(policy)
-    assert float(opt2["crash_budget"]["rho"]) == pytest.approx(0.087)
+    assert float(opt2["crash_budget"]["rho"]) == pytest.approx(0.0075)
+    assert bool(opt2["crash_budget"]["scale_to_budget"]) is True
     assert float(opt2["borrow_ramp_lo"]) == pytest.approx(0.80)
     assert float(opt2["borrow_ramp_hi"]) == pytest.approx(1.20)
     assert bool(opt2["weight_smoothing"]["enabled"]) is True
@@ -40,7 +41,8 @@ def test_policy_crash_rho_matches_production():
 
 def test_opt2_cfg_default_rho_not_legacy():
     cfg = opt2_cfg_from_policy({"inverse_decay_bucket4": {"rules": {"bucket4_weekly_opt2": {}}}})
-    assert float(cfg["crash_budget"]["rho"]) == pytest.approx(0.087)
+    assert float(cfg["crash_budget"]["rho"]) == pytest.approx(0.0075)
+    assert bool(cfg["crash_budget"]["scale_to_budget"]) is True
 
 
 def test_smooth_trim_only_cuts_immediate_raises_ema():
