@@ -1,5 +1,5 @@
 {
-  "build_time": "2026-07-11T02:18:23.984012Z",
+  "build_time": "2026-07-11T03:55:04.826775Z",
   "panel_rows": 47841,
   "panel_symbols": 534,
   "recommended_v2_features": [
@@ -28,19 +28,19 @@
     "h1": [
       {
         "feature": "borrow_z60",
-        "mean_abs_rank_corr": 0.072519
+        "mean_abs_rank_corr": 0.072515
       },
       {
         "feature": "borrow_pctile_60",
-        "mean_abs_rank_corr": 0.069153
+        "mean_abs_rank_corr": 0.06915
       },
       {
         "feature": "shares_available",
-        "mean_abs_rank_corr": 0.061021
+        "mean_abs_rank_corr": 0.061031
       },
       {
         "feature": "log_aum",
-        "mean_abs_rank_corr": 0.052279
+        "mean_abs_rank_corr": 0.05228
       },
       {
         "feature": "borrow_slope5",
@@ -52,11 +52,11 @@
       },
       {
         "feature": "borrow_vol10",
-        "mean_abs_rank_corr": 0.041581
+        "mean_abs_rank_corr": 0.041577
       },
       {
         "feature": "tradable_float_shares",
-        "mean_abs_rank_corr": 0.03837
+        "mean_abs_rank_corr": 0.038385
       }
     ],
     "h3": [
@@ -86,7 +86,7 @@
       },
       {
         "feature": "forecast_vol_underlying_annual",
-        "mean_abs_rank_corr": 0.06035
+        "mean_abs_rank_corr": 0.059848
       },
       {
         "feature": "borrow_pctile_60",
@@ -112,11 +112,11 @@
       },
       {
         "feature": "forecast_vol_underlying_annual",
-        "mean_abs_rank_corr": 0.074898
+        "mean_abs_rank_corr": 0.074472
       },
       {
         "feature": "gross_decay_annual",
-        "mean_abs_rank_corr": 0.065843
+        "mean_abs_rank_corr": 0.067975
       },
       {
         "feature": "borrow_z60",
@@ -146,11 +146,11 @@
       },
       {
         "feature": "forecast_vol_underlying_annual",
-        "mean_abs_rank_corr": 0.090369
+        "mean_abs_rank_corr": 0.089842
       },
       {
         "feature": "gross_decay_annual",
-        "mean_abs_rank_corr": 0.081601
+        "mean_abs_rank_corr": 0.083301
       },
       {
         "feature": "tradable_float_shares",
@@ -184,7 +184,7 @@
       },
       {
         "feature": "delta",
-        "r2": 0.000477
+        "r2": 0.000476
       },
       {
         "feature": "borrow_pctile_60",
@@ -196,7 +196,7 @@
       }
     ]
   },
-  "guidance_for_spike_model": "Use recommended_v2_features for logistic_v2 candidate set. Prioritize supply (utilization_proxy, shares_drop3) and peer_borrow_z_mean when re-running borrow_spike_eval; keep L0 labels and out-of-time splits. Best ablation block: full_plus_screener (AUROC 0.9950).",
+  "guidance_for_spike_model": "Use recommended_v2_features for logistic_v2 candidate set. Prioritize supply (utilization_proxy, shares_drop3) and peer_borrow_z_mean when re-running borrow_spike_eval; keep L0 labels and out-of-time splits. Best ablation block: full_plus_screener (AUROC 0.9951).",
   "key_findings": [
     "Top rank-corr predictors at h=5: borrow_current, borrow_vol10, log_aum."
   ],
@@ -204,6 +204,6 @@
   "block_auroc_lifts": {
     "supply_vs_borrow_only": 0.00257,
     "peer_vs_borrow_only": -0.003455,
-    "full_vs_borrow_only": 0.003279
+    "full_vs_borrow_only": 0.003367
   }
 }
