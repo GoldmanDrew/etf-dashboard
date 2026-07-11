@@ -38,6 +38,9 @@ def test_policy_crash_rho_matches_production():
     assert bool(opt2["weight_smoothing"]["enabled"]) is True
     assert float(opt2["weight_smoothing"]["alpha"]) == pytest.approx(0.5)
     assert bool(opt2["weight_smoothing"]["ramp_new_entries"]) is True
+    assert float(opt2["weight_smoothing"]["entry_alpha"]) == pytest.approx(0.25)
+    assert float(opt2["weight_smoothing"]["dilution_alpha"]) == pytest.approx(0.25)
+    assert float(opt2["weight_smoothing"]["soft_exit_alpha"]) == pytest.approx(0.35)
     assert float(opt2["weight_smoothing"]["no_trade_band_rel"]) == pytest.approx(0.15)
     assert float(opt2["weight_smoothing"]["no_trade_band_abs"]) == pytest.approx(0.0025)
     assert float(opt2["drift_threshold_share_of_gross"]) == pytest.approx(0.02)
@@ -53,8 +56,14 @@ def test_opt2_cfg_default_rho_not_legacy():
 
 def test_smooth_trim_only_cuts_immediate_raises_ema():
     prev = {("A", "U"): 0.20}
-    # Cut: take solved immediately
-    cut = smooth_pair_weights_trim_only({("A", "U"): 0.10}, prev, alpha=0.5)
+    # Hard own-risk cut: take solved immediately
+    cut = smooth_pair_weights_trim_only(
+        {("A", "U"): 0.10},
+        prev,
+        alpha=0.5,
+        own_risk_weights={("A", "U"): 0.02},
+        prev_own_risk_weights={("A", "U"): 0.05},
+    )
     assert cut[("A", "U")] == pytest.approx(0.10)
     # Raise: EMA
     up = smooth_pair_weights_trim_only({("A", "U"): 0.30}, prev, alpha=0.5)
@@ -68,16 +77,41 @@ def test_smooth_new_entry_ramp_and_no_trade_band():
         prev,
         alpha=0.5,
         ramp_new_entries=True,
+        entry_alpha=0.25,
         no_trade_band_rel=0.15,
+        own_risk_weights={("A", "U"): 0.05, ("NEW", "N"): 0.05},
+        prev_own_risk_weights={("A", "U"): 0.05},
     )
-    # New entry ramps in at alpha; A's tiny move is held inside the band.
-    assert out[("NEW", "N")] == pytest.approx(0.12)
+    assert out[("NEW", "N")] == pytest.approx(0.06)
     assert out[("A", "U")] == pytest.approx(0.20)
-    # First-ever run (empty state): ramp is skipped.
     first = smooth_pair_weights_trim_only(
-        {("NEW", "N"): 0.24}, {}, alpha=0.5, ramp_new_entries=True
+        {("NEW", "N"): 0.24}, {}, alpha=0.5, ramp_new_entries=True, entry_alpha=0.25
     )
     assert first[("NEW", "N")] == pytest.approx(0.24)
+
+
+def test_smooth_dilution_vs_hard_cut_and_soft_exit():
+    prev = {("A", "U"): 0.40, ("GONE", "Z"): 0.20}
+    # Dilution: own risk flat, post-scale target down.
+    dil = smooth_pair_weights_trim_only(
+        {("A", "U"): 0.30},
+        {("A", "U"): 0.40},
+        alpha=0.5,
+        dilution_alpha=0.25,
+        own_risk_weights={("A", "U"): 0.05},
+        prev_own_risk_weights={("A", "U"): 0.05},
+    )
+    assert dil[("A", "U")] == pytest.approx(0.375)
+    # Soft exit.
+    soft = smooth_pair_weights_trim_only(
+        {("A", "U"): 0.40},
+        prev,
+        alpha=0.5,
+        soft_exit_alpha=0.35,
+        own_risk_weights={("A", "U"): 0.05},
+        prev_own_risk_weights={("A", "U"): 0.05, ("GONE", "Z"): 0.03},
+    )
+    assert soft[("GONE", "Z")] == pytest.approx(0.13)
 
 
 def test_pit_borrow_asof_and_gate(tmp_path: Path):

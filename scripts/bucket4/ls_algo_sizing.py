@@ -86,6 +86,10 @@ def opt2_cfg_from_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
     # Post-cap smoothing extras (live 2026-07-11): entries ramp in from zero,
     # sub-band moves are held.
     ws.setdefault("ramp_new_entries", True)
+    ws.setdefault("entry_alpha", 0.25)
+    ws.setdefault("dilution_alpha", 0.25)
+    ws.setdefault("soft_exit_alpha", 0.35)
+    ws.setdefault("hard_cut_rel", 0.10)
     ws.setdefault("no_trade_band_rel", 0.15)
     ws.setdefault("no_trade_band_abs", 0.0025)
     opt2["weight_smoothing"] = ws
@@ -111,28 +115,70 @@ def smooth_pair_weights_trim_only(
     *,
     alpha: float,
     ramp_new_entries: bool = False,
+    entry_alpha: float | None = None,
+    dilution_alpha: float | None = None,
+    soft_exit_alpha: float | None = None,
     no_trade_band_rel: float = 0.0,
     no_trade_band_abs: float = 0.0,
+    own_risk_weights: Mapping[tuple[str, str], float] | None = None,
+    prev_own_risk_weights: Mapping[tuple[str, str], float] | None = None,
+    hard_cut_rel: float = 0.10,
 ) -> dict[tuple[str, str], float]:
-    """Trim-only EMA + entry ramp + no-trade band (mirrors ls-algo
-    bucket4_weekly_opt2.smooth_pair_weights_trim_only)."""
-    a = float(np.clip(alpha, 0.0, 1.0))
+    """Mirror ls-algo bucket4_weekly_opt2.smooth_pair_weights_trim_only."""
+    a_up = float(np.clip(alpha, 0.0, 1.0))
+    a_entry = float(np.clip(entry_alpha if entry_alpha is not None else min(a_up, 0.25), 0.0, 1.0))
+    a_down = float(np.clip(dilution_alpha if dilution_alpha is not None else a_entry, 0.0, 1.0))
+    a_exit = (
+        float(np.clip(soft_exit_alpha, 0.0, 1.0)) if soft_exit_alpha is not None else None
+    )
     band_rel = max(0.0, float(no_trade_band_rel))
     band_abs = max(0.0, float(no_trade_band_abs))
+    cut_rel = max(0.0, float(hard_cut_rel))
     has_history = any(
         v is not None and np.isfinite(float(v)) for v in prev_weights.values()
     )
+    own = own_risk_weights or {}
+    own_prev = prev_own_risk_weights or {}
+
+    def _hard_risk_cut(key: tuple[str, str]) -> bool:
+        o = own.get(key)
+        op = own_prev.get(key)
+        if o is None or op is None or not np.isfinite(float(o)) or not np.isfinite(float(op)):
+            return False
+        op_f = float(op)
+        if op_f <= 1e-12:
+            return False
+        return float(o) < op_f * (1.0 - cut_rel)
+
     out: dict[tuple[str, str], float] = {}
     for k, w in pair_weights.items():
         w = max(0.0, float(w))
         wp = prev_weights.get(k)
         if wp is None or not np.isfinite(float(wp)):
-            out[k] = a * w if (ramp_new_entries and has_history) else w
+            out[k] = a_entry * w if (ramp_new_entries and has_history) else w
             continue
         wp = float(wp)
-        cand = w if w < wp else wp + a * (w - wp)
+        if w >= wp:
+            cand = wp + a_up * (w - wp)
+            hard = False
+        elif _hard_risk_cut(k):
+            cand = w
+            hard = True
+        else:
+            cand = wp + a_down * (w - wp)
+            hard = False
         band = max(band_abs, band_rel * wp)
-        out[k] = wp if abs(cand - wp) < band else cand
+        out[k] = cand if (hard or abs(cand - wp) >= band) else wp
+
+    if a_exit is not None and has_history:
+        for k, wp in prev_weights.items():
+            if k in out:
+                continue
+            if wp is None or not np.isfinite(float(wp)) or float(wp) <= 1e-12:
+                continue
+            faded = float(wp) * (1.0 - a_exit)
+            if faded > max(band_abs, 1e-6):
+                out[k] = faded
     return out
 
 
@@ -223,6 +269,7 @@ def size_production_book(
     sleeve_budget_usd: float = 100_000.0,
     prev_smooth: dict[tuple[str, str], float] | None = None,
     prev_crash_l: dict[tuple[str, str], float] | None = None,
+    prev_own_risk: dict[tuple[str, str], float] | None = None,
     ratchet_sim: SimRatchetState | None = None,
     borrow_history: Mapping[str, pd.Series] | None = None,
 ):
@@ -264,10 +311,15 @@ def size_production_book(
         size_kwargs["prev_smooth_weights"] = prev_smooth or {}
         if "prev_crash_l" in _sig_params:
             size_kwargs["prev_crash_l"] = prev_crash_l or {}
+        if "prev_own_risk" in _sig_params:
+            size_kwargs["prev_own_risk"] = prev_own_risk or {}
         sized = size_fn(**size_kwargs)
         prev = dict(getattr(sized, "smooth_prev", None) or prev_smooth or {})
         sized._crash_l_state = dict(  # type: ignore[attr-defined]
             getattr(sized, "crash_l_state", None) or prev_crash_l or {}
+        )
+        sized._own_risk_state = dict(  # type: ignore[attr-defined]
+            getattr(sized, "own_risk_state", None) or prev_own_risk or {}
         )
     else:
         sized = size_fn(**size_kwargs)
@@ -401,6 +453,7 @@ def build_walk_forward_weights(
     ratchet_sim = SimRatchetState(cfg=ratchet_cfg)
     prev_smooth: dict[tuple[str, str], float] = {}
     prev_crash_l: dict[tuple[str, str], float] = {}
+    prev_own_risk: dict[tuple[str, str], float] = {}
     borrow_history = load_borrow_history() if bool(bt_cfg.get("pit_borrow", True)) else {}
 
     for d in dates:
@@ -429,11 +482,13 @@ def build_walk_forward_weights(
                 sleeve_budget_usd=float(sleeve_budget_usd),
                 prev_smooth=prev_smooth,
                 prev_crash_l=prev_crash_l,
+                prev_own_risk=prev_own_risk,
                 ratchet_sim=ratchet_sim,
                 borrow_history=borrow_history,
             )
             prev_smooth = getattr(sized, "_smooth_prev", prev_smooth)
             prev_crash_l = getattr(sized, "_crash_l_state", prev_crash_l)
+            prev_own_risk = getattr(sized, "_own_risk_state", prev_own_risk)
         except Exception as exc:  # noqa: BLE001 — skip thin dates
             tele_hist.append({"date": d.strftime("%Y-%m-%d"), "error": str(exc)})
             continue
