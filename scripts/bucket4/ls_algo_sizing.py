@@ -1,7 +1,8 @@
 """ls-algo production B4 sizing bridge for the dashboard backtest builder.
 
 Walk-forward path mirrors live GTP layers:
-  v6 opt2 → trim-only weight_smoothing → crash_budget → sim ratchet
+  v6 opt2 → crash_budget (scale_to_budget + asymmetric L EMA) → post-cap
+  trim-only weight_smoothing (entry ramp + no-trade band) → sim ratchet
 with optional point-in-time borrow overrides from borrow_history.json.
 """
 from __future__ import annotations
@@ -82,6 +83,11 @@ def opt2_cfg_from_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
     ws = dict(opt2.get("weight_smoothing") or {})
     ws.setdefault("enabled", True)
     ws.setdefault("alpha", 0.5)
+    # Post-cap smoothing extras (live 2026-07-11): entries ramp in from zero,
+    # sub-band moves are held.
+    ws.setdefault("ramp_new_entries", True)
+    ws.setdefault("no_trade_band_rel", 0.15)
+    ws.setdefault("no_trade_band_abs", 0.0025)
     opt2["weight_smoothing"] = ws
     cb = dict(opt2.get("crash_budget") or {})
     cb.setdefault("enabled", True)
@@ -93,6 +99,8 @@ def opt2_cfg_from_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
     cb.setdefault("l_floor", 0.02)
     cb.setdefault("missing_policy", "book_quantile")
     cb.setdefault("missing_l_quantile", 0.75)
+    # Asymmetric L EMA: risk-up immediate, risk-down smoothed.
+    cb.setdefault("l_ema_alpha", 0.4)
     opt2["crash_budget"] = cb
     return opt2
 
@@ -102,19 +110,29 @@ def smooth_pair_weights_trim_only(
     prev_weights: Mapping[tuple[str, str], float],
     *,
     alpha: float,
+    ramp_new_entries: bool = False,
+    no_trade_band_rel: float = 0.0,
+    no_trade_band_abs: float = 0.0,
 ) -> dict[tuple[str, str], float]:
-    """Trim-only EMA (mirrors ls-algo bucket4_weekly_opt2.smooth_pair_weights_trim_only)."""
+    """Trim-only EMA + entry ramp + no-trade band (mirrors ls-algo
+    bucket4_weekly_opt2.smooth_pair_weights_trim_only)."""
     a = float(np.clip(alpha, 0.0, 1.0))
+    band_rel = max(0.0, float(no_trade_band_rel))
+    band_abs = max(0.0, float(no_trade_band_abs))
+    has_history = any(
+        v is not None and np.isfinite(float(v)) for v in prev_weights.values()
+    )
     out: dict[tuple[str, str], float] = {}
     for k, w in pair_weights.items():
         w = max(0.0, float(w))
         wp = prev_weights.get(k)
         if wp is None or not np.isfinite(float(wp)):
-            out[k] = w
-        elif w < float(wp):
-            out[k] = w
-        else:
-            out[k] = float(wp) + a * (w - float(wp))
+            out[k] = a * w if (ramp_new_entries and has_history) else w
+            continue
+        wp = float(wp)
+        cand = w if w < wp else wp + a * (w - wp)
+        band = max(band_abs, band_rel * wp)
+        out[k] = wp if abs(cand - wp) < band else cand
     return out
 
 
@@ -204,6 +222,7 @@ def size_production_book(
     run_date: str | pd.Timestamp,
     sleeve_budget_usd: float = 100_000.0,
     prev_smooth: dict[tuple[str, str], float] | None = None,
+    prev_crash_l: dict[tuple[str, str], float] | None = None,
     ratchet_sim: SimRatchetState | None = None,
     borrow_history: Mapping[str, pd.Series] | None = None,
 ):
@@ -236,14 +255,20 @@ def size_production_book(
         opt2_cfg=opt2,
         use_ibkr_uvix_borrow=False,
     )
-    # Prefer API-native smoothing (opt2 → smooth → crash) when supported.
+    # Prefer API-native smoothing (opt2 → crash → post-cap smooth) when supported.
     import inspect
 
     size_fn = api["size_b4_book_asof"]
-    if "prev_smooth_weights" in inspect.signature(size_fn).parameters:
+    _sig_params = inspect.signature(size_fn).parameters
+    if "prev_smooth_weights" in _sig_params:
         size_kwargs["prev_smooth_weights"] = prev_smooth or {}
+        if "prev_crash_l" in _sig_params:
+            size_kwargs["prev_crash_l"] = prev_crash_l or {}
         sized = size_fn(**size_kwargs)
         prev = dict(getattr(sized, "smooth_prev", None) or prev_smooth or {})
+        sized._crash_l_state = dict(  # type: ignore[attr-defined]
+            getattr(sized, "crash_l_state", None) or prev_crash_l or {}
+        )
     else:
         sized = size_fn(**size_kwargs)
         # Legacy API: smooth opt2 then re-cap locally.
@@ -375,6 +400,7 @@ def build_walk_forward_weights(
     ratchet_cfg = RatchetConfig.from_cfg(rules.get("ratchet") or policy.get("bucket_4_ratchet"))
     ratchet_sim = SimRatchetState(cfg=ratchet_cfg)
     prev_smooth: dict[tuple[str, str], float] = {}
+    prev_crash_l: dict[tuple[str, str], float] = {}
     borrow_history = load_borrow_history() if bool(bt_cfg.get("pit_borrow", True)) else {}
 
     for d in dates:
@@ -402,10 +428,12 @@ def build_walk_forward_weights(
                 run_date=d,
                 sleeve_budget_usd=float(sleeve_budget_usd),
                 prev_smooth=prev_smooth,
+                prev_crash_l=prev_crash_l,
                 ratchet_sim=ratchet_sim,
                 borrow_history=borrow_history,
             )
             prev_smooth = getattr(sized, "_smooth_prev", prev_smooth)
+            prev_crash_l = getattr(sized, "_crash_l_state", prev_crash_l)
         except Exception as exc:  # noqa: BLE001 — skip thin dates
             tele_hist.append({"date": d.strftime("%Y-%m-%d"), "error": str(exc)})
             continue
@@ -450,6 +478,11 @@ def build_walk_forward_weights(
                 "pit_borrow": bool(bt_cfg.get("pit_borrow", True)),
                 "crash_rho": float((opt2.get("crash_budget") or {}).get("rho", 0.0075)),
                 "scale_to_budget": bool((opt2.get("crash_budget") or {}).get("scale_to_budget", True)),
+                "post_cap_smoothing": True,
+                "ramp_new_entries": bool((opt2.get("weight_smoothing") or {}).get("ramp_new_entries", True)),
+                "no_trade_band_rel": float((opt2.get("weight_smoothing") or {}).get("no_trade_band_rel", 0.15)),
+                "no_trade_band_abs": float((opt2.get("weight_smoothing") or {}).get("no_trade_band_abs", 0.0025)),
+                "l_ema_alpha": float((opt2.get("crash_budget") or {}).get("l_ema_alpha", 0.4)),
             },
         }
 

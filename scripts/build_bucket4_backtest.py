@@ -1060,6 +1060,11 @@ def build_backtest(
             "drift_threshold_share_of_gross": opt2.get("drift_threshold_share_of_gross"),
             "crash_rho": float((opt2.get("crash_budget") or {}).get("rho", 0.0075)),
             "scale_to_budget": bool((opt2.get("crash_budget") or {}).get("scale_to_budget", True)),
+            "l_ema_alpha": float((opt2.get("crash_budget") or {}).get("l_ema_alpha", 0.4)),
+            "post_cap_smoothing": True,
+            "ramp_new_entries": bool((opt2.get("weight_smoothing") or {}).get("ramp_new_entries", True)),
+            "no_trade_band_rel": float((opt2.get("weight_smoothing") or {}).get("no_trade_band_rel", 0.15)),
+            "no_trade_band_abs": float((opt2.get("weight_smoothing") or {}).get("no_trade_band_abs", 0.0025)),
             "custom_book_match_deployed_fraction": bool(
                 bt_cfg.get("custom_book_match_deployed_fraction", True)
             ),

@@ -156,6 +156,9 @@ def test_builder_production_sizing_smoke():
                         "crash_budget": {
                             "enabled": True,
                             "rho": 0.0075,
+                            # Research regime: freed dollars stay in cash (the
+                            # production default is scale_to_budget=true).
+                            "scale_to_budget": False,
                             "theta": 0.5,
                             "phi": 0.5,
                             "l_floor": 0.02,

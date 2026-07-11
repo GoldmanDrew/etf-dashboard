@@ -32,10 +32,14 @@ def test_policy_crash_rho_matches_production():
     opt2 = opt2_cfg_from_policy(policy)
     assert float(opt2["crash_budget"]["rho"]) == pytest.approx(0.0075)
     assert bool(opt2["crash_budget"]["scale_to_budget"]) is True
+    assert float(opt2["crash_budget"]["l_ema_alpha"]) == pytest.approx(0.4)
     assert float(opt2["borrow_ramp_lo"]) == pytest.approx(0.80)
     assert float(opt2["borrow_ramp_hi"]) == pytest.approx(1.20)
     assert bool(opt2["weight_smoothing"]["enabled"]) is True
     assert float(opt2["weight_smoothing"]["alpha"]) == pytest.approx(0.5)
+    assert bool(opt2["weight_smoothing"]["ramp_new_entries"]) is True
+    assert float(opt2["weight_smoothing"]["no_trade_band_rel"]) == pytest.approx(0.15)
+    assert float(opt2["weight_smoothing"]["no_trade_band_abs"]) == pytest.approx(0.0025)
     assert float(opt2["drift_threshold_share_of_gross"]) == pytest.approx(0.02)
 
 
@@ -43,6 +47,8 @@ def test_opt2_cfg_default_rho_not_legacy():
     cfg = opt2_cfg_from_policy({"inverse_decay_bucket4": {"rules": {"bucket4_weekly_opt2": {}}}})
     assert float(cfg["crash_budget"]["rho"]) == pytest.approx(0.0075)
     assert bool(cfg["crash_budget"]["scale_to_budget"]) is True
+    assert float(cfg["crash_budget"]["l_ema_alpha"]) == pytest.approx(0.4)
+    assert bool(cfg["weight_smoothing"]["ramp_new_entries"]) is True
 
 
 def test_smooth_trim_only_cuts_immediate_raises_ema():
@@ -53,6 +59,25 @@ def test_smooth_trim_only_cuts_immediate_raises_ema():
     # Raise: EMA
     up = smooth_pair_weights_trim_only({("A", "U"): 0.30}, prev, alpha=0.5)
     assert up[("A", "U")] == pytest.approx(0.25)
+
+
+def test_smooth_new_entry_ramp_and_no_trade_band():
+    prev = {("A", "U"): 0.20}
+    out = smooth_pair_weights_trim_only(
+        {("A", "U"): 0.205, ("NEW", "N"): 0.24},
+        prev,
+        alpha=0.5,
+        ramp_new_entries=True,
+        no_trade_band_rel=0.15,
+    )
+    # New entry ramps in at alpha; A's tiny move is held inside the band.
+    assert out[("NEW", "N")] == pytest.approx(0.12)
+    assert out[("A", "U")] == pytest.approx(0.20)
+    # First-ever run (empty state): ramp is skipped.
+    first = smooth_pair_weights_trim_only(
+        {("NEW", "N"): 0.24}, {}, alpha=0.5, ramp_new_entries=True
+    )
+    assert first[("NEW", "N")] == pytest.approx(0.24)
 
 
 def test_pit_borrow_asof_and_gate(tmp_path: Path):

@@ -145,7 +145,34 @@ def _und_price_series(und: str, dates: pd.DatetimeIndex, etf: str | None = None)
     return pd.Series(np.nan, index=dates)
 
 
-def _pair_frame(d: dict) -> pd.DataFrame:
+def _load_backtest() -> dict:
+    bt_path = REPO / "data" / "bucket4_backtest.json"
+    if bt_path.is_file():
+        try:
+            return json.loads(bt_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _weight_series(bt: dict, etf: str, dates: pd.DatetimeIndex) -> pd.Series | None:
+    """Walk-forward weekly portfolio weight for one ETF, ffilled onto ``dates``."""
+    wh = bt.get("weight_history") or []
+    if not wh:
+        return None
+    etf_u = str(etf).strip().upper()
+    pts = {
+        pd.Timestamp(e["date"]): float(e.get(etf_u, 0.0))
+        for e in wh
+        if isinstance(e, dict) and e.get("date")
+    }
+    if not pts:
+        return None
+    s = pd.Series(pts).sort_index()
+    return s.reindex(s.index.union(dates)).ffill().reindex(dates).fillna(0.0)
+
+
+def _pair_frame(d: dict, bt: dict) -> pd.DataFrame:
     daily = d.get("daily") or {}
     dates = pd.to_datetime(daily.get("dates") or [])
     if len(dates) == 0:
@@ -170,27 +197,37 @@ def _pair_frame(d: dict) -> pd.DataFrame:
         },
         index=idx,
     )
-    # Unit-capital gross_exposure * portfolio weight * sleeve budget → book USD gross.
+    # Book USD gross = walk-forward portfolio weight (weekly, ffilled)
+    # x sleeve budget x unit-capital pair gross path. Falls back to the
+    # latest static weight when weight_history is unavailable.
+    sleeve = float(
+        bt.get("sleeve_budget_usd")
+        or (bt.get("sizing_latest") or {}).get("budget_usd")
+        or 100_000.0
+    )
+    etf = str(d.get("etf") or "").upper()
+    w_ser = _weight_series(bt, etf, idx)
     summary = d.get("summary") or {}
-    w = float(summary.get("effective_weight") or summary.get("portfolio_weight") or 0.0)
-    sleeve = 100_000.0
-    bt_path = REPO / "data" / "bucket4_backtest.json"
-    if bt_path.is_file():
-        try:
-            bt = json.loads(bt_path.read_text(encoding="utf-8"))
-            sleeve = float(bt.get("sleeve_budget_usd") or (bt.get("sizing_latest") or {}).get("budget_usd") or sleeve)
-        except Exception:
-            pass
-    if w > 0 and df["gross"].notna().any():
-        df["proposed_gross_usd"] = df["gross"] * w * sleeve
+    if w_ser is not None and float(w_ser.max()) > 0:
+        df["port_weight"] = w_ser
+    else:
+        df["port_weight"] = float(
+            summary.get("effective_weight") or summary.get("portfolio_weight") or 0.0
+        )
+    if df["gross"].notna().any() and float(df["port_weight"].max()) > 0:
+        df["proposed_gross_usd"] = df["gross"] * df["port_weight"] * sleeve
     else:
         df["proposed_gross_usd"] = df["gross"]
+    # Only show the stretch where the name is actually in the sized book.
+    live = df.index[df["port_weight"] > 1e-9]
+    if len(live):
+        df = df.loc[live.min():]
     return df
 
 
-def plot_pair(etf: str, d: dict, out_dir: Path) -> Path | None:
+def plot_pair(etf: str, d: dict, bt: dict, out_dir: Path) -> Path | None:
     und = str(d.get("underlying") or (d.get("summary") or {}).get("underlying") or "").upper()
-    df = _pair_frame(d)
+    df = _pair_frame(d, bt)
     if df.empty or und == "":
         return None
     px = _und_price_series(und, df.index, etf=etf)
@@ -221,28 +258,44 @@ def plot_pair(etf: str, d: dict, out_dir: Path) -> Path | None:
     ax.plot(df.index, df["proposed_gross_usd"], color="#c62828", lw=1.3, label="proposed gross (USD)")
     if len(rb):
         ax.scatter(rb, df.loc[rb, "proposed_gross_usd"], color="#c62828", s=18, zorder=3, label="rebalance")
+    ax2 = ax.twinx()
+    ax2.plot(df.index, df["port_weight"], color="#6a1b9a", lw=1.0, ls="--", alpha=0.8, label="portfolio weight")
+    ax2.set_ylabel("Portfolio weight", color="#6a1b9a", fontsize=9)
+    ax2.tick_params(axis="y", labelcolor="#6a1b9a", labelsize=8)
     ax.set_ylabel("Proposed gross $")
     ax.set_xlabel("Date")
-    ax.legend(loc="upper left", fontsize=8)
+    lines1, labels1 = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=8)
     ax.grid(True, alpha=0.25)
 
-    # Stability annotation
+    # Stability annotations: MTM gross drift and pure sizing (weight) churn.
+    notes = []
     g = df["proposed_gross_usd"].dropna()
     if len(g) >= 5:
         weekly = g.resample("W-FRI").last().dropna()
         if len(weekly) >= 3:
             chg = weekly.pct_change().dropna()
-            med_abs = float(chg.abs().median()) if len(chg) else float("nan")
-            ax.text(
-                0.99,
-                0.95,
-                f"median |Δgross| week-to-week: {med_abs:.1%}" if np.isfinite(med_abs) else "",
-                transform=ax.transAxes,
-                ha="right",
-                va="top",
-                fontsize=8,
-                color="#424242",
-            )
+            if len(chg):
+                notes.append(f"median |Δgross| wk: {float(chg.abs().median()):.1%}")
+    w = df["port_weight"].dropna()
+    if len(w) >= 5:
+        wk = w.resample("W-FRI").last().dropna()
+        wk = wk[wk.shift(1) > 1e-9]
+        chg = wk.pct_change().dropna()
+        if len(chg):
+            notes.append(f"median |Δweight| wk: {float(chg.abs().median()):.1%}")
+    if notes:
+        ax.text(
+            0.99,
+            0.95,
+            "   ".join(notes),
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=8,
+            color="#424242",
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{etf}_{und}_sizing_stability.png"
@@ -262,13 +315,14 @@ def main() -> int:
         print("No production B4 pairs found in", PAIR_DIR, file=sys.stderr)
         return 1
 
+    bt = _load_backtest()
     paths: list[Path] = []
     for etf in etfs:
         d = _load_pair(etf)
         if d is None:
             print(f"[WARN] missing shard {etf}")
             continue
-        p = plot_pair(etf, d, out_dir)
+        p = plot_pair(etf, d, bt, out_dir)
         if p is not None:
             print(f"[OK] {p}")
             paths.append(p)

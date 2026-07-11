@@ -1,10 +1,11 @@
-# Snapshot of ls-algo production Bucket 4 hedge/cadence/sizing rules (2026-07-10).
+# Snapshot of ls-algo production Bucket 4 hedge/cadence/sizing rules (2026-07-11).
 # Source: config/strategy_config.yml inverse_decay_bucket4
-# Sizing: v6 opt2 (decay/borrow/cov) + weight_smoothing + crash_budget
-#         (trim then scale_to_budget) + grow-only ratchet on the walk-forward path.
+# Sizing: v6 opt2 (decay/borrow/cov) + crash_budget (trim then scale_to_budget,
+#         asymmetric L EMA) + POST-CAP trim-only weight_smoothing (entry ramp +
+#         no-trade band) + grow-only ratchet on the walk-forward path.
 
 schema: bucket4_backtest_policy.v1
-snapshot_date: "2026-07-10"
+snapshot_date: "2026-07-11"
 
 inverse_decay_bucket4:
   enabled: true
@@ -31,10 +32,15 @@ inverse_decay_bucket4:
       cov_penalty: 0.85
       cov_shrink: 0.35
       vol_etp_weight_penalty: 0.0
-      # Trim-only EMA before crash budget (live GTP Phase 5).
+      # Trim-only EMA applied AFTER the crash budget (live GTP Phase 5+):
+      # cuts immediate, increases smoothed, new entries ramp from zero,
+      # sub-band moves held (no churn).
       weight_smoothing:
         enabled: true
         alpha: 0.5
+        ramp_new_entries: true
+        no_trade_band_rel: 0.15
+        no_trade_band_abs: 0.0025
         state_json: data/b4_weight_ema_state.json
       crash_budget:
         enabled: true
@@ -46,6 +52,8 @@ inverse_decay_bucket4:
         l_floor: 0.02
         missing_policy: book_quantile
         missing_l_quantile: 0.75
+        # Asymmetric per-name L EMA: risk-up immediate, risk-down smoothed.
+        l_ema_alpha: 0.4
       hedge_cadence_policy:
         source: tr_vcr
         hedge_ratio_model: v7
