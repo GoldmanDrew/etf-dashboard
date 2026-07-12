@@ -1171,7 +1171,9 @@ class GraniteSharesProvider:
     """
 
     name = "granite_shares"
-    BASE = "https://www.graniteshares.com"
+    # Keep aligned with yieldboost_holdings.GRANITE_BASE. The legacy www host
+    # now self-redirects for ETF detail pages.
+    BASE = "https://graniteshares.com"
     # Static fallback for issuer routing when the Granite catalog endpoint/CDN is
     # unavailable. The dynamic catalog still wins when it loads successfully.
     KNOWN_TICKERS: set[str] = {

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -17,9 +18,11 @@ from yieldboost_fof_forward import (  # noqa: E402
     weighted_child_pair_pnl_blend,
 )
 from yieldboost_fof_holdings import (  # noqa: E402
+    business_days_since,
     build_fof_holdings_history,
     build_fof_holdings_payload,
     extract_fof_children_from_holdings,
+    fof_holdings_refresh_targets,
     infer_yb_child_ticker,
 )
 from yieldboost_fof_pair_pnl import (  # noqa: E402
@@ -333,3 +336,14 @@ def test_build_fof_holdings_payload_history():
     assert len(hist["YBST"]) == 2
     payload = build_fof_holdings_payload(hdf)
     assert "YBST" in payload["latest"]
+
+
+def test_fof_holdings_refresh_targets_missing_or_stale():
+    hdf = pd.DataFrame([
+        {"as_of_date": "2026-07-08", "etf_ticker": "YBTY"},
+        {"as_of_date": "2026-07-01", "etf_ticker": "YBST"},
+    ])
+    today = date(2026, 7, 10)
+    assert business_days_since("2026-07-08", today=today) == 2
+    assert fof_holdings_refresh_targets(hdf, today=today) == ["YBST"]
+    assert fof_holdings_refresh_targets(hdf, max_age_business_days=1, today=today) == ["YBTY", "YBST"]

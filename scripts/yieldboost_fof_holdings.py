@@ -255,19 +255,64 @@ def write_fof_holdings_artifacts(
     hist_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def business_days_since(as_of: object, *, today: date | None = None) -> int | None:
+    """Weekday age of a holdings snapshot, excluding the snapshot date."""
+    parsed = _parse_as_of(as_of)
+    if not parsed:
+        return None
+    try:
+        start = date.fromisoformat(parsed)
+    except ValueError:
+        return None
+    end = today or date.today()
+    if start >= end:
+        return 0
+    age = 0
+    cursor = start
+    while cursor < end:
+        cursor += timedelta(days=1)
+        if cursor.weekday() < 5:
+            age += 1
+    return age
+
+
+def fof_holdings_refresh_targets(
+    hdf: pd.DataFrame,
+    *,
+    max_age_business_days: int = 2,
+    today: date | None = None,
+) -> list[str]:
+    """FoF symbols that are absent or whose latest snapshot is too old."""
+    if hdf is None or hdf.empty or "etf_ticker" not in hdf.columns or "as_of_date" not in hdf.columns:
+        return list(YIELDBOOST_FOF_SYMBOLS)
+    tickers = hdf["etf_ticker"].astype(str).str.upper()
+    targets: list[str] = []
+    for symbol in YIELDBOOST_FOF_SYMBOLS:
+        dates = hdf.loc[tickers == symbol, "as_of_date"]
+        latest = max((_parse_as_of(value) for value in dates), default=None)
+        age = business_days_since(latest, today=today)
+        if latest is None or age is None or age > max_age_business_days:
+            targets.append(symbol)
+    return targets
+
+
 def ensure_fof_holdings_in_store(
     *,
     csv_path: Path | None = None,
     parquet_path: Path | None = None,
     fetch_if_missing: bool = True,
+    max_age_business_days: int = 2,
 ) -> pd.DataFrame:
-    """Return holdings frame; optionally fetch YBTY/YBST from Granite when absent."""
+    """Return holdings frame; refresh FoF holdings when absent or stale.
+
+    Historical snapshots are retained for the piecewise-constant basket series.
+    """
     hdf = load_holdings_frame(csv_path=csv_path, parquet_path=parquet_path)
-    missing = [
-        s for s in YIELDBOOST_FOF_SYMBOLS
-        if hdf.empty or s not in set(hdf.get("etf_ticker", pd.Series(dtype=str)).astype(str).str.upper())
-    ]
-    if not missing or not fetch_if_missing:
+    targets = fof_holdings_refresh_targets(
+        hdf,
+        max_age_business_days=max_age_business_days,
+    )
+    if not targets or not fetch_if_missing:
         return hdf
     try:
         import requests
@@ -277,7 +322,8 @@ def ensure_fof_holdings_in_store(
         session = requests.Session()
         session.headers.update({"User-Agent": "etf-dashboard-builder/1.0"})
         stack = build_default_holdings_stack(session, underlying_by_ticker=YIELDBOOST_CHILD_TO_UNDERLYING)
-        new_df = fetch_all_holdings(list(missing), as_of=date.today(), stack=stack)
+        print(f"  Refreshing stale/missing FoF holdings: {', '.join(targets)}")
+        new_df = fetch_all_holdings(targets, as_of=date.today(), stack=stack)
         if new_df is not None and not new_df.empty:
             if not hdf.empty:
                 combined = pd.concat([hdf, new_df], ignore_index=True)

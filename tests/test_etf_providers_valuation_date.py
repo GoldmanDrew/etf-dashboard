@@ -68,6 +68,10 @@ def test_granite_supports_static_new_ticker_fallback(monkeypatch):
     assert provider.supports_ticker("NOTA", date(2026, 6, 26)) is False
 
 
+def test_granite_uses_canonical_non_www_host():
+    assert GraniteSharesProvider.BASE == "https://graniteshares.com"
+
+
 def test_merge_provider_attempts_prefers_polygon_when_yfinance_nav_diverges():
     """INTW-style bug: stale yfinance totalAssets + last_price must not beat polygon close."""
     yfin = ProviderResult(

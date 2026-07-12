@@ -84,7 +84,9 @@ QUOTE_SYNC_MAX_GAP_HOURS = 24.0
 SHORT_SIGNAL_STRONG = 0.15
 SHORT_SIGNAL_SELL = 0.05
 
-GRANITE_BASE = "https://www.graniteshares.com"
+# GraniteShares migrated to the apex domain in July 2026. The legacy www host
+# replies with a self-redirect, silently preventing holdings refreshes.
+GRANITE_BASE = "https://graniteshares.com"
 
 
 def _variance_time_interp_iv(

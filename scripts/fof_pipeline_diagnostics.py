@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -14,8 +15,10 @@ DATA = REPO_ROOT / "data"
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from product_taxonomy import yieldboost_fof_symbols  # noqa: E402
+from yieldboost_fof_holdings import business_days_since  # noqa: E402
 
 MIN_NAV_ROWS = 20
+MAX_HOLDINGS_AGE_BDAYS = 2
 
 
 def _load_metrics(path: Path) -> pd.DataFrame:
@@ -33,13 +36,29 @@ def _load_metrics(path: Path) -> pd.DataFrame:
     return df
 
 
-def check_fof_metrics(metrics_path: Path, *, min_rows: int) -> tuple[list[str], dict]:
+def _load_holdings(path: Path) -> pd.DataFrame:
+    if path.suffix.lower() == ".parquet" and path.exists():
+        return pd.read_parquet(path)
+    if path.exists():
+        return pd.read_csv(path)
+    return pd.DataFrame()
+
+
+def check_fof_metrics(
+    metrics_path: Path,
+    *,
+    min_rows: int,
+    holdings_path: Path = DATA / "etf_holdings_daily.parquet",
+    max_holdings_age_bdays: int = MAX_HOLDINGS_AGE_BDAYS,
+    today: date | None = None,
+) -> tuple[list[str], dict]:
     errors: list[str] = []
     report: dict[str, object] = {"symbols": {}, "min_rows": min_rows}
     df = _load_metrics(metrics_path)
     if df.empty:
         return [f"FoF diagnostics: no metrics at {metrics_path.name}"], report
 
+    holdings = _load_holdings(holdings_path)
     for sym in sorted(yieldboost_fof_symbols()):
         sub = df[df["ticker"] == sym]
         nav_col = None
@@ -52,9 +71,30 @@ def check_fof_metrics(metrics_path: Path, *, min_rows: int) -> tuple[list[str], 
         else:
             nav_rows = 0
         latest_date = str(sub["date"].max()) if not sub.empty and "date" in sub.columns else None
-        report["symbols"][sym] = {"nav_rows": nav_rows, "latest_date": latest_date, "nav_column": nav_col}
+        holding_rows = holdings[
+            holdings["etf_ticker"].astype(str).str.upper() == sym
+        ] if "etf_ticker" in holdings.columns else pd.DataFrame()
+        holding_as_of = (
+            max(holding_rows["as_of_date"].astype(str).str.slice(0, 10).tolist())
+            if not holding_rows.empty and "as_of_date" in holding_rows.columns else None
+        )
+        holding_age = business_days_since(holding_as_of, today=today)
+        report["symbols"][sym] = {
+            "nav_rows": nav_rows,
+            "latest_date": latest_date,
+            "nav_column": nav_col,
+            "holdings_as_of": holding_as_of,
+            "holdings_age_business_days": holding_age,
+        }
         if nav_rows < min_rows:
             errors.append(f"FoF {sym}: only {nav_rows} NAV rows (need >={min_rows})")
+        if holding_as_of is None:
+            errors.append(f"FoF {sym}: holdings missing")
+        elif holding_age is None or holding_age > max_holdings_age_bdays:
+            errors.append(
+                f"FoF {sym}: holdings {holding_as_of} are {holding_age if holding_age is not None else '?'} "
+                f"business days stale (max {max_holdings_age_bdays})"
+            )
 
     dash_path = DATA / "dashboard_data.json"
     if dash_path.exists():
@@ -79,11 +119,18 @@ def check_fof_metrics(metrics_path: Path, *, min_rows: int) -> tuple[list[str], 
 def main() -> int:
     parser = argparse.ArgumentParser(description="FoF pipeline diagnostics")
     parser.add_argument("--metrics", type=Path, default=DATA / "etf_metrics_daily.parquet")
+    parser.add_argument("--holdings", type=Path, default=DATA / "etf_holdings_daily.parquet")
     parser.add_argument("--min-rows", type=int, default=MIN_NAV_ROWS)
+    parser.add_argument("--max-holdings-age-bdays", type=int, default=MAX_HOLDINGS_AGE_BDAYS)
     parser.add_argument("--report", type=Path, default=None)
     args = parser.parse_args()
 
-    errors, report = check_fof_metrics(args.metrics, min_rows=args.min_rows)
+    errors, report = check_fof_metrics(
+        args.metrics,
+        min_rows=args.min_rows,
+        holdings_path=args.holdings,
+        max_holdings_age_bdays=args.max_holdings_age_bdays,
+    )
     report["ok"] = not errors
     report["errors"] = errors
     if args.report:
