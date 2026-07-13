@@ -375,19 +375,34 @@
     return out;
   }
 
-  function detectSplitBoundary(points, splitMult, relTol = 0.15) {
+  /**
+   * Find a raw-close split jump, optionally constrained to the declared effective
+   * date.  A ticker can have a stale/vendor-mixed close that happens to be a
+   * familiar split multiple; that is not enough to move a corporate-action
+   * boundary.  Callers resolving a declared event must therefore supply its
+   * date (and a small session window).
+   */
+  function detectSplitBoundary(points, splitMult, relTol = 0.15, effectiveDate = null, maxWindowDays = 7) {
     const target = toNum(splitMult);
     if (!Number.isFinite(target) || !Array.isArray(points) || points.length < 2) return null;
+    const effective = parseDate(effectiveDate);
+    let best = null;
     for (let i = 1; i < points.length; i += 1) {
       const prev = toNum(points[i - 1].close);
       const cur = toNum(points[i].close);
       if (!(prev > 0 && cur > 0)) continue;
       const matched = matchSplitToPriceJump(cur / prev, target, 0.18, relTol);
       if (matched != null && Math.abs(matched - target) <= Math.max(1e-6, relTol * Math.abs(target))) {
-        return parseDate(points[i].date);
+        const candidate = parseDate(points[i].date);
+        if (!candidate) continue;
+        if (!effective) return candidate;
+        const distance = Math.abs((new Date(candidate) - new Date(effective)) / 86400000);
+        if (distance <= maxWindowDays && (!best || distance < best.distance)) {
+          best = { date: candidate, distance };
+        }
       }
     }
-    return null;
+    return best ? best.date : null;
   }
 
   function parseSplitEventsFromCorp(corpPayload, ticker) {
@@ -457,7 +472,7 @@
     let boundary = null;
     if (filtered.length) {
       mult = filtered[0].mult;
-      boundary = detectSplitBoundary(closePoints, mult);
+      boundary = detectSplitBoundary(closePoints, mult, 0.15, filtered[0].date);
       if (!boundary) boundary = filtered[0].date;
       return { mode: "discrete_split", boundary, mult, filtered };
     }
@@ -495,9 +510,8 @@
       for (const ev of events) {
         const m = toNum(ev.mult);
         if (!(m > 0)) continue;
-        const b = detectSplitBoundary(closePoints, m);
-        const dayDiff = b ? Math.abs((new Date(b) - new Date(parseDate(ev.date))) / 86400000) : Infinity;
-        if (b && dayDiff <= 45) {
+        const b = detectSplitBoundary(closePoints, m, 0.15, ev.date);
+        if (b) {
           boundary = b;
           mult = m;
           break;
@@ -857,6 +871,54 @@
     return best;
   }
 
+  function splitEventMatchesBoundary(splitEvents, date, multiplier, maxWindowDays = 7) {
+    const d = parseDate(date);
+    const m = toNum(multiplier);
+    if (!d || !(m > 0)) return false;
+    return (Array.isArray(splitEvents) ? splitEvents : []).some((ev) => {
+      const evDate = parseDate(ev && ev.date);
+      const evMult = toNum(ev && ev.mult);
+      if (!evDate || !(evMult > 0)) return false;
+      const dateDistance = Math.abs((new Date(d) - new Date(evDate)) / 86400000);
+      const multMatches = Math.abs(evMult / m - 1) <= 0.18;
+      return dateDistance <= maxWindowDays && multMatches;
+    });
+  }
+
+  function metricRowIsStale(row) {
+    const provider = String(row && row.source_provider || "").trim().toLowerCase();
+    const kind = String(row && row.stale_kind || "").trim().toLowerCase();
+    return Boolean(row && row.stale) || provider.startsWith("carry_forward") || kind === "issuer_lag" || kind === "carry_forward";
+  }
+
+  /**
+   * A stale issuer row can carry a split-sized Yahoo close while its adjusted
+   * close remains on the normal daily basis.  Preserve the raw bar for audit,
+   * but use the closest reliable close/adjusted ratio for exposure, borrow and
+   * turnover.  This is intentionally limited to stale rows; real split-session
+   * closes remain tradeable and are handled by the declared-action path.
+   */
+  function sanitizedTradeClose(points, index, splitEvents) {
+    const point = points[index];
+    const close = toNum(point && point.close);
+    const adj = toNum(point && point.adj);
+    if (!(close > 0) || !(adj > 0) || !metricRowIsStale(point && point.row)) return close;
+    const ratio = close / adj;
+    const ratioAbs = ratio >= 1 ? ratio : 1 / ratio;
+    if (ratioAbs < 1.45 || splitEventMatchesBoundary(splitEvents, point.date, ratioAbs, 2)) return close;
+    for (let distance = 1; distance < points.length; distance += 1) {
+      for (const candidateIndex of [index - distance, index + distance]) {
+        const candidate = points[candidateIndex];
+        const cClose = toNum(candidate && candidate.close);
+        const cAdj = toNum(candidate && candidate.adj);
+        if (!candidate || metricRowIsStale(candidate.row) || !(cClose > 0) || !(cAdj > 0)) continue;
+        const basisRatio = cClose / cAdj;
+        if (basisRatio > 0 && basisRatio < 100) return adj * basisRatio;
+      }
+    }
+    return close;
+  }
+
   function normalizeSplitSizedBasisJumps(tr, splitEvents, maxUnderlyingLogMove = 0.25, minEtfLogJump = 0.55) {
     if (!Array.isArray(tr) || tr.length < 2) return tr;
     const multipliers = knownSplitMultipliers(splitEvents);
@@ -883,7 +945,7 @@
       const lrU = Math.abs(Math.log(u1 / u0));
       if (Math.abs(lrE) >= minEtfLogJump && lrU < maxUnderlyingLogMove) {
         const matched = matchKnownSplitJump(Math.exp(Math.abs(lrE)), multipliers);
-        if (matched != null) {
+        if (matched != null && splitEventMatchesBoundary(splitEvents, out[i + 1].date, matched)) {
           scale = lrE > 0 ? scale / matched : scale * matched;
           prevAdj = prevRaw * scale;
           suffix[i] = `|basis_jump_scaled(${matched})`;
@@ -930,7 +992,7 @@
       const lrE = Math.abs(Math.log(e1 / e0));
       if (Math.abs(lrU) >= minUndLogJump && lrE < maxEtfLogMove) {
         const matched = matchKnownSplitJump(Math.exp(Math.abs(lrU)), multipliers);
-        if (matched != null) {
+        if (matched != null && splitEventMatchesBoundary(splitEvents, out[i + 1].date, matched)) {
           scale = lrU > 0 ? scale / matched : scale * matched;
           prevAdj = prevRaw * scale;
           suffix[i] = `|und_basis_jump_scaled(${matched})`;
@@ -971,19 +1033,33 @@
     if (ctx.mode === "adj_basis_switch") {
       ctx._flatCloseTr = adjBasisSwitchUsesFlatClose(sorted, ctx);
     }
-    const built = points.map((p) => {
-      const trEtfPx = etfTrPriceForPoint(p, ctx);
+    const built = points.map((p, index) => {
+      // For an accepted discrete split, Yahoo adjusted close is the least
+      // assumption-heavy return input.  The normalizer below joins any
+      // provider basis switch around the declared event; mapping every
+      // pre-event adj close by the split multiple incorrectly turns stale raw
+      // spikes into return cliffs.
+      const trEtfPx = ctx.mode === "discrete_split" && p.adj > 0
+        ? p.adj
+        : etfTrPriceForPoint(p, ctx);
       const trUndPx = underlyingTrPriceForPoint(p, undEvents);
+      const tradeClose = sanitizedTradeClose(points, index, etfEvents);
       return {
         date: p.date,
         trEtfPx,
         trUndPx,
-        tradeClose: p.close,
-        trMode: trModeForPoint(p, ctx),
+        tradeClose,
+        trMode: ctx.mode === "discrete_split" && p.adj > 0
+          ? "split_adj_normalized"
+          : trModeForPoint(p, ctx),
         row: p.row,
       };
     }).filter((x) => x.date && x.trEtfPx > 0 && x.trUndPx > 0);
-    const repaired = repairSplitOutlierBars(built, ctx);
+    // Once a declared discrete split is using the normalized adjusted path,
+    // raw-close outlier repair is both redundant and unsafe: a stale split-like
+    // close can otherwise overwrite the clean adjusted observation before the
+    // basis normalizer sees it.
+    const repaired = ctx.mode === "discrete_split" ? built : repairSplitOutlierBars(built, ctx);
     return normalizeUnderlyingSplitSizedBasisJumps(
       normalizeSplitSizedBasisJumps(repaired, etfEvents),
       undEvents,

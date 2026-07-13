@@ -742,6 +742,42 @@ test("MTYY-style reverse split: exposure stays within 2x of target notionals", (
   );
 });
 
+test("COYY-style stale split-like prints cannot move the declared split boundary or create PnL", () => {
+  const rows = [
+    { date: "2026-05-11", close_price: 3.92, etf_adj_close: 3.79, underlying_adj_close: 200 },
+    // A stale vendor close is 6x while Yahoo adjusted close remains continuous.
+    { date: "2026-05-12", close_price: 23.43, etf_adj_close: 3.78, underlying_adj_close: 200, stale: true, stale_kind: "issuer_lag" },
+    { date: "2026-05-13", close_price: 3.92, etf_adj_close: 3.79, underlying_adj_close: 200 },
+    // Yahoo moves its adjusted-price basis before the actual reverse split.
+    { date: "2026-05-27", close_price: 3.47, etf_adj_close: 0.578, underlying_adj_close: 200 },
+    { date: "2026-06-01", close_price: 3.49, etf_adj_close: 0.582, underlying_adj_close: 200 },
+    { date: "2026-06-02", close_price: 20.71, etf_adj_close: 3.452, underlying_adj_close: 200 },
+    { date: "2026-06-03", close_price: 20.12, etf_adj_close: 3.353, underlying_adj_close: 200 },
+  ];
+  const splitEvents = [{ date: "2026-06-02", mult: 6 }];
+  const coverage = globalThis.PriceBasis.summarizeTrCoverage(rows, splitEvents, []);
+  assert.equal(coverage.splitBoundary, "2026-06-02");
+
+  const out = simulateInversePairBacktest(rows, {
+    gross: 100000,
+    hedgeRatio: 1,
+    beta: 0.5,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0,
+    splitEvents,
+  });
+  assert.equal(out.ok, true);
+  const staleDay = out.rows.find((r) => r.date === "2026-05-12");
+  const splitDay = out.rows.find((r) => r.date === "2026-06-02");
+  assert.ok(staleDay && splitDay, "expected stale and split transition rows");
+  assert.ok(Math.abs(staleDay.netPnl) < 2000, `stale close created PnL ${staleDay.netPnl}`);
+  assert.ok(Math.abs(splitDay.netPnl) < 5000, `split transition created PnL ${splitDay.netPnl}`);
+  assert.ok(staleDay.mvEtfAbs < 60000, `stale close inflated ETF MV ${staleDay.mvEtfAbs}`);
+  assert.ok(splitDay.mvEtfAbs < 60000, `split transition inflated ETF MV ${splitDay.mvEtfAbs}`);
+});
+
 test("simulateShortFlowBacktest starts each ETF when tradable and flows every N days", () => {
   const out = simulateShortFlowBacktest({
     legs: [

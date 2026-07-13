@@ -179,34 +179,25 @@
     return null;
   }
 
-  function inferSplitJumpRatio(jump) {
-    if (!(jump > 0) || !Number.isFinite(jump)) return null;
-    const absJump = jump >= 1 ? jump : 1 / jump;
-    if (absJump < 1.45) return null;
-    const PB = globalObj.PriceBasis;
-    if (PB && typeof PB.nearestSplitRatio === "function") {
-      const matched = PB.nearestSplitRatio(absJump, 0.18);
-      if (matched != null) return jump;
-    }
-    return jump;
-  }
-
   /**
    * Scale carried share quantities when raw tradeable prices jump on a split.
    * PnL uses split-aware TR prices; exposure/borrow must not multiply stale qty by post-split close.
+   * A split-like vendor bar without a matching declared action is deliberately
+   * ignored: treating familiar 2x/3x/6x glitches as corporate actions creates
+   * permanent share-count and P&L errors.
    */
   function applyCrossSplitQuantityAdjust(qE, qU, prev, cur, etfEvents, undEvents) {
     let nextE = qE;
     let nextU = qU;
     if (prev && cur && prev.pl > 0 && cur.pl > 0) {
       const etfJump = cur.pl / prev.pl;
-      if (matchDeclaredSplitJump(etfEvents, cur.date, etfJump) || inferSplitJumpRatio(etfJump)) {
+      if (matchDeclaredSplitJump(etfEvents, cur.date, etfJump)) {
         nextE = qE * (prev.pl / cur.pl);
       }
     }
     if (prev && cur && prev.ps > 0 && cur.ps > 0) {
       const undJump = cur.ps / prev.ps;
-      if (matchDeclaredSplitJump(undEvents, cur.date, undJump) || inferSplitJumpRatio(undJump)) {
+      if (matchDeclaredSplitJump(undEvents, cur.date, undJump)) {
         nextU = qU * (prev.ps / cur.ps);
       }
     }
@@ -565,12 +556,13 @@
 
     let pts = [];
     for (const row of rows) {
-      const pl = toNum(row && row.close_price) || toNum(row && row.nav);
+      const rawPl = toNum(row && row.close_price) || toNum(row && row.nav);
       const pa = toNum(row && row.etf_adj_close);
       const ps = toNum(row && row.underlying_adj_close);
       const ds = String((row && row.date) || "").trim();
-      if (!ds || !Number.isFinite(pl) || pl <= 0 || !Number.isFinite(ps) || ps <= 0) continue;
       const tr = trByDate ? trByDate.get(ds) : null;
+      const pl = tr && toNum(tr.tradeClose) > 0 ? toNum(tr.tradeClose) : rawPl;
+      if (!ds || !Number.isFinite(pl) || pl <= 0 || !Number.isFinite(ps) || ps <= 0) continue;
       const trPx = tr && Number.isFinite(tr.trEtfPx) && tr.trEtfPx > 0 ? tr.trEtfPx : NaN;
       const trUndPx = tr && Number.isFinite(tr.trUndPx) && tr.trUndPx > 0 ? tr.trUndPx : NaN;
       pts.push({
@@ -674,6 +666,7 @@
       cumEtf += dEtf;
       cumDistributions += etfDay.divDebit;
       if (etfDay.mode === "adj_close" || etfDay.mode === "tr_price" || String(etfDay.mode || "").startsWith("pre_split")
+        || String(etfDay.mode || "").startsWith("split_adj_normalized")
         || etfDay.mode === "post_split" || etfDay.mode === "continuous_adj") nDaysAdjClose += 1;
       else nDaysPriceFallback += 1;
       const prevUndPx = underlyingPxForPoint(prev);
