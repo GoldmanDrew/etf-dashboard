@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -32,6 +32,31 @@ def _age_minutes(ts: str | None, now: datetime) -> int | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return max(0, int((now - dt).total_seconds() // 60))
+
+
+def _market_age_minutes(ts: str | None, now: datetime) -> int | None:
+    """Wall-clock age excluding complete weekend calendar days."""
+    if not ts:
+        return None
+    try:
+        start = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
+    now = now.astimezone(UTC)
+    if start >= now:
+        return 0
+    excluded = timedelta(0)
+    day = start.date()
+    while day <= now.date():
+        if day.weekday() >= 5:
+            lo = max(start, datetime.combine(day, time.min, tzinfo=UTC))
+            hi = min(now, datetime.combine(day + timedelta(days=1), time.min, tzinfo=UTC))
+            if hi > lo:
+                excluded += hi - lo
+        day += timedelta(days=1)
+    return max(0, int(((now - start) - excluded).total_seconds() // 60))
 
 
 def _load_monitored_options_symbols() -> set[str]:
@@ -85,7 +110,7 @@ def _check_options(cache: dict, *, max_underlying_hours: float) -> tuple[dict, l
         if not isinstance(payload, dict):
             continue
         ts = payload.get("updated_at")
-        age = _age_minutes(str(ts) if ts else None, now)
+        age = _market_age_minutes(str(ts) if ts else None, now)
         if age is not None:
             sym_u = str(sym).upper()
             und_ages.append((sym_u, age))
@@ -143,7 +168,9 @@ def _check_options(cache: dict, *, max_underlying_hours: float) -> tuple[dict, l
 
 def _check_vrp(health: dict, *, max_underlying_hours: float) -> tuple[dict, list[str]]:
     violations: list[str] = []
-    age = health.get("worst_underlying_options_age_minutes")
+    age = _market_age_minutes(health.get("underlying_options_as_of_min"), datetime.now(UTC))
+    if age is None:
+        age = health.get("worst_underlying_options_age_minutes")
     sym = health.get("worst_underlying_symbol")
     max_min = int(max_underlying_hours * 60)
     if isinstance(age, (int, float)) and age > max_min:

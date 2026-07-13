@@ -126,6 +126,10 @@ REQUIRED_COLUMNS = [
     "source_url",
     "ingested_at_utc",
     "status",
+    "issuer_asof_date",
+    "market_asof_date",
+    "premium_discount_eligible",
+    "premium_discount_status",
 ]
 
 
@@ -383,6 +387,7 @@ def compute_prem_disc_health(
         return {
             "rows_with_close": 0,
             "rows_with_nav_and_close": 0,
+            "rows_suppressed_asof_mismatch": 0,
             "median_prem_disc_bps": None,
             "lockstep_nav_close_count": 0,
             "lockstep_nav_close_pct": 0.0,
@@ -400,7 +405,14 @@ def compute_prem_disc_health(
         if isinstance(v, bool)
         else str(v).strip().lower() in {"1", "true", "yes"}
     ).fillna(False)
-    ok = nav.notna() & (nav > 0) & close.notna() & (close > 0)
+    raw_ok = nav.notna() & (nav > 0) & close.notna() & (close > 0)
+    eligible_raw = latest.get(
+        "premium_discount_eligible", pd.Series(True, index=latest.index)
+    )
+    eligible = eligible_raw.map(
+        lambda v: v if isinstance(v, bool) else str(v).strip().lower() in {"1", "true", "yes"}
+    ).fillna(False)
+    ok = raw_ok & eligible
     prem_bps = pd.Series(np.nan, index=latest.index, dtype=float)
     if ok.any():
         prem_bps.loc[ok] = (close[ok] - nav[ok]) / nav[ok] * 10000.0
@@ -436,6 +448,7 @@ def compute_prem_disc_health(
     return {
         "rows_with_close": int(close.notna().sum()),
         "rows_with_nav_and_close": ok_n,
+        "rows_suppressed_asof_mismatch": int((raw_ok & ~eligible).sum()),
         "median_prem_disc_bps": float(prem_bps.median()) if not prem_bps.empty else None,
         "lockstep_nav_close_count": lock_n,
         "lockstep_nav_close_pct": round(100.0 * lock_n / ok_n, 2) if ok_n else 0.0,
@@ -785,6 +798,8 @@ def validate_df(df: pd.DataFrame) -> None:
         & (close > 0)
         & (abs(close / nav - 1.0) > 0.5)
     )
+    if "premium_discount_eligible" in df.columns:
+        absurd &= df["premium_discount_eligible"].fillna(False).astype(bool)
     if absurd.any():
         sample = df.loc[absurd, ["date", "ticker", "nav", "close_price"]].head(8)
         LOGGER.warning(
@@ -1066,6 +1081,134 @@ def apply_stale_carry_forward(
         out.at[idx, "stale_kind"] = "carry_forward"
         out.at[idx, "source_provider"] = "carry_forward"
         out.at[idx, "source_url"] = f"carry_forward://{sym}?from={last['date']}"
+    return out
+
+
+def overlay_row_session_market_fields(
+    df: pd.DataFrame,
+    *,
+    close_df: pd.DataFrame | None = None,
+    etf_adj_df: pd.DataFrame | None = None,
+    underlying_df: pd.DataFrame | None = None,
+    etf_to_underlying: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Overlay market fields by the row's exact exchange session.
+
+    Carry-forward rows deliberately keep issuer NAV/AUM/shares from an older
+    valuation date.  Market fields must *not* follow that old issuer date: doing
+    so makes Stats compare today's NAV slot with yesterday's close and produces
+    fictitious premium/discount values.  This helper is intentionally separate
+    from :func:`merge_close_prices`, whose provider-aware join-date behavior is
+    useful before carry-forward rows are created.
+    """
+    if df.empty:
+        return df
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["_row_order"] = np.arange(len(out))
+
+    if close_df is not None and not close_df.empty:
+        c = close_df.copy()
+        c["date"] = pd.to_datetime(c["date"], errors="coerce").dt.date
+        c["ticker"] = c["ticker"].astype(str).str.upper()
+        c = c.drop_duplicates(["date", "ticker"], keep="last")
+        out = out.merge(
+            c[["date", "ticker", "close_price", "shares_traded"]].rename(
+                columns={"close_price": "_session_close", "shares_traded": "_session_volume"}
+            ),
+            on=["date", "ticker"],
+            how="left",
+        )
+        session_close = pd.to_numeric(out.pop("_session_close"), errors="coerce")
+        session_volume = pd.to_numeric(out.pop("_session_volume"), errors="coerce")
+        out["close_price"] = session_close.combine_first(
+            pd.to_numeric(out.get("close_price"), errors="coerce")
+        )
+        out["shares_traded"] = session_volume.combine_first(
+            pd.to_numeric(out.get("shares_traded"), errors="coerce")
+        )
+
+    if etf_adj_df is not None and not etf_adj_df.empty:
+        a = etf_adj_df.copy()
+        a["date"] = pd.to_datetime(a["date"], errors="coerce").dt.date
+        a["ticker"] = a["ticker"].astype(str).str.upper()
+        a = a.drop_duplicates(["date", "ticker"], keep="last")
+        out = out.merge(
+            a[["date", "ticker", "etf_adj_close"]].rename(
+                columns={"etf_adj_close": "_session_adj"}
+            ),
+            on=["date", "ticker"],
+            how="left",
+        )
+        session_adj = pd.to_numeric(out.pop("_session_adj"), errors="coerce")
+        out["etf_adj_close"] = session_adj.combine_first(
+            pd.to_numeric(out.get("etf_adj_close"), errors="coerce")
+        )
+
+    if underlying_df is not None and not underlying_df.empty and etf_to_underlying:
+        u = underlying_df.copy()
+        u["date"] = pd.to_datetime(u["date"], errors="coerce").dt.date
+        u["ticker"] = u["ticker"].astype(str).map(_normalize_symbol)
+        u = u.drop_duplicates(["date", "ticker"], keep="last").rename(
+            columns={"ticker": "_underlying", "underlying_adj_close": "_session_underlying"}
+        )
+        out["_underlying"] = out["ticker"].map(
+            lambda s: _normalize_symbol(etf_to_underlying.get(str(s).upper(), "")) or None
+        )
+        out = out.merge(
+            u[["date", "_underlying", "_session_underlying"]],
+            on=["date", "_underlying"],
+            how="left",
+        ).drop(columns=["_underlying"])
+        session_underlying = pd.to_numeric(out.pop("_session_underlying"), errors="coerce")
+        out["underlying_adj_close"] = session_underlying.combine_first(
+            pd.to_numeric(out.get("underlying_adj_close"), errors="coerce")
+        )
+
+    market_ok = pd.to_numeric(out.get("close_price"), errors="coerce").gt(0)
+    if "market_asof_date" not in out.columns:
+        out["market_asof_date"] = None
+    out.loc[market_ok, "market_asof_date"] = out.loc[market_ok, "date"].astype(str)
+    return out.sort_values("_row_order").drop(columns=["_row_order"]).reset_index(drop=True)
+
+
+def stamp_metric_asof_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """Stamp issuer/market valuation dates and a safe premium/discount gate."""
+    if df.empty:
+        return df
+    out = df.copy()
+    row_date = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    urls = out.get("source_url", pd.Series(index=out.index, dtype=object)).fillna("").astype(str)
+    carry_from = urls.str.extract(r"(?:\?|&)from=(\d{4}-\d{2}-\d{2})\b")[0]
+    source_asof = urls.str.extract(r"#(?:as_of|nav_date)=(\d{4}-\d{2}-\d{2})\b")[0]
+    issuer_existing = out.get("issuer_asof_date", pd.Series(index=out.index, dtype=object))
+    issuer = issuer_existing.where(pd.notna(issuer_existing), carry_from)
+    issuer = issuer.where(pd.notna(issuer), source_asof)
+    issuer = issuer.where(pd.notna(issuer), row_date)
+    out["issuer_asof_date"] = issuer.astype(object)
+
+    market_existing = out.get("market_asof_date", pd.Series(index=out.index, dtype=object))
+    close_ok = pd.to_numeric(out.get("close_price"), errors="coerce").gt(0)
+    market = market_existing.where(pd.notna(market_existing), row_date.where(close_ok))
+    out["market_asof_date"] = market.astype(object)
+    nav_ok = pd.to_numeric(out.get("nav"), errors="coerce").gt(0)
+    aligned = out["issuer_asof_date"].astype(str).eq(out["market_asof_date"].astype(str))
+    ratio = pd.to_numeric(out.get("close_price"), errors="coerce") / pd.to_numeric(
+        out.get("nav"), errors="coerce"
+    ) - 1.0
+    sane_basis = ratio.abs().le(0.50)
+    out["premium_discount_eligible"] = (
+        nav_ok
+        & close_ok
+        & aligned
+        & sane_basis
+    )
+    out["premium_discount_status"] = np.where(
+        ~nav_ok | ~close_ok,
+        "provider_missing",
+        np.where(~aligned, "asof_mismatch", np.where(~sane_basis, "split_basis_mismatch", "valid")),
+    )
     return out
 
 
@@ -2429,6 +2572,7 @@ def save_yieldboost_put_spreads(
 def save_outputs(df: pd.DataFrame) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     df = ensure_stale_kind_column(df)
+    df = stamp_metric_asof_metadata(df)
     df, n_non_session = filter_metrics_to_nyse_sessions(df)
     if n_non_session:
         LOGGER.info("Dropped %d non-NYSE-session metrics row(s) before persistence", n_non_session)
@@ -3117,6 +3261,15 @@ def main() -> None:
         incoming=incoming,
         as_of_date=resolved_end_date,
         max_stale_business_days=max_stale_business_days,
+    )
+    # Carry-forward only applies issuer fundamentals. Re-attach market data by
+    # the row's exact exchange session after the carry row exists.
+    incoming = overlay_row_session_market_fields(
+        incoming,
+        close_df=close_df,
+        etf_adj_df=etf_adj_df,
+        underlying_df=und_close_df,
+        etf_to_underlying=underlying_map,
     )
     merged = upsert(existing, incoming)
     merged, n_poly_merged = backfill_close_prices_polygon_gaps(

@@ -2112,7 +2112,17 @@ const fmtSharesTradedStat = (raw) => {
 };
 const fmtUsd = v => (v == null || !Number.isFinite(Number(v))) ? '—' : `$${Number(v).toFixed(2)}`;
 /** Premium/discount of market close vs issuer NAV (bps when |prem| is small). */
-const fmtPremDisc = (nav, close) => {
+const fmtPremDisc = (nav, close, metricsRow = null) => {
+  // A premium/discount is meaningful only when issuer NAV and market close
+  // share a valuation session. Legacy carry-forward rows are rejected even
+  // before the explicit eligibility field reaches the browser.
+  if (metricsRow) {
+    if (metricsRow.premium_discount_eligible === false) return '—';
+    if (isCarryForwardMetricsRow(metricsRow)) return '—';
+    const issuerAsOf = String(metricsRow.issuer_asof_date || '');
+    const marketAsOf = String(metricsRow.market_asof_date || '');
+    if (issuerAsOf && marketAsOf && issuerAsOf !== marketAsOf) return '—';
+  }
   const n = Number(nav);
   const c = Number(close);
   if (!Number.isFinite(n) || n <= 0 || !Number.isFinite(c)) return '—';
@@ -7579,6 +7589,19 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       else ivProxy = ivLong != null ? Number(ivLong) : (ivShort != null ? Number(ivShort) : null);
       if (ivProxy != null && Number.isFinite(ivProxy)) merged.vrp_vol_2x = ivProxy - merged.rv_30d_2x;
     }
+    const freshness = VrpUi.rowFreshness(merged);
+    if (merged.actionable === false || freshness.blockSignal) {
+      merged._publication_blocked = true;
+      // Keep identifiers and freshness diagnostics visible, but never render
+      // stale pricing/greeks as an actionable trade card.
+      [
+        'model_fair', 'edge_pp_of_max_loss', 'expected_weekly_carry_usd',
+        'model_disagreement_pp_of_max_loss', 'dollar_gamma_per_1pct_underlying',
+        'theta_per_day', 'az_put_spread_fair', 'heston_put_spread_fair',
+        'bates_put_spread_fair', 'spread_mid_market', 'iv_put_long',
+        'iv_put_short', 'iv_full_proxy', 'vrp_vol_2x', 'vrp_vol_2x_base',
+      ].forEach((key) => { merged[key] = null; });
+    }
     return merged;
   }, [vrpLiveRow, vrpSpreadRow, allRecords]);
   const vrpIvPending = Boolean(vrpDisplayRow?._iv_pending);
@@ -9954,7 +9977,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <td>{m.date || '—'}</td>
                           <td title="Issuer-published NAV (REX/Roundhill/etc.), not AUM÷shares unless NAV absent">{fmtUsd(nav)}</td>
                           <td title="Exchange close (issuer closing price when available, else Yahoo)">{Number.isFinite(close) ? fmtUsd(close) : '—'}</td>
-                          <td title="(close − NAV) / NAV">{fmtPremDisc(nav, close)}</td>
+                          <td title={m?.premium_discount_eligible === false
+                            ? `Unavailable: ${m?.premium_discount_status === 'split_basis_mismatch'
+                              ? 'NAV and close are on incompatible split bases.'
+                              : 'issuer NAV and market close are from different sessions.'}`
+                            : '(close − NAV) / NAV'}>{fmtPremDisc(nav, close, m)}</td>
                           <td>{toFiniteNum(m.nav_total_return) != null ? fmtUsd(toFiniteNum(m.nav_total_return)) : '—'}</td>
                           <td>{toFiniteNum(m.underlying_adj_close) != null ? fmtUsd(toFiniteNum(m.underlying_adj_close)) : '—'}</td>
                           <td>{fmtMoney(Number(m.aum))}</td>
@@ -11729,6 +11756,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 {vrpHealth?.occ_supplement?.tradier_api_configured === false && (
                   <> Last options build ran without Tradier token.</>
                 )}
+              </div>
+            )}
+            {vrpDisplayRow?._publication_blocked && (
+              <div className="scenario-warning" style={{ marginBottom: 8 }}>
+                Vol / VRP pricing is blocked: {vrpDisplayRow.publication_status || vrpDisplayRow.data_grade_reason || 'inputs are stale or incomplete'}.
+                {' '}Refresh current holdings and synchronized option quotes before using this panel.
               </div>
             )}
             {!vrpDisplayRow ? (

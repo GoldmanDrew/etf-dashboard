@@ -22,6 +22,7 @@ DASHBOARD_JSON = REPO / "data" / "dashboard_data.json"
 METRICS_PARQUET = REPO / "data" / "etf_metrics_daily.parquet"
 UNIVERSE_CSV = REPO / "data" / "etf_screened_today.csv"
 CORP_ACTIONS_JSON = REPO / "data" / "corporate_actions.json"
+VRP_LIVE_JSON = REPO / "data" / "vrp_live.json"
 DEFAULT_JSON_GLOBS = ("data/*.json", "data/**/*.json")
 MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45
 HARD_LIFECYCLE_GAP_DAYS = 365
@@ -256,6 +257,72 @@ def audit_metrics_calendar(
     return errors
 
 
+def audit_metrics_asof_alignment(
+    metrics_by_symbol: dict[str, list[dict[str, Any]]],
+) -> tuple[list[str], list[str]]:
+    """Validate the explicit NAV/market as-of contract used by Stats."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    for sym, rows in sorted(metrics_by_symbol.items()):
+        if not rows:
+            continue
+        row = sorted(rows, key=lambda r: str(r.get("date") or ""))[-1]
+        eligible = row.get("premium_discount_eligible") is True
+        issuer_asof = str(row.get("issuer_asof_date") or "")[:10]
+        market_asof = str(row.get("market_asof_date") or "")[:10]
+        if eligible and (not issuer_asof or not market_asof or issuer_asof != market_asof):
+            errors.append(
+                f"{sym}: premium_discount_eligible=true with issuer_asof={issuer_asof or '?'} "
+                f"and market_asof={market_asof or '?'}"
+            )
+            continue
+        if eligible and _is_carry_forward_row(row):
+            errors.append(f"{sym}: carry-forward row incorrectly eligible for premium/discount")
+            continue
+        if eligible:
+            try:
+                nav = float(row.get("nav"))
+                close = float(row.get("close_price"))
+                prem = close / nav - 1.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+            if abs(prem) > 0.50:
+                errors.append(f"{sym}: aligned premium/discount implausible at {prem:+.1%}")
+            elif abs(prem) > 0.10:
+                warnings.append(f"{sym}: aligned premium/discount unusually large at {prem:+.1%}")
+    return errors, warnings
+
+
+def audit_vrp_publication(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    today = dt.date.today()
+    required = (
+        "model_fair", "edge_pp_of_max_loss", "expected_weekly_carry_usd",
+        "dollar_gamma_per_1pct_underlying", "theta_per_day",
+    )
+    for row in payload.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        sym = str(row.get("yb_etf") or "?")
+        expiry = _date(row.get("expiry"))
+        expired = expiry is None or expiry < today
+        grade = str(row.get("data_grade") or "").upper()
+        sync_ok = bool((row.get("quote_sync") or {}).get("sync_ok"))
+        missing = [key for key in required if not _finite(row.get(key))]
+        actionable = row.get("actionable") is True
+        if actionable and (expired or grade not in {"A", "B"} or not sync_ok or missing):
+            errors.append(
+                f"{sym}: actionable VRP row violates publication gate "
+                f"(expired={expired}, grade={grade or '?'}, sync={sync_ok}, missing={missing})"
+            )
+        if not actionable and (expired or grade == "D"):
+            warnings.append(
+                f"{sym}: VRP blocked ({row.get('publication_status') or row.get('data_grade_reason') or 'stale'})"
+            )
+    return errors, warnings
+
+
 def audit_dashboard(
     payload: dict[str, Any],
     *,
@@ -266,6 +333,7 @@ def audit_dashboard(
     records = payload.get("records")
     if not isinstance(records, list):
         return ["dashboard_data.json missing records[]"], warnings
+    require_schema_v4_quality = int(payload.get("schema_v") or 0) >= 4
 
     for row in records:
         if not isinstance(row, dict):
@@ -297,6 +365,15 @@ def audit_dashboard(
             )
             if not any(_finite(v) for v in expected_values):
                 errors.append(f"{sym}: expected_decay_available=true but no expected decay value")
+
+        if (
+            require_schema_v4_quality
+            and row.get("gross_decay_annual") is not None
+            and not row.get("gross_decay_annual_source")
+        ):
+            errors.append(f"{sym}: gross_decay_annual has no provenance source")
+        if require_schema_v4_quality and not isinstance(row.get("stats_status"), dict):
+            errors.append(f"{sym}: missing stats_status conditional quality map")
 
         for leg in ("etf", "underlying"):
             obs_key = f"vol_{leg}_annual_obs"
@@ -384,9 +461,20 @@ def main() -> int:
             )
         )
         errors.extend(audit_metrics_calendar(metrics_by_symbol))
+        asof_errors, asof_warnings = audit_metrics_asof_alignment(metrics_by_symbol)
+        errors.extend(asof_errors)
+        warnings.extend(asof_warnings)
         stale_errors, stale_warnings = audit_stale_price_feeds(metrics_by_symbol)
         errors.extend(stale_errors)
         warnings.extend(stale_warnings)
+
+    if VRP_LIVE_JSON.exists():
+        try:
+            vrp_errors, vrp_warnings = audit_vrp_publication(_load_json(VRP_LIVE_JSON))
+            errors.extend(vrp_errors)
+            warnings.extend(vrp_warnings)
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"vrp_live.json unreadable: {exc}")
 
     if errors:
         print("Dashboard data quality failures:")

@@ -21,12 +21,55 @@ from build_data import (  # noqa: E402
     load_monitored_options_symbols,
     prune_unmonitored_options_cache,
 )
-from freshness_diagnostics import _check_options  # noqa: E402
+from freshness_diagnostics import _check_options, _market_age_minutes  # noqa: E402
 from ingest_etf_metrics import (  # noqa: E402
     extend_metrics_session_coverage,
+    overlay_row_session_market_fields,
     prune_expired_carry_forward_rows,
     repair_nav_only_partial_aum,
+    stamp_metric_asof_metadata,
 )
+
+
+def test_carry_forward_market_overlay_uses_row_session_and_blocks_premium_discount():
+    rows = pd.DataFrame([{
+        "date": date(2026, 7, 10),
+        "ticker": "TEST",
+        "nav": 10.0,
+        "close_price": 8.0,
+        "shares_traded": None,
+        "etf_adj_close": None,
+        "underlying_adj_close": None,
+        "source_provider": "carry_forward",
+        "source_url": "carry_forward://TEST?from=2026-07-09",
+        "stale_kind": "carry_forward",
+    }])
+    close = pd.DataFrame([{
+        "date": date(2026, 7, 10), "ticker": "TEST",
+        "close_price": 9.5, "shares_traded": 1234,
+    }])
+    adj = pd.DataFrame([{
+        "date": date(2026, 7, 10), "ticker": "TEST", "etf_adj_close": 9.5,
+    }])
+    und = pd.DataFrame([{
+        "date": date(2026, 7, 10), "ticker": "UND", "underlying_adj_close": 101.0,
+    }])
+    out = overlay_row_session_market_fields(
+        rows,
+        close_df=close,
+        etf_adj_df=adj,
+        underlying_df=und,
+        etf_to_underlying={"TEST": "UND"},
+    )
+    out = stamp_metric_asof_metadata(out)
+    row = out.iloc[0]
+    assert row["close_price"] == 9.5
+    assert row["shares_traded"] == 1234
+    assert row["etf_adj_close"] == 9.5
+    assert row["underlying_adj_close"] == 101.0
+    assert row["issuer_asof_date"] == "2026-07-09"
+    assert row["market_asof_date"] == "2026-07-10"
+    assert bool(row["premium_discount_eligible"]) is False
 
 
 def test_yieldboost_targeted_refresh_symbols_keeps_underlyings():
@@ -167,6 +210,11 @@ def test_check_options_ignores_orphan_stale_symbols(monkeypatch):
     block, violations = _check_options(cache, max_underlying_hours=48.0)
     assert not any("AAL" in v for v in violations)
     assert block["oldest_enforced_symbol"] == "SOXL"
+
+
+def test_market_age_excludes_weekend_days():
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+    assert _market_age_minutes("2026-07-11T10:00:00Z", now) == 14 * 60
 
 
 def test_extend_metrics_session_coverage_adds_issuer_session_extend():

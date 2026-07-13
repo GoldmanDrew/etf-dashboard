@@ -2457,6 +2457,37 @@ def enrich_vrp_rows_with_short_edge(
             borrow_ops_spike_watch=bool(rec.get("borrow_ops_spike_watch")),
         )
         row["quote_sync"] = evaluate_quote_sync(row, screener_asof=screener_asof)
+        expiry_date: date | None = None
+        try:
+            expiry_date = date.fromisoformat(str(row.get("expiry") or "")[:10])
+        except ValueError:
+            expiry_date = None
+        expired = expiry_date is None or expiry_date < date.today()
+        grade = str(row.get("data_grade") or "").upper()
+        required_public = (
+            "model_fair",
+            "edge_pp_of_max_loss",
+            "expected_weekly_carry_usd",
+            "dollar_gamma_per_1pct_underlying",
+            "theta_per_day",
+        )
+        missing_public = [key for key in required_public if row.get(key) is None]
+        sync_ok = bool((row.get("quote_sync") or {}).get("sync_ok"))
+        actionable = bool(grade in {"A", "B"} and not expired and sync_ok and not missing_public)
+        if expired:
+            publication_status = "expired_holdings"
+        elif grade not in {"A", "B"}:
+            publication_status = "quality_blocked"
+        elif not sync_ok:
+            publication_status = "quote_sync_blocked"
+        elif missing_public:
+            publication_status = "canonical_fields_missing"
+        else:
+            publication_status = "actionable"
+        row["held_expiry_expired"] = expired
+        row["actionable"] = actionable
+        row["publication_status"] = publication_status
+        row["publication_missing_fields"] = missing_public
         row["borrow_carry"] = borrow_carry_display_meta(row)
         row["short_edge_why"] = _short_edge_why_sentence(row)
     payload["short_edge_screener_asof"] = screener_asof

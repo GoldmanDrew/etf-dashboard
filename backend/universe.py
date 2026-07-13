@@ -101,9 +101,9 @@ def assign_buckets(
     cfg_bl = sym_series.isin(blacklist_set) if blacklist_set else pd.Series(False, index=df.index)
     if "strategy_blacklisted" in df.columns:
         csv_bl = df["strategy_blacklisted"].fillna(False).astype(bool)
-        df["strategy_blacklisted"] = (csv_bl | cfg_bl).astype(bool)
+        df["strategy_blacklisted"] = (csv_bl | cfg_bl).map(bool).astype(object)
     else:
-        df["strategy_blacklisted"] = cfg_bl.astype(bool)
+        df["strategy_blacklisted"] = cfg_bl.map(bool).astype(object)
 
     def _assign(row):
         sym = row.get("symbol", "")

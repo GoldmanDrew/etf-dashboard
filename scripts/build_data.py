@@ -4341,6 +4341,161 @@ def refresh_yieldboost_vrp_only() -> None:
     print(f"[OK] YieldBOOST VRP refresh wrote {VRP_LIVE_FILE.name}, {VRP_HEALTH_FILE.name}")
 
 
+def repair_published_quality_fields() -> None:
+    """Recompute lifecycle-sensitive realized fields and quality metadata.
+
+    This bounded path is intended for data-quality repairs when a full market
+    refresh is unnecessary.  It reads only committed/local source artifacts;
+    it does not fetch quotes, options, borrow, or volatility panels.
+    """
+    if not OUTPUT_FILE.exists():
+        raise FileNotFoundError(f"Missing {OUTPUT_FILE}; run a full build first.")
+    with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+        output = json.load(f)
+    records = output.get("records", [])
+    if not isinstance(records, list) or not records:
+        raise ValueError("dashboard_data.json is malformed: missing records list")
+
+    csv_path = OUTPUT_DIR / "etf_screened_today.csv"
+    df = pd.read_csv(csv_path)
+    df["symbol"] = df["ETF"].apply(norm_sym)
+    universe_symbols = set(df["symbol"].dropna())
+    source_rows = {str(row["symbol"]): row.to_dict() for _, row in df.iterrows()}
+    beta_by_symbol = {
+        str(row["symbol"]): float(row["Delta"])
+        for _, row in df.iterrows() if pd.notna(row.get("Delta"))
+    }
+    underlying_by_symbol = {
+        str(row["symbol"]): norm_sym(str(row["Underlying"]))
+        for _, row in df.iterrows()
+        if pd.notna(row.get("Underlying")) and str(row.get("Underlying") or "").strip()
+    }
+    borrow_by_symbol = {
+        norm_sym(str(rec.get("symbol") or "")): float(rec["borrow_current"])
+        for rec in records if rec.get("borrow_current") is not None
+    }
+    gross_map = load_gross_decay_from_metrics(
+        ETF_METRICS_PARQUET_FILE,
+        universe_symbols,
+        beta_by_symbol=beta_by_symbol,
+        underlying_by_symbol=underlying_by_symbol,
+    )
+    realized_map = load_realized_pair_gross_20d_from_metrics(
+        ETF_METRICS_PARQUET_FILE,
+        universe_symbols,
+        beta_by_symbol=beta_by_symbol,
+        borrow_by_symbol=borrow_by_symbol,
+        underlying_by_symbol=underlying_by_symbol,
+    )
+
+    for rec in records:
+        sym = norm_sym(str(rec.get("symbol") or ""))
+        src = source_rows.get(sym, {})
+        gd = gross_map.get(sym)
+        if gd and gd.get("gross_decay_annual") is not None:
+            metrics_gross = float(gd["gross_decay_annual"])
+            screener_gross = _safe_float(src, "blended_gross_decay")
+            split_suspect = bool(gd.get("underlying_split_suspect"))
+            use_screener = bool(
+                screener_gross is not None
+                and (
+                    split_suspect
+                    or (metrics_gross > 1.5 and screener_gross < metrics_gross * 0.45)
+                    or (metrics_gross < -0.5 and screener_gross > metrics_gross * 0.45)
+                    or (metrics_gross * screener_gross < 0 and abs(metrics_gross - screener_gross) > 0.5)
+                )
+            )
+            rec["gross_decay_annual"] = screener_gross if use_screener else metrics_gross
+            rec["gross_decay_annual_source"] = "screener_fallback" if use_screener else "etf_metrics_daily"
+            rec["gross_decay_n_obs"] = gd.get("n_obs")
+            if split_suspect:
+                rec["gross_decay_split_suspect"] = True
+            else:
+                rec.pop("gross_decay_split_suspect", None)
+            if rec.get("borrow_current") is not None:
+                rec["net_decay_annual"] = round(
+                    float(rec["gross_decay_annual"])
+                    - float(rec["borrow_current"]) * BORROW_ACT360_FACTOR,
+                    6,
+                )
+
+        rp20 = realized_map.get(sym)
+        for key in list(rec):
+            if key.startswith("realized_pair_gross_"):
+                rec.pop(key, None)
+        if rp20 and not rp20.get("suppressed"):
+            for key, value in rp20.items():
+                if key not in ("n_days", "suppressed", "underlying_split_suspect") and value is not None:
+                    rec[key] = value
+        elif rp20 and rp20.get("underlying_split_suspect"):
+            rec["realized_pair_gross_20d_split_suspect"] = True
+
+        if rec.get("gross_decay_annual") is not None and not rec.get("gross_decay_annual_source"):
+            rec["gross_decay_annual_source"] = (
+                "fof_realized_pair" if rec.get("product_class") == "income_yieldboost_fof"
+                else "screener_fallback"
+            )
+            if rec.get("gross_decay_n_obs") is None:
+                rec["gross_decay_n_obs"] = rec.get("delta_n_obs")
+
+        try:
+            delta_obs = int(rec.get("delta_n_obs") or 0)
+        except (TypeError, ValueError):
+            delta_obs = 0
+        expected_available = bool(rec.get("expected_decay_available"))
+        expected_valid = any(
+            rec.get(key) is not None
+            for key in (
+                "expected_pair_pnl_p50_annual",
+                "expected_gross_decay_p50_annual",
+                "expected_gross_decay_annual",
+            )
+        )
+        rec["stats_status"] = {
+            "borrow_current": (
+                "valid" if rec.get("borrow_current") is not None and not rec.get("borrow_missing")
+                else "stale_fallback" if rec.get("borrow_current") is not None
+                else "provider_missing"
+            ),
+            "gross_decay_annual": (
+                "valid" if rec.get("gross_decay_annual") is not None
+                else "insufficient_history" if delta_obs < 40
+                else "provider_missing"
+            ),
+            "realized_pair_gross_20d": (
+                "valid" if rec.get("realized_pair_gross_20d") is not None
+                else "insufficient_history" if rec.get("realized_pair_gross_partial") is not None
+                else "suppressed_quality" if rec.get("realized_pair_gross_20d_split_suspect")
+                else "insufficient_history"
+            ),
+            "expected_pair_pnl_p50_annual": (
+                "valid" if expected_available and expected_valid
+                else "insufficient_history" if expected_available
+                else "not_applicable"
+            ),
+            "net_edge_p50_annual": (
+                "valid" if rec.get("net_edge_p50_annual") is not None
+                else "insufficient_history" if delta_obs < 40
+                else "provider_missing"
+            ),
+            "forecast_vol_underlying_annual": (
+                "valid" if rec.get("forecast_vol_underlying_annual") is not None
+                else "insufficient_history" if delta_obs < 2
+                else "provider_missing"
+            ),
+        }
+
+    output["summary"] = _calc_summary(records)
+    output["build_time"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+    output["refresh_type"] = "quality_repair"
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(_sanitize_for_json(output), f, separators=(",", ":"), allow_nan=False)
+    print(
+        f"[OK] Quality repair wrote {OUTPUT_FILE}: "
+        f"gross={len(gross_map)} realized20={len(realized_map)} records={len(records)}"
+    )
+
+
 # ──────────────────────────────────────────────
 # Main build
 # ──────────────────────────────────────────────
@@ -4952,6 +5107,72 @@ def build():
                     rec[_k] = _v
         elif _rp20 and _rp20.get("underlying_split_suspect"):
             rec["realized_pair_gross_20d_split_suspect"] = True
+        # Every displayed realized value needs explicit provenance.  When the
+        # dashboard metrics panel is still below its minimum history, the value
+        # retained from the upstream screener is valid but previously looked
+        # source-less in JSON.
+        if rec.get("gross_decay_annual") is not None and not rec.get("gross_decay_annual_source"):
+            if product_class_out == "income_yieldboost_fof":
+                rec["gross_decay_annual_source"] = "fof_realized_pair"
+            else:
+                rec["gross_decay_annual_source"] = "screener_fallback"
+            if rec.get("gross_decay_n_obs") is None:
+                rec["gross_decay_n_obs"] = rec.get("delta_n_obs")
+
+        delta_obs_for_status = rec.get("delta_n_obs")
+        try:
+            delta_obs_for_status = int(delta_obs_for_status)
+        except (TypeError, ValueError):
+            delta_obs_for_status = 0
+        if rec.get("borrow_current") is not None:
+            borrow_status = "stale_fallback" if rec.get("borrow_missing") else "valid"
+        else:
+            borrow_status = "provider_missing"
+        if rec.get("gross_decay_annual") is not None:
+            gross_status = "valid"
+        elif delta_obs_for_status < 40:
+            gross_status = "insufficient_history"
+        else:
+            gross_status = "provider_missing"
+        if rec.get("realized_pair_gross_20d") is not None:
+            realized_20d_status = "valid"
+        elif rec.get("realized_pair_gross_partial") is not None:
+            realized_20d_status = "insufficient_history"
+        elif rec.get("realized_pair_gross_20d_split_suspect"):
+            realized_20d_status = "suppressed_quality"
+        else:
+            realized_20d_status = "insufficient_history"
+        if rec.get("expected_decay_available"):
+            expected_status_out = (
+                "valid" if (
+                    rec.get("expected_pair_pnl_p50_annual") is not None
+                    or rec.get("expected_gross_decay_p50_annual") is not None
+                    or rec.get("expected_gross_decay_annual") is not None
+                )
+                else "insufficient_history"
+            )
+        else:
+            expected_status_out = (
+                "insufficient_history"
+                if expected_decay_status == "insufficient_history"
+                else "not_applicable"
+            )
+        rec["stats_status"] = {
+            "borrow_current": borrow_status,
+            "gross_decay_annual": gross_status,
+            "realized_pair_gross_20d": realized_20d_status,
+            "expected_pair_pnl_p50_annual": expected_status_out,
+            "net_edge_p50_annual": (
+                "valid" if rec.get("net_edge_p50_annual") is not None
+                else "insufficient_history" if delta_obs_for_status < 40
+                else "provider_missing"
+            ),
+            "forecast_vol_underlying_annual": (
+                "valid" if rec.get("forecast_vol_underlying_annual") is not None
+                else "insufficient_history" if delta_obs_for_status < 2
+                else "provider_missing"
+            ),
+        }
         quality_flags: list[str] = []
         if rec.get("realized_pair_gross_20d_sufficient") is False:
             quality_flags.append("partial_realized_pair_20d")
@@ -5436,6 +5657,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Recompute dashboard borrow avg/median + spike risk from data/borrow_history.json",
     )
+    parser.add_argument(
+        "--quality-repair-only",
+        action="store_true",
+        help="Recompute lifecycle-sensitive realized fields, provenance, and quality statuses without network refreshes",
+    )
     args = parser.parse_args()
 
     modes = sum([
@@ -5443,6 +5669,7 @@ if __name__ == "__main__":
         args.options_only,
         args.yieldboost_vrp_only,
         args.borrow_restore_stats,
+        args.quality_repair_only,
     ])
     if modes > 1:
         raise SystemExit(
@@ -5457,5 +5684,7 @@ if __name__ == "__main__":
         refresh_options_only()
     elif args.yieldboost_vrp_only:
         refresh_yieldboost_vrp_only()
+    elif args.quality_repair_only:
+        repair_published_quality_fields()
     else:
         build()

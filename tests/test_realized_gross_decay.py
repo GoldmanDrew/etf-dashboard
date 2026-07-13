@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import json
 import sys
 from pathlib import Path
+
+import pandas as pd
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -20,10 +23,43 @@ from realized_gross_decay import (  # noqa: E402
     compute_horizon_period_returns,
     compute_realized_pair_gross_20d,
     latest_contiguous_metrics_segment,
+    load_realized_pair_gross_20d_from_metrics,
     realized_pair_gross_20d_fields,
     _period_borrow_log,
 )
 from price_basis import build_tr_series_from_metrics  # noqa: E402
+
+
+def test_loader_cliff_check_ignores_prior_reused_ticker_lifecycle(tmp_path):
+    rows = []
+    for i in range(4):
+        rows.append({
+            "date": dt.date(2018, 1, 2) + dt.timedelta(days=i),
+            "ticker": "REUSE", "close_price": 10 + i,
+            "etf_adj_close": 10 + i, "underlying_adj_close": 20 + i,
+            "source_provider": "yahoo_bootstrap", "source_url": "", "stale_kind": "",
+        })
+    for i in range(25):
+        rows.append({
+            "date": dt.date(2026, 6, 1) + dt.timedelta(days=i),
+            "ticker": "REUSE", "close_price": 30 * (1.001 ** i),
+            "etf_adj_close": 30 * (1.001 ** i),
+            "underlying_adj_close": 120 * (1.001 ** i),
+            "source_provider": "issuer", "source_url": "", "stale_kind": "",
+        })
+    metrics = tmp_path / "metrics.parquet"
+    pd.DataFrame(rows).to_parquet(metrics, index=False)
+    corp = tmp_path / "corp.json"
+    corp.write_text(json.dumps({"events": []}), encoding="utf-8")
+    out = load_realized_pair_gross_20d_from_metrics(
+        metrics,
+        {"REUSE"},
+        corp_actions_path=corp,
+        beta_by_symbol={"REUSE": 2.0},
+        underlying_by_symbol={"REUSE": "UND"},
+    )
+    assert out["REUSE"]["realized_pair_gross_20d_sufficient"] is True
+    assert out["REUSE"].get("suppressed") is not True
 
 
 def _flat_joint_rows(n: int, *, etf_drift: float = -0.005, und_drift: float = 0.0):

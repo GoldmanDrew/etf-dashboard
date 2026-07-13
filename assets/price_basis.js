@@ -945,7 +945,7 @@
       const lrU = Math.abs(Math.log(u1 / u0));
       if (Math.abs(lrE) >= minEtfLogJump && lrU < maxUnderlyingLogMove) {
         const matched = matchKnownSplitJump(Math.exp(Math.abs(lrE)), multipliers);
-        if (matched != null && splitEventMatchesBoundary(splitEvents, out[i + 1].date, matched)) {
+        if (matched != null) {
           scale = lrE > 0 ? scale / matched : scale * matched;
           prevAdj = prevRaw * scale;
           suffix[i] = `|basis_jump_scaled(${matched})`;
@@ -1034,14 +1034,7 @@
       ctx._flatCloseTr = adjBasisSwitchUsesFlatClose(sorted, ctx);
     }
     const built = points.map((p, index) => {
-      // For an accepted discrete split, Yahoo adjusted close is the least
-      // assumption-heavy return input.  The normalizer below joins any
-      // provider basis switch around the declared event; mapping every
-      // pre-event adj close by the split multiple incorrectly turns stale raw
-      // spikes into return cliffs.
-      const trEtfPx = ctx.mode === "discrete_split" && p.adj > 0
-        ? p.adj
-        : etfTrPriceForPoint(p, ctx);
+      const trEtfPx = etfTrPriceForPoint(p, ctx);
       const trUndPx = underlyingTrPriceForPoint(p, undEvents);
       const tradeClose = sanitizedTradeClose(points, index, etfEvents);
       return {
@@ -1049,17 +1042,11 @@
         trEtfPx,
         trUndPx,
         tradeClose,
-        trMode: ctx.mode === "discrete_split" && p.adj > 0
-          ? "split_adj_normalized"
-          : trModeForPoint(p, ctx),
+        trMode: trModeForPoint(p, ctx),
         row: p.row,
       };
     }).filter((x) => x.date && x.trEtfPx > 0 && x.trUndPx > 0);
-    // Once a declared discrete split is using the normalized adjusted path,
-    // raw-close outlier repair is both redundant and unsafe: a stale split-like
-    // close can otherwise overwrite the clean adjusted observation before the
-    // basis normalizer sees it.
-    const repaired = ctx.mode === "discrete_split" ? built : repairSplitOutlierBars(built, ctx);
+    const repaired = repairSplitOutlierBars(built, ctx);
     return normalizeUnderlyingSplitSizedBasisJumps(
       normalizeSplitSizedBasisJumps(repaired, etfEvents),
       undEvents,

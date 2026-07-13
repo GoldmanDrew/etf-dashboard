@@ -11,7 +11,9 @@ from audit_dashboard_data_quality import (  # noqa: E402
     audit_dashboard,
     audit_fabricated_adj_basis,
     audit_metrics_calendar,
+    audit_metrics_asof_alignment,
     audit_stale_price_feeds,
+    audit_vrp_publication,
 )
 
 
@@ -172,3 +174,35 @@ def test_audit_metrics_calendar_rejects_juneteenth_rows():
     }
     errors = audit_metrics_calendar(rows)
     assert any("2026-06-19" in msg and "non-NYSE session" in msg for msg in errors)
+
+
+def test_asof_audit_rejects_eligible_carry_forward_premium_discount():
+    errors, _warnings = audit_metrics_asof_alignment({
+        "TEST": [{
+            "date": "2026-07-10",
+            "nav": 10.0,
+            "close_price": 9.0,
+            "source_provider": "carry_forward",
+            "source_url": "carry_forward://TEST?from=2026-07-09",
+            "stale_kind": "carry_forward",
+            "issuer_asof_date": "2026-07-09",
+            "market_asof_date": "2026-07-10",
+            "premium_discount_eligible": True,
+        }]
+    })
+    assert any("premium_discount_eligible=true" in msg for msg in errors)
+
+
+def test_vrp_audit_blocks_expired_grade_d_rows_without_failing():
+    errors, warnings = audit_vrp_publication({
+        "rows": [{
+            "yb_etf": "TEST",
+            "expiry": "2020-01-01",
+            "data_grade": "D",
+            "actionable": False,
+            "publication_status": "expired_holdings",
+            "quote_sync": {"sync_ok": False},
+        }]
+    })
+    assert errors == []
+    assert any("TEST" in msg and "blocked" in msg for msg in warnings)

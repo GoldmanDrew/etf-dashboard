@@ -588,6 +588,11 @@ def load_gross_decay_from_metrics(
         joint = [r for r in rows if _metrics_row_has_usable_prices(r)]
         if len(joint) < min_obs + 1:
             continue
+        # Corporate-action/cliff checks must use the same current lifecycle as
+        # the realized calculation.  Reused tickers can have an unrelated old
+        # Yahoo segment years before the current fund; inspecting both segments
+        # falsely suppresses an otherwise clean current 20-day window.
+        joint_current = latest_contiguous_metrics_segment(joint)
         beta = (beta_by_symbol or {}).get(sym_u)
         if beta is None:
             try:
@@ -601,11 +606,11 @@ def load_gross_decay_from_metrics(
         und_events = parse_split_events_from_corp(corp_payload, und_sym) if und_sym else []
         und_cliff_rows = [
             {"date": r.get("date"), "underlying_adj_close": r.get("underlying_adj_close")}
-            for r in joint
+            for r in joint_current
         ]
         und_cliffs = find_underlying_adj_cliffs(und_cliff_rows, und_events) if und_sym else []
         result = compute_gross_decay_annual(
-            joint,
+            joint_current,
             float(beta),
             etf_events,
             underlying_split_events=und_events,
@@ -659,6 +664,7 @@ def load_realized_pair_gross_20d_from_metrics(
         joint = [r for r in rows if _metrics_row_has_usable_prices(r)]
         if len(joint) < min_obs + 1:
             continue
+        joint_current = latest_contiguous_metrics_segment(joint)
         beta = (beta_by_symbol or {}).get(sym_u)
         if beta is None:
             try:
@@ -673,11 +679,11 @@ def load_realized_pair_gross_20d_from_metrics(
         und_events = parse_split_events_from_corp(corp_payload, und_sym) if und_sym else []
         und_cliff_rows = [
             {"date": r.get("date"), "underlying_adj_close": r.get("underlying_adj_close")}
-            for r in joint
+            for r in joint_current
         ]
         und_cliffs = find_underlying_adj_cliffs(und_cliff_rows, und_events) if und_sym else []
         result = compute_realized_pair_gross_20d(
-            joint,
+            joint_current,
             float(beta),
             etf_events,
             underlying_split_events=und_events,

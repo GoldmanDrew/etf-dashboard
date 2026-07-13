@@ -226,7 +226,7 @@
     else label = worst + 'm old';
     const tone = grade === 'A' || grade === 'B' ? 'good' : grade === 'C' ? 'warn' : 'bad';
     const className = tone === 'good' ? 'fresh-good' : tone === 'warn' ? 'fresh-warn' : 'fresh-bad';
-    const blockSignal = grade === 'C' || grade === 'D';
+    const blockSignal = row.actionable === false || grade === 'C' || grade === 'D';
     return {
       optAge,
       undAge,

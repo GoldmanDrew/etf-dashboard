@@ -57,7 +57,7 @@ def test_refresh_borrow_only_writes_dashboard_and_history_only(borrow_only_tmp):
 
     assert (borrow_only_tmp / "dashboard_data.json").exists()
     assert (borrow_only_tmp / "borrow_history.json").exists()
-    assert not (borrow_only_tmp / "borrow_spike_risk.json").exists()
+    assert (borrow_only_tmp / "borrow_spike_risk.json").exists()
     assert not (borrow_only_tmp / "borrow_spike_predictions").exists()
 
     out = json.loads((borrow_only_tmp / "dashboard_data.json").read_text(encoding="utf-8"))

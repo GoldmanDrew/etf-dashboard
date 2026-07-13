@@ -169,6 +169,14 @@ jobs:
         continue-on-error: true
         run: python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
 
+      - name: Build freshness summary
+        if: steps.build_data.outcome == 'success'
+        run: python scripts/freshness_diagnostics.py --max-underlying-hours 48 --max-flow-stale-pct 25
+
+      - name: Audit published dashboard data
+        if: steps.build_data.outcome == 'success'
+        run: python scripts/audit_dashboard_data_quality.py
+
       # If build_data.py crashed (continue-on-error above), skip the commit
       # step entirely.  Otherwise we'd risk staging a partially-written JSON
       # into main.  Deploy must still run even when this push fails (concurrent
@@ -202,6 +210,7 @@ jobs:
             data/vol_shape_history.json
             data/vrp_live.json
             data/vrp_health.json
+            data/freshness_summary.json
             data/yieldboost_put_spreads_latest.json
             data/yieldboost_options_target.json
             data/letf_rebalance_flows_daily.parquet
