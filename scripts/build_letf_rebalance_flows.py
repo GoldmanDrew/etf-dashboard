@@ -915,6 +915,8 @@ def annotate_with_adv(
             fund_flows = fund_flows.copy()
             fund_flows["underlying_dollar_adv_20d"] = float("nan")
             fund_flows["rebalance_pct_adv_20d"] = float("nan")
+            fund_flows["underlying_dollar_auction_est"] = float("nan")
+            fund_flows["rebalance_pct_auction_volume"] = float("nan")
             fund_flows["underlying_tradable_float_dollars"] = float("nan")
             fund_flows["rebalance_pct_tradable_float"] = float("nan")
         if not aggregates.empty:
@@ -934,6 +936,12 @@ def annotate_with_adv(
         with np.errstate(divide="ignore", invalid="ignore"):
             fund_flows["rebalance_pct_adv_20d"] = (
                 fund_flows["rebalance_signed_dollars"] / fund_flows["underlying_dollar_adv_20d"]
+            )
+            fund_flows["underlying_dollar_auction_est"] = (
+                fund_flows["underlying_dollar_adv_20d"].astype(float) * _AUCTION_SHARE_OF_ADV
+            )
+            fund_flows["rebalance_pct_auction_volume"] = (
+                fund_flows["rebalance_signed_dollars"] / fund_flows["underlying_dollar_auction_est"]
             )
             fund_flows["rebalance_pct_tradable_float"] = (
                 fund_flows["rebalance_signed_dollars"] / fund_flows["underlying_tradable_float_dollars"]
@@ -1051,7 +1059,13 @@ def _top_contributors(fund_flows: pd.DataFrame, date_iso: str, underlying: str, 
             "rebalance_signed_dollars": _round(r.get("rebalance_signed_dollars"), 2),
             "aum_prior_close": _round(r.get("aum_prior_close"), 2),
             "rebalance_pct_adv_20d": _round(r.get("rebalance_pct_adv_20d"), 8),
+            "rebalance_pct_auction_volume": _round(r.get("rebalance_pct_auction_volume"), 8),
             "rebalance_pct_tradable_float": _round(r.get("rebalance_pct_tradable_float"), 8),
+            "tradable_float_reliable": (
+                bool(r.get("tradable_float_reliable"))
+                if r.get("tradable_float_reliable") is not None and not pd.isna(r.get("tradable_float_reliable"))
+                else None
+            ),
         }
         for _, r in rows.iterrows()
     ]

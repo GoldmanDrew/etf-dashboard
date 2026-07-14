@@ -2949,7 +2949,113 @@ const flowFloatQualityLabel = (q) => ({
   ok: 'reliable',
 }[String(q || '')] || 'float quality unknown');
 
-/** Pair backtest SVG x-axis: include day + year and avoid duplicate tick strings. */
+/** Net dollars ÷ estimated closing-auction size (share × 20d $ ADV). */
+const flowAuctionPct = (dollars, advDollars, auctionShare = 0.08) => {
+  const d = Number(dollars);
+  const adv = Number(advDollars);
+  const share = Number(auctionShare);
+  if (!Number.isFinite(d) || !Number.isFinite(adv) || !(adv > 0) || !Number.isFinite(share) || !(share > 0)) return null;
+  return d / (adv * share);
+};
+
+/**
+ * Prior-session net MOC per underlying from fund daily rows (date strictly before
+ * the EOD latest date). Used so Intraday can show yesterday's realised print
+ * while today's EOD session is still forming / zero.
+ */
+function priorEodNetByUnderlying(byTicker, byUnderlying) {
+  const latestByUnd = byUnderlying || {};
+  const sums = {};
+  Object.values(byTicker || {}).forEach((rows) => {
+    if (!Array.isArray(rows)) return;
+    rows.forEach((row) => {
+      if (row?.included_in_aggregate === false) return;
+      const und = String(row?.underlying || '').toUpperCase();
+      const date = String(row?.date || '').trim();
+      if (!und || !date) return;
+      const latestDate = String(latestByUnd[und]?.date || '').trim();
+      if (latestDate && date >= latestDate) return;
+      const dollars = Number(row?.rebalance_signed_dollars);
+      if (!Number.isFinite(dollars)) return;
+      if (!sums[und]) sums[und] = {};
+      sums[und][date] = (sums[und][date] || 0) + dollars;
+    });
+  });
+  const out = {};
+  Object.keys(sums).forEach((und) => {
+    const dates = Object.keys(sums[und]).sort();
+    if (!dates.length) return;
+    const date = dates[dates.length - 1];
+    out[und] = { date, net_moc_dollars: sums[und][date] };
+  });
+  return out;
+}
+
+/**
+ * Per-date underlying net + trailing 5d/20d/z60/%ile from fund daily rows.
+ * Powers the per-security Flow history table rolling context.
+ */
+function underlyingFlowHistoryStats(byTicker, underlying, { auctionShare = 0.08 } = {}) {
+  const und = String(underlying || '').toUpperCase();
+  if (!und) return {};
+  const byDate = {};
+  Object.values(byTicker || {}).forEach((rows) => {
+    if (!Array.isArray(rows)) return;
+    rows.forEach((row) => {
+      if (String(row?.underlying || '').toUpperCase() !== und) return;
+      if (row?.included_in_aggregate === false) return;
+      const date = String(row?.date || '').trim();
+      if (!date) return;
+      const dollars = Number(row?.rebalance_signed_dollars);
+      if (!Number.isFinite(dollars)) return;
+      if (!byDate[date]) {
+        byDate[date] = {
+          date,
+          net_moc_dollars: 0,
+          underlying_dollar_adv_20d: Number(row?.underlying_dollar_adv_20d),
+        };
+      }
+      byDate[date].net_moc_dollars += dollars;
+      const adv = Number(row?.underlying_dollar_adv_20d);
+      if (Number.isFinite(adv) && adv > 0) byDate[date].underlying_dollar_adv_20d = adv;
+    });
+  });
+  const dates = Object.keys(byDate).sort();
+  const nets = dates.map((d) => byDate[d].net_moc_dollars);
+  const out = {};
+  dates.forEach((date, i) => {
+    const window5 = nets.slice(Math.max(0, i - 4), i + 1);
+    const window20 = nets.slice(Math.max(0, i - 19), i + 1);
+    const window60 = nets.slice(Math.max(0, i - 59), i + 1);
+    const mean60 = window60.length >= 20
+      ? window60.reduce((a, b) => a + b, 0) / window60.length
+      : null;
+    let z60 = null;
+    if (mean60 != null && window60.length >= 20) {
+      const var60 = window60.reduce((a, b) => a + (b - mean60) ** 2, 0) / window60.length;
+      const std60 = Math.sqrt(var60);
+      z60 = std60 > 0 ? (nets[i] - mean60) / std60 : null;
+    }
+    let absPctile = null;
+    if (window60.length >= 20) {
+      const absToday = Math.abs(nets[i]);
+      const rank = window60.filter((v) => Math.abs(v) <= absToday).length;
+      absPctile = rank / window60.length;
+    }
+    const adv = byDate[date].underlying_dollar_adv_20d;
+    out[date] = {
+      date,
+      net_moc_dollars: nets[i],
+      net_moc_5d_dollars: window5.reduce((a, b) => a + b, 0),
+      net_moc_20d_dollars: window20.reduce((a, b) => a + b, 0),
+      net_moc_z_60d: z60,
+      abs_net_moc_pctile_60d: absPctile,
+      net_moc_pct_adv_20d: (Number.isFinite(adv) && adv > 0) ? nets[i] / adv : null,
+      net_moc_pct_auction_volume: flowAuctionPct(nets[i], adv, auctionShare),
+    };
+  });
+  return out;
+}
 function formatBacktestAxisDate(raw) {
   if (raw == null || raw === '') return '';
   const d = new Date(`${String(raw).trim()}T00:00:00Z`);
@@ -8320,12 +8426,35 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const peerFlowRows = useMemo(() => (
     Array.isArray(underlyingFlowLatest?.top_contributors) ? underlyingFlowLatest.top_contributors : []
   ), [underlyingFlowLatest]);
+  const intradayPeerFlowRows = useMemo(() => (
+    Array.isArray(intradayUnderlyingRow?.top_contributors) ? intradayUnderlyingRow.top_contributors : []
+  ), [intradayUnderlyingRow]);
+  const underlyingHistStats = useMemo(() => (
+    underlyingFlowHistoryStats(
+      letfFlowsCache?.byTicker,
+      undSym,
+      { auctionShare: letfFlowsCache?.auctionShareOfAdv ?? 0.08 },
+    )
+  ), [letfFlowsCache, undSym]);
   const fundShareOfUnderlying = useMemo(() => {
     const fund = latestFundFlow?.rebalance_signed_dollars;
     const total = underlyingFlowLatest?.net_moc_dollars;
     if (!Number.isFinite(Number(fund)) || !Number.isFinite(Number(total)) || Number(total) === 0) return null;
     return Number(fund) / Number(total);
   }, [latestFundFlow, underlyingFlowLatest]);
+  const fundShareOfIntraday = useMemo(() => {
+    const fund = intradayFundRow?.estimated_close_rebalance_dollars;
+    const total = intradayUnderlyingRow?.estimated_net_close_rebalance_dollars;
+    if (!Number.isFinite(Number(fund)) || !Number.isFinite(Number(total)) || Number(total) === 0) return null;
+    return Number(fund) / Number(total);
+  }, [intradayFundRow, intradayUnderlyingRow]);
+  const eodVsIntradayDelta = useMemo(() => {
+    const live = Number(intradayFundRow?.estimated_close_rebalance_dollars);
+    const eod = Number(latestFundFlow?.rebalance_signed_dollars);
+    if (!Number.isFinite(live) || !Number.isFinite(eod)) return null;
+    return live - eod;
+  }, [intradayFundRow, latestFundFlow]);
+  const flowAuctionShare = letfFlowsCache?.auctionShareOfAdv ?? intradayFlows?.auctionShareOfAdv ?? 0.08;
   const pairBacktestBounds = useMemo(() => {
     const s = etfBacktestSeries;
     if (!Array.isArray(s) || !s.length) return { first: '', last: '' };
@@ -11623,6 +11752,127 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 latestRealizedDate={underlyingFlowLatest?.date}
               />
 
+              <div className="chart-stats" style={{ marginTop: 12 }}>
+                <div className="chart-stat" title="Same-fund live estimate vs latest EOD realised print.">
+                  <div className="cs-label">{etfSym} live vs EOD</div>
+                  <div className={cls('cs-value', flowValClass(eodVsIntradayDelta))}>
+                    {fmtSignedMoney(eodVsIntradayDelta)}
+                  </div>
+                  <div className="cs-sub">
+                    live {fmtCompactSignedMoney(intradayFundRow?.estimated_close_rebalance_dollars)}
+                    {' · '}EOD {fmtCompactSignedMoney(latestFundFlow?.rebalance_signed_dollars)}
+                    {latestFundFlow?.date ? <> ({latestFundFlow.date})</> : null}
+                    {letfFlowsCache?.sessionState && letfFlowsCache.sessionState !== 'final'
+                      ? <> · <span className="val-warning">EOD session forming</span></>
+                      : null}
+                  </div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">{etfSym} share of live und flow</div>
+                  <div className="cs-value">
+                    {fundShareOfIntraday == null ? '—' : fmtPctDecimal(fundShareOfIntraday)}
+                  </div>
+                  <div className="cs-sub">
+                    und live {fmtCompactSignedMoney(intradayUnderlyingRow?.estimated_net_close_rebalance_dollars)}
+                    {intradayUnderlyingRow?.estimated_close_rebalance_pct_auction_volume != null
+                      ? <> · {(Number(intradayUnderlyingRow.estimated_close_rebalance_pct_auction_volume) * 100).toFixed(0)}% auction</>
+                      : null}
+                  </div>
+                </div>
+                <div className="chart-stat" title="Remaining-to-close as % of tradable float (intraday).">
+                  <div className="cs-label">Remain % float (live)</div>
+                  <div className={cls('cs-value', intradayUnderlyingRow?.tradable_float_reliable === false ? '' : flowValClass(intradayUnderlyingRow?.remaining_close_rebalance_pct_tradable_float))}>
+                    {intradayUnderlyingRow?.tradable_float_reliable === false
+                      ? '—'
+                      : fmtPctDecimal(intradayUnderlyingRow?.remaining_close_rebalance_pct_tradable_float, 3)}
+                  </div>
+                  <div className="cs-sub">
+                    today vol/ADV {fmtPctDecimal(intradayUnderlyingRow?.volume_so_far_pct_adv, 1)}
+                    {intradayUnderlyingRow?.estimated_close_rebalance_pct_adv_20d != null
+                      ? <> · est {fmtPctDecimal(intradayUnderlyingRow.estimated_close_rebalance_pct_adv_20d, 2)} ADV</>
+                      : null}
+                  </div>
+                </div>
+              </div>
+
+              <div className="trade-card" style={{ marginTop: 12 }}>
+                <div className="trade-head">
+                  <div className="scenario-title">{String(undSym || '').toUpperCase()} contributors — intraday (live)</div>
+                  <div className="scenario-sub">
+                    Live peer estimates
+                    {intradayFlows?.asOf ? <> · as of {fmtTime(intradayFlows.asOf)}</> : null}
+                    {intradayFlows?.minutesToClose != null ? <> · {intradayFlows.minutesToClose}m to close</> : null}.
+                  </div>
+                </div>
+                {intradayPeerFlowRows.length ? (
+                  <div className="scenario-table-wrap" style={{ maxHeight: 260, overflow: 'auto' }}>
+                    <table className="scenario-table">
+                      <thead>
+                        <tr>
+                          <th>ETF</th>
+                          <th>L</th>
+                          <th>Est. close $</th>
+                          <th>% ADV</th>
+                          <th>% auction</th>
+                          <th>% float</th>
+                          <th>Prior AUM</th>
+                          <th>Share of net</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {intradayPeerFlowRows.map((row) => {
+                          const dollars = Number(row?.estimated_close_rebalance_dollars);
+                          const undNet = Number(intradayUnderlyingRow?.estimated_net_close_rebalance_dollars);
+                          const share = (Number.isFinite(dollars) && Number.isFinite(undNet) && undNet !== 0)
+                            ? dollars / undNet
+                            : null;
+                          const pctAdv = row?.estimated_close_rebalance_pct_adv_20d
+                            ?? (
+                              Number.isFinite(dollars)
+                              && Number.isFinite(Number(intradayUnderlyingRow?.underlying_dollar_adv_intraday_20d ?? intradayUnderlyingRow?.underlying_dollar_adv_20d))
+                              && Number(intradayUnderlyingRow?.underlying_dollar_adv_intraday_20d ?? intradayUnderlyingRow?.underlying_dollar_adv_20d) > 0
+                                ? dollars / Number(intradayUnderlyingRow?.underlying_dollar_adv_intraday_20d ?? intradayUnderlyingRow?.underlying_dollar_adv_20d)
+                                : null
+                            );
+                          const pctAuction = row?.estimated_close_rebalance_pct_auction_volume
+                            ?? flowAuctionPct(
+                              dollars,
+                              intradayUnderlyingRow?.underlying_dollar_adv_intraday_20d ?? intradayUnderlyingRow?.underlying_dollar_adv_20d,
+                              flowAuctionShare,
+                            );
+                          const pctFloat = (row?.tradable_float_reliable === false || intradayUnderlyingRow?.tradable_float_reliable === false)
+                            ? null
+                            : (row?.estimated_close_rebalance_pct_tradable_float
+                              ?? (
+                                Number.isFinite(dollars)
+                                && Number.isFinite(Number(intradayUnderlyingRow?.underlying_tradable_float_dollars))
+                                && Number(intradayUnderlyingRow.underlying_tradable_float_dollars) > 0
+                                  ? dollars / Number(intradayUnderlyingRow.underlying_tradable_float_dollars)
+                                  : null
+                              ));
+                          return (
+                            <tr key={`live-${row.ticker}`} style={String(row.ticker).toUpperCase() === String(etfSym).toUpperCase() ? { fontWeight: 600 } : undefined}>
+                              <td>{row.ticker}</td>
+                              <td>{Number.isFinite(Number(row.leverage)) ? Number(row.leverage).toFixed(2) : '—'}</td>
+                              <td className={flowValClass(dollars)}>{fmtSignedMoney(dollars)}</td>
+                              <td className={flowValClass(pctAdv)}>{fmtPctDecimal(pctAdv, 2)}</td>
+                              <td className={flowValClass(pctAuction)}>
+                                {Number.isFinite(Number(pctAuction)) ? `${(Number(pctAuction) * 100).toFixed(0)}%` : '—'}
+                              </td>
+                              <td className={flowValClass(pctFloat)}>{fmtPctDecimal(pctFloat, 3)}</td>
+                              <td>{fmtMoney(row.aum_prior_close)}</td>
+                              <td>{share == null ? '—' : fmtPctDecimal(share)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="scenario-warning">No live contributors yet — waiting for an intraday snapshot.</div>
+                )}
+              </div>
+
               <div className="trade-card" style={{ marginTop: 12 }}>
                 <div className="trade-head">
                   <div className="scenario-title">{String(undSym || '').toUpperCase()} contributors — latest close</div>
@@ -11636,6 +11886,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <th>ETF</th>
                           <th>L</th>
                           <th>Rebalance $</th>
+                          <th>% ADV</th>
+                          <th>% auction</th>
+                          <th>% float</th>
                           <th>Prior AUM</th>
                           <th>Share of net</th>
                         </tr>
@@ -11647,11 +11900,26 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                             && Number.isFinite(Number(underlyingFlowLatest?.net_moc_dollars))
                             && Number(underlyingFlowLatest.net_moc_dollars) !== 0
                           ) ? Number(row.rebalance_signed_dollars) / Number(underlyingFlowLatest.net_moc_dollars) : null;
+                          const pctAdv = row?.rebalance_pct_adv_20d ?? null;
+                          const pctAuction = row?.rebalance_pct_auction_volume
+                            ?? flowAuctionPct(
+                              row?.rebalance_signed_dollars,
+                              underlyingFlowLatest?.underlying_dollar_adv_20d,
+                              flowAuctionShare,
+                            );
+                          const pctFloat = (row?.tradable_float_reliable === false || underlyingFlowLatest?.tradable_float_reliable === false)
+                            ? null
+                            : (row?.rebalance_pct_tradable_float ?? null);
                           return (
-                            <tr key={row.ticker}>
+                            <tr key={row.ticker} style={String(row.ticker).toUpperCase() === String(etfSym).toUpperCase() ? { fontWeight: 600 } : undefined}>
                               <td>{row.ticker}</td>
                               <td>{Number.isFinite(Number(row.leverage)) ? Number(row.leverage).toFixed(2) : '—'}</td>
                               <td className={flowValClass(row.rebalance_signed_dollars)}>{fmtSignedMoney(row.rebalance_signed_dollars)}</td>
+                              <td className={flowValClass(pctAdv)}>{fmtPctDecimal(pctAdv, 2)}</td>
+                              <td className={flowValClass(pctAuction)}>
+                                {Number.isFinite(Number(pctAuction)) ? `${(Number(pctAuction) * 100).toFixed(0)}%` : '—'}
+                              </td>
+                              <td className={flowValClass(pctFloat)}>{fmtPctDecimal(pctFloat, 3)}</td>
                               <td>{fmtMoney(row.aum_prior_close)}</td>
                               <td>{share == null ? '—' : fmtPctDecimal(share)}</td>
                             </tr>
@@ -11665,7 +11933,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 )}
               </div>
 
-              <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 320, overflow: 'auto' }}>
+              <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 360, overflow: 'auto' }}>
                 <table className="scenario-table">
                   <thead>
                     <tr>
@@ -11675,6 +11943,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       <th>Rebalance $</th>
                       <th>% prior AUM</th>
                       <th>% 20d $ ADV</th>
+                      <th>% auction</th>
+                      <th>% float</th>
+                      <th>Und 5d net</th>
+                      <th>Und 20d net</th>
+                      <th>z60</th>
+                      <th>%ile</th>
                       <th>Quality</th>
                     </tr>
                   </thead>
@@ -11685,6 +11959,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                         ? { opacity: 0.6, fontStyle: 'italic' }
                         : undefined;
                       const flag = row.quality_flag || (excluded ? 'excluded' : 'ok');
+                      const hist = underlyingHistStats[String(row.date || '')] || null;
+                      const pctAuction = row?.rebalance_pct_auction_volume
+                        ?? flowAuctionPct(row?.rebalance_signed_dollars, row?.underlying_dollar_adv_20d, flowAuctionShare);
+                      const pctFloat = row?.tradable_float_reliable === false
+                        ? null
+                        : row?.rebalance_pct_tradable_float;
                       return (
                         <tr key={row.date} style={rowStyle}>
                           <td>{row.date}</td>
@@ -11694,6 +11974,20 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <td>{fmtPctDecimal(row.abs_rebalance_pct_prior_aum)}</td>
                           <td className={flowValClass(row.rebalance_pct_adv_20d)}>
                             {fmtPctDecimal(row.rebalance_pct_adv_20d, 2)}
+                          </td>
+                          <td className={flowValClass(pctAuction)}>
+                            {Number.isFinite(Number(pctAuction)) ? `${(Number(pctAuction) * 100).toFixed(0)}%` : '—'}
+                          </td>
+                          <td className={flowValClass(pctFloat)}>{fmtPctDecimal(pctFloat, 3)}</td>
+                          <td className={flowValClass(hist?.net_moc_5d_dollars)}>{fmtCompactSignedMoney(hist?.net_moc_5d_dollars)}</td>
+                          <td className={flowValClass(hist?.net_moc_20d_dollars)}>{fmtCompactSignedMoney(hist?.net_moc_20d_dollars)}</td>
+                          <td className={flowValClass(hist?.net_moc_z_60d)}>
+                            {Number.isFinite(Number(hist?.net_moc_z_60d)) ? Number(hist.net_moc_z_60d).toFixed(2) : '—'}
+                          </td>
+                          <td>
+                            {Number.isFinite(Number(hist?.abs_net_moc_pctile_60d))
+                              ? `${(Number(hist.abs_net_moc_pctile_60d) * 100).toFixed(0)}%`
+                              : '—'}
                           </td>
                           <td>{flag}</td>
                         </tr>
@@ -13382,10 +13676,32 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
     const map = payload?.byUnderlying || {};
     return Object.keys(map).map((und) => ({ underlying: und, ...map[und] }));
   }, [payload]);
+  const priorEodByUnd = useMemo(
+    () => priorEodNetByUnderlying(payload?.byTicker, payload?.byUnderlying),
+    [payload],
+  );
   const intradayRows = useMemo(() => {
     const map = intradayPayload?.byUnderlying || {};
-    return Object.keys(map).map((und) => ({ underlying: und, ...map[und] }));
-  }, [intradayPayload]);
+    const eodMap = payload?.byUnderlying || {};
+    return Object.keys(map).map((und) => {
+      const eod = eodMap[und] || {};
+      const prior = priorEodByUnd[und] || null;
+      return {
+        underlying: und,
+        ...map[und],
+        // EOD rolling / prior context (joined client-side; EOD does not refresh RTH).
+        net_moc_5d_dollars: eod.net_moc_5d_dollars ?? null,
+        net_moc_20d_dollars: eod.net_moc_20d_dollars ?? null,
+        net_moc_z_60d: eod.net_moc_z_60d ?? null,
+        abs_net_moc_pctile_60d: eod.abs_net_moc_pctile_60d ?? null,
+        eod_net_moc_dollars: eod.net_moc_dollars ?? null,
+        eod_net_moc_date: eod.date || null,
+        eod_session_state: eod.session_state || payload?.sessionState || null,
+        prior_eod_net_moc_dollars: prior?.net_moc_dollars ?? null,
+        prior_eod_date: prior?.date || null,
+      };
+    });
+  }, [intradayPayload, payload, priorEodByUnd]);
 
   const allRows = mode === 'intraday' ? intradayRows : eodRows;
   const latestDate = mode === 'intraday'
@@ -13446,6 +13762,13 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
       )) :
       key === 'abs_pctile' ? Math.abs(Number(row.abs_net_moc_pctile_60d)) :
       key === 'abs_z60' ? Math.abs(Number(row.net_moc_z_60d)) :
+      key === 'abs_buy' ? Math.abs(Number(
+        mode === 'intraday' ? row.moc_buy_dollars_est : row.moc_buy_dollars,
+      )) :
+      key === 'abs_sell' ? Math.abs(Number(
+        mode === 'intraday' ? row.moc_sell_dollars_est : row.moc_sell_dollars,
+      )) :
+      key === 'abs_prior_eod' ? Math.abs(Number(row.prior_eod_net_moc_dollars)) :
       key === 'underlying' ? row.underlying :
       key === 'n_funds' ? fundsOf(row) :
       key === 'return' ? Number(mode === 'intraday' ? row.return_d1_so_far : row.underlying_return_d1) :
@@ -13737,14 +14060,33 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
                 {mode === 'intraday' ? 'Und ret so far' : 'Und ret'}{sortIndicator('return')}
               </th>
               <th onClick={() => handleSort('n_funds')} style={{ cursor: 'pointer' }}># Funds{sortIndicator('n_funds')}</th>
-              {mode === 'eod' ? (
-                <>
-                  <th onClick={() => handleSort('net_moc_5d_dollars')} style={{ cursor: 'pointer' }}>5d net{sortIndicator('net_moc_5d_dollars')}</th>
-                  <th onClick={() => handleSort('net_moc_20d_dollars')} style={{ cursor: 'pointer' }}>20d net{sortIndicator('net_moc_20d_dollars')}</th>
-                  <th onClick={() => handleSort('abs_z60')} style={{ cursor: 'pointer' }}>z60{sortIndicator('abs_z60')}</th>
-                  <th onClick={() => handleSort('abs_pctile')} style={{ cursor: 'pointer' }} title="Percentile rank of |today's net flow| within its trailing 60-session history (1.00 = largest in 60d).">%ile{sortIndicator('abs_pctile')}</th>
-                </>
+              <th onClick={() => handleSort('abs_buy')} style={{ cursor: 'pointer' }} title="Sum of positive (buy-into-close) fund rebalances">
+                Buy ${sortIndicator('abs_buy')}
+              </th>
+              <th onClick={() => handleSort('abs_sell')} style={{ cursor: 'pointer' }} title="Sum of |negative| (sell-into-close) fund rebalances">
+                Sell ${sortIndicator('abs_sell')}
+              </th>
+              {mode === 'intraday' ? (
+                <th
+                  onClick={() => handleSort('abs_prior_eod')}
+                  style={{ cursor: 'pointer' }}
+                  title="Prior session realised net MOC (while today's EOD row is still forming / zero)"
+                >
+                  Prior EOD ${sortIndicator('abs_prior_eod')}
+                </th>
               ) : null}
+              <th onClick={() => handleSort('net_moc_5d_dollars')} style={{ cursor: 'pointer' }} title={mode === 'intraday' ? 'EOD trailing 5-session net (joined from last EOD build)' : 'Trailing 5-session net MOC'}>
+                5d net{sortIndicator('net_moc_5d_dollars')}
+              </th>
+              <th onClick={() => handleSort('net_moc_20d_dollars')} style={{ cursor: 'pointer' }} title={mode === 'intraday' ? 'EOD trailing 20-session net (joined from last EOD build)' : 'Trailing 20-session net MOC'}>
+                20d net{sortIndicator('net_moc_20d_dollars')}
+              </th>
+              <th onClick={() => handleSort('abs_z60')} style={{ cursor: 'pointer' }} title={mode === 'intraday' ? 'EOD z-score of net vs trailing 60 sessions' : 'Z-score of net vs trailing 60 sessions'}>
+                z60{sortIndicator('abs_z60')}
+              </th>
+              <th onClick={() => handleSort('abs_pctile')} style={{ cursor: 'pointer' }} title="Percentile rank of |net flow| within trailing 60-session history (1.00 = largest in 60d).">
+                %ile{sortIndicator('abs_pctile')}
+              </th>
               <th>Top contributor</th>
             </tr>
           </thead>
@@ -13835,18 +14177,34 @@ function FlowPage({ payload, intradayPayload = null, intradayError = null, bucke
                     {fmtPctDecimal(row[returnFieldName], 2)}
                   </td>
                   <td>{fmtNum(fundsOf(row))}</td>
-                  {mode === 'eod' ? (
-                    <>
-                      <td className={flowValClass(row.net_moc_5d_dollars)}>{fmtCompactSignedMoney(row.net_moc_5d_dollars)}</td>
-                      <td className={flowValClass(row.net_moc_20d_dollars)}>{fmtCompactSignedMoney(row.net_moc_20d_dollars)}</td>
-                      <td className={flowValClass(row.net_moc_z_60d)}>
-                        {Number.isFinite(Number(row.net_moc_z_60d)) ? Number(row.net_moc_z_60d).toFixed(2) : '—'}
-                      </td>
-                      <td title={Number.isFinite(Number(row.net_moc_pctile_60d)) ? `signed pctile ${(Number(row.net_moc_pctile_60d) * 100).toFixed(0)}%` : ''}>
-                        {Number.isFinite(Number(row.abs_net_moc_pctile_60d)) ? `${(Number(row.abs_net_moc_pctile_60d) * 100).toFixed(0)}%` : '—'}
-                      </td>
-                    </>
+                  <td className={flowValClass(mode === 'intraday' ? row.moc_buy_dollars_est : row.moc_buy_dollars)}>
+                    {fmtCompactSignedMoney(mode === 'intraday' ? row.moc_buy_dollars_est : row.moc_buy_dollars)}
+                  </td>
+                  <td className={flowValClass(
+                    mode === 'intraday'
+                      ? (Number.isFinite(Number(row.moc_sell_dollars_est)) ? -Math.abs(Number(row.moc_sell_dollars_est)) : null)
+                      : (Number.isFinite(Number(row.moc_sell_dollars)) ? -Math.abs(Number(row.moc_sell_dollars)) : null),
+                  )}>
+                    {mode === 'intraday'
+                      ? (Number.isFinite(Number(row.moc_sell_dollars_est)) ? fmtCompactSignedMoney(-Math.abs(Number(row.moc_sell_dollars_est))) : '—')
+                      : (Number.isFinite(Number(row.moc_sell_dollars)) ? fmtCompactSignedMoney(-Math.abs(Number(row.moc_sell_dollars))) : '—')}
+                  </td>
+                  {mode === 'intraday' ? (
+                    <td
+                      className={flowValClass(row.prior_eod_net_moc_dollars)}
+                      title={row.prior_eod_date ? `Prior realised close ${row.prior_eod_date}` : 'No prior session in daily history'}
+                    >
+                      {fmtCompactSignedMoney(row.prior_eod_net_moc_dollars)}
+                    </td>
                   ) : null}
+                  <td className={flowValClass(row.net_moc_5d_dollars)}>{fmtCompactSignedMoney(row.net_moc_5d_dollars)}</td>
+                  <td className={flowValClass(row.net_moc_20d_dollars)}>{fmtCompactSignedMoney(row.net_moc_20d_dollars)}</td>
+                  <td className={flowValClass(row.net_moc_z_60d)}>
+                    {Number.isFinite(Number(row.net_moc_z_60d)) ? Number(row.net_moc_z_60d).toFixed(2) : '—'}
+                  </td>
+                  <td title={Number.isFinite(Number(row.net_moc_pctile_60d)) ? `signed pctile ${(Number(row.net_moc_pctile_60d) * 100).toFixed(0)}%` : ''}>
+                    {Number.isFinite(Number(row.abs_net_moc_pctile_60d)) ? `${(Number(row.abs_net_moc_pctile_60d) * 100).toFixed(0)}%` : '—'}
+                  </td>
                   <td>
                     {top ? (
                       <a

@@ -599,7 +599,7 @@ def test_annotate_with_adv_adds_auction_and_physical_stats():
     adv = pd.DataFrame([
         {"date": "2026-05-19", "underlying": "SPY", "underlying_dollar_adv_20d": 30_000_000_000.0},
     ])
-    _, agg2 = flows.annotate_with_adv(fund, agg, adv)
+    fund2, agg2 = flows.annotate_with_adv(fund, agg, adv)
     spy = agg2[(agg2["date"].eq("2026-05-19")) & (agg2["underlying"].eq("SPY"))].iloc[0]
     net = 180_000_000.0
     auction = 30_000_000_000.0 * flows._AUCTION_SHARE_OF_ADV
@@ -608,6 +608,9 @@ def test_annotate_with_adv_adds_auction_and_physical_stats():
     assert spy["net_moc_pct_adv_physical"] == pytest.approx(
         net * (1.0 - flows._SWAP_HEDGE_SHARE) / 30_000_000_000.0
     )
+    upro = fund2[(fund2["date"].eq("2026-05-19")) & (fund2["ticker"].eq("UPRO"))].iloc[0]
+    assert upro["underlying_dollar_auction_est"] == pytest.approx(auction)
+    assert upro["rebalance_pct_auction_volume"] == pytest.approx(60_000_000.0 / auction)
 
 
 def test_fetch_underlying_volume_panel_uses_yfinance_download(monkeypatch):

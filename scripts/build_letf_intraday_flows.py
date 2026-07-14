@@ -865,7 +865,13 @@ def aggregate_underlying(
 # ?? Outputs ??????????????????????????????????????????????????????????????
 
 
-def _top_contributors(fund_df: pd.DataFrame, underlying: str, *, n: int = 5) -> list[dict[str, Any]]:
+def _top_contributors(
+    fund_df: pd.DataFrame,
+    underlying: str,
+    *,
+    n: int = 5,
+    und_row: pd.Series | dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     rows = fund_df[
         (fund_df["underlying"].eq(underlying))
         & (fund_df["included_in_aggregate"].astype(bool))
@@ -874,21 +880,52 @@ def _top_contributors(fund_df: pd.DataFrame, underlying: str, *, n: int = 5) -> 
         return []
     rows["_abs"] = rows["estimated_close_rebalance_dollars"].abs()
     rows = rows.sort_values("_abs", ascending=False).head(n)
-    return [
-        {
-            "ticker": r["ticker"],
-            "leverage": _round(r.get("leverage"), 4),
-            "estimated_close_rebalance_dollars": _round(r.get("estimated_close_rebalance_dollars"), 2),
-            "rebalance_spot": _round(r.get("rebalance_spot"), 2),
-            "rebalance_nav": _round(r.get("rebalance_nav"), 2),
-            "rebalance_blend": _round(r.get("rebalance_blend"), 2),
-            "blend_weight_nav": _round(r.get("blend_weight_nav"), 4),
-            "nav_model": r.get("nav_model"),
-            "nav_confidence": r.get("nav_confidence"),
-            "aum_prior_close": _round(r.get("aum_prior_close"), 2),
-        }
-        for _, r in rows.iterrows()
-    ]
+    meta = und_row if isinstance(und_row, dict) else (
+        und_row.to_dict() if und_row is not None else {}
+    )
+    adv = _f(meta.get("underlying_dollar_adv_intraday_20d"))
+    if adv is None or adv <= 0:
+        adv = _f(meta.get("underlying_dollar_median_adv_20d"))
+    if adv is None or adv <= 0:
+        adv = _f(meta.get("underlying_dollar_adv_20d"))
+    float_d = _f(meta.get("underlying_tradable_float_dollars"))
+    float_reliable = meta.get("tradable_float_reliable")
+    if float_reliable is None:
+        float_reliable = True
+    else:
+        float_reliable = bool(float_reliable)
+    auction = _f(meta.get("underlying_dollar_auction_est"))
+    if auction is None or auction <= 0:
+        auction = (adv * _AUCTION_SHARE_OF_ADV) if adv is not None and adv > 0 else None
+    out: list[dict[str, Any]] = []
+    for _, r in rows.iterrows():
+        est = _f(r.get("estimated_close_rebalance_dollars"))
+        pct_adv = (est / adv) if est is not None and adv is not None and adv > 0 else None
+        pct_auction = (est / auction) if est is not None and auction is not None and auction > 0 else None
+        pct_float = (
+            (est / float_d)
+            if est is not None and float_d is not None and float_d > 0 and float_reliable
+            else None
+        )
+        out.append(
+            {
+                "ticker": r["ticker"],
+                "leverage": _round(r.get("leverage"), 4),
+                "estimated_close_rebalance_dollars": _round(r.get("estimated_close_rebalance_dollars"), 2),
+                "rebalance_spot": _round(r.get("rebalance_spot"), 2),
+                "rebalance_nav": _round(r.get("rebalance_nav"), 2),
+                "rebalance_blend": _round(r.get("rebalance_blend"), 2),
+                "blend_weight_nav": _round(r.get("blend_weight_nav"), 4),
+                "nav_model": r.get("nav_model"),
+                "nav_confidence": r.get("nav_confidence"),
+                "aum_prior_close": _round(r.get("aum_prior_close"), 2),
+                "estimated_close_rebalance_pct_adv_20d": _round(pct_adv, 8),
+                "estimated_close_rebalance_pct_auction_volume": _round(pct_auction, 8),
+                "estimated_close_rebalance_pct_tradable_float": _round(pct_float, 8),
+                "tradable_float_reliable": float_reliable,
+            }
+        )
+    return out
 
 
 def build_payloads(
@@ -1020,7 +1057,7 @@ def build_payloads(
                 "bias_signed_error_pct": _round(row.get("bias_signed_error_pct"), 6),
                 "forecast_abs_error_pct": _round(row.get("forecast_abs_error_pct"), 6),
                 "forecast_error_n_obs": int(row.get("forecast_error_n_obs")) if pd.notna(row.get("forecast_error_n_obs")) else None,
-                "top_contributors": _top_contributors(fund_df, und),
+                "top_contributors": _top_contributors(fund_df, und, und_row=row),
             }
 
     payload = {
