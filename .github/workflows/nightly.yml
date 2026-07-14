@@ -321,10 +321,16 @@ jobs:
         continue-on-error: true
         run: pip install -r ls-algo/requirements.txt
 
-      - name: Build Bucket 5 insurance backtest panel
+      - name: Build Bucket 5 product dashboard
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
-        run: python scripts/build_bucket5_insurance_backtest.py --copy-ls-algo-panel
+        run: |
+          # Prefer copying a prebuilt product JSON from ls-algo; otherwise build --quick.
+          if [ -f ls-algo/risk_dashboard/data/bucket5_product.json ]; then
+            python scripts/build_bucket5_product.py --copy-ls-algo-panel
+          else
+            python scripts/build_bucket5_product.py --quick
+          fi
 
       - name: Build Bucket 4 inverse-decay backtest artifact
         if: steps.build_data.outcome == 'success'
