@@ -11,6 +11,19 @@
   }
 })(typeof self !== "undefined" ? self : this, function () {
   const COLORS = ["#58a6ff", "#3fb950", "#bc8cff", "#d29922", "#f85149", "#56d4dd"];
+  /** @type {{spec: object, el: HTMLElement, chart: object}[]} */
+  let _liveCharts = [];
+  /** @type {object[]} */
+  let _pendingChartSpecs = [];
+
+  function disposeLiveCharts() {
+    _liveCharts.forEach((entry) => {
+      try {
+        if (entry.chart && typeof entry.chart.remove === "function") entry.chart.remove();
+      } catch (_e) { /* ignore */ }
+    });
+    _liveCharts = [];
+  }
 
   function fmtPct(n, d) {
     if (n == null || Number.isNaN(Number(n))) return "—";
@@ -68,11 +81,215 @@
     return String(v);
   }
 
+  function pointsToLw(points) {
+    const out = [];
+    const seen = new Set();
+    (points || []).forEach((p) => {
+      const x = Array.isArray(p) ? p[0] : p.x;
+      const y = Number(Array.isArray(p) ? p[1] : p.y);
+      if (x == null || Number.isNaN(y)) return;
+      const t = String(x).slice(0, 10);
+      if (seen.has(t)) return;
+      seen.add(t);
+      out.push({ time: t, value: y });
+    });
+    out.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+    return out;
+  }
+
+  function lwPriceFormatter(yMode) {
+    return (v) => niceYFormat(v, yMode || "num");
+  }
+
   /**
-   * SPX-shaped multi-series line chart.
-   * series: [{ name, color, points: [[date, y], ...] | {x,y}[], hidden? }]
+   * Interactive TradingView Lightweight Charts mount (crosshair / zoom / pan).
+   * Falls back to static SVG if the library is unavailable.
+   * series: [{ name, color, points, hidden?, primary?, id? }]
    */
   function LineChart({ title, series, height, yMode, variant, includeZero, yAxisLabel }) {
+    const H = height || 300;
+    const visible = (series || []).filter((s) => !s.hidden && (s.points || []).length);
+    if (!visible.length) {
+      return `<div class="b5p-chart b5p-chart--${variant || "secondary"}"><h3>${escapeHtml(
+        title || ""
+      )}</h3><p class="dim">No data.</p></div>`;
+    }
+
+    const hasLw =
+      typeof window !== "undefined" &&
+      window.LightweightCharts &&
+      typeof window.LightweightCharts.createChart === "function";
+
+    if (!hasLw) {
+      return svgLineChart({ title, series: visible, height: H, yMode, variant, includeZero, yAxisLabel });
+    }
+
+    const idx = _pendingChartSpecs.length;
+    _pendingChartSpecs.push({
+      title: title || "",
+      height: H,
+      yMode: yMode || "num",
+      includeZero: !!includeZero,
+      yAxisLabel: yAxisLabel || "",
+      series: visible.map((s) => ({
+        name: s.name || s.id || "series",
+        id: s.id || s.name,
+        color: s.color || COLORS[0],
+        primary: !!s.primary,
+        data: pointsToLw(s.points),
+      })),
+    });
+
+    return (
+      `<div class="b5p-chart b5p-chart--${variant || "secondary"}">` +
+      (title ? `<h3>${escapeHtml(title)}</h3>` : "") +
+      `<div class="b5p-lw-wrap">` +
+      `<div class="b5p-lw-hud dim small" data-b5p-hud="${idx}"></div>` +
+      `<div class="b5p-lw" data-b5p-idx="${idx}" style="height:${H}px" role="img" aria-label="${escapeHtml(
+        title || "interactive chart"
+      )}"></div>` +
+      `<p class="b5p-lw-hint dim small">Scroll to zoom · drag to pan · double-click resets · crosshair shows values</p>` +
+      `</div></div>`
+    );
+  }
+
+  function hydrateInteractiveCharts(root) {
+    disposeLiveCharts();
+    const LW = typeof window !== "undefined" ? window.LightweightCharts : null;
+    if (!LW || !root) {
+      _pendingChartSpecs = [];
+      return;
+    }
+    const LineSeries = LW.LineSeries;
+    const mounts = root.querySelectorAll("[data-b5p-idx]");
+    let syncing = false;
+
+    mounts.forEach((el) => {
+      const idx = Number(el.getAttribute("data-b5p-idx"));
+      const spec = _pendingChartSpecs[idx];
+      if (!spec || !spec.series.length) return;
+      const hud = root.querySelector(`[data-b5p-hud="${idx}"]`);
+      const chart = LW.createChart(el, {
+        height: spec.height,
+        autoSize: true,
+        layout: {
+          background: { color: "#111827" },
+          textColor: "#d5e3f2",
+          fontSize: 12,
+          attributionLogo: false,
+        },
+        grid: {
+          vertLines: { color: "#334155", visible: true },
+          horzLines: { color: "#334155", visible: true },
+        },
+        crosshair: {
+          mode: LW.CrosshairMode ? LW.CrosshairMode.Normal : 0,
+          vertLine: { color: "#58a6ff", width: 1, style: 2, labelBackgroundColor: "#1e293b" },
+          horzLine: { color: "#58a6ff", width: 1, style: 2, labelBackgroundColor: "#1e293b" },
+        },
+        rightPriceScale: {
+          visible: true,
+          borderVisible: true,
+          borderColor: "#718096",
+          scaleMargins: { top: 0.10, bottom: 0.12 },
+        },
+        timeScale: {
+          visible: true,
+          borderVisible: true,
+          borderColor: "#718096",
+          timeVisible: true,
+          secondsVisible: false,
+          tickMarkFormatter: (time) => {
+            const value = typeof time === "string"
+              ? time
+              : `${time.year}-${String(time.month).padStart(2, "0")}-${String(time.day).padStart(2, "0")}`;
+            return value.slice(0, 7);
+          },
+        },
+        handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true },
+        handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+      });
+
+      const seriesApis = [];
+      spec.series.forEach((s) => {
+        if (!s.data.length) return;
+        const api = LineSeries
+          ? chart.addSeries(LineSeries, {
+              color: s.color,
+              lineWidth: s.primary ? 3 : 2,
+              priceLineVisible: false,
+              lastValueVisible: true,
+              title: s.name,
+            })
+          : chart.addLineSeries({
+              color: s.color,
+              lineWidth: s.primary ? 3 : 2,
+              priceLineVisible: false,
+              lastValueVisible: true,
+              title: s.name,
+            });
+        api.setData(s.data);
+        api.applyOptions({
+          priceFormat: {
+            type: "custom",
+            formatter: lwPriceFormatter(spec.yMode),
+          },
+        });
+        seriesApis.push({ api, name: s.name });
+      });
+
+      try {
+        chart.timeScale().fitContent();
+      } catch (_e) { /* ignore */ }
+
+      chart.subscribeCrosshairMove((param) => {
+        if (!hud) return;
+        if (!param || param.time === undefined || !param.seriesData) {
+          hud.textContent = "";
+          return;
+        }
+        const t = typeof param.time === "object"
+          ? `${param.time.year}-${String(param.time.month).padStart(2, "0")}-${String(param.time.day).padStart(2, "0")}`
+          : String(param.time);
+        const parts = seriesApis
+          .map(({ api, name }) => {
+            const v = param.seriesData.get(api);
+            if (!v || v.value == null) return null;
+            return `${name} ${niceYFormat(v.value, spec.yMode)}`;
+          })
+          .filter(Boolean);
+        hud.textContent = parts.length ? `${t}  ·  ${parts.join("  ·  ")}` : String(t);
+      });
+
+      el.addEventListener("dblclick", () => {
+        try {
+          chart.timeScale().fitContent();
+        } catch (_e) { /* ignore */ }
+      });
+
+      _liveCharts.push({ chart, el, seriesApis });
+    });
+
+    // Sync time range across all charts on the page (TradingView-like)
+    _liveCharts.forEach((entry) => {
+      entry.chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+        if (!range || syncing) return;
+        syncing = true;
+        _liveCharts.forEach((other) => {
+          if (other.chart === entry.chart) return;
+          try {
+            other.chart.timeScale().setVisibleLogicalRange(range);
+          } catch (_e) { /* ignore */ }
+        });
+        syncing = false;
+      });
+    });
+
+    _pendingChartSpecs = [];
+  }
+
+  /** Static SVG fallback when Lightweight Charts CDN is blocked. */
+  function svgLineChart({ title, series, height, yMode, variant, includeZero, yAxisLabel }) {
     const pad = { l: 72, r: 18, t: 18, b: 52 };
     const W = 900;
     const H = height || 300;
@@ -87,16 +304,13 @@
       })
     );
     if (!allPts.length) {
-      return `<div class="b5p-chart b5p-chart--${variant || "secondary"}"><h3>${escapeHtml(
-        title || ""
-      )}</h3><p class="dim">No data.</p></div>`;
+      return `<div class="b5p-chart"><h3>${escapeHtml(title || "")}</h3><p class="dim">No data.</p></div>`;
     }
     const xs = [...new Set(allPts.map((p) => p.x))].sort();
     const xi = Object.fromEntries(xs.map((x, i) => [x, i]));
     const ys = allPts.map((p) => p.y);
     let ymin = Math.min(...ys);
     let ymax = Math.max(...ys);
-    // Only pin to zero when explicitly requested (equity/PnL). Regime ratios must keep local scale.
     if (includeZero) {
       ymin = Math.min(0, ymin);
       ymax = Math.max(0, ymax);
@@ -108,13 +322,9 @@
     if (ymin === ymax) ymax = ymin + 1;
     const xToPx = (x) => pad.l + (xs.length <= 1 ? 0 : (xi[x] / (xs.length - 1)) * (W - pad.l - pad.r));
     const yToPx = (y) => pad.t + (1 - (y - ymin) / (ymax - ymin)) * (H - pad.t - pad.b);
-    const ticks = 5;
-    const yticks = Array.from({ length: ticks + 1 }, (_, i) => ymin + (i / ticks) * (ymax - ymin));
+    const yticks = Array.from({ length: 6 }, (_, i) => ymin + (i / 5) * (ymax - ymin));
     let xticks = yearAxisTicks(xs);
-    // Thin overcrowded year labels on very long histories
-    if (xticks.length > 14) {
-      xticks = xticks.filter((t, i) => i % 2 === 0 || i === xticks.length - 1);
-    }
+    if (xticks.length > 14) xticks = xticks.filter((t, i) => i % 2 === 0 || i === xticks.length - 1);
     const grid = yticks
       .map((yt) => {
         const y = yToPx(yt);
@@ -137,16 +347,11 @@
         );
       })
       .join("");
-    let zeroLine = "";
-    if (ymin < 0 && ymax > 0) {
-      const z = yToPx(0);
-      zeroLine = `<line x1="${pad.l}" x2="${W - pad.r}" y1="${z.toFixed(1)}" y2="${z.toFixed(1)}" stroke="${axisStroke}" stroke-width="1.4"/>`;
-    }
     const frame =
       `<line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}" stroke="${axisStroke}" stroke-width="1.5"/>` +
       `<line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="${axisStroke}" stroke-width="1.5"/>`;
     const yTitle = yAxisLabel
-      ? `<text x="14" y="${(H / 2).toFixed(1)}" fill="${ink}" font-size="11" text-anchor="middle" transform="rotate(-90 14 ${(H / 2).toFixed(
+      ? `<text x="15" y="${(H / 2).toFixed(1)}" fill="#d5e3f2" font-size="11" text-anchor="middle" font-weight="600" transform="rotate(-90 15 ${(H / 2).toFixed(
           1
         )})">${escapeHtml(yAxisLabel)}</text>`
       : "";
@@ -156,45 +361,16 @@
         const d = pts
           .map((p, i) => `${i === 0 ? "M" : "L"}${xToPx(p.x).toFixed(1)},${yToPx(p.y).toFixed(1)}`)
           .join(" ");
-        const lw = s.primary ? 2.4 : 2;
-        return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${lw}" data-series="${escapeHtml(
-          s.name || ""
-        )}"/>`;
+        return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${s.primary ? 2.4 : 2}"/>`;
       })
       .join("");
-    // Invisible hit layer for tooltips (sampled)
-    const tipPts = xs.length > 800 ? xs.filter((_, i) => i % Math.ceil(xs.length / 400) === 0) : xs;
-    const hits = tipPts
-      .map((x) => {
-        const vals = visible
-          .map((s) => {
-            const pts = (s.points || []).map((p) => (Array.isArray(p) ? { x: p[0], y: Number(p[1]) } : p));
-            const hit = pts.find((p) => p.x === x);
-            return hit ? `${s.name}:${niceYFormat(hit.y, yMode || "num")}` : "";
-          })
-          .filter(Boolean);
-        if (!vals.length) return "";
-        const cx = xToPx(x);
-        return `<circle class="b5p-hit" cx="${cx.toFixed(1)}" cy="${(H / 2).toFixed(1)}" r="14" fill="transparent" data-tip="${escapeHtml(
-          x + " · " + vals.join(" · ")
-        )}"/>`;
-      })
-      .join("");
-
     return (
       `<div class="b5p-chart b5p-chart--${variant || "secondary"}">` +
       (title ? `<h3>${escapeHtml(title)}</h3>` : "") +
-      `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${escapeHtml(
+      `<svg class="b5p-svg-chart" viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${escapeHtml(
         title || "chart"
-      )}">` +
-      grid +
-      zeroLine +
-      frame +
-      yTitle +
-      xlabels +
-      paths +
-      hits +
-      `</svg></div>`
+      )}">${grid}${frame}${yTitle}${xlabels}${paths}</svg>` +
+      `<p class="dim small">Static chart (Lightweight Charts CDN not loaded).</p></div>`
     );
   }
 
@@ -222,7 +398,7 @@
       LineChart({
         title: "",
         series,
-        height: 320,
+        height: 400,
         yMode: "usdM",
         variant: "primary",
         includeZero: false,
@@ -256,12 +432,6 @@
         return `<div class="b5p-guide-sec"><h3>${escapeHtml(sec.title)}</h3>${paras}${bullets}</div>`;
       })
       .join("");
-    const results = guide.results?.length
-      ? kpiCards(
-          guide.results.map((r) => [r.label, r.value, ""]),
-          "b5p-results"
-        )
-      : "";
     return (
       `<div class="b5p-panel b5p-guide">` +
       `<div class="b5p-guide-head"><h2>${escapeHtml(guide.title || run?.label || "Bucket 5")}</h2>` +
@@ -272,7 +442,6 @@
           }</p>`
         : "") +
       `</div>${sections}` +
-      (results ? `<h3>Backtest results (this run)</h3>${results}` : "") +
       `<details class="b5p-howto"><summary>How to read this dashboard</summary>` +
       `<p>Overview = strategy narrative + equity path. Regime = VIX term structure, rho, and sleeve gross. ` +
       `Daily = day-level marks and monetize events. Live tags are the GTP vol-ETP sleeve, not the full insurance book.</p>` +
@@ -315,7 +484,6 @@
 
   function renderOverview(data, run, state) {
     const guide = run.meta?.strategy_guide;
-    const hasGuideResults = !!(guide && guide.results && guide.results.length);
     const dd = run.drawdown_series || [];
     const putMtm = (run.daily || []).map((d) => [d.date, d.put_mtm]);
     const harvested = (run.daily || []).map((d) => [d.date, d.put_cash_cum]);
@@ -327,17 +495,14 @@
           )}</option>`
       )
       .join("");
-    const kpi =
-      hasGuideResults
-        ? ""
-        : `<div class="b5p-panel"><h2>Key results — ${escapeHtml(run.label)}</h2>${kpiCards([
-            ["CAGR", fmtPct(run.summary?.combined_CAGR), ""],
-            ["Vol", fmtPct(run.summary?.combined_Vol), ""],
-            ["Sharpe", fmtNum(run.summary?.combined_Sharpe), ""],
-            ["Max DD", fmtPct(run.summary?.combined_MaxDD), cls(run.summary?.combined_MaxDD)],
-            ["Calmar", fmtNum(run.summary?.combined_Calmar), ""],
-            ["Harvested $", fmtUsd(run.summary?.["realized_$"]), ""],
-          ])}</div>`;
+    const kpi = `<div class="b5p-panel"><h2>Key results — ${escapeHtml(run.label)}</h2>${kpiCards([
+      ["CAGR", fmtPct(run.summary?.combined_CAGR), ""],
+      ["Vol", fmtPct(run.summary?.combined_Vol), ""],
+      ["Sharpe", fmtNum(run.summary?.combined_Sharpe), ""],
+      ["Max DD", fmtPct(run.summary?.combined_MaxDD), cls(run.summary?.combined_MaxDD)],
+      ["Calmar", fmtNum(run.summary?.combined_Calmar), ""],
+      ["Harvested $", fmtUsd(run.summary?.["realized_$"]), ""],
+    ])}</div>`;
 
     return (
       (data.runs?.length > 1
@@ -350,7 +515,7 @@
       `<div class="b5p-panel">${LineChart({
         title: "Drawdown",
         series: [{ name: "DD", color: "#f85149", points: dd.map((p) => [p[0], Number(p[1]) * 100]) }],
-        height: 240,
+        height: 300,
         yMode: "pct100",
         variant: "secondary",
         includeZero: true,
@@ -359,7 +524,7 @@
       `<div class="b5p-panel">${LineChart({
         title: "Put MTM ($)",
         series: [{ name: "Put MTM", color: "#bc8cff", points: putMtm }],
-        height: 240,
+        height: 300,
         yMode: "usd",
         variant: "secondary",
         includeZero: true,
@@ -369,7 +534,7 @@
       `<div class="b5p-panel">${LineChart({
         title: "Cumulative harvested put cash ($)",
         series: [{ name: "Harvested", color: "#3fb950", points: harvested }],
-        height: 240,
+        height: 300,
         yMode: "usd",
         variant: "secondary",
         includeZero: false,
@@ -749,6 +914,8 @@
     }
 
     function paint() {
+      disposeLiveCharts();
+      _pendingChartSpecs = [];
       const r = run();
       writeSubToHash(state.sub);
       const tabs =
@@ -857,7 +1024,11 @@
         });
       }
 
-      if (root) bindTooltips(root);
+      if (root) {
+        bindTooltips(root);
+        // Defer so layout has width for autoSize charts
+        requestAnimationFrame(() => hydrateInteractiveCharts(root));
+      }
     }
     paint();
   }
