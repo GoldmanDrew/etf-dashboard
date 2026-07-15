@@ -1,0 +1,514 @@
+/**
+ * Bucket 5 Product dashboard — SPX-0DTE-style scoped chrome.
+ * Self-contained under .b5p-root so etf-dashboard works without Magis CSS.
+ */
+
+.b5p-host {
+  width: 100%;
+}
+
+.b5-product-page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 24px 32px;
+  box-sizing: border-box;
+}
+
+.b5-product-page .b5p-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.b5p-root {
+  --b5p-bg: var(--bg-panel, var(--bg-card, #131a26));
+  --b5p-bg2: var(--bg-soft, var(--bg-secondary, #1a2434));
+  --b5p-ink: var(--text-primary, #e6edf6);
+  --b5p-muted: var(--text-muted, var(--text-secondary, #8aa0bd));
+  --b5p-line: var(--border, #243245);
+  --b5p-accent: var(--accent, #58a6ff);
+  --b5p-pos: var(--pos, #3fb950);
+  --b5p-neg: var(--neg, #f85149);
+  --b5p-radius: 12px;
+  --b5p-gap: 20px;
+  --b5p-measure: 72ch;
+  --b5p-chart-grid: #243245;
+  --b5p-chart-tick: #3a4a5e;
+  max-width: 1280px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--b5p-gap);
+  color: var(--b5p-ink);
+  font: 14px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  box-sizing: border-box;
+}
+
+.b5p-root *,
+.b5p-root *::before,
+.b5p-root *::after {
+  box-sizing: border-box;
+}
+
+.b5p-head h1,
+.b5p-head h2 {
+  font-size: 18px;
+  font-weight: 650;
+  margin: 0;
+  color: var(--b5p-ink);
+}
+
+.b5p-head .b5p-meta {
+  color: var(--b5p-muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+/* Underline tabs (SPX pattern) */
+.b5p-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--b5p-line);
+  margin: 0;
+  padding: 0;
+}
+
+.b5p-tabs [role="tab"],
+.b5p-tabs a {
+  display: inline-block;
+  padding: 10px 16px;
+  cursor: pointer;
+  color: var(--b5p-muted);
+  border-bottom: 2px solid transparent;
+  text-decoration: none;
+  font-size: 14px;
+  background: transparent;
+  border-top: 0;
+  border-left: 0;
+  border-right: 0;
+  font: inherit;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.b5p-tabs [role="tab"]:hover,
+.b5p-tabs a:hover {
+  color: var(--b5p-ink);
+}
+
+.b5p-tabs [role="tab"].active,
+.b5p-tabs [role="tab"][aria-selected="true"],
+.b5p-tabs a.active {
+  color: var(--b5p-ink);
+  border-bottom-color: var(--b5p-accent);
+}
+
+.b5p-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--b5p-gap);
+  animation: b5p-fade 120ms ease;
+}
+
+@keyframes b5p-fade {
+  from { opacity: 0.72; }
+  to { opacity: 1; }
+}
+
+.b5p-panel {
+  background: var(--b5p-bg);
+  border: 1px solid var(--b5p-line);
+  border-radius: var(--b5p-radius);
+  padding: 18px;
+  margin: 0;
+}
+
+.b5p-panel h2,
+.b5p-panel > h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 14px;
+  color: var(--b5p-ink);
+}
+
+.b5p-panel .dim,
+.b5p-root .dim {
+  color: var(--b5p-muted);
+}
+
+.b5p-root .small {
+  font-size: 12px;
+}
+
+.b5p-root .callout {
+  border: 1px solid var(--b5p-line);
+  background: var(--b5p-bg2);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0;
+}
+
+/* Guide */
+.b5p-guide .b5p-guide-head {
+  margin-bottom: 16px;
+}
+
+.b5p-guide .lead {
+  font-size: 15px;
+  margin: 8px 0 0;
+  color: var(--b5p-muted);
+  max-width: var(--b5p-measure);
+  line-height: 1.55;
+}
+
+.b5p-guide-sec {
+  margin: 0;
+}
+
+.b5p-guide h3 {
+  font-size: 15px;
+  margin: 20px 0 8px;
+  font-weight: 600;
+  color: var(--b5p-ink);
+}
+
+.b5p-guide-sec:first-child h3,
+.b5p-guide h3:first-child {
+  margin-top: 0;
+}
+
+.b5p-guide p,
+.b5p-guide li {
+  max-width: var(--b5p-measure);
+  line-height: 1.55;
+  margin: 0 0 10px;
+  color: var(--b5p-ink);
+}
+
+.b5p-guide ul {
+  margin: 0 0 12px 18px;
+  padding: 0;
+}
+
+.b5p-guide li {
+  margin-bottom: 6px;
+}
+
+.b5p-guide details.b5p-howto {
+  margin-top: 8px;
+  color: var(--b5p-muted);
+  font-size: 13px;
+}
+
+.b5p-guide details.b5p-howto summary {
+  cursor: pointer;
+  color: var(--b5p-accent);
+  margin-bottom: 8px;
+}
+
+/* KPI cards */
+.b5p-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.b5p-card {
+  background: var(--b5p-bg);
+  border: 1px solid var(--b5p-line);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.b5p-card .k {
+  color: var(--b5p-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.b5p-card .v {
+  font-size: 22px;
+  font-weight: 650;
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+  color: var(--b5p-ink);
+}
+
+.b5p-results .b5p-card .v {
+  font-size: 17px;
+}
+
+.b5p-root .pos,
+.b5p-root td.pos,
+.b5p-root .v.pos {
+  color: var(--b5p-pos);
+}
+
+.b5p-root .neg,
+.b5p-root td.neg,
+.b5p-root .v.neg {
+  color: var(--b5p-neg);
+}
+
+/* Charts */
+.b5p-chart {
+  margin: 0 0 4px;
+  width: 100%;
+}
+
+.b5p-chart h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--b5p-muted);
+}
+
+.b5p-chart svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.b5p-chart--primary svg {
+  min-height: 300px;
+}
+
+.b5p-chart--secondary svg {
+  min-height: 220px;
+}
+
+.b5p-chart--regime svg {
+  min-height: 240px;
+}
+
+.b5p-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--b5p-muted);
+}
+
+.b5p-leg {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  opacity: 1;
+  transition: opacity 120ms ease;
+}
+
+.b5p-leg.off {
+  opacity: 0.35;
+  text-decoration: line-through;
+}
+
+.b5p-leg i,
+.b5p-leg .swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.b5p-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.b5p-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.b5p-controls.b5p-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: color-mix(in srgb, var(--b5p-bg) 92%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 10px 0;
+  margin: -4px 0 16px;
+  border-bottom: 1px solid var(--b5p-line);
+}
+
+@supports not (background: color-mix(in srgb, white 50%, black)) {
+  .b5p-controls.b5p-sticky {
+    background: var(--b5p-bg);
+  }
+}
+
+.b5p-controls label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--b5p-muted);
+}
+
+.b5p-controls select,
+.b5p-controls input[type="search"] {
+  background: var(--b5p-bg2);
+  color: var(--b5p-ink);
+  border: 1px solid var(--b5p-line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+  min-width: 200px;
+  max-width: 100%;
+}
+
+.b5p-controls select:focus,
+.b5p-controls input:focus,
+.b5p-tabs [role="tab"]:focus-visible {
+  outline: 2px solid var(--b5p-accent);
+  outline-offset: 2px;
+}
+
+.b5p-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  width: 100%;
+}
+
+.b5p-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.b5p-table th,
+.b5p-table td {
+  text-align: right;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--b5p-line);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.b5p-table th:first-child,
+.b5p-table td:first-child,
+.b5p-table th:nth-child(2),
+.b5p-table td:nth-child(2) {
+  text-align: left;
+}
+
+.b5p-table th {
+  color: var(--b5p-muted);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: transparent;
+}
+
+.b5p-table tr:hover td {
+  background: var(--b5p-bg2);
+}
+
+.b5p-crash-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.b5p-crash-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 1fr auto;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.b5p-crash-track {
+  height: 10px;
+  background: var(--b5p-bg2);
+  border-radius: 99px;
+  overflow: hidden;
+  position: relative;
+}
+
+.b5p-crash-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--b5p-pos);
+  min-width: 2px;
+}
+
+.b5p-tip {
+  pointer-events: none;
+  position: absolute;
+  z-index: 6;
+  background: var(--b5p-bg2);
+  border: 1px solid var(--b5p-line);
+  color: var(--b5p-ink);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.b5p-run-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 900px) {
+  .b5p-grid-2 {
+    grid-template-columns: 1fr;
+  }
+  .b5p-cards {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+  .b5p-chart--primary svg {
+    min-height: 220px;
+  }
+  .b5p-chart--secondary svg,
+  .b5p-chart--regime svg {
+    min-height: 180px;
+  }
+  .b5-product-page {
+    padding: 0 12px 24px;
+  }
+}
+
+@media (max-width: 640px) {
+  .b5p-controls select,
+  .b5p-controls input[type="search"] {
+    min-width: 140px;
+  }
+  .b5p-crash-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .b5p-tabs [role="tab"] {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+}
+
+@media print {
+  .b5p-tabs,
+  .b5p-controls.b5p-sticky {
+    position: static;
+  }
+  .b5p-panel {
+    break-inside: avoid;
+  }
+}

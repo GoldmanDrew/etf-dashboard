@@ -7,7 +7,7 @@ describe('Bucket5 product page', () => {
       path.join(__dirname, '../assets/bucket5_insurance_backtest.js'),
       'utf8',
     );
-    expect(src).toContain("data/bucket5_product.json");
+    expect(src).toContain('data/bucket5_product.json');
     expect(src).toContain('bucket5_product_dashboard.v1');
     expect(src).toContain('Bucket5Product');
     expect(src).toContain('Bucket5InsurancePage');
@@ -21,5 +21,18 @@ describe('Bucket5 product page', () => {
     expect(ui).toContain('bucket5_product_dashboard.v1');
     expect(ui).toMatch(/Overview|Regime|Daily/);
     expect(ui).toContain('Bucket5Product');
+    expect(ui).toContain('b5p-tabs');
+    expect(ui).toContain('b5p-cards');
+  });
+
+  test('shared product CSS is present and scoped', () => {
+    const css = fs.readFileSync(
+      path.join(__dirname, '../assets/bucket5_product.css'),
+      'utf8',
+    );
+    expect(css).toContain('.b5p-root');
+    expect(css).toContain('.b5p-cards');
+    expect(css).toContain('.b5p-tabs');
+    expect(css).toContain('--b5p-measure');
   });
 });

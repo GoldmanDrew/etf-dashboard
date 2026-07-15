@@ -14,6 +14,16 @@
 
   const DATA_URLS = ['data/bucket5_product.json', 'data/bucket5_insurance_backtest.json'];
 
+  function parseSubFromHash() {
+    try {
+      const raw = (location.hash || '').replace(/^#/, '');
+      if (!raw.startsWith('/bucket5')) return null;
+      const parts = raw.split('?')[0].split('/').filter(Boolean);
+      if (parts[1] === 'regime' || parts[1] === 'daily' || parts[1] === 'overview') return parts[1];
+    } catch (_e) { /* ignore */ }
+    return null;
+  }
+
   function Bucket5InsurancePage({ onBack, onNavigateToChart }) {
     const hostRef = useRef(null);
     const [error, setError] = useState(null);
@@ -40,7 +50,7 @@
             setError(null);
             const Product = (typeof self !== 'undefined' ? self : window).Bucket5Product;
             if (hostRef.current && Product) {
-              Product.mount(hostRef.current, d);
+              Product.mount(hostRef.current, d, { sub: parseSubFromHash() || undefined });
             } else if (hostRef.current) {
               hostRef.current.innerHTML =
                 '<p style="color:var(--accent-red)">Bucket5Product UI missing — load assets/bucket5_product.js</p>';
@@ -66,9 +76,8 @@
       { className: 'backtest-page b5-product-page' },
       React.createElement(
         'div',
-        { style: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' } },
+        { className: 'b5p-toolbar' },
         React.createElement('button', { type: 'button', className: 'topbar-btn', onClick: onBack }, '← Back'),
-        React.createElement('h2', { style: { fontSize: 18, margin: 0 } }, 'Bucket 5 Product'),
         React.createElement(
           'button',
           {
@@ -109,7 +118,7 @@
             'In ls-algo: python scripts/build_bucket5_product_dashboard.py --copy-etf-dashboard',
           ),
         ),
-      React.createElement('div', { ref: hostRef, id: 'b5-product-host' }),
+      React.createElement('div', { ref: hostRef, id: 'b5-product-host', className: 'b5p-host' }),
     );
   }
 

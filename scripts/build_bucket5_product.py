@@ -51,12 +51,24 @@ def main(argv: list[str] | None = None) -> int:
         print("ls-algo checkout not found (need scripts/build_bucket5_product_dashboard.py)", file=sys.stderr)
         return 1
 
+    def _sync_ui() -> None:
+        pairs = [
+            (ls / "site" / "assets" / "js" / "bucket5_product.js", REPO / "assets" / "bucket5_product.js"),
+            (ls / "site" / "assets" / "css" / "bucket5_product.css", REPO / "assets" / "bucket5_product.css"),
+        ]
+        for s, d in pairs:
+            if s.is_file():
+                d.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(s, d)
+                print(f"synced UI {s.name} -> {d}")
+
     src = ls / "risk_dashboard" / "data" / "bucket5_product.json"
     if args.copy_ls_algo_panel and src.is_file():
         OUT.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, OUT)
         shutil.copy2(src, LEGACY)
         print(f"copied {src} -> {OUT}")
+        _sync_ui()
         return 0
 
     cmd = [sys.executable, str(ls / "scripts" / "build_bucket5_product_dashboard.py"), "--copy-etf-dashboard"]
@@ -69,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     if not OUT.is_file():
         print(f"expected {OUT} missing after build", file=sys.stderr)
         return 1
+    _sync_ui()
     print(f"ok {OUT} ({OUT.stat().st_size / 1e6:.1f} MB)")
     return 0
 
