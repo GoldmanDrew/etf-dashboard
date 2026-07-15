@@ -13,6 +13,7 @@ from audit_dashboard_data_quality import (  # noqa: E402
     audit_metrics_calendar,
     audit_metrics_asof_alignment,
     audit_stale_price_feeds,
+    audit_underlying_adj_cliffs,
     audit_vrp_publication,
 )
 
@@ -206,3 +207,70 @@ def test_vrp_audit_blocks_expired_grade_d_rows_without_failing():
     })
     assert errors == []
     assert any("TEST" in msg and "blocked" in msg for msg in warnings)
+
+
+def test_audit_schema_v4_requires_fof_provenance_and_stats_status():
+    bare = {
+        "schema_v": 4,
+        "records": [
+            {
+                "symbol": "YBTY",
+                "product_class": "income_yieldboost_fof",
+                "gross_decay_annual": 0.12,
+                "expected_decay_available": True,
+                "expected_pair_pnl_p50_annual": 0.20,
+            }
+        ],
+    }
+    errors, _ = audit_dashboard(bare)
+    assert any("gross_decay_annual has no provenance source" in msg for msg in errors)
+    assert any("missing stats_status" in msg for msg in errors)
+
+    stamped = {
+        "schema_v": 4,
+        "records": [
+            {
+                "symbol": "YBTY",
+                "product_class": "income_yieldboost_fof",
+                "gross_decay_annual": 0.12,
+                "gross_decay_annual_source": "fof_realized_pair",
+                "expected_decay_available": True,
+                "expected_pair_pnl_p50_annual": 0.20,
+                "stats_status": {
+                    "borrow_current": "provider_missing",
+                    "gross_decay_annual": "valid",
+                    "realized_pair_gross_20d": "insufficient_history",
+                    "expected_pair_pnl_p50_annual": "valid",
+                    "net_edge_p50_annual": "provider_missing",
+                    "forecast_vol_underlying_annual": "provider_missing",
+                },
+            }
+        ],
+    }
+    errors2, _ = audit_dashboard(stamped)
+    assert not any("YBTY" in msg and ("provenance" in msg or "stats_status" in msg) for msg in errors2)
+
+
+def test_audit_underlying_cliff_message_mentions_declared_coverage_gap():
+    rows = {
+        "LCDL": [
+            {"date": "2025-05-13", "underlying_adj_close": 26.5},
+            {"date": "2025-05-14", "underlying_adj_close": 276.0},
+            {"date": "2025-05-22", "underlying_adj_close": 26.6},
+        ]
+    }
+    corp = {
+        "events": [
+            {
+                "type": "reverse_split",
+                "ticker": "LCID",
+                "execution_date": "2025-09-02",
+                "ratio_from": 10.0,
+                "ratio_to": 1.0,
+            }
+        ]
+    }
+    errors = audit_underlying_adj_cliffs(rows, corp, etf_to_underlying={"LCDL": "LCID"})
+    assert errors
+    assert any("do not cover this date" in msg for msg in errors)
+    assert any("Yahoo und island" in msg for msg in errors)

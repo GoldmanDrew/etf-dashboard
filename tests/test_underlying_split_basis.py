@@ -13,7 +13,10 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from ingest_etf_metrics import repair_underlying_adj_close_split_basis  # noqa: E402
+from ingest_etf_metrics import (  # noqa: E402
+    repair_underlying_adj_close_reverting_islands,
+    repair_underlying_adj_close_split_basis,
+)
 from price_basis import (  # noqa: E402
     build_tr_series_from_metrics,
     find_underlying_adj_cliffs,
@@ -139,3 +142,83 @@ def test_repair_underlying_adj_close_split_basis_scales_store(tmp_path: Path):
     assert n == 1
     pre = float(out.loc[out["date"] == dt.date(2026, 6, 10), "underlying_adj_close"].iloc[0])
     assert abs(pre - 213.564) < 0.05
+
+
+def test_repair_reverting_underlying_island_lcdl_style():
+    import pandas as pd
+
+    rows = []
+    for i, d in enumerate(["2025-05-09", "2025-05-12", "2025-05-13"]):
+        rows.append({
+            "date": d,
+            "ticker": "LCDL",
+            "close_price": 31.0 + i * 0.2,
+            "underlying_adj_close": 26.0 + i * 0.2,
+        })
+    for i, d in enumerate(["2025-05-14", "2025-05-15", "2025-05-16", "2025-05-19", "2025-05-20", "2025-05-21"]):
+        rows.append({
+            "date": d,
+            "ticker": "LCDL",
+            "close_price": 32.0 + i * 0.1,
+            "underlying_adj_close": 270.0 + i,
+        })
+    for i, d in enumerate(["2025-05-22", "2025-05-23"]):
+        rows.append({
+            "date": d,
+            "ticker": "LCDL",
+            "close_price": 31.5 + i * 0.1,
+            "underlying_adj_close": 26.5 + i * 0.1,
+        })
+    df = pd.DataFrame(rows)
+    out, n = repair_underlying_adj_close_reverting_islands(df, {"LCDL": "LCID"})
+    assert n >= 5
+    island = out[out["date"].astype(str).between("2025-05-14", "2025-05-21")]
+    assert float(island["underlying_adj_close"].median()) < 40.0
+    cliffs = find_underlying_adj_cliffs(
+        [{"date": str(r.date), "underlying_adj_close": r.underlying_adj_close} for r in out.itertuples()],
+        [],
+    )
+    assert cliffs == []
+
+
+def test_split_basis_skips_reverting_island_when_later_reverse_exists(tmp_path: Path):
+    import pandas as pd
+
+    ca = tmp_path / "corporate_actions.json"
+    ca.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "type": "reverse_split",
+                        "ticker": "LCID",
+                        "execution_date": "2025-09-02",
+                        "ratio_from": 10.0,
+                        "ratio_to": 1.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = []
+    for d, und in [
+        ("2025-05-13", 26.5),
+        ("2025-05-14", 276.0),
+        ("2025-05-15", 280.0),
+        ("2025-05-16", 275.0),
+        ("2025-05-22", 26.6),
+        ("2025-09-01", 20.0),
+        ("2025-09-02", 17.0),
+    ]:
+        rows.append({"date": d, "ticker": "LCDL", "underlying_adj_close": und, "close_price": 30.0})
+    df = pd.DataFrame(rows)
+    repaired, n_island = repair_underlying_adj_close_reverting_islands(df, {"LCDL": "LCID"})
+    assert n_island >= 2
+    out, _n_scaled = repair_underlying_adj_close_split_basis(
+        repaired,
+        {"LCDL": "LCID"},
+        corporate_actions_path=ca,
+    )
+    may14 = float(out.loc[out["date"] == dt.date(2025, 5, 14), "underlying_adj_close"].iloc[0])
+    assert may14 < 50.0

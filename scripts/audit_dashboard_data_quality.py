@@ -173,18 +173,29 @@ def audit_underlying_adj_cliffs(
         und = str(und_map.get(sym) or "").strip().upper()
         if not und:
             continue
-        und_events = parse_split_events_from_corp(corp_payload or {"events": []}, und)
+        declared = parse_split_events_from_corp(corp_payload or {"events": []}, und)
         cliff_rows = [
             {"date": r.get("date"), "underlying_adj_close": r.get("underlying_adj_close")}
             for r in rows
         ]
+        # Only infer when corp metadata is empty. If a later declared split exists
+        # (e.g. LCID Sep reverse), do not invent May/Jul events that would silence
+        # Yahoo garbage islands — those need metrics repair instead.
+        und_events = list(declared)
         if not und_events:
-            und_events = infer_underlying_split_events_from_rows(cliff_rows, und_events)
+            und_events = infer_underlying_split_events_from_rows(cliff_rows, declared)
         cliffs = find_underlying_adj_cliffs(cliff_rows, und_events)
         for cliff in cliffs[:2]:
+            if declared:
+                declared_note = (
+                    f"{len(declared)} declared {und} split(s) do not cover this date "
+                    f"(possible Yahoo und island; not a real split)"
+                )
+            else:
+                declared_note = f"no {und} split metadata"
             errors.append(
                 f"{sym}/{und}: unexplained underlying_adj_close cliff on {cliff['date']} "
-                f"(x{cliff['factor']:.2f}; no {und} split metadata)"
+                f"(x{cliff['factor']:.2f}; {declared_note})"
             )
     return errors
 

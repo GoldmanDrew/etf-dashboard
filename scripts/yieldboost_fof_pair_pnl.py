@@ -449,6 +449,77 @@ def build_fof_dashboard_record(
         rec["fof_underlyings"] = [
             {"underlying": u, "weight": und_weights[u]} for u in und_list
         ]
+    apply_fof_quality_fields(rec)
+    return rec
+
+
+def apply_fof_quality_fields(rec: dict[str, Any]) -> dict[str, Any]:
+    """Stamp schema_v=4 provenance + ``stats_status`` on synthetic FoF rows.
+
+    FoF records are appended after the main ``build_data`` loop that stamps these
+    fields for screener rows; without this, the published-quality audit fails on
+    YBTY/YBST for missing ``gross_decay_annual_source`` / ``stats_status``.
+    """
+    if rec.get("gross_decay_annual") is not None and not rec.get("gross_decay_annual_source"):
+        rec["gross_decay_annual_source"] = "fof_realized_pair"
+        if rec.get("gross_decay_n_obs") is None:
+            n = None
+            realized = rec.get("fof_realized_pair") or {}
+            if isinstance(realized, dict) and realized.get("n_days") is not None:
+                n = realized.get("n_days")
+            rec["gross_decay_n_obs"] = n if n is not None else rec.get("delta_n_obs")
+
+    try:
+        delta_obs = int(rec.get("delta_n_obs") or 0)
+    except (TypeError, ValueError):
+        delta_obs = 0
+    expected_available = bool(rec.get("expected_decay_available"))
+    expected_valid = any(
+        rec.get(key) is not None
+        for key in (
+            "expected_pair_pnl_p50_annual",
+            "expected_gross_decay_p50_annual",
+            "expected_gross_decay_annual",
+        )
+    )
+    if rec.get("borrow_current") is not None:
+        borrow_status = "stale_fallback" if rec.get("borrow_missing") else "valid"
+    else:
+        borrow_status = "provider_missing"
+    if rec.get("gross_decay_annual") is not None:
+        gross_status = "valid"
+    elif delta_obs < 40:
+        gross_status = "insufficient_history"
+    else:
+        gross_status = "provider_missing"
+    if rec.get("realized_pair_gross_20d") is not None:
+        realized_20d_status = "valid"
+    elif rec.get("realized_pair_gross_partial") is not None:
+        realized_20d_status = "insufficient_history"
+    elif rec.get("realized_pair_gross_20d_split_suspect"):
+        realized_20d_status = "suppressed_quality"
+    else:
+        realized_20d_status = "insufficient_history"
+    if expected_available:
+        expected_status = "valid" if expected_valid else "insufficient_history"
+    else:
+        expected_status = "not_applicable"
+    rec["stats_status"] = {
+        "borrow_current": borrow_status,
+        "gross_decay_annual": gross_status,
+        "realized_pair_gross_20d": realized_20d_status,
+        "expected_pair_pnl_p50_annual": expected_status,
+        "net_edge_p50_annual": (
+            "valid" if rec.get("net_edge_p50_annual") is not None
+            else "insufficient_history" if delta_obs < 40
+            else "provider_missing"
+        ),
+        "forecast_vol_underlying_annual": (
+            "valid" if rec.get("forecast_vol_underlying_annual") is not None
+            else "insufficient_history" if delta_obs < 2
+            else "provider_missing"
+        ),
+    }
     return rec
 
 

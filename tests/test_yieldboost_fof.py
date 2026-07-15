@@ -321,6 +321,11 @@ def test_build_fof_dashboard_record_v2():
     assert rec.get("income_distribution_calibration") is not None
     assert rec["income_distribution_calibration"]["source"] == "fof_weighted_child_rollup"
     assert rec.get("gross_blend_method") in ("inverse_variance", "anchor_shift_fallback")
+    assert rec.get("gross_decay_annual_source") == "fof_realized_pair"
+    assert isinstance(rec.get("stats_status"), dict)
+    assert rec["stats_status"]["gross_decay_annual"] == "valid"
+    assert rec["stats_status"]["expected_pair_pnl_p50_annual"] == "valid"
+    assert rec["stats_status"]["borrow_current"] == "valid"
 
 
 def test_build_fof_holdings_payload_history():

@@ -1836,6 +1836,146 @@ def repair_fabricated_etf_adj_basis(
     return out, n_repaired
 
 
+def repair_underlying_adj_close_reverting_islands(
+    df: pd.DataFrame,
+    etf_to_underlying: dict[str, str],
+    *,
+    min_factor: float = 1.8,
+    max_island_days: int = 40,
+    flank_rel_tol: float = 0.30,
+    max_etf_log_jump: float = 0.20,
+) -> tuple[pd.DataFrame, int]:
+    """Null/rescale multi-day Yahoo ``underlying_adj_close`` garbage islands.
+
+    Pattern (LCDL/LCID May 2025, Jul 2025): und jumps ≥~1.8× for several sessions,
+    then reverts to the pre-island level while the ETF leg stays calm. These are
+    not real splits (LCID's declared reverse split is later). Split-basis repair
+    must not treat the island highs as pre-split levels.
+    """
+    if df.empty or "underlying_adj_close" not in df.columns or not etf_to_underlying:
+        return df, 0
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    has_etf = "close_price" in out.columns
+    min_log = math.log(float(min_factor))
+    n_fixed = 0
+
+    und_to_etfs: dict[str, set[str]] = {}
+    for etf, und in etf_to_underlying.items():
+        u = _normalize_symbol(und) if und is not None and str(und).strip() else ""
+        if u:
+            und_to_etfs.setdefault(u, set()).add(_normalize_symbol(etf))
+
+    for und_sym, etf_syms in sorted(und_to_etfs.items()):
+        mask = out["ticker"].isin(etf_syms)
+        if not bool(mask.any()):
+            continue
+        # Prefer one ETF row per date for the und series (shared underlying).
+        by_date: dict[date, dict[str, float]] = {}
+        for _, row in out.loc[mask].sort_values(["date", "ticker"]).iterrows():
+            d0 = row["date"]
+            if d0 is None or (isinstance(d0, float) and math.isnan(d0)):
+                continue
+            uadj = pd.to_numeric(row.get("underlying_adj_close"), errors="coerce")
+            if not (math.isfinite(float(uadj)) and float(uadj) > 0):
+                continue
+            entry = by_date.setdefault(d0, {"und": float(uadj)})
+            if has_etf:
+                cpx = pd.to_numeric(row.get("close_price"), errors="coerce")
+                if math.isfinite(float(cpx)) and float(cpx) > 0:
+                    entry["etf"] = float(cpx)
+        pts = sorted(by_date.items())
+        if len(pts) < 4:
+            continue
+
+        unds = [meta["und"] for _, meta in pts]
+        dates = [d for d, _ in pts]
+        i = 1
+        while i < len(pts):
+            u_prev, u_cur = unds[i - 1], unds[i]
+            if u_prev <= 0 or u_cur <= 0:
+                i += 1
+                continue
+            up_lr = abs(math.log(u_cur / u_prev))
+            if up_lr < min_log:
+                i += 1
+                continue
+            # Search for a revert that lands near the pre-island level.
+            island_end = None
+            for j in range(i + 1, min(len(pts), i + max_island_days + 1)):
+                u_j = unds[j]
+                if u_j <= 0:
+                    continue
+                down_lr = abs(math.log(u_j / unds[j - 1]))
+                if down_lr < min_log:
+                    continue
+                # Flanks agree: post-revert ≈ pre-island.
+                if abs(u_j / u_prev - 1.0) <= flank_rel_tol:
+                    island_end = j - 1  # last elevated day is j-1
+                    break
+            if island_end is None or island_end < i:
+                i += 1
+                continue
+
+            # Extreme und jumps (≥5x): skip ETF calm gate — LETF prints often move
+            # with the poisoned und print (LCDL Jul 2025). Milder islands require calm.
+            extreme_und = up_lr >= math.log(5.0)
+            if has_etf and not extreme_und:
+                e0 = by_date[dates[i - 1]].get("etf")
+                e1 = by_date[dates[i]].get("etf")
+                e2 = by_date[dates[island_end + 1]].get("etf") if island_end + 1 < len(dates) else None
+                if e0 and e1 and e0 > 0 and e1 > 0:
+                    if abs(math.log(e1 / e0)) > max_etf_log_jump:
+                        i += 1
+                        continue
+                if e1 and e2 and e1 > 0 and e2 > 0:
+                    if abs(math.log(e2 / e1)) > max_etf_log_jump:
+                        i += 1
+                        continue
+
+            island_vals = [unds[k] for k in range(i, island_end + 1)]
+            island_med = sorted(island_vals)[len(island_vals) // 2]
+            if island_med <= 0:
+                i = island_end + 1
+                continue
+            # Island must be clearly elevated (or depressed) vs the pre-flank.
+            if abs(math.log(island_med / u_prev)) < min_log * 0.85:
+                i = island_end + 1
+                continue
+            scale = u_prev / island_med
+
+            island_dates = set(dates[k] for k in range(i, island_end + 1))
+            for ix, row in out.loc[mask].iterrows():
+                if row["date"] not in island_dates:
+                    continue
+                uadj = pd.to_numeric(row.get("underlying_adj_close"), errors="coerce")
+                if not (math.isfinite(float(uadj)) and float(uadj) > 0):
+                    continue
+                repaired = float(uadj) * scale
+                if abs(repaired - float(uadj)) > 1e-9:
+                    out.loc[ix, "underlying_adj_close"] = repaired
+                    n_fixed += 1
+            LOGGER.warning(
+                "repaired reverting underlying_adj_close island for %s: %s→%s "
+                "(scale=%.4f, flank≈%.4f)",
+                und_sym,
+                dates[i],
+                dates[island_end],
+                scale,
+                u_prev,
+            )
+            # Refresh local series after repair so chained islands can be found.
+            for k in range(i, island_end + 1):
+                unds[k] *= scale
+                by_date[dates[k]]["und"] = unds[k]
+            i = island_end + 2
+
+    if n_fixed > 0:
+        LOGGER.info("repaired reverting underlying_adj_close island(s) on %d row(s)", n_fixed)
+    return out, n_fixed
+
+
 def repair_underlying_adj_close_split_basis(
     df: pd.DataFrame,
     etf_to_underlying: dict[str, str],
@@ -1902,6 +2042,16 @@ def repair_underlying_adj_close_split_basis(
         pts = sorted(by_date.items())
         post_vals: list[float] = []
         for eff, mult in sorted(declared):
+            # If adj is already continuous through this declared event, the split is
+            # absorbed in Yahoo's series — do not invent a pre/post basis scale.
+            # (LCID Sep reverse is continuous; May/Jul garbage islands are separate.)
+            near_event_cliffs = [
+                c for c in find_underlying_adj_cliffs(cliff_rows, [])
+                if abs((c["date"] - eff).days) <= 21
+            ]
+            if not near_event_cliffs:
+                continue
+
             boundary = eff
             for i in range(1, len(pts)):
                 d_prev, u_prev = pts[i - 1]
@@ -1923,11 +2073,44 @@ def repair_underlying_adj_close_split_basis(
             post_med = sorted(post_vals)[len(post_vals) // 2]
             high_threshold = post_med * 2.5
 
+            # Pre-compute short reverting islands so a later declared reverse
+            # split cannot inflate garbage Yahoo highs (LCDL/LCID May/Jul 2025).
+            island_dates: set[date] = set()
+            und_seq = [(d, px) for d, px in pts if d < boundary]
+            k = 1
+            while k < len(und_seq):
+                d_prev, u_prev = und_seq[k - 1]
+                d_cur, u_cur = und_seq[k]
+                if u_prev <= 0 or u_cur <= 0:
+                    k += 1
+                    continue
+                if abs(math.log(u_cur / u_prev)) < math.log(1.8):
+                    k += 1
+                    continue
+                end_k = None
+                for j in range(k + 1, min(len(und_seq), k + 41)):
+                    u_j = und_seq[j][1]
+                    if u_j <= 0:
+                        continue
+                    if abs(math.log(u_j / und_seq[j - 1][1])) < math.log(1.8):
+                        continue
+                    if abs(u_j / u_prev - 1.0) <= 0.30:
+                        end_k = j - 1
+                        break
+                if end_k is not None and end_k >= k:
+                    for t in range(k, end_k + 1):
+                        island_dates.add(und_seq[t][0])
+                    k = end_k + 2
+                else:
+                    k += 1
+
             for ix, row in out.loc[mask].iterrows():
                 uadj = pd.to_numeric(row.get("underlying_adj_close"), errors="coerce")
                 if not (math.isfinite(float(uadj)) and float(uadj) > 0):
                     continue
                 if row["date"] >= boundary:
+                    continue
+                if row["date"] in island_dates:
                     continue
                 if float(uadj) < high_threshold:
                     continue
@@ -3308,6 +3491,14 @@ def main() -> None:
     # Must run on full merged history: ``incoming`` is usually one trading day,
     # so an earlier backfill never saw legacy null rows in the parquet store.
     merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
+    n_und_island_total = 0
+    for _pass in range(5):
+        merged, n_und_island = repair_underlying_adj_close_reverting_islands(merged, underlying_map)
+        n_und_island_total += n_und_island
+        if n_und_island <= 0:
+            break
+    if n_und_island_total:
+        LOGGER.info("Repaired reverting underlying_adj_close islands on %d row(s)", n_und_island_total)
     merged, n_und_split = repair_underlying_adj_close_split_basis(merged, underlying_map)
     if n_und_split:
         LOGGER.info("Repaired underlying_adj_close split basis on %d row(s)", n_und_split)
