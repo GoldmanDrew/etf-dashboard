@@ -5169,7 +5169,8 @@ function ExpectedDecayCalculator() {
 
 // ── Gross vs net comparison (detail strip): two rails, independent scales ──
 function GrossDecayComparisonStrip({ r }) {
-  const gR = Number(r.gross_decay_annual);
+  const gRRaw = r.gross_decay_annual;
+  const gR = gRRaw == null || gRRaw === '' ? NaN : Number(gRRaw);
   const gHead = expectedDecayHeadlineValue(r, '6M');
   const gE = gHead != null && Number.isFinite(Number(gHead)) ? Number(gHead) : NaN;
 
@@ -5535,11 +5536,22 @@ function NetEdgeQuantileTable({ r }) {
 function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheTick = 0, borrowHistoryMap = {} }) {
   const fv = forecastVolForScenario(r, chartVolLookbackRange);
   const fSig = fv?.sigma;
-  const gR = Number(r?.gross_decay_annual);
-  const bAvg = Number(r?.borrow_avg_annual);
+  const gRRaw = r?.gross_decay_annual;
+  const gR = gRRaw == null || gRRaw === '' ? NaN : Number(gRRaw);
+  const bAvgRaw = r?.borrow_avg_annual;
+  const bAvg = bAvgRaw == null || bAvgRaw === '' ? NaN : Number(bAvgRaw);
   const realizedNetVsAvgBorrow = Number.isFinite(gR) && Number.isFinite(bAvg)
     ? gR - annualBorrowDrag(bAvg)
     : null;
+  const netDecaySpot = r?.net_decay == null || r?.net_decay === '' ? null : Number(r.net_decay);
+  const netDecayDisplay = realizedNetVsAvgBorrow != null && Number.isFinite(realizedNetVsAvgBorrow)
+    ? realizedNetVsAvgBorrow
+    : (Number.isFinite(netDecaySpot) ? netDecaySpot : null);
+  const grossPartial = (
+    r?.gross_decay_quality === 'partial'
+    || String(r?.gross_decay_annual_source || '').includes('partial')
+    || String(r?.gross_decay_annual_source || '').startsWith('annualized_from_')
+  );
   const volShapeHistGrid = useMemo(() => {
     void metricsCacheTick;
     const rows = ETF_METRICS_CACHE?.bySymbol?.[String(r?.symbol || '').toUpperCase()];
@@ -5587,17 +5599,22 @@ function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheT
           </div>
           <div className="detail-item">
             <div className="dlabel">Net decay (realized)</div>
-            <div className={cls('dval', spreadCls(realizedNetVsAvgBorrow ?? r.net_decay))}>
-              {realizedNetVsAvgBorrow != null && Number.isFinite(realizedNetVsAvgBorrow) ? fmt(realizedNetVsAvgBorrow) : fmt(r.net_decay)}
+            <div className={cls('dval', spreadCls(netDecayDisplay))}>
+              {netDecayDisplay != null ? fmt(netDecayDisplay) : '—'}
             </div>
             {realizedNetVsAvgBorrow != null && Number.isFinite(realizedNetVsAvgBorrow) ? (
               <div className="detail-item-hint">
-                vs spot borrow: {fmt(r.net_decay)}
+                vs spot borrow: {Number.isFinite(netDecaySpot) ? fmt(netDecaySpot) : '—'}
                 <br />
                 (gross − borrow, Act/360 ×365/360)
+                {grossPartial ? <><br />partial history estimate</> : null}
               </div>
             ) : (
-              <div className="detail-item-hint">No hist. avg → gross − spot borrow only.</div>
+              <div className="detail-item-hint">
+                {netDecayDisplay != null
+                  ? (grossPartial ? 'Partial history · gross − spot borrow.' : 'No hist. avg → gross − spot borrow only.')
+                  : 'Insufficient realized gross history.'}
+              </div>
             )}
           </div>
           <div className="detail-item">

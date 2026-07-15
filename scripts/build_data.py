@@ -31,7 +31,11 @@ import pandas as pd
 import requests
 
 from vol_shape_metrics import apply_vol_shape_to_record, load_vol_shape_from_metrics
-from realized_gross_decay import load_gross_decay_from_metrics, load_realized_pair_gross_20d_from_metrics
+from realized_gross_decay import (
+    load_gross_decay_from_metrics,
+    load_realized_pair_gross_20d_from_metrics,
+    best_estimate_gross_from_realized_pair_fields,
+)
 from product_taxonomy import volatility_etp_symbols, yieldboost_income_pairs, write_spa_export
 from operational_signals import enrich_records_with_operational_signals
 from split_adjustments import (
@@ -3926,6 +3930,82 @@ def _normalize_borrow_fields(rec: dict) -> None:
         )
 
 
+def _apply_metrics_gross_estimate(
+    rec: dict,
+    gd: dict | None,
+    *,
+    screener_gross: float | None = None,
+    rp20: dict | None = None,
+) -> None:
+    """Set realized gross/net from metrics (full or partial) or 20d annualization fallback."""
+    metrics_gross = None
+    if gd and gd.get("gross_decay_annual") is not None:
+        metrics_gross = float(gd["gross_decay_annual"])
+    split_suspect = bool(gd.get("underlying_split_suspect")) if gd else False
+    use_screener = False
+    if metrics_gross is not None and screener_gross is not None:
+        if split_suspect:
+            use_screener = True
+        elif metrics_gross > 1.5 and screener_gross < metrics_gross * 0.45:
+            use_screener = True
+        elif metrics_gross < -0.5 and screener_gross > metrics_gross * 0.45:
+            use_screener = True
+        elif (
+            metrics_gross * screener_gross < 0
+            and abs(metrics_gross - screener_gross) > 0.5
+        ):
+            use_screener = True
+
+    if metrics_gross is not None:
+        if use_screener and screener_gross is not None:
+            rec["gross_decay_annual"] = screener_gross
+            rec["gross_decay_annual_source"] = "screener_fallback"
+            rec["gross_decay_quality"] = "full"
+        else:
+            rec["gross_decay_annual"] = metrics_gross
+            rec["gross_decay_annual_source"] = (
+                gd.get("gross_decay_annual_source")
+                or gd.get("source")
+                or "etf_metrics_daily"
+            )
+            rec["gross_decay_quality"] = gd.get("quality") or (
+                "partial" if "partial" in str(rec["gross_decay_annual_source"]) else "full"
+            )
+        if gd and gd.get("n_obs") is not None:
+            rec["gross_decay_n_obs"] = gd.get("n_obs")
+        if split_suspect and use_screener:
+            rec["gross_decay_split_suspect"] = True
+        else:
+            rec.pop("gross_decay_split_suspect", None)
+    elif rec.get("gross_decay_annual") is None and rp20:
+        est = best_estimate_gross_from_realized_pair_fields(rp20)
+        if est and est.get("gross_decay_annual") is not None:
+            rec["gross_decay_annual"] = est["gross_decay_annual"]
+            rec["gross_decay_annual_source"] = est.get(
+                "gross_decay_annual_source", "annualized_from_20d_period"
+            )
+            rec["gross_decay_n_obs"] = est.get("n_obs")
+            rec["gross_decay_quality"] = "partial"
+
+    if rec.get("gross_decay_annual") is not None and rec.get("borrow_current") is not None:
+        rec["net_decay_annual"] = round(
+            float(rec["gross_decay_annual"])
+            - float(rec["borrow_current"]) * BORROW_ACT360_FACTOR,
+            6,
+        )
+        rec["net_decay"] = rec["net_decay_annual"]
+
+
+def _gross_decay_stats_status(rec: dict, delta_obs: int) -> str:
+    if rec.get("gross_decay_annual") is None:
+        return "insufficient_history" if delta_obs < 40 else "provider_missing"
+    quality = str(rec.get("gross_decay_quality") or "")
+    source = str(rec.get("gross_decay_annual_source") or "")
+    if quality == "partial" or "partial" in source or source.startswith("annualized_from_"):
+        return "partial"
+    return "valid"
+
+
 def refresh_borrow_only() -> None:
     """Update borrow + shares in existing dashboard JSON without re-pulling universe."""
     if not OUTPUT_FILE.exists():
@@ -4392,34 +4472,14 @@ def repair_published_quality_fields() -> None:
         sym = norm_sym(str(rec.get("symbol") or ""))
         src = source_rows.get(sym, {})
         gd = gross_map.get(sym)
-        if gd and gd.get("gross_decay_annual") is not None:
-            metrics_gross = float(gd["gross_decay_annual"])
-            screener_gross = _safe_float(src, "blended_gross_decay")
-            split_suspect = bool(gd.get("underlying_split_suspect"))
-            use_screener = bool(
-                screener_gross is not None
-                and (
-                    split_suspect
-                    or (metrics_gross > 1.5 and screener_gross < metrics_gross * 0.45)
-                    or (metrics_gross < -0.5 and screener_gross > metrics_gross * 0.45)
-                    or (metrics_gross * screener_gross < 0 and abs(metrics_gross - screener_gross) > 0.5)
-                )
-            )
-            rec["gross_decay_annual"] = screener_gross if use_screener else metrics_gross
-            rec["gross_decay_annual_source"] = "screener_fallback" if use_screener else "etf_metrics_daily"
-            rec["gross_decay_n_obs"] = gd.get("n_obs")
-            if split_suspect:
-                rec["gross_decay_split_suspect"] = True
-            else:
-                rec.pop("gross_decay_split_suspect", None)
-            if rec.get("borrow_current") is not None:
-                rec["net_decay_annual"] = round(
-                    float(rec["gross_decay_annual"])
-                    - float(rec["borrow_current"]) * BORROW_ACT360_FACTOR,
-                    6,
-                )
-
         rp20 = realized_map.get(sym)
+        _apply_metrics_gross_estimate(
+            rec,
+            gd,
+            screener_gross=_safe_float(src, "blended_gross_decay"),
+            rp20=rp20 if rp20 and not rp20.get("suppressed") else None,
+        )
+
         for key in list(rec):
             if key.startswith("realized_pair_gross_"):
                 rec.pop(key, None)
@@ -4427,6 +4487,9 @@ def repair_published_quality_fields() -> None:
             for key, value in rp20.items():
                 if key not in ("n_days", "suppressed", "underlying_split_suspect") and value is not None:
                     rec[key] = value
+            # Second chance: if gross still missing after metrics apply, annualize 20d.
+            if rec.get("gross_decay_annual") is None:
+                _apply_metrics_gross_estimate(rec, None, rp20=rp20)
         elif rp20 and rp20.get("underlying_split_suspect"):
             rec["realized_pair_gross_20d_split_suspect"] = True
 
@@ -4457,11 +4520,7 @@ def repair_published_quality_fields() -> None:
                 else "stale_fallback" if rec.get("borrow_current") is not None
                 else "provider_missing"
             ),
-            "gross_decay_annual": (
-                "valid" if rec.get("gross_decay_annual") is not None
-                else "insufficient_history" if delta_obs < 40
-                else "provider_missing"
-            ),
+            "gross_decay_annual": _gross_decay_stats_status(rec, delta_obs),
             "realized_pair_gross_20d": (
                 "valid" if rec.get("realized_pair_gross_20d") is not None
                 else "insufficient_history" if rec.get("realized_pair_gross_partial") is not None
@@ -5066,45 +5125,19 @@ def build():
         }
         apply_vol_shape_to_record(rec, vol_shape_by_symbol.get(norm_sym(sym)))
         _gd = gross_decay_by_symbol.get(norm_sym(sym))
-        if _gd and _gd.get("gross_decay_annual") is not None:
-            metrics_gross = float(_gd["gross_decay_annual"])
-            screener_gross = _safe_float(rdict, "blended_gross_decay")
-            split_suspect = bool(_gd.get("underlying_split_suspect"))
-            use_screener = False
-            if screener_gross is not None:
-                if split_suspect:
-                    use_screener = True
-                elif metrics_gross > 1.5 and screener_gross < metrics_gross * 0.45:
-                    use_screener = True
-                elif metrics_gross < -0.5 and screener_gross > metrics_gross * 0.45:
-                    use_screener = True
-                elif (
-                    metrics_gross * screener_gross < 0
-                    and abs(metrics_gross - screener_gross) > 0.5
-                ):
-                    use_screener = True
-            if use_screener and screener_gross is not None:
-                rec["gross_decay_annual"] = screener_gross
-                rec["gross_decay_annual_source"] = "screener_fallback"
-                rec["gross_decay_n_obs"] = _gd.get("n_obs")
-                if split_suspect:
-                    rec["gross_decay_split_suspect"] = True
-            else:
-                rec["gross_decay_annual"] = metrics_gross
-                rec["gross_decay_annual_source"] = "etf_metrics_daily"
-                rec["gross_decay_n_obs"] = _gd.get("n_obs")
-            if rec.get("borrow_current") is not None:
-                # Act/360: a 1-year hold at the quoted annual fee costs rate x 365/360.
-                rec["net_decay_annual"] = round(
-                    float(rec["gross_decay_annual"])
-                    - float(rec["borrow_current"]) * BORROW_ACT360_FACTOR,
-                    6,
-                )
         _rp20 = realized_pair_gross_20d_by_symbol.get(norm_sym(sym))
+        _apply_metrics_gross_estimate(
+            rec,
+            _gd,
+            screener_gross=_safe_float(rdict, "blended_gross_decay"),
+            rp20=_rp20 if _rp20 and not _rp20.get("suppressed") else None,
+        )
         if _rp20 and not _rp20.get("suppressed"):
             for _k, _v in _rp20.items():
                 if _k not in ("n_days", "suppressed", "underlying_split_suspect") and _v is not None:
                     rec[_k] = _v
+            if rec.get("gross_decay_annual") is None:
+                _apply_metrics_gross_estimate(rec, None, rp20=_rp20)
         elif _rp20 and _rp20.get("underlying_split_suspect"):
             rec["realized_pair_gross_20d_split_suspect"] = True
         # Every displayed realized value needs explicit provenance.  When the
@@ -5128,12 +5161,7 @@ def build():
             borrow_status = "stale_fallback" if rec.get("borrow_missing") else "valid"
         else:
             borrow_status = "provider_missing"
-        if rec.get("gross_decay_annual") is not None:
-            gross_status = "valid"
-        elif delta_obs_for_status < 40:
-            gross_status = "insufficient_history"
-        else:
-            gross_status = "provider_missing"
+        gross_status = _gross_decay_stats_status(rec, delta_obs_for_status)
         if rec.get("realized_pair_gross_20d") is not None:
             realized_20d_status = "valid"
         elif rec.get("realized_pair_gross_partial") is not None:
@@ -5501,6 +5529,14 @@ def build():
         )
         if fof_records:
             records.extend(fof_records)
+            # Safety net: FoF rows are appended after the main quality-stamp loop.
+            try:
+                from yieldboost_fof_pair_pnl import apply_fof_quality_fields
+
+                for fof_rec in fof_records:
+                    apply_fof_quality_fields(fof_rec)
+            except Exception as exc:
+                print(f"  Warning: FoF quality stamp failed: {exc}")
             print(
                 f"  FoF dashboard rows: {len(fof_records)} "
                 f"({', '.join(r.get('symbol', '?') for r in fof_records)})"

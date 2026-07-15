@@ -23,6 +23,9 @@ from price_basis import (
 
 TRADING_DAYS = 252
 DEFAULT_MIN_OBS = 40
+# Below full min_obs but still enough to publish a best-estimate annualized
+# mean daily log-drag (noisier; tagged quality=partial / source=*_partial).
+PARTIAL_MIN_OBS = 10
 REALIZED_PAIR_GROSS_20D_HORIZON = 20
 MAX_CONTIGUOUS_METRICS_GAP_DAYS = 45
 HARD_LIFECYCLE_GAP_DAYS = 365
@@ -468,6 +471,54 @@ def compute_realized_pair_gross_20d(
     return fields
 
 
+def annualize_log_drag_mean(drags: list[float]) -> float | None:
+    """Annualize mean daily log-drag (short-favorable +)."""
+    clean = [float(x) for x in (drags or []) if x is not None and math.isfinite(float(x))]
+    if not clean:
+        return None
+    return float(sum(clean) / len(clean) * TRADING_DAYS)
+
+
+def annualize_period_log_drag(gross_log: float, obs_days: int) -> float | None:
+    """Scale a period Σ log-drag to a 252d rate: gross_log × (252 / N)."""
+    if not math.isfinite(float(gross_log)):
+        return None
+    n = int(obs_days)
+    if n < PARTIAL_MIN_OBS:
+        return None
+    return float(gross_log) * (TRADING_DAYS / float(n))
+
+
+def best_estimate_gross_from_realized_pair_fields(
+    fields: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Fallback annualized gross from 20d (or partial) period log-drag fields."""
+    if not fields or fields.get("suppressed"):
+        return None
+    if fields.get("realized_pair_gross_20d_log") is not None:
+        obs = int(fields.get("realized_pair_gross_20d_obs") or 0)
+        gross_log = float(fields["realized_pair_gross_20d_log"])
+        source = "annualized_from_20d_period"
+    elif fields.get("realized_pair_gross_partial_log") is not None:
+        obs = int(fields.get("realized_pair_gross_20d_obs") or 0)
+        gross_log = float(fields["realized_pair_gross_partial_log"])
+        source = "annualized_from_partial_period"
+    else:
+        return None
+    annual = annualize_period_log_drag(gross_log, obs)
+    if annual is None:
+        return None
+    return {
+        "gross_decay_annual": round(annual, 6),
+        "n_obs": obs,
+        "quality": "partial",
+        "gross_decay_annual_source": source,
+        "start_date": fields.get("realized_pair_gross_20d_start_date"),
+        "end_date": fields.get("realized_pair_gross_20d_end_date"),
+        "pair_drag_basis": PAIR_DRAG_BASIS,
+    }
+
+
 def compute_gross_decay_annual(
     rows: list[dict[str, Any]],
     beta: float,
@@ -475,10 +526,17 @@ def compute_gross_decay_annual(
     *,
     underlying_split_events: list[tuple[dt.date, float]] | None = None,
     min_obs: int = DEFAULT_MIN_OBS,
+    partial_min_obs: int = PARTIAL_MIN_OBS,
 ) -> dict[str, Any] | None:
-    """Mean daily log-drag annualized: beta * log(R_u) - log(R_etf) on split-aware TR."""
+    """Mean daily log-drag annualized: beta * log(R_u) - log(R_etf) on split-aware TR.
+
+    When ``partial_min_obs <= n_obs < min_obs``, still returns an annualized
+    best estimate with ``quality="partial"`` (noisier short panel).
+    """
     if not math.isfinite(beta):
         return None
+    full_min = max(1, int(min_obs))
+    part_min = max(1, min(int(partial_min_obs), full_min))
     rows = latest_contiguous_metrics_segment(
         [r for r in rows if _metrics_row_has_usable_prices(r)]
     )
@@ -488,7 +546,7 @@ def compute_gross_decay_annual(
         split_events or [],
         underlying_split_events=underlying_split_events or [],
     )
-    if len(tr) < min_obs + 1:
+    if len(tr) < part_min + 1:
         return None
 
     skip_dates: set[dt.date] = set()
@@ -540,12 +598,19 @@ def compute_gross_decay_annual(
         if drag is None or not math.isfinite(float(drag)):
             continue
         drags.append(float(drag))
-    if len(drags) < min_obs:
+    if len(drags) < part_min:
         return None
-    mean_drag = sum(drags) / len(drags)
+    mean_ann = annualize_log_drag_mean(drags)
+    if mean_ann is None:
+        return None
+    quality = "full" if len(drags) >= full_min else "partial"
     return {
-        "gross_decay_annual": round(mean_drag * TRADING_DAYS, 6),
+        "gross_decay_annual": round(mean_ann, 6),
         "n_obs": len(drags),
+        "quality": quality,
+        "gross_decay_annual_source": (
+            "etf_metrics_daily" if quality == "full" else "etf_metrics_daily_partial"
+        ),
         "start_date": daily[0]["date"] if daily else None,
         "end_date": daily[-1]["date"] if daily else None,
         "pair_drag_basis": PAIR_DRAG_BASIS,
@@ -560,6 +625,7 @@ def load_gross_decay_from_metrics(
     beta_by_symbol: dict[str, float] | None = None,
     underlying_by_symbol: dict[str, str] | None = None,
     min_obs: int = DEFAULT_MIN_OBS,
+    partial_min_obs: int = PARTIAL_MIN_OBS,
 ) -> dict[str, dict[str, Any]]:
     """Build per-symbol realized gross decay from joint ETF metrics rows."""
     if not metrics_path.exists():
@@ -576,6 +642,7 @@ def load_gross_decay_from_metrics(
     df["date"] = df["date"].astype(str).str[:10]
     df["ticker"] = df["ticker"].astype(str).str.upper()
     out: dict[str, dict[str, Any]] = {}
+    part_min = max(1, min(int(partial_min_obs), int(min_obs)))
 
     for sym in sorted(universe_symbols):
         sym_u = str(sym or "").strip().upper()
@@ -586,7 +653,7 @@ def load_gross_decay_from_metrics(
             continue
         rows = sub.to_dict("records")
         joint = [r for r in rows if _metrics_row_has_usable_prices(r)]
-        if len(joint) < min_obs + 1:
+        if len(joint) < part_min + 1:
             continue
         # Corporate-action/cliff checks must use the same current lifecycle as
         # the realized calculation.  Reused tickers can have an unrelated old
@@ -615,9 +682,10 @@ def load_gross_decay_from_metrics(
             etf_events,
             underlying_split_events=und_events,
             min_obs=min_obs,
+            partial_min_obs=part_min,
         )
         if result:
-            result["source"] = "etf_metrics_daily"
+            result["source"] = result.get("gross_decay_annual_source") or "etf_metrics_daily"
             if und_cliffs:
                 result["underlying_split_suspect"] = True
                 result["underlying_split_cliff_dates"] = [

@@ -15,7 +15,10 @@ sys.path.insert(0, str(SCRIPTS))
 from realized_gross_decay import (  # noqa: E402
     MAX_PAIR_DRAG_GAP_DAYS,
     PAIR_DRAG_BASIS,
+    PARTIAL_MIN_OBS,
     REALIZED_PAIR_GROSS_20D_HORIZON,
+    annualize_period_log_drag,
+    best_estimate_gross_from_realized_pair_fields,
     build_daily_log_drag_series,
     build_daily_log_drag_series_with_meta,
     collapse_partial_horizons,
@@ -229,12 +232,54 @@ def test_ticker_reuse_gap_makes_60d_partial_and_gross_unavailable():
     rows = old_rows + new_rows
     annual = compute_gross_decay_annual(rows, beta=2.0, split_events=[], min_obs=40)
     pair = compute_realized_pair_gross_20d(rows, beta=2.0, split_events=[], borrow_annual=0.1)
-    assert annual is None
+    assert annual is None  # only ~4 drag days after lifecycle cut (< PARTIAL_MIN_OBS)
     assert pair is not None
     assert pair["realized_pair_gross_20d_obs"] == 4
     assert pair["realized_pair_gross_20d_sufficient"] is False
     assert "realized_pair_gross_20d" not in pair
     assert "realized_pair_gross_partial" in pair
+
+
+def test_partial_history_returns_annualized_best_estimate():
+    """10–39 drag days → quality=partial annualized mean, not null."""
+    rows = _flat_joint_rows(25, etf_drift=-0.001, und_drift=0.002)  # ~24 drag days
+    result = compute_gross_decay_annual(rows, beta=2.0, split_events=[], min_obs=40)
+    assert result is not None
+    assert result["quality"] == "partial"
+    assert result["n_obs"] >= PARTIAL_MIN_OBS
+    assert result["n_obs"] < 40
+    assert result["gross_decay_annual_source"] == "etf_metrics_daily_partial"
+    assert result["gross_decay_annual"] > 0
+
+    # Full panel still quality=full
+    full = compute_gross_decay_annual(
+        _flat_joint_rows(50, etf_drift=-0.001, und_drift=0.002),
+        beta=2.0,
+        split_events=[],
+        min_obs=40,
+    )
+    assert full is not None
+    assert full["quality"] == "full"
+    assert full["gross_decay_annual_source"] == "etf_metrics_daily"
+
+
+def test_best_estimate_from_20d_period_log():
+    fields = {
+        "realized_pair_gross_20d_log": 0.10,
+        "realized_pair_gross_20d_obs": 20,
+        "realized_pair_gross_20d_start_date": "2026-06-01",
+        "realized_pair_gross_20d_end_date": "2026-06-29",
+    }
+    est = best_estimate_gross_from_realized_pair_fields(fields)
+    assert est is not None
+    assert est["quality"] == "partial"
+    assert est["gross_decay_annual_source"] == "annualized_from_20d_period"
+    assert abs(est["gross_decay_annual"] - annualize_period_log_drag(0.10, 20)) < 1e-9
+
+    too_thin = best_estimate_gross_from_realized_pair_fields(
+        {"realized_pair_gross_partial_log": 0.05, "realized_pair_gross_20d_obs": 5}
+    )
+    assert too_thin is None
 
 
 def test_build_daily_log_drag_skips_orphan_leg_jumps():
