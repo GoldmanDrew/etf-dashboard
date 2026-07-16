@@ -200,6 +200,18 @@ def test_dedupe_corp_hint_padding_triple_mtyy():
     assert merged == [(dt.date(2026, 6, 3), 6.0)]
 
 
+def test_filter_snaps_koru_style_forward_split_hint_date():
+    """Corp ±1d padding can land on execution+1 while the close jumps on execution day."""
+    points = [
+        (dt.date(2026, 7, 14), 481.34, 481.34),
+        (dt.date(2026, 7, 15), 21.87, 21.87),
+    ]
+    # dedupe prefers latest hint day (Jul 16) — no bar there yet
+    events = [(dt.date(2026, 7, 16), 0.05)]
+    verified = filter_splits_needing_close_basis_fix(points, events)
+    assert verified == [(dt.date(2026, 7, 15), 0.05)]
+
+
 def test_filter_keeps_smup_style_reverse_split():
     points = [
         (dt.date(2026, 1, 23), 421.25, 421.25),
@@ -207,6 +219,27 @@ def test_filter_keeps_smup_style_reverse_split():
     ]
     events = [(dt.date(2026, 1, 26), 0.1)]
     assert filter_splits_needing_close_basis_fix(points, events) == events
+
+
+def test_build_market_windows_koru_forward_split_repairs_returns():
+    points = [
+        (dt.date(2026, 4, 15), 445.88, 445.88),
+        (dt.date(2026, 7, 14), 481.34, 481.34),
+        (dt.date(2026, 7, 15), 21.87, 21.87),
+    ]
+    events = [(dt.date(2026, 7, 15), 0.05)]
+    windows = build_data._build_market_windows(
+        points,
+        dividends=[],
+        split_events=events,
+        asof_calendar=dt.date(2026, 7, 15),
+    )
+    w = windows["3M"]
+    assert w["split_factor_start_to_end"] == pytest.approx(0.05)
+    # ~flat on post-split basis: 21.87 / (445.88 * 0.05) - 1 ≈ -0.019
+    assert w["price_return"] == pytest.approx((21.87 / (445.88 * 0.05)) - 1, rel=1e-3)
+    assert w["adj_return"] == pytest.approx(w["price_return"], abs=1e-6)
+    assert w["price_return"] > -0.10
 
 
 def test_filter_keeps_aplz_style_reverse_split_declared_five():

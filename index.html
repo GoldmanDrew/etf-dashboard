@@ -1502,17 +1502,17 @@
 <script src="assets/vendor/react-dom.production.min.js"></script>
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
-<script src="assets/chart_returns.js?v=cr-v2"></script>
+<script src="assets/chart_returns.js?v=cr-v3"></script>
 <script src="assets/price_basis.js?v=pb-v3"></script>
 <script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab_spots.js?v=tl-spots-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v4"></script>
 <script src="assets/pair_backtest.js?v=pb-v9"></script>
 <script src="assets/bucket4_backtest.js?v=b4-v2"></script>
-<link rel="stylesheet" href="assets/bucket5_product.css?v=b5p-v4">
+<link rel="stylesheet" href="assets/bucket5_product.css?v=b5p-v5">
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.7/dist/lightweight-charts.standalone.production.js"></script>
-<script src="assets/bucket5_product.js?v=b5p-v4"></script>
-<script src="assets/bucket5_insurance_backtest.js?v=b5p-v4"></script>
+<script src="assets/bucket5_product.js?v=b5p-v5"></script>
+<script src="assets/bucket5_insurance_backtest.js?v=b5p-v5"></script>
 <script src="assets/realized_decay.js?v=rd-v9"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
@@ -8198,6 +8198,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const etfEndAdjClose = Number(divPoint?.etf_end_adj_close);
   const undEndAdjClose = Number(divPoint?.underlying_end_adj_close);
   const etfStartAdjClose = Number(divPoint?.etf_start_adj_close);
+  const undStartAdjClose = Number(divPoint?.underlying_start_adj_close);
   const etfSplitEndToAsof = Number(divPoint?.etf_split_factor_end_to_asof);
   const undSplitEndToAsof = Number(divPoint?.underlying_split_factor_end_to_asof);
   const etfWindowDates = divPoint?.etf_start_date && divPoint?.etf_end_date ? `${divPoint.etf_start_date} to ${divPoint.etf_end_date}` : 'window unavailable';
@@ -9056,38 +9057,77 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
         divPoint?.underlying_split_factor_start_to_end,
       )
       : null);
+  // Repair window returns when Yahoo left a forward-split cliff unadjusted.
+  const etfWindowPriceRet = (typeof chartRetFns.splitAwareWindowPriceReturn === 'function'
+    && Number.isFinite(etfStartClose) && Number.isFinite(etfEndClose))
+    ? chartRetFns.splitAwareWindowPriceReturn({
+      startClose: etfStartClose,
+      endClose: etfEndClose,
+      splitFactorStartToEnd: divPoint?.etf_split_factor_start_to_end,
+      fallback: etfPriceRet,
+    })
+    : etfPriceRet;
+  const undWindowPriceRet = (typeof chartRetFns.splitAwareWindowPriceReturn === 'function'
+    && Number.isFinite(undStartClose) && Number.isFinite(undEndClose))
+    ? chartRetFns.splitAwareWindowPriceReturn({
+      startClose: undStartClose,
+      endClose: undEndClose,
+      splitFactorStartToEnd: divPoint?.underlying_split_factor_start_to_end,
+      fallback: undPriceRet,
+    })
+    : undPriceRet;
+  const etfWindowAdjRet = (typeof chartRetFns.splitAwareWindowPriceReturn === 'function'
+    && Number.isFinite(etfStartAdjClose) && Number.isFinite(etfEndAdjClose)
+    && Math.abs((etfAdjRet ?? 0) - (etfPriceRet ?? 0)) <= 0.02)
+    ? chartRetFns.splitAwareWindowPriceReturn({
+      startClose: etfStartAdjClose,
+      endClose: etfEndAdjClose,
+      splitFactorStartToEnd: divPoint?.etf_split_factor_start_to_end,
+      fallback: etfAdjRet,
+    })
+    : etfAdjRet;
+  const undWindowAdjRet = (typeof chartRetFns.splitAwareWindowPriceReturn === 'function'
+    && Number.isFinite(undStartAdjClose) && Number.isFinite(undEndAdjClose)
+    && Math.abs((undAdjRet ?? 0) - (undPriceRet ?? 0)) <= 0.02)
+    ? chartRetFns.splitAwareWindowPriceReturn({
+      startClose: undStartAdjClose,
+      endClose: undEndAdjClose,
+      splitFactorStartToEnd: divPoint?.underlying_split_factor_start_to_end,
+      fallback: undAdjRet,
+    })
+    : undAdjRet;
   const etfLivePriceRet = (hasCachedSpotEtf && Number.isFinite(etfEndClose) && etfEndClose > 0)
     ? (typeof chartRetFns.livePriceReturnFromWindow === 'function'
       ? chartRetFns.livePriceReturnFromWindow({
         liveSpot: tradeSpotEtf,
         endClose: etfEndClose,
-        priceReturn: etfPriceRet,
+        priceReturn: etfWindowPriceRet,
         splitFactorEndToAsof: etfSplitEndToAsof,
       })
-      : etfPriceRet)
-    : etfPriceRet;
+      : etfWindowPriceRet)
+    : etfWindowPriceRet;
   const undLivePriceRet = (hasCachedSpotUnd && Number.isFinite(undEndClose) && undEndClose > 0)
     ? (typeof chartRetFns.livePriceReturnFromWindow === 'function'
       ? chartRetFns.livePriceReturnFromWindow({
         liveSpot: tradeSpotUnderlying,
         endClose: undEndClose,
-        priceReturn: undPriceRet,
+        priceReturn: undWindowPriceRet,
         splitFactorEndToAsof: undSplitEndToAsof,
       })
-      : undPriceRet)
-    : undPriceRet;
+      : undWindowPriceRet)
+    : undWindowPriceRet;
   const etfAdjRetDisplay = (hasCachedSpotEtf && typeof chartRetFns.liveTrReturnFromWindow === 'function')
     ? chartRetFns.liveTrReturnFromWindow({
       liveSpot: tradeSpotEtf,
       endClose: etfEndClose,
       endAdjClose: etfEndAdjClose,
-      trReturn: etfAdjRet,
-      priceReturn: etfPriceRet,
+      trReturn: etfWindowAdjRet,
+      priceReturn: etfWindowPriceRet,
       splitFactorEndToAsof: etfSplitEndToAsof,
       dividendYield: etfDivYieldAdj ?? etfDivYield,
     })
-    : ((Number.isFinite(etfAdjRet))
-      ? etfAdjRet
+    : ((Number.isFinite(etfWindowAdjRet))
+      ? etfWindowAdjRet
       : ((Number.isFinite(etfLivePriceRet) && Number.isFinite(etfDivYieldAdj ?? etfDivYield))
         ? (etfLivePriceRet + (etfDivYieldAdj ?? etfDivYield))
         : null));
@@ -9096,13 +9136,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       liveSpot: tradeSpotUnderlying,
       endClose: undEndClose,
       endAdjClose: undEndAdjClose,
-      trReturn: undAdjRet,
-      priceReturn: undPriceRet,
+      trReturn: undWindowAdjRet,
+      priceReturn: undWindowPriceRet,
       splitFactorEndToAsof: undSplitEndToAsof,
       dividendYield: undDivYieldAdj ?? undDivYield,
     })
-    : ((Number.isFinite(undAdjRet))
-      ? undAdjRet
+    : ((Number.isFinite(undWindowAdjRet))
+      ? undWindowAdjRet
       : ((Number.isFinite(undLivePriceRet) && Number.isFinite(undDivYieldAdj ?? undDivYield))
         ? (undLivePriceRet + (undDivYieldAdj ?? undDivYield))
         : null));
@@ -15376,7 +15416,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           return;
         }
       }
-      if (hash === '#/bucket5') {
+      // Keep B5 Product mounted for Overview / Regime / Daily deep links
+      // (`#/bucket5`, `#/bucket5/regime`, `#/bucket5/daily`).
+      if (hash === '#/bucket5' || hash.startsWith('#/bucket5/')) {
         setChartRecord(null);
         setShowInfo(false);
         setShowNews(false);

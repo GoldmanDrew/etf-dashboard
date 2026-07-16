@@ -129,6 +129,32 @@
     return div / denom;
   }
 
+  /**
+   * Recompute window price return on end-close basis using corp/Yahoo split events.
+   * Repairs builds where a forward-split cliff was left unadjusted (KORU 20-for-1).
+   */
+  function splitAwareWindowPriceReturn({
+    startClose,
+    endClose,
+    splitFactorStartToEnd,
+    fallback,
+  }) {
+    const start = Number(startClose);
+    const end = Number(endClose);
+    const stored = Number(fallback);
+    if (!(start > 0 && end > 0)) return Number.isFinite(stored) ? stored : null;
+    let factor = Number(splitFactorStartToEnd);
+    if (!(Number.isFinite(factor) && factor > 0)) factor = 1;
+    const raw = end / start;
+    // When stored factor is 1 but the raw path looks like a discrete split cliff,
+    // infer the whitelist ratio (guards fresh forward splits Yahoo has not tagged).
+    if (Math.abs(factor - 1) <= 1e-9 && Math.abs(raw - 1) > 0.45) {
+      const guessed = nearestSplitRatio(raw, 0.12);
+      if (guessed != null && Math.abs(guessed - 1) > 1e-9) factor = guessed;
+    }
+    return (end / (start * factor)) - 1;
+  }
+
   return {
     SPLIT_RATIOS,
     nearestSplitRatio,
@@ -137,5 +163,6 @@
     liveTrReturnFromWindow,
     liveAdjReturnFromWindow,
     splitAdjustedDividendYield,
+    splitAwareWindowPriceReturn,
   };
 });

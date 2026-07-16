@@ -681,39 +681,76 @@ def filter_splits_needing_close_basis_fix(
     When ``corporate_actions.json`` supplies a declared ratio, trust it when the observed
     jump is within ``jump_tol`` of that mult — even if a different whitelist ratio is
     nearer (e.g. APLZ 5.64× jump with declared 5×).
+
+    Corp-action hint padding (±1 day) often lands one session past the real jump
+    (KORU 20-for-1: hints collapse to execution+1). When the declared date has no
+    matching jump, snap to a nearby close-jump boundary before rejecting.
     """
     if not events:
         return []
     out: list[tuple[dt.date, float]] = []
-    for eff, mult in events:
-        jump = split_close_jump_ratio(points, eff)
+    close_points = [(d, float(c)) for d, c, _a in points]
 
-        # Continuous Yahoo close: adj-basis-switch (APLX 3-for-1) is handled in price_basis;
-        # fully back-adjusted continuous listings (MTYY) must not mechanical-scale.
-        if jump is not None and abs(jump - 1.0) <= 0.08:
-            if yahoo_adj_looks_back_adjusted(points, eff, float(mult), rel_tol=rel_tol):
-                continue
-            continue
+    def _accept_at(eff: dt.date, mult: float, jump: float | None) -> bool:
+        if jump is None:
+            return False
+        if abs(jump - 1.0) <= 0.08:
+            return False
+        matched = match_split_to_price_jump(
+            jump,
+            float(mult),
+            jump_tol=jump_tol,
+            rel_tol=rel_tol,
+        )
+        if matched is None:
+            return False
+        if abs(matched - float(mult)) > max(1e-6, rel_tol * abs(mult)):
+            return False
+        if yahoo_adj_looks_back_adjusted(points, eff, float(mult), rel_tol=rel_tol):
+            return False
+        return True
+
+    for eff, mult in events:
+        use_eff = eff
+        jump = split_close_jump_ratio(points, eff)
 
         if 0 < float(mult) < 1 and yahoo_adj_looks_forward_normalized(
             points, eff, float(mult), rel_tol=rel_tol
         ):
-            continue
-
-        accepted = False
-        if jump is not None:
-            matched = match_split_to_price_jump(
-                jump,
+            # Forward-normalized adj at declared date — try snap before skip.
+            snapped = find_close_jump_boundary(
+                close_points,
                 float(mult),
+                eff,
+                window_days=7,
                 jump_tol=jump_tol,
                 rel_tol=rel_tol,
             )
-            if (
-                matched is not None
-                and abs(matched - float(mult)) <= max(1e-6, rel_tol * abs(mult))
-                and not yahoo_adj_looks_back_adjusted(points, eff, float(mult), rel_tol=rel_tol)
-            ):
-                accepted = True
+            if snapped is None:
+                continue
+            jump = split_close_jump_ratio(points, snapped)
+            if not _accept_at(snapped, float(mult), jump):
+                continue
+            out.append((snapped, float(mult)))
+            continue
+
+        accepted = _accept_at(eff, float(mult), jump)
+
+        if not accepted:
+            # Declared/hint date often ±1 session from the real close jump (KORU).
+            snapped = find_close_jump_boundary(
+                close_points,
+                float(mult),
+                eff,
+                window_days=7,
+                jump_tol=jump_tol,
+                rel_tol=rel_tol,
+            )
+            if snapped is not None and snapped != eff:
+                jump2 = split_close_jump_ratio(points, snapped)
+                if _accept_at(snapped, float(mult), jump2):
+                    accepted = True
+                    use_eff = snapped
 
         if not accepted and jump is None:
             prev_row, curr_row = _metric_row_at_date(metric_rows, eff)
@@ -728,9 +765,10 @@ def filter_splits_needing_close_basis_fix(
                 )
                 if issuer_mult is not None:
                     accepted = True
+                    use_eff = eff
 
         if accepted:
-            out.append((eff, float(mult)))
+            out.append((use_eff, float(mult)))
     return out
 
 

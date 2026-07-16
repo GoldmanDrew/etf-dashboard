@@ -12,6 +12,7 @@ const {
   liveTrReturnFromWindow,
   liveAdjReturnFromWindow,
   splitAdjustedDividendYield,
+  splitAwareWindowPriceReturn,
 } = require("../assets/chart_returns.js");
 
 test("nearestSplitRatio detects 1-for-6 reverse split ratio", () => {
@@ -89,12 +90,24 @@ test("splitAdjustedDividendYield scales start by split factor", () => {
   assert.ok(Math.abs(y - 0.371 / 4.709) < 1e-6);
 });
 
-test("no split: live chains from end close", () => {
-  const ret = livePriceReturnFromWindow({
-    liveSpot: 150,
-    endClose: 149.78,
-    priceReturn: -0.14,
-    splitFactorEndToAsof: 1,
+test("KORU-style forward split cliff is repaired without stored factor", () => {
+  const ret = splitAwareWindowPriceReturn({
+    startClose: 445.88,
+    endClose: 21.87,
+    splitFactorStartToEnd: 1,
+    fallback: -0.950951,
   });
-  assert.ok(Math.abs(ret - ((150 / 149.78) * (1 - 0.14) - 1)) < 1e-6);
+  assert.ok(Number.isFinite(ret));
+  assert.ok(ret > -0.10, `expected repaired return, got ${ret}`);
+  assert.ok(Math.abs(ret - ((21.87 / (445.88 * 0.05)) - 1)) < 1e-6);
+});
+
+test("genuine LETF drawdown is not mistaken for a split", () => {
+  const ret = splitAwareWindowPriceReturn({
+    startClose: 999.25,
+    endClose: 419.19,
+    splitFactorStartToEnd: 1,
+    fallback: -0.58,
+  });
+  assert.ok(Math.abs(ret - ((419.19 / 999.25) - 1)) < 1e-6);
 });

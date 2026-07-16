@@ -3421,7 +3421,28 @@ def _build_market_windows(
             else:
                 dividend_yield_recurring = dividend_yield
         if start_adj > 0:
-            adj_return = (end_adj / start_adj) - 1.0
+            # Yahoo often leaves adj_close == close through fresh forward splits
+            # (KORU 20-for-1). When a verified close-basis factor is in play, put
+            # start adj on the same end basis so TR does not inherit the cliff.
+            if (
+                split_factor_start_to_end != 1.0
+                and abs(split_factor_start_to_end - 1.0) > 1e-9
+            ):
+                raw_adj_ret = (end_adj / start_adj) - 1.0
+                raw_close_ret = (
+                    (end_close / start_close) - 1.0 if start_close > 0 else None
+                )
+                adj_looks_unadjusted = (
+                    raw_close_ret is not None
+                    and abs(raw_adj_ret - raw_close_ret) <= 0.02
+                )
+                if adj_looks_unadjusted:
+                    start_adj_on_end = start_adj * split_factor_start_to_end
+                    adj_return = (end_adj / start_adj_on_end) - 1.0 if start_adj_on_end > 0 else None
+                else:
+                    adj_return = raw_adj_ret
+            else:
+                adj_return = (end_adj / start_adj) - 1.0
 
         results[window] = {
             "vol_annual": stats["vol_annual"],

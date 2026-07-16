@@ -73,7 +73,7 @@ def test_google_news_keel_bitf_chain_still_maps_to_btfl(monkeypatch):
                 "title": "Keel Infrastructure Corp. will Change its Ticker to KEEL from BITF - marketscreener.com",
                 "description": "",
                 "link": "https://example.com/keel",
-                "pub_date": "Wed, 20 May 2026 07:00:00 GMT",
+                "pub_date": "Sat, 20 Jun 2026 07:00:00 GMT",
                 "source": "marketscreener.com",
             }
         ],
@@ -104,7 +104,7 @@ def test_google_news_trex_body_extracts_xrpk_and_solx(monkeypatch):
                 "title": "T-REX 2X XRP Daily Target ETF and T-REX 2X SOL Daily Target ETF to Liquidate",
                 "description": "",
                 "link": "https://example.com/trex",
-                "pub_date": "Thu, 21 May 2026 14:22:53 GMT",
+                "pub_date": "Sat, 21 Jun 2026 14:22:53 GMT",
                 "source": "ACCESS Newswire",
             }
         ],
@@ -389,7 +389,7 @@ def test_title_anchor_prefers_parens_bmax_in_universe(monkeypatch):
                 "title": "REX (BMAX) to Liquidate — placeholder",
                 "description": "",
                 "link": "https://example.com/bmax1",
-                "pub_date": "Fri, 22 May 2026 07:00:00 GMT",
+                "pub_date": "Mon, 22 Jun 2026 07:00:00 GMT",
                 "source": "wire",
             }
         ],
@@ -457,7 +457,7 @@ def test_gnews_structured_event_id_symbol_change_ticker_only(monkeypatch):
                 "title": "Keel Infrastructure Corp. will Change its Ticker to KEEL from BITF - marketscreener.com",
                 "description": "",
                 "link": "https://example.com/keel2",
-                "pub_date": "Wed, 20 May 2026 07:00:00 GMT",
+                "pub_date": "Sat, 20 Jun 2026 07:00:00 GMT",
                 "source": "marketscreener.com",
             }
         ],
@@ -513,7 +513,7 @@ def test_google_news_generic_lineup_title_fetches_body_and_emits_delistings(monk
                 "title": "GraniteShares Announces Change in ETF Lineup",
                 "description": "",
                 "link": "https://example.com/granite-lineup",
-                "pub_date": "Mon, 18 May 2026 21:25:00 GMT",
+                "pub_date": "Thu, 18 Jun 2026 21:25:00 GMT",
                 "source": "GlobeNewswire",
             }
         ],
@@ -546,6 +546,73 @@ def test_google_news_generic_lineup_title_fetches_body_and_emits_delistings(monk
     assert news[0].category == "delisting"
     assert {e.ticker for e in events if e.type == "delisting"} == {"BULX", "ETRL", "MSDD"}
     assert {e.execution_date for e in events if e.type == "delisting"} == {"2026-06-18"}
+
+
+def test_google_news_launch_headline_emits_listing_not_delisting(monkeypatch):
+    """Launch headlines must not fall through as pending delistings (PUL/BBUL)."""
+    bucket_map, underlying_map = _maps()
+    bmap = {
+        **dict(bucket_map),
+        "BBUL": "bucket_1_high_delta",
+        "PUL": "bucket_1_high_delta",
+    }
+    umap = {
+        **dict(underlying_map),
+        "BBUL": "BB",
+        "PUL": "EVEX",
+    }
+    # Delisting-mapped query historically caused the false-positive via
+    # query-default fallback when classify_text returned None.
+    monkeypatch.setattr(mod, "GOOGLE_NEWS_QUERIES", [('"change in ETF lineup"', "delisting")])
+    monkeypatch.setattr(
+        mod,
+        "_fetch_google_news_rss",
+        lambda _s, _q: [
+            {
+                "title": (
+                    "GraniteShares Launches BBUL and PUL, 2x Long ETFs on "
+                    "BlackBerry and Everpure - Yahoo Finance"
+                ),
+                "description": "",
+                "link": "https://example.com/granite-launches-bbul-pul",
+                "pub_date": "Tue, 07 Jul 2026 14:00:00 GMT",
+                "source": "Yahoo Finance",
+            }
+        ],
+    )
+    monkeypatch.setattr(mod, "_fetch_article_body", lambda _s, _u: "")
+
+    events, news = mod.phase_5_google_news(
+        requests.Session(),
+        universe={"BBUL", "PUL"},
+        ever_known={"BBUL", "PUL"},
+        underlyings={"BB", "EVEX"},
+        alias_map={},
+        bucket_map=bmap,
+        underlying_map=umap,
+    )
+    assert news
+    assert news[0].category == "listing"
+    assert {e.ticker for e in events if e.type == "delisting"} == set()
+    assert {e.ticker for e in events if e.type == "listing"} == {"BBUL", "PUL"}
+    assert all(e.id.startswith("gnews_listing:") for e in events if e.type == "listing")
+
+
+def test_classify_launch_headline_is_listing():
+    cat, conf = mod.classify_text(
+        "GraniteShares Launches BBUL and PUL, 2x Long ETFs on BlackBerry and Everpure"
+    )
+    assert cat == "listing"
+    assert conf > 0
+
+
+def test_headline_looks_like_listing_helper():
+    assert mod.headline_looks_like_listing(
+        "GraniteShares Launches SPAL and SNK, Offering 2x Leveraged Access"
+    )
+    assert not mod.headline_looks_like_listing(
+        "T-REX 2X LONG PAAS DAILY TARGET ETF (PAAU) to liquidate"
+    )
 
 
 def test_issuer_press_jsonld_extracts_granite_article():

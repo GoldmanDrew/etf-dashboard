@@ -45,12 +45,36 @@ def load_price_panel(
     min_days: int = MIN_PRICE_PANEL_DAYS,
     metrics: pd.DataFrame | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Per-ETF aligned (etf_adj_close, underlying_adj_close) price panels."""
+    """Per-ETF aligned (etf_adj_close, underlying_adj_close) price panels.
+
+    Applies ls-algo ``data/splits_from_flex.csv`` when available so reverse
+    splits do not invent +400% daily returns in the dashboard B4 backtest.
+    """
     md = metrics if metrics is not None else load_metrics_frame()
     cols = ["date", "ticker", "etf_adj_close", "underlying_adj_close"]
     missing = [c for c in cols if c not in md.columns]
     if missing:
         raise ValueError(f"etf_metrics_daily missing columns: {missing}")
+
+    # Prefer shared ls-algo split logic when the sibling repo is importable.
+    try:
+        import sys
+
+        ls_algo = Path(r"C:\Users\drewg\Projects\quant\ls-algo")
+        if ls_algo.is_dir() and str(ls_algo) not in sys.path:
+            sys.path.insert(0, str(ls_algo))
+        from scripts.pair_price_panel import frames_from_metrics, split_events_by_symbol
+
+        flex = ls_algo / "data" / "splits_from_flex.csv"
+        split_map = split_events_by_symbol(flex_csv=flex if flex.is_file() else None, repo=ls_algo)
+        return frames_from_metrics(
+            md[cols],
+            min_days=min_days,
+            apply_splits=True,
+            split_map=split_map,
+        )
+    except Exception:
+        pass
 
     md = md[cols].copy()
     md["ticker"] = md["ticker"].map(_norm_sym)

@@ -144,13 +144,35 @@
       `<div class="b5p-chart b5p-chart--${variant || "secondary"}">` +
       (title ? `<h3>${escapeHtml(title)}</h3>` : "") +
       `<div class="b5p-lw-wrap">` +
+      `<div class="b5p-lw-toolbar">` +
       `<div class="b5p-lw-hud dim small" data-b5p-hud="${idx}"></div>` +
+      `<div class="b5p-lw-actions" data-b5p-actions="${idx}">` +
+      `<button type="button" class="b5p-lw-btn" data-b5p-range="1Y" title="Last 1 year">1Y</button>` +
+      `<button type="button" class="b5p-lw-btn" data-b5p-range="3Y" title="Last 3 years">3Y</button>` +
+      `<button type="button" class="b5p-lw-btn" data-b5p-range="5Y" title="Last 5 years">5Y</button>` +
+      `<button type="button" class="b5p-lw-btn" data-b5p-range="all" title="Fit all">All</button>` +
+      `<button type="button" class="b5p-lw-btn" data-b5p-zoom="in" title="Zoom in">+</button>` +
+      `<button type="button" class="b5p-lw-btn" data-b5p-zoom="out" title="Zoom out">−</button>` +
+      `<button type="button" class="b5p-lw-btn" data-b5p-zoom="reset" title="Reset view">Reset</button>` +
+      `</div></div>` +
       `<div class="b5p-lw" data-b5p-idx="${idx}" style="height:${H}px" role="img" aria-label="${escapeHtml(
         title || "interactive chart"
-      )}"></div>` +
-      `<p class="b5p-lw-hint dim small">Scroll to zoom · drag to pan · double-click resets · crosshair shows values</p>` +
+      )}" tabindex="0"></div>` +
+      `<p class="b5p-lw-hint dim small">Scroll = zoom at cursor · drag = pan · drag price/time axis to stretch · Shift+scroll = price zoom · 1Y/3Y/5Y = jump · double-click / Reset = fit</p>` +
       `</div></div>`
     );
+  }
+
+  /** Zoom time scale around a logical anchor (TradingView-style). */
+  function zoomLogicalRange(range, anchor, factor) {
+    if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to)) return null;
+    const span = range.to - range.from;
+    if (!(span > 0) || !(factor > 0)) return null;
+    const a = Number.isFinite(anchor) ? anchor : (range.from + range.to) / 2;
+    const nextSpan = Math.max(2, Math.min(span * factor, 1e6));
+    const leftFrac = (a - range.from) / span;
+    const from = a - nextSpan * leftFrac;
+    return { from, to: from + nextSpan };
   }
 
   function hydrateInteractiveCharts(root) {
@@ -169,6 +191,7 @@
       const spec = _pendingChartSpecs[idx];
       if (!spec || !spec.series.length) return;
       const hud = root.querySelector(`[data-b5p-hud="${idx}"]`);
+      const actions = root.querySelector(`[data-b5p-actions="${idx}"]`);
       const chart = LW.createChart(el, {
         height: spec.height,
         autoSize: true,
@@ -192,6 +215,7 @@
           borderVisible: true,
           borderColor: "#718096",
           scaleMargins: { top: 0.10, bottom: 0.12 },
+          autoScale: true,
         },
         timeScale: {
           visible: true,
@@ -199,6 +223,10 @@
           borderColor: "#718096",
           timeVisible: true,
           secondsVisible: false,
+          rightOffset: 6,
+          barSpacing: 6,
+          minBarSpacing: 0.5,
+          lockVisibleTimeRangeOnResize: true,
           tickMarkFormatter: (time) => {
             const value = typeof time === "string"
               ? time
@@ -206,8 +234,20 @@
             return value.slice(0, 7);
           },
         },
-        handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true },
-        handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+        // TradingView-like: wheel zooms time (at cursor); drag pans; wheel does NOT page-scroll the chart.
+        handleScroll: {
+          mouseWheel: false,
+          pressedMouseMove: true,
+          horzTouchDrag: true,
+          vertTouchDrag: false,
+        },
+        handleScale: {
+          axisPressedMouseMove: { time: true, price: true },
+          axisDoubleClickReset: { time: true, price: true },
+          mouseWheel: true,
+          pinch: true,
+        },
+        kineticScroll: { mouse: true, touch: true },
       });
 
       const seriesApis = [];
@@ -242,6 +282,72 @@
         chart.timeScale().fitContent();
       } catch (_e) { /* ignore */ }
 
+      const setPriceAutoScale = (on) => {
+        const apply = (ps) => {
+          if (!ps) return;
+          if (typeof ps.setAutoScale === "function") ps.setAutoScale(!!on);
+          else ps.applyOptions({ autoScale: !!on });
+        };
+        try {
+          apply(chart.priceScale("right"));
+        } catch (_e) { /* ignore */ }
+        seriesApis.forEach(({ api }) => {
+          try {
+            apply(api.priceScale());
+          } catch (_e) { /* ignore */ }
+        });
+      };
+
+      const fitAll = () => {
+        try {
+          chart.timeScale().fitContent();
+          setPriceAutoScale(true);
+        } catch (_e) { /* ignore */ }
+      };
+
+      const zoomAtClientX = (clientX, factor) => {
+        const ts = chart.timeScale();
+        const range = ts.getVisibleLogicalRange();
+        if (!range) return;
+        const rect = el.getBoundingClientRect();
+        let anchor = (range.from + range.to) / 2;
+        try {
+          const logical = ts.coordinateToLogical(clientX - rect.left);
+          if (Number.isFinite(logical)) anchor = logical;
+        } catch (_e) { /* ignore */ }
+        const next = zoomLogicalRange(range, anchor, factor);
+        if (!next) return;
+        try {
+          ts.setVisibleLogicalRange(next);
+        } catch (_e) { /* ignore */ }
+      };
+
+      const zoomPrice = (factor) => {
+        const tryZoom = (ps) => {
+          if (!ps || typeof ps.getVisibleRange !== "function" || typeof ps.setVisibleRange !== "function") {
+            return false;
+          }
+          const vr = ps.getVisibleRange();
+          if (!vr || !Number.isFinite(vr.from) || !Number.isFinite(vr.to)) return false;
+          const mid = (vr.from + vr.to) / 2;
+          const half = ((vr.to - vr.from) / 2) * factor;
+          if (!(half > 0)) return false;
+          ps.setVisibleRange({ from: mid - half, to: mid + half });
+          return true;
+        };
+        let ok = false;
+        seriesApis.forEach(({ api }) => {
+          try {
+            ok = tryZoom(api.priceScale()) || ok;
+          } catch (_e) { /* ignore */ }
+        });
+        if (!ok) {
+          try {
+            tryZoom(chart.priceScale("right"));
+          } catch (_e) { /* ignore */ }
+        }
+      };
+
       chart.subscribeCrosshairMove((param) => {
         if (!hud) return;
         if (!param || param.time === undefined || !param.seriesData) {
@@ -261,13 +367,78 @@
         hud.textContent = parts.length ? `${t}  ·  ${parts.join("  ·  ")}` : String(t);
       });
 
-      el.addEventListener("dblclick", () => {
-        try {
-          chart.timeScale().fitContent();
-        } catch (_e) { /* ignore */ }
+      // Capture wheel so the page does not scroll; Shift+wheel = price zoom (TV-like).
+      el.addEventListener(
+        "wheel",
+        (e) => {
+          if (e.shiftKey) {
+            e.preventDefault();
+            e.stopPropagation();
+            const factor = e.deltaY < 0 ? 0.85 : 1.18;
+            zoomPrice(factor);
+            return;
+          }
+          // Library zooms time at cursor; still block page scroll while hovering the chart.
+          if (e.cancelable) e.preventDefault();
+        },
+        { passive: false, capture: true }
+      );
+
+      el.addEventListener("dblclick", (e) => {
+        e.preventDefault();
+        fitAll();
       });
 
-      _liveCharts.push({ chart, el, seriesApis });
+      if (actions) {
+        actions.addEventListener("click", (e) => {
+          const btn = e.target && e.target.closest ? e.target.closest("[data-b5p-zoom],[data-b5p-range]") : null;
+          if (!btn) return;
+          const rangeKind = btn.getAttribute("data-b5p-range");
+          if (rangeKind) {
+            if (rangeKind === "all") {
+              fitAll();
+              return;
+            }
+            const years = rangeKind === "1Y" ? 1 : rangeKind === "3Y" ? 3 : rangeKind === "5Y" ? 5 : 0;
+            if (!years) return;
+            const times = [];
+            spec.series.forEach((s) => {
+              (s.data || []).forEach((pt) => {
+                if (pt && pt.time != null) times.push(String(pt.time).slice(0, 10));
+              });
+            });
+            if (!times.length) return;
+            times.sort();
+            const to = times[times.length - 1];
+            const toMs = Date.parse(to + "T00:00:00Z");
+            if (!Number.isFinite(toMs)) return;
+            const fromTarget = new Date(toMs);
+            fromTarget.setUTCFullYear(fromTarget.getUTCFullYear() - years);
+            const fromWant = fromTarget.toISOString().slice(0, 10);
+            let from = times[0];
+            for (let i = 0; i < times.length; i++) {
+              if (times[i] >= fromWant) {
+                from = times[i];
+                break;
+              }
+            }
+            try {
+              chart.timeScale().setVisibleRange({ from, to });
+              setPriceAutoScale(true);
+            } catch (_e) { /* ignore */ }
+            return;
+          }
+          const kind = btn.getAttribute("data-b5p-zoom");
+          if (kind === "reset") {
+            fitAll();
+            return;
+          }
+          const rect = el.getBoundingClientRect();
+          zoomAtClientX(rect.left + rect.width / 2, kind === "in" ? 0.7 : 1.4);
+        });
+      }
+
+      _liveCharts.push({ chart, el, seriesApis, fitAll });
     });
 
     // Sync time range across all charts on the page (TradingView-like)

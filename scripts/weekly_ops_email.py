@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Build and send the weekly ops email: B2/B4 earnings + recent delistings."""
+"""Build and send the weekly ops email: B2/B4 earnings + listings + delistings."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import smtplib
 import sys
 from datetime import UTC, date, datetime, timedelta
@@ -32,8 +33,33 @@ DEFAULT_FROM_EMAIL = "werdnamdlog01@gmail.com"
 DEFAULT_SMTP_USER = DEFAULT_FROM_EMAIL
 DEFAULT_SMTP_HOST = "smtp.gmail.com"
 DEFAULT_SMTP_PORT = 587
-EARNINGS_HORIZON_DAYS = 14
+EARNINGS_HORIZON_DAYS = 7
 DELISTING_LOOKBACK_DAYS = 14
+LISTING_LOOKBACK_DAYS = 14
+
+# Defense-in-depth: stale corporate_actions may still carry launch headlines
+# tagged as type=delisting until the next ingest prune.
+_LAUNCH_HEADLINE_RE = re.compile(
+    r"\b(launch(es|ed|ing)?|introduc(es|ed|ing)|debut(s|ed|ing)?|"
+    r"new\s+(leveraged\s+)?(etf|etfs|fund))\b",
+    re.IGNORECASE,
+)
+_DELIST_HEADLINE_RE = re.compile(
+    r"\b(delist|liquidat|wind[-\s]down|fund\s+closure|cease\w*\s+trading|"
+    r"plan\s+of\s+liquidation|terminat(e|es|ed|ion|ing))\b",
+    re.IGNORECASE,
+)
+
+
+def headline_looks_like_listing(text: str | None) -> bool:
+    """True for new-fund launch headlines (exclude from delisting section)."""
+    if not text:
+        return False
+    if not _LAUNCH_HEADLINE_RE.search(text):
+        return False
+    if _DELIST_HEADLINE_RE.search(text):
+        return False
+    return True
 
 
 def parse_recipients(raw: str) -> list[str]:
@@ -133,6 +159,48 @@ def collect_recent_delistings(
     for ev in payload.get("events") or []:
         if str(ev.get("type") or "").lower() != "delisting":
             continue
+        if headline_looks_like_listing(ev.get("headline")):
+            continue
+        ref = _parse_iso_date(ev.get("announcement_date")) or _parse_iso_date(ev.get("execution_date"))
+        if ref is None or ref < cutoff:
+            continue
+        rows.append({
+            "ticker": str(ev.get("ticker") or "").upper(),
+            "underlying": str(ev.get("underlying") or "").upper() or None,
+            "announcement_date": ev.get("announcement_date"),
+            "execution_date": ev.get("execution_date"),
+            "status": str(ev.get("status") or "unknown"),
+            "bucket": _bucket_label(ev.get("bucket")),
+            "headline": str(ev.get("headline") or "").strip() or None,
+            "source_url": ev.get("source_url"),
+            "source": str(ev.get("source") or "unknown"),
+        })
+
+    rows.sort(
+        key=lambda r: (
+            _parse_iso_date(r.get("announcement_date")) or date.min,
+            r.get("ticker") or "",
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def collect_recent_listings(
+    *,
+    today: date | None = None,
+    lookback_days: int = LISTING_LOOKBACK_DAYS,
+    corporate_actions_path: Path = CORPORATE_ACTIONS_PATH,
+) -> list[dict]:
+    """New ETF listing / launch announcements in the trailing lookback window."""
+    today = today or date.today()
+    cutoff = today - timedelta(days=lookback_days)
+    payload = _load_json(corporate_actions_path)
+    rows: list[dict] = []
+
+    for ev in payload.get("events") or []:
+        if str(ev.get("type") or "").lower() != "listing":
+            continue
         ref = _parse_iso_date(ev.get("announcement_date")) or _parse_iso_date(ev.get("execution_date"))
         if ref is None or ref < cutoff:
             continue
@@ -163,6 +231,7 @@ def build_email_payload(
     today: date | None = None,
     earnings_horizon_days: int = EARNINGS_HORIZON_DAYS,
     delisting_lookback_days: int = DELISTING_LOOKBACK_DAYS,
+    listing_lookback_days: int = LISTING_LOOKBACK_DAYS,
 ) -> dict:
     today = today or date.today()
     earnings = collect_upcoming_earnings(
@@ -173,19 +242,26 @@ def build_email_payload(
         today=today,
         lookback_days=delisting_lookback_days,
     )
+    listings = collect_recent_listings(
+        today=today,
+        lookback_days=listing_lookback_days,
+    )
     return {
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "as_of_date": today.isoformat(),
         "earnings_horizon_days": earnings_horizon_days,
         "delisting_lookback_days": delisting_lookback_days,
+        "listing_lookback_days": listing_lookback_days,
         "universe_buckets": list(DEFAULT_EARNINGS_BUCKETS),
         "earnings": earnings,
         "delistings": delistings,
+        "listings": listings,
         "diagnostics": {
             "event_calendar_known": str(KNOWN_CALENDAR_PATH.relative_to(REPO_ROOT)).replace("\\", "/"),
             "corporate_actions": str(CORPORATE_ACTIONS_PATH.relative_to(REPO_ROOT)).replace("\\", "/"),
             "earnings_count": len(earnings),
             "delistings_count": len(delistings),
+            "listings_count": len(listings),
         },
     }
 
@@ -223,6 +299,26 @@ def render_plain_text(payload: dict) -> str:
                 f"{_confirmation_badge(row.get('confirmation', '')):10s}  "
                 f"ETFs: {etfs}  ({row.get('source', '')})"
             )
+
+    lines.extend([
+        "",
+        f"New listings (last {payload.get('listing_lookback_days', LISTING_LOOKBACK_DAYS)} days)",
+        "—" * 72,
+    ])
+    listings = payload.get("listings") or []
+    if not listings:
+        lines.append("No new listing announcements in window.")
+    else:
+        for row in listings:
+            lines.append(
+                f"Ann { _fmt_date(row.get('announcement_date')) }  "
+                f"{row.get('ticker', '—'):6s}  "
+                f"{row.get('status', '—'):8s}  "
+                f"{row.get('bucket', '—'):3s}  "
+                f"{(row.get('headline') or '')[:60]}"
+            )
+            if row.get("source_url"):
+                lines.append(f"  {row['source_url']}")
 
     lines.extend([
         "",
@@ -288,6 +384,20 @@ def render_html(payload: dict) -> str:
             escape(str(row.get("source") or "")),
         ])
 
+    listing_rows = []
+    for row in payload.get("listings") or []:
+        headline = escape((row.get("headline") or "—")[:80])
+        url = row.get("source_url")
+        if url:
+            headline = f'<a href="{escape(str(url))}">{headline}</a>'
+        listing_rows.append([
+            escape(_fmt_date(row.get("announcement_date"))),
+            f"<strong>{escape(str(row.get('ticker') or ''))}</strong>",
+            escape(str(row.get("status") or "")),
+            escape(str(row.get("bucket") or "")),
+            headline,
+        ])
+
     delisting_rows = []
     for row in payload.get("delistings") or []:
         headline = escape((row.get("headline") or "—")[:80])
@@ -309,6 +419,8 @@ def render_html(payload: dict) -> str:
   <h2>ETF Dashboard Weekly Ops — {escape(today)}</h2>
   <p>Upcoming <strong>bucket 2 YieldBOOST + bucket 4</strong> underlying earnings (next {int(payload.get('earnings_horizon_days', EARNINGS_HORIZON_DAYS))} days).</p>
   {_html_table(["Date", "Underlying", "Confirmation", "B2/B4 ETFs", "Source"], earnings_rows)}
+  <h3>New listings (last {int(payload.get('listing_lookback_days', LISTING_LOOKBACK_DAYS))} days)</h3>
+  {_html_table(["Announced", "ETF", "Status", "Bucket", "Headline"], listing_rows)}
   <h3>Delisting announcements (last {int(payload.get('delisting_lookback_days', DELISTING_LOOKBACK_DAYS))} days)</h3>
   {_html_table(["Announced", "ETF", "Effective", "Status", "Bucket", "Headline"], delisting_rows)}
   <p style="margin-top:24px;font-size:12px;color:#555;">
@@ -323,7 +435,11 @@ def format_subject(payload: dict) -> str:
     today = payload.get("as_of_date") or date.today().isoformat()
     n_earn = len(payload.get("earnings") or [])
     n_delist = len(payload.get("delistings") or [])
-    return f"ETF Dashboard Weekly — {n_earn} earnings / {n_delist} delistings — {today}"
+    n_list = len(payload.get("listings") or [])
+    return (
+        f"ETF Dashboard Weekly — {n_earn} earnings / {n_delist} delistings"
+        f" / {n_list} listings — {today}"
+    )
 
 
 def send_email(
@@ -363,12 +479,14 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print preview only; do not write or send")
     parser.add_argument("--earnings-horizon-days", type=int, default=EARNINGS_HORIZON_DAYS)
     parser.add_argument("--delisting-lookback-days", type=int, default=DELISTING_LOOKBACK_DAYS)
+    parser.add_argument("--listing-lookback-days", type=int, default=LISTING_LOOKBACK_DAYS)
     parser.add_argument("--output", type=Path, default=PREVIEW_PATH)
     args = parser.parse_args()
 
     payload = build_email_payload(
         earnings_horizon_days=max(1, int(args.earnings_horizon_days)),
         delisting_lookback_days=max(1, int(args.delisting_lookback_days)),
+        listing_lookback_days=max(1, int(args.listing_lookback_days)),
     )
     subject = format_subject(payload)
     plain = render_plain_text(payload)
@@ -376,7 +494,8 @@ def main() -> int:
 
     print(
         f"Weekly ops email: {payload['diagnostics']['earnings_count']} earnings, "
-        f"{payload['diagnostics']['delistings_count']} delistings"
+        f"{payload['diagnostics']['delistings_count']} delistings, "
+        f"{payload['diagnostics']['listings_count']} listings"
     )
 
     if args.dry_run:

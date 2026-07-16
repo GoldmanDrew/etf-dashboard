@@ -211,6 +211,7 @@ CATEGORY_PRIORITY = {
     "symbol_change": 70,
     "merger": 60,
     "forward_split": 50,
+    "listing": 40,
     "other": 10,
 }
 
@@ -1034,11 +1035,20 @@ POSITIVE_PATTERNS: dict[str, list[re.Pattern]] = {
         re.compile(r"\bexchange\s+delisting\b", re.I),
         re.compile(r"\bdelisting\s+notice\b", re.I),
     ],
+    "listing": [
+        re.compile(r"\blaunch(es|ed|ing)?\b", re.I),
+        re.compile(r"\bintroduc(es|ed|ing)\b", re.I),
+        re.compile(r"\bdebut(s|ed|ing)?\b", re.I),
+        re.compile(r"\bnew\s+(leveraged\s+)?(etf|etfs|fund)\b", re.I),
+    ],
     "symbol_change": [
         re.compile(r"\bticker\s+change\b", re.I),
         re.compile(r"\bsymbol\s+change\b", re.I),
         re.compile(r"\brenam(e|ed|ing)\b", re.I),
         re.compile(r"\bre[-\s]brand", re.I),
+        re.compile(r"\bchange[sd]?\s+its\s+ticker\b", re.I),
+        re.compile(r"\bwill\s+change\s+.{0,40}\bticker\b", re.I),
+        re.compile(r"\bchange\s+its\s+ticker\s+to\b", re.I),
     ],
     "merger": [
         re.compile(r"\bmerger\b", re.I),
@@ -1478,6 +1488,9 @@ GOOGLE_NEWS_QUERIES: list[tuple[str, str]] = [
     ('"ETF" "wind down"', "delisting"),
     ('"ETF" "fund termination"', "delisting"),
     ('"ETF" "fund closure"', "delisting"),
+    # New fund launches (must not fall through as delistings).
+    ('"ETF" "launches"', "listing"),
+    ('"launches" "2x" "ETF"', "listing"),
     ('"ETF" "ticker change"', "symbol_change"),
     ('"ETF" "symbol change"', "symbol_change"),
     # Common-stock / issuer renames (BITF→KEEL, etc.) rarely contain the token
@@ -1488,6 +1501,20 @@ GOOGLE_NEWS_QUERIES: list[tuple[str, str]] = [
     ('"ETF" "reverse split"', "reverse_split"),
     ('"ETF" "stock split"', "forward_split"),
 ]
+
+
+def headline_looks_like_listing(text: str | None) -> bool:
+    """True when text is a new-fund launch, not a liquidation/delisting."""
+    if not text:
+        return False
+    patterns = POSITIVE_PATTERNS.get("listing") or []
+    if not any(p.search(text) for p in patterns):
+        return False
+    # If liquidate/delist language is also present, treat as delisting side.
+    delist_patterns = POSITIVE_PATTERNS.get("delisting") or []
+    if any(p.search(text) for p in delist_patterns):
+        return False
+    return True
 
 # Regex to extract ticker candidates from a news title or summary.  We bias
 # toward 3-5 uppercase letters with a word boundary to avoid matching generic
@@ -2076,15 +2103,30 @@ def phase_5_google_news(
             if body_window:
                 classify_text_src = f"{classify_text_src}\n{body_window}"
 
-            # 2) Classify via the shared regex bank so we honour negative patterns
-            # (dividend/distribution/earnings drop) but fall back to the query's
-            # default category if the classifier doesn't fire.
+            # 2) Classify via the shared regex bank.  Query-default fallback is
+            # kept for titles that phrase the action slightly differently than
+            # POSITIVE_PATTERNS (e.g. "will Change its Ticker"), but NEVER when
+            # the text is a new-fund launch — that was the PUL/BBUL false-positive
+            # path (delisting-mapped RSS query + launch headline → pending delist).
             cat, conf = classify_text(classify_text_src)
             if not cat:
+                if headline_looks_like_listing(classify_text_src):
+                    continue
                 cat = default_category
                 conf = 0.65  # lower confidence when inferred from query only
-            if cat not in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
+            if cat not in {
+                "delisting",
+                "listing",
+                "symbol_change",
+                "reverse_split",
+                "forward_split",
+                "merger",
+            }:
                 continue
+            # Launch headlines that somehow classified as delisting (e.g. mixed
+            # syndication chrome) are still redirected away from delisting.
+            if cat == "delisting" and headline_looks_like_listing(classify_text_src):
+                cat = "listing"
 
             # Strict tiering to prevent feed spam:
             # explicit ETF ticker in article > high-signal issuer-form ticker
@@ -2182,7 +2224,14 @@ def phase_5_google_news(
             # Delistings already use ``polygon_delisting:{sym}`` ids so multiple
             # press pick-ups merge; symbol_change uses a **ticker-only** id so
             # we do not stack duplicate cards for the same fund.
-            if cat in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
+            if cat in {
+                "delisting",
+                "listing",
+                "symbol_change",
+                "reverse_split",
+                "forward_split",
+                "merger",
+            }:
                 if match_tier in {"explicit", "high"}:
                     exec_date = (
                         _extract_delisting_execution_date(classify_text_src)
@@ -2192,6 +2241,8 @@ def phase_5_google_news(
                     for sym in emit_syms:
                         if cat == "delisting":
                             event_id = f"polygon_delisting:{sym}"
+                        elif cat == "listing":
+                            event_id = f"gnews_listing:{sym}"
                         elif cat == "symbol_change":
                             event_id = f"gnews_symbol_change:{sym}"
                         else:
@@ -2358,7 +2409,14 @@ def phase_6_issuer_press(
                 continue
             text = f"{title}\n{body}"
             cat, conf = classify_text(text)
-            if cat not in {"delisting", "symbol_change", "reverse_split", "forward_split", "merger"}:
+            if cat not in {
+                "delisting",
+                "listing",
+                "symbol_change",
+                "reverse_split",
+                "forward_split",
+                "merger",
+            }:
                 continue
             emit_syms = sorted(_resolve_direct_etf_tickers(text, etf_universe))
             if not emit_syms:
@@ -2394,6 +2452,8 @@ def phase_6_issuer_press(
             for sym in emit_syms:
                 if cat == "delisting":
                     event_id = f"polygon_delisting:{sym}"
+                elif cat == "listing":
+                    event_id = f"issuer_listing:{sym}"
                 elif cat == "symbol_change":
                     event_id = f"issuer_symbol_change:{sym}"
                 else:
@@ -2894,17 +2954,27 @@ def main() -> None:
         # stub sharing AAPW with today's live AAPL weekly-pay ETF).  Without
         # this cleanup they'd persist forever via the prior-record merge.
         current_live_for_prune = _load_current_universe()
-        before_prune = len(prior_delistings)
-        pruned = {
-            eid: ev
-            for eid, ev in prior_delistings.items()
-            if ev.ticker not in current_live_for_prune
-        }
-        dropped = before_prune - len(pruned)
-        if dropped:
+        pruned = {}
+        dropped_live = 0
+        dropped_launch = 0
+        for eid, ev in prior_delistings.items():
+            if ev.ticker in current_live_for_prune:
+                dropped_live += 1
+                continue
+            if headline_looks_like_listing(ev.headline):
+                # Launch headlines mis-tagged as pending delistings (PUL/BBUL).
+                dropped_launch += 1
+                continue
+            pruned[eid] = ev
+        if dropped_live:
             LOGGER.info(
                 "  evicted %d prior delisting records for tickers now active in screener (false-positives)",
-                dropped,
+                dropped_live,
+            )
+        if dropped_launch:
+            LOGGER.info(
+                "  evicted %d prior delisting records with launch headlines (reclassify as listings)",
+                dropped_launch,
             )
         prior_delistings = pruned
         LOGGER.info(
