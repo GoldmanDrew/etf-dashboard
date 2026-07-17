@@ -590,8 +590,10 @@ Every user-facing JSON under `data/` has a single producer workflow, a primary c
 | `event_calendar_inferred.json` | `event_vol_decomposition.py` (mystery scanner) | combined calendar merge | each VRP refresh |
 | `event_calendar_combined.json` | `event_vol_decomposition.py` | `vrp_live.json` builder, `ls-algo/decay_distribution.py` | each VRP refresh |
 | `macro_event_calendar.json` | manual (FOMC/CPI dates) | combined calendar merge | manual |
-| `etf_metrics_daily.{parquet,csv,json}` | `ingest_etf_metrics.py` | Stats tab … | **`nightly.yml`** Tue–Sat 6 AM ET |
+| `etf_metrics_daily.{parquet,csv,json}` | `ingest_etf_metrics.py` (+ `repair_metrics_decay_coverage.py`) | Stats tab; Decay / realized pair gross (joint non-CF rows) | **`nightly.yml`** Tue–Sat 6 AM ET |
 | `etf_metrics_latest.json` | `ingest_etf_metrics.py` | Stats tab (snapshot panel) | **`nightly.yml`** |
+| `metrics_decay_coverage_report.json` | `audit_metrics_decay_coverage.py` | CI Decay as-of gate; repair targeting | **`nightly.yml`** after metrics repair |
+| `metrics_decay_repair_report.json` | `repair_metrics_decay_coverage.py` | Ops audit of CF→market_backed rewrites | **`nightly.yml`** |
 | `ci_state.json` | `scripts/ci_tick.py` | staleness gates for `market-hours.yml` | each market tick |
 | `etf_distributions.json` | `ingest_distributions.py` | Stats tab Total-Return NAV line | daily 5 AM ET |
 | `corporate_actions.json` | `ingest_corporate_actions.py` | News tab pinned events | every 6 h |
@@ -1194,7 +1196,13 @@ This repo lives on a Windows machine. Many of the obvious one-liners (heredocs, 
 
 There is no build step. Editing `index.html` is editing production. Validate locally with `python -m http.server 8000` and open the browser dev console — Babel will surface JSX errors at parse time.
 
-### 13.13 Reverse / forward split TR invariants
+### 13.13 Decay as-of = last joint usable session (not build time)
+
+Decay horizons end at the last **non-`carry_forward`** metrics day with ETF close/NAV **and** `underlying_adj_close` (gaps >5 calendar days do not form a drag day). When issuer NAV fails, ingest may stamp `carry_forward` and overlay Yahoo/Polygon close — those CF-tagged rows are **dropped** by Decay even if close is present.
+
+**Policy:** after market overlay, CF rows with positive session `close_price` + `underlying_adj_close` are promoted to `stale_kind=market_backed_no_issuer_nav` / `source_provider=market_backed` (Decay-usable; still not premium/discount eligible). Classic CF remains only for true holes (no market close). Fleet heal: `scripts/repair_metrics_decay_coverage.py --apply`; CI gate: `audit_metrics_decay_coverage.py --fail-on-tradeable-lag` in `nightly.yml`.
+
+### 13.14 Reverse / forward split TR invariants
 
 Split-aware TR must stay in sync across **`scripts/split_adjustments.py`**, **`assets/price_basis.js`**, and **`scripts/price_basis.py`**.
 
@@ -1212,6 +1220,7 @@ Split-aware TR must stay in sync across **`scripts/split_adjustments.py`**, **`a
 
 (In rough chronological order, most recent first.)
 
+- **Jul 2026 — Decay market-backed metrics when issuer NAV is down.** CF rows with session close + underlying are promoted to `market_backed_no_issuer_nav` so Decay windows track the last NYSE session. See §13.13; scripts `audit_metrics_decay_coverage.py` / `repair_metrics_decay_coverage.py`; nightly hard gate.
 - **Jul 2026 — Bucket 4 production backtest.** Screener `bucket_4` rows (`screener_bucket`, `bucket4_net_edge_annual`, sizing/purgatory fields) pass through `build_data.py`. Nightly `scripts/build_bucket4_backtest.py` writes `data/bucket4_backtest.json` (schema `bucket4_backtest.v3`: weekly walk-forward **v6 opt2 → weight_smoothing → crash-budget → ratchet** with cash residual, VCR cadence, PIT borrow, drift-gated rebalances, production `default_weights`, and compact per-pair `pair_series` paths) plus `data/bucket4_pairs/{ETF}.json` shards. Surfaces: **B4 Book** (`#/bucket-4/backtest`) = portfolio lab (custom weights reblend unit returns scaled to production deployed fraction + max-weight caps; no live opt2 rerun); **Pair Report** (`#/bucket-4/pair/{SYM}`) = production path scaled from unit capital to a notional $ (default $100k) via `pairChartResultFromShard`; chart **Backtest** = editable hedged what-if; chart **Drip** (`#/chart/{SYM}/backtest-flow`) = add-$ every N days (`simulateShortFlowBacktest`); chart **Flow** = issuer LETF rebalance (not drip). Global multi-leg drip: `#/backtest-flow`. Policy: `config/bucket4_backtest_policy.yml` (must stay synced with ls-algo `crash_budget.rho`, borrow_ramp, weight_smoothing). Sizing source of truth: ls-algo `scripts/bucket4_backtest_api.py` / `b4_crash_budget.py`.
 - **May 2026 — YB Exp. edge (fwd) = Exp. decay gross.** YieldBOOST main-grid **Exp. edge (fwd)** now mirrors screener **`expected_gross_decay_p*`** (put-spread structural gross), aligned with net edge and Scenarios heatmap. Weekly-rebalanced pair MC remains as **`expected_pair_pnl_weekly_mc_*`** diagnostic fields only. See §4.5.2 / §4.5.3 / §4.6.
 - **May 2026 — schema_v=4: YB forward edge on the pair-axis.** The YieldBOOST forward edge moved from buy-and-hold Magis closed-form to the log-continuous-annual pair axis. Weekly MC is now diagnostic-only; headline is put-spread structural gross from the screener. See §4.5.2 / §4.5.3 / §4.6.

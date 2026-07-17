@@ -132,6 +132,9 @@ REQUIRED_COLUMNS = [
     "premium_discount_status",
 ]
 
+# Issuer NAV missing but session market close present — Decay-usable (not carry_forward).
+STALE_KIND_MARKET_BACKED = "market_backed_no_issuer_nav"
+
 
 # ---------------------------------------------------------------------------
 # Universe / helpers
@@ -1084,6 +1087,61 @@ def apply_stale_carry_forward(
     return out
 
 
+def _is_carry_forward_mask(df: pd.DataFrame) -> pd.Series:
+    kind = df.get("stale_kind", pd.Series(index=df.index, dtype=object)).astype(str).str.lower()
+    provider = df.get("source_provider", pd.Series(index=df.index, dtype=object)).astype(str).str.lower()
+    url = df.get("source_url", pd.Series(index=df.index, dtype=object)).fillna("").astype(str)
+    return (kind == "carry_forward") | provider.eq("carry_forward") | url.str.startswith("carry_forward://")
+
+
+def promote_carry_forward_rows_with_market(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, int]:
+    """Promote CF rows that already have session market prices to Decay-usable rows.
+
+    Requires positive ``close_price`` and ``underlying_adj_close`` (joint Decay
+    contract). Classic ``carry_forward`` remains when either leg is missing.
+    Market-backed rows keep last-known issuer NAV/AUM/shares when present but
+    are not premium/discount eligible (issuer as-of ≠ market as-of).
+    """
+    if df.empty:
+        return df, 0
+    out = df.copy()
+    is_cf = _is_carry_forward_mask(out)
+    if not is_cf.any():
+        return out, 0
+    close_ok = pd.to_numeric(out.get("close_price"), errors="coerce").gt(0)
+    und_ok = pd.to_numeric(out.get("underlying_adj_close"), errors="coerce").gt(0)
+    promote = is_cf & close_ok & und_ok
+    n = int(promote.sum())
+    if not n:
+        return out, 0
+
+    urls = out.loc[promote, "source_url"].fillna("").astype(str)
+    from_dates = urls.str.extract(r"(?:\?|&)from=(\d{4}-\d{2}-\d{2})\b")[0]
+    session_dates = pd.to_datetime(out.loc[promote, "date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    tickers = out.loc[promote, "ticker"].astype(str).str.upper()
+    new_urls = [
+        (
+            f"market_backed://{sym}?from={frm}#session={sess}#repaired=market_backed"
+            if isinstance(frm, str) and len(frm) == 10
+            else f"market_backed://{sym}#session={sess}#repaired=market_backed"
+        )
+        for sym, frm, sess in zip(tickers, from_dates.tolist(), session_dates.tolist())
+    ]
+    out.loc[promote, "source_provider"] = "market_backed"
+    out.loc[promote, "source_url"] = new_urls
+    out.loc[promote, "stale_kind"] = STALE_KIND_MARKET_BACKED
+    out.loc[promote, "stale"] = True
+    # Issuer fundamentals may be carried; treat as partial for honesty.
+    out.loc[promote, "status"] = "partial"
+    if "issuer_asof_date" in out.columns:
+        # Preserve the issuer valuation date when known so prem/disc stays blocked.
+        keep_issuer = from_dates.where(from_dates.notna(), out.loc[promote, "issuer_asof_date"])
+        out.loc[promote, "issuer_asof_date"] = keep_issuer.astype(object)
+    return out, n
+
+
 def overlay_row_session_market_fields(
     df: pd.DataFrame,
     *,
@@ -1198,16 +1256,34 @@ def stamp_metric_asof_metadata(df: pd.DataFrame) -> pd.DataFrame:
         out.get("nav"), errors="coerce"
     ) - 1.0
     sane_basis = ratio.abs().le(0.50)
+    kind = out.get("stale_kind", pd.Series(index=out.index, dtype=object)).astype(str).str.lower()
+    provider = out.get("source_provider", pd.Series(index=out.index, dtype=object)).astype(str).str.lower()
+    market_backed = (
+        kind.eq(STALE_KIND_MARKET_BACKED)
+        | provider.eq("market_backed")
+        | urls.str.startswith("market_backed://")
+    )
+    carry_forward = (
+        kind.eq("carry_forward")
+        | provider.eq("carry_forward")
+        | urls.str.startswith("carry_forward://")
+    )
     out["premium_discount_eligible"] = (
         nav_ok
         & close_ok
         & aligned
         & sane_basis
+        & ~market_backed
+        & ~carry_forward
     )
     out["premium_discount_status"] = np.where(
-        ~nav_ok | ~close_ok,
-        "provider_missing",
-        np.where(~aligned, "asof_mismatch", np.where(~sane_basis, "split_basis_mismatch", "valid")),
+        market_backed | carry_forward,
+        "issuer_stale",
+        np.where(
+            ~nav_ok | ~close_ok,
+            "provider_missing",
+            np.where(~aligned, "asof_mismatch", np.where(~sane_basis, "split_basis_mismatch", "valid")),
+        ),
     )
     return out
 
@@ -3454,6 +3530,12 @@ def main() -> None:
         underlying_df=und_close_df,
         etf_to_underlying=underlying_map,
     )
+    incoming, n_promoted_in = promote_carry_forward_rows_with_market(incoming)
+    if n_promoted_in:
+        LOGGER.info(
+            "Promoted %d incoming carry_forward row(s) with market close to market_backed",
+            n_promoted_in,
+        )
     merged = upsert(existing, incoming)
     merged, n_poly_merged = backfill_close_prices_polygon_gaps(
         merged, start=resolved_start_date, end=resolved_end_date,
@@ -3535,6 +3617,14 @@ def main() -> None:
         tickers=tickers,
         max_lag_bdays=session_extend_bdays,
     )
+    # Promote CF→market_backed before prune so session-priced rows stay Decay-usable
+    # and are not wiped by the CF age budget.
+    merged, n_promoted = promote_carry_forward_rows_with_market(merged)
+    if n_promoted:
+        LOGGER.info(
+            "Promoted %d carry_forward row(s) with market close to market_backed",
+            n_promoted,
+        )
     merged, n_cf_pruned = prune_expired_carry_forward_rows(
         merged,
         max_stale_bdays=max_stale_business_days,

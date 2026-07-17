@@ -223,10 +223,28 @@ def audit_stale_price_feeds(
             else:
                 break
         if tail_cf >= STALE_TAIL_CARRY_FORWARD_ROWS:
-            warnings.append(
+            # Market close present on the CF tail ⇒ hard error (should have been
+            # promoted to market_backed for Decay). Otherwise warn.
+            has_market = False
+            for _d, row in reversed(dated):
+                if not _is_carry_forward_row(row):
+                    break
+                try:
+                    px = row.get("close_price") if row.get("close_price") is not None else row.get("nav")
+                    und = row.get("underlying_adj_close")
+                    if float(px or 0) > 0 and float(und or 0) > 0:
+                        has_market = True
+                        break
+                except (TypeError, ValueError):
+                    continue
+            msg = (
                 f"{sym}: last {tail_cf} metrics rows are carry_forward "
                 f"(last real data {real_dates[-1] if real_dates else 'never'})"
             )
+            if has_market:
+                errors.append(msg + " with market close+underlying (expected market_backed)")
+            else:
+                warnings.append(msg)
     real_dates_all = [d for d in last_real_by_sym.values() if d is not None]
     if not real_dates_all:
         return errors, warnings
@@ -241,6 +259,64 @@ def audit_stale_price_feeds(
         errors.append(
             f"systemic ingest stall: {len(stale_syms)}/{len(last_real_by_sym)} tickers "
             f"have no real metrics within {STALE_FEED_MAX_LAG_BDAYS} business days of {max_real}"
+        )
+    return errors, warnings
+
+
+def audit_decay_coverage(
+    metrics_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    dashboard_payload: dict[str, Any] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Fail when tradeable Decay joint-usable lag / CF+market tails regress."""
+    try:
+        import pandas as pd
+        from audit_metrics_decay_coverage import (
+            build_coverage_report,
+            coverage_gate_errors,
+            _load_tradeable_symbols,
+        )
+    except ImportError as exc:
+        return [f"decay coverage audit unavailable: {exc}"], []
+
+    rows: list[dict[str, Any]] = []
+    for sym, sym_rows in metrics_by_symbol.items():
+        for r in sym_rows:
+            row = dict(r)
+            row["ticker"] = sym
+            rows.append(row)
+    if not rows:
+        return [], []
+    df = pd.DataFrame(rows)
+    tradeable = set()
+    if dashboard_payload:
+        for rec in dashboard_payload.get("records") or dashboard_payload.get("rows") or []:
+            if not isinstance(rec, dict):
+                continue
+            sym = str(rec.get("symbol") or "").strip().upper()
+            pc = str(rec.get("product_class") or "")
+            bucket = rec.get("bucket")
+            is_yb = bool(rec.get("is_yieldboost")) or pc in {
+                "income_yieldboost",
+                "income_yieldboost_fof",
+            }
+            if (
+                bucket in (1, 3, "1", "3", "bucket_1", "bucket_3")
+                or pc in {"letf", "inverse", "volatility_etp", "income_yieldboost", "income_yieldboost_fof"}
+                or is_yb
+            ):
+                tradeable.add(sym)
+    if not tradeable:
+        tradeable = _load_tradeable_symbols()
+    report = build_coverage_report(df, set(metrics_by_symbol), tradeable=tradeable)
+    errors = coverage_gate_errors(report)
+    warnings: list[str] = []
+    summary = report.get("summary") or {}
+    lag_n = int(summary.get("tradeable_lagging_n") or 0)
+    if lag_n and not errors:
+        warnings.append(
+            f"decay coverage: {lag_n} tradeable ticker(s) lag joint-usable history "
+            f"(under fail threshold)"
         )
     return errors, warnings
 
@@ -289,6 +365,15 @@ def audit_metrics_asof_alignment(
             continue
         if eligible and _is_carry_forward_row(row):
             errors.append(f"{sym}: carry-forward row incorrectly eligible for premium/discount")
+            continue
+        stale_kind = str(row.get("stale_kind") or "").lower()
+        provider = str(row.get("source_provider") or "").lower()
+        if eligible and (
+            stale_kind == "market_backed_no_issuer_nav"
+            or provider == "market_backed"
+            or str(row.get("source_url") or "").startswith("market_backed://")
+        ):
+            errors.append(f"{sym}: market-backed row incorrectly eligible for premium/discount")
             continue
         if eligible:
             try:
@@ -430,11 +515,13 @@ def main() -> int:
         except Exception as exc:
             warnings.append(f"Could not load metrics gap audit input: {exc}")
 
+    dashboard_payload: dict[str, Any] | None = None
     if not args.dashboard.exists():
         errors.append(f"{args.dashboard} missing")
     else:
+        dashboard_payload = _load_json(args.dashboard)
         dash_errors, dash_warnings = audit_dashboard(
-            _load_json(args.dashboard),
+            dashboard_payload,
             metrics_by_symbol=metrics_by_symbol,
         )
         errors.extend(dash_errors)
@@ -478,6 +565,12 @@ def main() -> int:
         stale_errors, stale_warnings = audit_stale_price_feeds(metrics_by_symbol)
         errors.extend(stale_errors)
         warnings.extend(stale_warnings)
+        decay_errors, decay_warnings = audit_decay_coverage(
+            metrics_by_symbol,
+            dashboard_payload=dashboard_payload,
+        )
+        errors.extend(decay_errors)
+        warnings.extend(decay_warnings)
 
     if VRP_LIVE_JSON.exists():
         try:

@@ -157,6 +157,22 @@ def test_audit_stale_feed_warns_on_carry_forward_tail():
     assert errors == []
 
 
+def test_audit_stale_feed_errors_on_cf_tail_with_market():
+    real = [{"date": "2026-06-01", "source_provider": "polygon", "close_price": 10.0, "underlying_adj_close": 20.0}]
+    cf = [
+        {
+            "date": f"2026-06-{d:02d}",
+            "source_provider": "carry_forward",
+            "stale_kind": "carry_forward",
+            "close_price": 11.0,
+            "underlying_adj_close": 21.0,
+        }
+        for d in range(2, 6)
+    ]
+    errors, _warnings = audit_stale_price_feeds({"RGTZ": real + cf})
+    assert any("market_backed" in msg and "RGTZ" in msg for msg in errors)
+
+
 def test_audit_stale_feed_fails_on_systemic_stall():
     stalled = [{"date": "2026-05-20", "source_provider": "polygon"}]
     fresh = [{"date": "2026-06-08", "source_provider": "polygon"}]

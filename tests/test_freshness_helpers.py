@@ -23,8 +23,10 @@ from build_data import (  # noqa: E402
 )
 from freshness_diagnostics import _check_options, _market_age_minutes  # noqa: E402
 from ingest_etf_metrics import (  # noqa: E402
+    STALE_KIND_MARKET_BACKED,
     extend_metrics_session_coverage,
     overlay_row_session_market_fields,
+    promote_carry_forward_rows_with_market,
     prune_expired_carry_forward_rows,
     repair_nav_only_partial_aum,
     stamp_metric_asof_metadata,
@@ -70,6 +72,15 @@ def test_carry_forward_market_overlay_uses_row_session_and_blocks_premium_discou
     assert row["issuer_asof_date"] == "2026-07-09"
     assert row["market_asof_date"] == "2026-07-10"
     assert bool(row["premium_discount_eligible"]) is False
+
+    promoted, n = promote_carry_forward_rows_with_market(out)
+    assert n == 1
+    promoted = stamp_metric_asof_metadata(promoted)
+    prow = promoted.iloc[0]
+    assert prow["stale_kind"] == STALE_KIND_MARKET_BACKED
+    assert prow["source_provider"] == "market_backed"
+    assert bool(prow["premium_discount_eligible"]) is False
+    assert prow["premium_discount_status"] == "issuer_stale"
 
 
 def test_yieldboost_targeted_refresh_symbols_keeps_underlyings():

@@ -177,6 +177,20 @@ jobs:
         continue-on-error: true
         run: python scripts/repair_metrics_staleness.py --apply --targeted-catchup --min-days-behind 2 --report-out data/metrics_staleness_report.json
 
+      - name: Audit Decay joint-usable coverage
+        continue-on-error: true
+        run: python scripts/audit_metrics_decay_coverage.py --report-out data/metrics_decay_coverage_report.json
+
+      - name: Repair Decay coverage (CF → market_backed)
+        continue-on-error: true
+        run: |
+          python scripts/repair_metrics_decay_coverage.py --apply --backfill-gaps \
+            --report-out data/metrics_decay_repair_report.json \
+            --coverage-out data/metrics_decay_coverage_report.json
+
+      - name: Decay coverage gate (hard fail)
+        run: python scripts/audit_metrics_decay_coverage.py --fail-on-tradeable-lag --report-out data/metrics_decay_coverage_report.json
+
       - name: Bootstrap Yahoo prices before first stored metrics row
         continue-on-error: true
         run: python scripts/bootstrap_metrics_yahoo_history.py --max-tickers 500
@@ -284,6 +298,9 @@ jobs:
             data/freshness_summary.json
             data/fof_pipeline_report.json
             data/metrics_staleness_report.json
+            data/metrics_decay_coverage_report.json
+            data/metrics_decay_coverage_summary.csv
+            data/metrics_decay_repair_report.json
             data/earnings_seed_audit.json
             data/earnings_calendar_seed.json
           commit_message: "${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday metrics catch-up ingest' || 'chore: nightly metrics ingest' }}"
