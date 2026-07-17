@@ -65,6 +65,7 @@ from split_adjustments import (
 
 from etf_providers import (
     ProviderResult,
+    STALE_KIND_ANCHOR_LAG,
     STALE_KIND_ISSUER_EARLY,
     STALE_KIND_ISSUER_LAG,
     STALE_KIND_ISSUER_SESSION_EXTEND,
@@ -74,6 +75,17 @@ from etf_providers import (
     infer_stale_kind,
     merge_provider_attempts,
 )
+
+# Max |close/NAV − 1| still treated as a tradeable premium/discount.
+# Larger gaps are almost always frozen issuer NAV vs live Yahoo close (or a
+# split-basis mismatch). Aligns with audit_dashboard_data_quality warnings.
+PREM_DISC_MAX_ABS_RATIO = 0.10
+_PREM_DISC_ISSUER_STALE_KINDS = frozenset({
+    STALE_KIND_ISSUER_LAG,
+    STALE_KIND_ISSUER_EARLY,
+    STALE_KIND_ANCHOR_LAG,
+    "carry_forward",
+})
 from etf_holdings_providers import (
     HOLDINGS_COLUMNS,
     build_default_holdings_stack,
@@ -1255,7 +1267,7 @@ def stamp_metric_asof_metadata(df: pd.DataFrame) -> pd.DataFrame:
     ratio = pd.to_numeric(out.get("close_price"), errors="coerce") / pd.to_numeric(
         out.get("nav"), errors="coerce"
     ) - 1.0
-    sane_basis = ratio.abs().le(0.50)
+    sane_basis = ratio.abs().le(PREM_DISC_MAX_ABS_RATIO)
     kind = out.get("stale_kind", pd.Series(index=out.index, dtype=object)).astype(str).str.lower()
     provider = out.get("source_provider", pd.Series(index=out.index, dtype=object)).astype(str).str.lower()
     market_backed = (
@@ -1268,16 +1280,18 @@ def stamp_metric_asof_metadata(df: pd.DataFrame) -> pd.DataFrame:
         | provider.eq("carry_forward")
         | urls.str.startswith("carry_forward://")
     )
+    # issuer_lag / early / anchor_lag: NAV (or session stamp) is not trustworthy
+    # vs the market close even when issuer_asof_date == market_asof_date.
+    issuer_nav_stale = kind.isin(_PREM_DISC_ISSUER_STALE_KINDS) | market_backed | carry_forward
     out["premium_discount_eligible"] = (
         nav_ok
         & close_ok
         & aligned
         & sane_basis
-        & ~market_backed
-        & ~carry_forward
+        & ~issuer_nav_stale
     )
     out["premium_discount_status"] = np.where(
-        market_backed | carry_forward,
+        issuer_nav_stale,
         "issuer_stale",
         np.where(
             ~nav_ok | ~close_ok,

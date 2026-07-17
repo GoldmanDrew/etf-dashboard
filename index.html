@@ -1514,6 +1514,7 @@
 <script src="assets/bucket5_product.js?v=b5p-v5"></script>
 <script src="assets/bucket5_insurance_backtest.js?v=b5p-v5"></script>
 <script src="assets/realized_decay.js?v=rd-v9"></script>
+<script src="assets/metrics_prem_disc.js?v=mpd-v1"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="assets/fof_chart.js?v=fof-v3"></script>
@@ -2114,22 +2115,47 @@ const fmtSharesTradedStat = (raw) => {
   return Math.round(n).toLocaleString('en-US');
 };
 const fmtUsd = v => (v == null || !Number.isFinite(Number(v))) ? '—' : `$${Number(v).toFixed(2)}`;
+const MetricsPremDiscFns = window.MetricsPremDisc || {};
+const isMarketBackedMetricsRow = typeof MetricsPremDiscFns.isMarketBackedMetricsRow === 'function'
+  ? MetricsPremDiscFns.isMarketBackedMetricsRow
+  : (m) => String(m?.stale_kind || '').toLowerCase() === 'market_backed_no_issuer_nav'
+    || String(m?.source_provider || '').toLowerCase() === 'market_backed'
+    || String(m?.source_url || '').startsWith('market_backed://');
+const isIssuerStaleMetricsRow = typeof MetricsPremDiscFns.isIssuerStaleMetricsRow === 'function'
+  ? MetricsPremDiscFns.isIssuerStaleMetricsRow
+  : (m) => isCarryForwardMetricsRow(m) || isMarketBackedMetricsRow(m);
+const isPremiumDiscountEligibleRow = typeof MetricsPremDiscFns.isPremiumDiscountEligibleRow === 'function'
+  ? MetricsPremDiscFns.isPremiumDiscountEligibleRow
+  : (m) => {
+    if (!m) return false;
+    if (m.premium_discount_eligible === false) return false;
+    if (isIssuerStaleMetricsRow(m)) return false;
+    const issuerAsOf = String(m.issuer_asof_date || '');
+    const marketAsOf = String(m.market_asof_date || '');
+    if (issuerAsOf && marketAsOf && issuerAsOf !== marketAsOf) return false;
+    return true;
+  };
+const premiumDiscountPct = typeof MetricsPremDiscFns.premiumDiscountPct === 'function'
+  ? MetricsPremDiscFns.premiumDiscountPct
+  : (nav, close, metricsRow = null) => {
+    if (metricsRow && !isPremiumDiscountEligibleRow(metricsRow)) return null;
+    const n = Number(nav);
+    const c = Number(close);
+    if (!Number.isFinite(n) || n <= 0 || !Number.isFinite(c)) return null;
+    return ((c - n) / n) * 100;
+  };
+const issuerNavForPlot = typeof MetricsPremDiscFns.issuerNavForPlot === 'function'
+  ? MetricsPremDiscFns.issuerNavForPlot
+  : (m) => {
+    if (!m || isIssuerStaleMetricsRow(m)) return null;
+    const nav = Number(m.nav);
+    return Number.isFinite(nav) && nav > 0 ? nav : null;
+  };
+
 /** Premium/discount of market close vs issuer NAV (bps when |prem| is small). */
 const fmtPremDisc = (nav, close, metricsRow = null) => {
-  // A premium/discount is meaningful only when issuer NAV and market close
-  // share a valuation session. Legacy carry-forward rows are rejected even
-  // before the explicit eligibility field reaches the browser.
-  if (metricsRow) {
-    if (metricsRow.premium_discount_eligible === false) return '—';
-    if (isCarryForwardMetricsRow(metricsRow)) return '—';
-    const issuerAsOf = String(metricsRow.issuer_asof_date || '');
-    const marketAsOf = String(metricsRow.market_asof_date || '');
-    if (issuerAsOf && marketAsOf && issuerAsOf !== marketAsOf) return '—';
-  }
-  const n = Number(nav);
-  const c = Number(close);
-  if (!Number.isFinite(n) || n <= 0 || !Number.isFinite(c)) return '—';
-  const pct = ((c - n) / n) * 100;
+  const pct = premiumDiscountPct(nav, close, metricsRow);
+  if (pct == null || !Number.isFinite(pct)) return '—';
   if (Math.abs(pct) < 0.05) return `${pct >= 0 ? '+' : ''}${(pct * 100).toFixed(0)} bp`;
   return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
 };
@@ -8242,10 +8268,11 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     etfMetricsSeries.map((m) => {
       const nav = Number(m.nav);
       const close = Number(m.close_price);
-      const prem_disc_pct = (Number.isFinite(nav) && nav > 0 && Number.isFinite(close))
-        ? ((close - nav) / nav) * 100
-        : null;
-      return { ...m, prem_disc_pct };
+      // Do not plot stale carried NAV against a live close — that fabricates
+      // a fake premium/discount spike (e.g. SNDQ +45% on market-backed rows).
+      const nav_plot = issuerNavForPlot(m);
+      const prem_disc_pct = premiumDiscountPct(nav, close, m);
+      return { ...m, nav_plot, prem_disc_pct };
     })
   ), [etfMetricsSeries]);
   // Pair Backtest: joint days (ETF px + underlying_adj_close) from etf_metrics_daily.
@@ -10054,21 +10081,23 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               {(() => {
                 let staleTail = 0;
                 for (let i = etfMetricsSeries.length - 1; i >= 0; i -= 1) {
-                  if (isCarryForwardMetricsRow(etfMetricsSeries[i])) staleTail += 1; else break;
+                  if (isIssuerStaleMetricsRow(etfMetricsSeries[i])) staleTail += 1; else break;
                 }
-                if (staleTail < 3) return null;
-                const lastReal = [...etfMetricsSeries].reverse().find((m) => !isCarryForwardMetricsRow(m));
+                if (staleTail < 1) return null;
+                const lastReal = [...etfMetricsSeries].reverse().find((m) => !isIssuerStaleMetricsRow(m));
                 const lastRealDate = lastReal ? String(lastReal.date || '').slice(0, 10) : 'unknown';
                 return (
                   <div className="scenario-warning" style={{ marginTop: 6 }}>
-                    Issuer feed stale: the last {staleTail} rows are carried forward — last real data {lastRealDate}. Recent NAV / AUM / prem-disc values repeat stale prints.
+                    Issuer feed stale: the last {staleTail} row{staleTail === 1 ? '' : 's'} lack a same-session issuer NAV
+                    (carry-forward or market-backed close only) — last real issuer NAV {lastRealDate}.
+                    Prem/disc is suppressed until issuer NAV catches up; do not read the close−NAV gap as a tradeable premium.
                   </div>
                 );
               })()}
               <div className="metrics-stack">
                 <SimpleSeriesPlot
                   series={etfMetricsChartSeries}
-                  valueKey="nav"
+                  valueKey="nav_plot"
                   color="rgba(59,130,246,0.95)"
                   label={`${etfSym} NAV vs. market close (issuer NAV, not AUM/shares implied)`}
                   formatValue={(v) => fmtUsd(v)}
@@ -10076,6 +10105,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   overlayValueKey="close_price"
                   overlayColor="rgba(234,179,8,0.95)"
                   overlayLabel="Market close"
+                  strictNullPrimary
                 />
                 <SimpleSeriesPlot
                   series={etfMetricsChartSeries}
@@ -10090,6 +10120,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   }}
                   zeroLabel="0%"
                   includeZero={true}
+                  strictNullPrimary
                 />
                 <SimpleSeriesPlot
                   series={etfMetricsSeries}
@@ -10166,18 +10197,22 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                           <td>{m.date || '—'}</td>
                           <td title="Issuer-published NAV (REX/Roundhill/etc.), not AUM÷shares unless NAV absent">{fmtUsd(nav)}</td>
                           <td title="Exchange close (issuer closing price when available, else Yahoo)">{Number.isFinite(close) ? fmtUsd(close) : '—'}</td>
-                          <td title={m?.premium_discount_eligible === false
+                          <td title={!isPremiumDiscountEligibleRow(m)
                             ? `Unavailable: ${m?.premium_discount_status === 'split_basis_mismatch'
                               ? 'NAV and close are on incompatible split bases.'
-                              : 'issuer NAV and market close are from different sessions.'}`
+                              : (m?.premium_discount_status === 'issuer_stale' || isIssuerStaleMetricsRow(m))
+                                ? 'issuer NAV is stale vs market close (carry-forward / market-backed).'
+                                : 'issuer NAV and market close are from different sessions.'}`
                             : '(close − NAV) / NAV'}>{fmtPremDisc(nav, close, m)}</td>
                           <td>{toFiniteNum(m.nav_total_return) != null ? fmtUsd(toFiniteNum(m.nav_total_return)) : '—'}</td>
                           <td>{toFiniteNum(m.underlying_adj_close) != null ? fmtUsd(toFiniteNum(m.underlying_adj_close)) : '—'}</td>
                           <td>{fmtMoney(Number(m.aum))}</td>
                           <td>{fmtSharesCount(Number(m.shares_outstanding))}</td>
                           <td>{fmtSharesTradedStat(m.shares_traded)}</td>
-                          <td className={String(m.status || '').includes('repaired') || isCarryForwardMetricsRow(m) ? 'val-warning' : ''}>
-                            {m.status || '—'}{isCarryForwardMetricsRow(m) ? ' · carry-fwd' : ''}
+                          <td className={String(m.status || '').includes('repaired') || isIssuerStaleMetricsRow(m) ? 'val-warning' : ''}>
+                            {m.status || '—'}
+                            {isCarryForwardMetricsRow(m) ? ' · carry-fwd' : ''}
+                            {isMarketBackedMetricsRow(m) ? ' · market-backed (NAV stale)' : ''}
                           </td>
                         </tr>
                       );

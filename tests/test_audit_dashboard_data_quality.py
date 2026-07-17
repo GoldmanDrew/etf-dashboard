@@ -207,7 +207,34 @@ def test_asof_audit_rejects_eligible_carry_forward_premium_discount():
             "premium_discount_eligible": True,
         }]
     })
-    assert any("premium_discount_eligible=true" in msg for msg in errors)
+    assert any("premium_discount_eligible=true" in msg or "incorrectly eligible" in msg for msg in errors)
+
+
+def test_asof_audit_rejects_eligible_issuer_lag_and_implausible_prem():
+    errors, _warnings = audit_metrics_asof_alignment({
+        "APHU": [{
+            "date": "2026-05-19",
+            "nav": 29.65,
+            "close_price": 14.84,
+            "source_provider": "rex_shares",
+            "stale_kind": "issuer_lag",
+            "issuer_asof_date": "2026-05-19",
+            "market_asof_date": "2026-05-19",
+            "premium_discount_eligible": True,
+        }],
+        "MIC": [{
+            "date": "2026-06-26",
+            "nav": 14.4528,
+            "close_price": 21.67,
+            "source_provider": "merged",
+            "stale_kind": None,
+            "issuer_asof_date": "2026-06-26",
+            "market_asof_date": "2026-06-26",
+            "premium_discount_eligible": True,
+        }],
+    })
+    assert any("APHU" in msg and "issuer_lag" in msg for msg in errors)
+    assert any("MIC" in msg and "implausible" in msg for msg in errors)
 
 
 def test_vrp_audit_blocks_expired_grade_d_rows_without_failing():

@@ -375,6 +375,16 @@ def audit_metrics_asof_alignment(
         ):
             errors.append(f"{sym}: market-backed row incorrectly eligible for premium/discount")
             continue
+        if eligible and stale_kind in {
+            "issuer_lag",
+            "issuer_early",
+            "anchor_lag",
+            "carry_forward",
+        }:
+            errors.append(
+                f"{sym}: {stale_kind or 'stale'} row incorrectly eligible for premium/discount"
+            )
+            continue
         if eligible:
             try:
                 nav = float(row.get("nav"))
@@ -382,9 +392,9 @@ def audit_metrics_asof_alignment(
                 prem = close / nav - 1.0
             except (TypeError, ValueError, ZeroDivisionError):
                 continue
-            if abs(prem) > 0.50:
+            if abs(prem) > 0.10:
                 errors.append(f"{sym}: aligned premium/discount implausible at {prem:+.1%}")
-            elif abs(prem) > 0.10:
+            elif abs(prem) > 0.05:
                 warnings.append(f"{sym}: aligned premium/discount unusually large at {prem:+.1%}")
     return errors, warnings
 

@@ -31,6 +31,7 @@ from ingest_etf_metrics import (  # noqa: E402
     repair_nav_only_partial_aum,
     stamp_metric_asof_metadata,
 )
+from etf_providers import STALE_KIND_ISSUER_LAG  # noqa: E402
 
 
 def test_carry_forward_market_overlay_uses_row_session_and_blocks_premium_discount():
@@ -81,6 +82,55 @@ def test_carry_forward_market_overlay_uses_row_session_and_blocks_premium_discou
     assert prow["source_provider"] == "market_backed"
     assert bool(prow["premium_discount_eligible"]) is False
     assert prow["premium_discount_status"] == "issuer_stale"
+
+
+def test_stamp_blocks_issuer_lag_and_implausible_prem_disc():
+    """Frozen issuer NAV vs live close must not look like a tradeable premium."""
+    rows = pd.DataFrame([
+        {
+            "date": date(2026, 5, 19),
+            "ticker": "APHU",
+            "nav": 29.65,
+            "close_price": 14.84,
+            "source_provider": "rex_shares",
+            "source_url": "https://www.rexshares.com/APHU/#as_of=2026-05-19",
+            "stale_kind": STALE_KIND_ISSUER_LAG,
+            "issuer_asof_date": "2026-05-19",
+            "market_asof_date": "2026-05-19",
+        },
+        {
+            "date": date(2026, 6, 26),
+            "ticker": "MIC",
+            "nav": 14.4528,
+            "close_price": 21.67,
+            "source_provider": "merged",
+            "source_url": "https://example/#as_of=2026-06-26",
+            "stale_kind": None,
+            "issuer_asof_date": "2026-06-26",
+            "market_asof_date": "2026-06-26",
+        },
+        {
+            "date": date(2026, 7, 14),
+            "ticker": "SNDQ",
+            "nav": 2.6829,
+            "close_price": 2.68,
+            "source_provider": "tradr_axs",
+            "source_url": "https://example/#as_of=2026-07-14",
+            "stale_kind": None,
+            "issuer_asof_date": "2026-07-14",
+            "market_asof_date": "2026-07-14",
+        },
+    ])
+    out = stamp_metric_asof_metadata(rows)
+    aphu = out.loc[out["ticker"] == "APHU"].iloc[0]
+    mic = out.loc[out["ticker"] == "MIC"].iloc[0]
+    sndq = out.loc[out["ticker"] == "SNDQ"].iloc[0]
+    assert bool(aphu["premium_discount_eligible"]) is False
+    assert aphu["premium_discount_status"] == "issuer_stale"
+    assert bool(mic["premium_discount_eligible"]) is False
+    assert mic["premium_discount_status"] == "split_basis_mismatch"
+    assert bool(sndq["premium_discount_eligible"]) is True
+    assert sndq["premium_discount_status"] == "valid"
 
 
 def test_yieldboost_targeted_refresh_symbols_keeps_underlyings():
