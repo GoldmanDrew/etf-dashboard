@@ -653,6 +653,37 @@
     );
   }
 
+  function putSizingPanel(sizing) {
+    if (!sizing || !(sizing.rungs || []).length) return "";
+    const rows = sizing.rungs
+      .map(
+        (r) => `<tr><td>${fmtPct(r.otm_pct, 0)} OTM</td><td>${fmtNum(r.strike, 0)}</td>` +
+          `<td>${fmtUsd(r.modeled_put_price)}</td><td>${fmtUsd(r.target_budget_usd)}</td>` +
+          `<td>${r.baseline_contracts ?? "—"}</td><td><strong>${r.target_contracts ?? "—"}</strong></td>` +
+          `<td>${fmtUsd(r.premium_used_usd)}</td><td>${fmtUsd(r.unspent_budget_usd)}</td></tr>`
+      )
+      .join("");
+    return `<div class="b5p-panel"><h2>Next SPX put roll — reverse-solved quantity</h2>` +
+      kpiCards([
+        ["Account NAV", fmtUsd(sizing.account_nav_usd), ""],
+        ["B5 pair gross", fmtUsd(sizing.b5_pair_gross_usd), ""],
+        ["Effective B5 NAV", fmtUsd(sizing.effective_b5_nav_usd), ""],
+        ["Baseline contracts", String(sizing.baseline_total_contracts ?? "—"), ""],
+        ["2× target contracts", String(sizing.target_total_contracts ?? "—"), ""],
+        ["Nominal 2× budget", fmtUsd(sizing.target_total_budget_usd), ""],
+        ["Modeled premium used", fmtUsd(sizing.premium_used_usd), ""],
+        ["Budget multiplier", `${fmtNum(sizing.dynamic_budget_multiplier, 2)}×`, ""],
+      ]) +
+      `<div class="b5p-table-wrap" style="margin-top:12px"><table class="b5p-table"><thead><tr>` +
+      `<th>Rung</th><th>Strike</th><th>Modeled px</th><th>Budget</th><th>Old qty</th><th>2× qty</th><th>Used</th><th>Budget +/-</th>` +
+      `</tr></thead><tbody>${rows}</tbody></table></div>` +
+      (Number(sizing.premium_used_usd) > Number(sizing.target_total_budget_usd)
+        ? `<p class="callout negative">Blocked for full rollout: exact 2× integer quantities exceed the nominal premium budget. Use the staged pilot and approve a smaller contract multiplier or an up-to-2× cap before live routing.</p>`
+        : "") +
+      `<p class="dim small" style="margin-top:10px">As of ${escapeHtml(sizing.as_of || "—")}. ` +
+      `${escapeHtml(sizing.execution_formula || "")} ${escapeHtml(sizing.quote_note || "")}</p></div>`;
+  }
+
   function renderOverview(data, run, state) {
     const guide = run.meta?.strategy_guide;
     const dd = run.drawdown_series || [];
@@ -681,6 +712,7 @@
         : "") +
       StrategyGuide(guide, run) +
       kpi +
+      putSizingPanel(run.put_sizing) +
       MultiEquityChart(data.runs || [run], data.primary_run_id, state.hiddenRuns) +
       `<div class="b5p-grid-2">` +
       `<div class="b5p-panel">${LineChart({
