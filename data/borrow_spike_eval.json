@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-07-19T06:54:41.306206Z",
+  "as_of": "2026-07-19T13:57:09.024316Z",
   "label": {
     "name": "production",
     "description": "future_max > max(1.0, 3*med60, p99_180) and jump > 0.25",
@@ -244,9 +244,9 @@
       "lift_top_decile": 4.534299,
       "capture_rate_p_ge_0p10": 0.244111,
       "precision_at_k": {
-        "precision_at_5": 0.205769,
-        "precision_at_10": 0.177885,
-        "precision_at_20": 0.133654
+        "precision_at_5": 0.221154,
+        "precision_at_10": 0.170192,
+        "precision_at_20": 0.130769
       },
       "calibration_bins": [
         {
@@ -320,7 +320,7 @@
           "realized_rate": 0.018104
         }
       ],
-      "precision_at_10_lift_vs_base": 7.7492
+      "precision_at_10_lift_vs_base": 7.4141
     },
     "live_predictions": {
       "source": "live_predictions",
@@ -415,7 +415,7 @@
       "precision_at_10_lift_vs_base": 40.7296
     },
     "production_rollup": {
-      "build_time": "2026-07-19T06:51:18.660265Z",
+      "build_time": "2026-07-19T13:54:04.740463Z",
       "n_rows": 23221,
       "brier_score": 0.00057,
       "log_loss": 0.02295,
@@ -1079,9 +1079,9 @@
       }
     ],
     "study_summary": {
-      "build_time": "2026-07-18T21:48:27.113573Z",
-      "panel_rows": 51753,
-      "panel_symbols": 546,
+      "build_time": "2026-07-19T06:56:52.359949Z",
+      "panel_rows": 52311,
+      "panel_symbols": 547,
       "recommended_v2_features": [
         "borrow_current",
         "borrow_vol10",
@@ -1104,106 +1104,106 @@
         "utilization_proxy",
         "shares_drop1"
       ],
-      "guidance_for_spike_model": "Use recommended_v2_features for logistic_v2 candidate set. Prioritize supply (utilization_proxy, shares_drop3) and peer_borrow_z_mean when re-running borrow_spike_eval; keep L0 labels and out-of-time splits. Best ablation block: borrow_plus_supply (AUROC 0.9940).",
+      "guidance_for_spike_model": "Use recommended_v2_features for logistic_v2 candidate set. Prioritize supply (utilization_proxy, shares_drop3) and peer_borrow_z_mean when re-running borrow_spike_eval; keep L0 labels and out-of-time splits. Best ablation block: borrow_plus_supply (AUROC 0.9939).",
       "key_findings": [
         "Top rank-corr predictors at h=5: borrow_current, borrow_vol10, log_aum."
       ],
       "best_block_ablation": "borrow_plus_supply",
       "block_auroc_lifts": {
-        "supply_vs_borrow_only": 0.002387,
-        "peer_vs_borrow_only": -0.00366,
-        "full_vs_borrow_only": 0.000876
+        "supply_vs_borrow_only": 0.002856,
+        "peer_vs_borrow_only": -0.003332,
+        "full_vs_borrow_only": 0.001032
       },
       "top_predictors_h5": [
         {
           "feature": "borrow_current",
-          "mean_abs_rank_corr": 0.128316
+          "mean_abs_rank_corr": 0.127893
         },
         {
           "feature": "borrow_vol10",
-          "mean_abs_rank_corr": 0.121268
+          "mean_abs_rank_corr": 0.121218
         },
         {
           "feature": "log_aum",
-          "mean_abs_rank_corr": 0.10558
+          "mean_abs_rank_corr": 0.105403
         },
         {
           "feature": "shares_available",
-          "mean_abs_rank_corr": 0.096851
+          "mean_abs_rank_corr": 0.09645
         },
         {
           "feature": "forecast_vol_underlying_annual",
-          "mean_abs_rank_corr": 0.073506
+          "mean_abs_rank_corr": 0.0734
         },
         {
           "feature": "gross_decay_annual",
-          "mean_abs_rank_corr": 0.064818
+          "mean_abs_rank_corr": 0.064567
         },
         {
           "feature": "borrow_z60",
-          "mean_abs_rank_corr": 0.060113
+          "mean_abs_rank_corr": 0.06037
         },
         {
           "feature": "tradable_float_shares",
-          "mean_abs_rank_corr": 0.058828
+          "mean_abs_rank_corr": 0.059617
         }
       ]
     },
     "feature_importance": {
-      "build_time": "2026-07-18T21:48:24.554535Z",
+      "build_time": "2026-07-19T06:56:49.541546Z",
       "target": "y_spike_5",
       "split": "out_of_time_80_20",
       "blocks": {
         "borrow_only": {
           "status": "ok",
-          "auroc": 0.991645,
+          "auroc": 0.991035,
           "precision_at_10": 0.004,
-          "precision_lift_vs_base": 2.7849,
+          "precision_lift_vs_base": 2.8226,
           "test_positives": 1
         },
         "borrow_plus_supply": {
           "status": "ok",
-          "auroc": 0.994032,
+          "auroc": 0.993891,
           "precision_at_10": 0.004,
-          "precision_lift_vs_base": 2.7849,
-          "auroc_delta_vs_borrow_only": 0.002387,
+          "precision_lift_vs_base": 2.8226,
+          "auroc_delta_vs_borrow_only": 0.002856,
           "test_positives": 1
         },
         "borrow_plus_scale": {
           "status": "ok",
-          "auroc": 0.991009,
+          "auroc": 0.990718,
           "precision_at_10": 0.004,
-          "precision_lift_vs_base": 2.7849,
-          "auroc_delta_vs_borrow_only": -0.000637,
+          "precision_lift_vs_base": 2.8226,
+          "auroc_delta_vs_borrow_only": -0.000317,
           "test_positives": 1
         },
         "borrow_plus_float": {
           "status": "ok",
-          "auroc": 0.989418,
+          "auroc": 0.98929,
           "precision_at_10": 0.004,
-          "precision_lift_vs_base": 2.7849,
-          "auroc_delta_vs_borrow_only": -0.002228,
+          "precision_lift_vs_base": 2.8226,
+          "auroc_delta_vs_borrow_only": -0.001745,
           "test_positives": 1
         },
         "borrow_plus_peer": {
           "status": "ok",
-          "auroc": 0.987985,
+          "auroc": 0.987703,
           "precision_at_10": 0.0,
           "precision_lift_vs_base": 0.0,
-          "auroc_delta_vs_borrow_only": -0.00366,
+          "auroc_delta_vs_borrow_only": -0.003332,
           "test_positives": 1
         },
         "full_plus_screener": {
           "status": "ok",
-          "auroc": 0.992521,
+          "auroc": 0.992067,
           "precision_at_10": 0.004,
-          "precision_lift_vs_base": 2.7849,
-          "auroc_delta_vs_borrow_only": 0.000875,
+          "precision_lift_vs_base": 2.8226,
+          "auroc_delta_vs_borrow_only": 0.001031,
           "test_positives": 1
         },
         "logistic_v1_reference": {
           "status": "ok",
-          "auroc": 0.993157,
+          "auroc": 0.992543,
           "precision_at_10": 0.004
         }
       }
@@ -1697,7 +1697,7 @@
       "primary_eval_label": "L2",
       "spike_production": "logistic_v2"
     },
-    "build_time": "2026-07-19T06:54:31.637826Z",
+    "build_time": "2026-07-19T13:57:00.952916Z",
     "boosting": {
       "backend": "unavailable",
       "spike_replay": {
