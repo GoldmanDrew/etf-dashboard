@@ -351,10 +351,11 @@ jobs:
 
       - name: Build Bucket 4 inverse-decay backtest artifact
         if: steps.build_data.outcome == 'success'
-        continue-on-error: true
         env:
           LS_ALGO_ROOT: ${{ github.workspace }}/ls-algo
-        run: python scripts/build_bucket4_backtest.py
+        run: |
+          python ls-algo/scripts/export_b4_dashboard.py --run-production --run-date "$(date -u +%F)" --start 2026-02-27
+          python scripts/build_bucket4_backtest.py --mode production
 
       - name: Refresh YieldBOOST VRP (sleeves + Tradier OCC)
         if: steps.build_data.outcome == 'success'

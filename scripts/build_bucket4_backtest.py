@@ -1075,6 +1075,14 @@ def build_backtest(
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--mode",
+        choices=("production", "research-legacy"),
+        default="production",
+        help="Production strictly imports the authoritative ls-algo ledger; research-legacy runs the old local simulator.",
+    )
+    ap.add_argument("--production-export", type=Path, default=None)
+    ap.add_argument("--allow-dirty-source", action="store_true")
     ap.add_argument("--screener", default=str(DEFAULT_SCREENER))
     ap.add_argument("--policy", default=str(DEFAULT_POLICY))
     ap.add_argument("--start", default=None)
@@ -1087,6 +1095,24 @@ def main(argv=None) -> int:
         help="Use legacy (edge-borrow)/vol concentration weights instead of ls-algo opt2+crash sizing.",
     )
     args = ap.parse_args(argv)
+
+    if args.mode == "production" and not args.legacy_concentration:
+        from import_bucket4_production import find_production_export, import_contract
+
+        source = find_production_export(args.production_export)
+        if source is None:
+            print(
+                "[bucket4-bt] authoritative ls-algo production export not found; "
+                "set B4_PRODUCTION_EXPORT/LS_ALGO_ROOT or use --mode research-legacy",
+                file=sys.stderr,
+            )
+            return 2
+        built = import_contract(source, allow_dirty_source=bool(args.allow_dirty_source))
+        print(
+            f"[bucket4-bt] imported authoritative production ledger "
+            f"pairs={built['n_pairs']} obs={built['n_obs']} policy={built['policy_version']}"
+        )
+        return 0
 
     policy_path = Path(args.policy)
     policy = load_policy(policy_path)
