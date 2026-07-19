@@ -41,13 +41,13 @@ def test_bucket4_artifact_schema_when_present():
     if not path.is_file():
         return
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload.get("schema") in {"bucket4_backtest.v2", "bucket4_backtest.v3"}
+    assert payload.get("schema") in {"bucket4_backtest.v2", "bucket4_backtest.v3", "bucket4_backtest.v4"}
     assert isinstance(payload.get("pairs"), list)
     assert payload.get("n_pairs", 0) == len(payload["pairs"])
     assert isinstance(payload.get("sim_dates"), list)
     assert isinstance(payload.get("port_equity"), list)
     assert len(payload["sim_dates"]) == len(payload["port_equity"])
-    if payload.get("schema") in {"bucket4_backtest.v2", "bucket4_backtest.v3"}:
+    if payload.get("schema") in {"bucket4_backtest.v2", "bucket4_backtest.v3", "bucket4_backtest.v4"}:
         assert isinstance(payload.get("default_weights"), dict)
         assert isinstance(payload.get("pair_series"), dict)
         assert isinstance(payload.get("universes"), dict)
@@ -65,6 +65,13 @@ def test_bucket4_artifact_schema_when_present():
             }
             assert "cash_residual" in payload
             assert "deployed_fraction" in payload
+        if payload.get("schema") == "bucket4_backtest.v4":
+            assert payload.get("authoritative") is True
+            assert payload.get("mode") == "production_policy_replay"
+            assert payload.get("research_reblend_enabled") is False
+            assert payload.get("parity", {}).get("production_execution_ledger") is True
+            assert payload.get("parity", {}).get("pair_reconciliation_max_abs_usd", 1) <= 0.01
+            assert payload.get("source", {}).get("commit")
         sndq = [p for p in payload.get("pair_manifest", []) if p.get("etf") == "SNDQ"]
         if sndq:
             shard_path = REPO / "data" / "bucket4_pairs" / "SNDQ.json"

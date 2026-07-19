@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -44,24 +46,45 @@ def load_price_panel(
     *,
     min_days: int = MIN_PRICE_PANEL_DAYS,
     metrics: pd.DataFrame | None = None,
+    corporate_actions_path: Path | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Per-ETF aligned (etf_adj_close, underlying_adj_close) price panels.
 
     Applies ls-algo ``data/splits_from_flex.csv`` when available so reverse
     splits do not invent +400% daily returns in the dashboard B4 backtest.
     """
-    md = metrics if metrics is not None else load_metrics_frame()
+    md = (metrics if metrics is not None else load_metrics_frame()).copy()
     cols = ["date", "ticker", "etf_adj_close", "underlying_adj_close"]
     missing = [c for c in cols if c not in md.columns]
     if missing:
         raise ValueError(f"etf_metrics_daily missing columns: {missing}")
 
-    # Prefer shared ls-algo split logic when the sibling repo is importable.
-    try:
-        import sys
+    # Repair the dashboard's canonical adjusted-close basis first. This is
+    # required even when ls-algo is available: Flex can report the formal
+    # action date after the market close has already switched basis (NBIZ).
+    from ingest_etf_metrics import backfill_split_adjusted_etf_adj_close
 
-        ls_algo = Path(r"C:\Users\drewg\Projects\quant\ls-algo")
-        if ls_algo.is_dir() and str(ls_algo) not in sys.path:
+    md = backfill_split_adjusted_etf_adj_close(
+        md,
+        corporate_actions_path=corporate_actions_path,
+    )
+
+    # Then prefer shared ls-algo crater/override logic when a sibling checkout
+    # is available. Keep path discovery aligned with the sizing bridge and CI.
+    try:
+        env_root = os.environ.get("LS_ALGO_ROOT", "").strip()
+        candidates = [
+            Path(env_root) if env_root else None,
+            REPO / "ls-algo",
+            REPO.parent / "ls-algo",
+            Path.home() / "Projects" / "quant" / "ls-algo",
+        ]
+        ls_algo = next(
+            p.resolve()
+            for p in candidates
+            if p is not None and (p / "scripts" / "pair_price_panel.py").is_file()
+        )
+        if str(ls_algo) not in sys.path:
             sys.path.insert(0, str(ls_algo))
         from scripts.pair_price_panel import frames_from_metrics, split_events_by_symbol
 

@@ -92,6 +92,48 @@ test("pairChartResultFromShard scales unit-capital PnL to notional dollars", () 
   assert.equal(out.rebalanceLog.length, 1);
 });
 
+test("authoritative pair shard uses exported dollar ledger fields", () => {
+  const shard = {
+    etf: "NBIZ",
+    underlying: "NBIS",
+    ledger_mode: "actual_dollar",
+    notional_basis_usd: 50000,
+    daily: {
+      dates: ["2026-06-01", "2026-06-02"],
+      equity: [1, 1.002],
+      ret: [0, 0.002],
+      net_pnl_dollars: [0, 100],
+      price_pnl_cum_dollars: [0, 120],
+      borrow_cost_cum_dollars: [0, 5],
+      txn_cost_cum_dollars: [0, 15],
+      gross_exposure_dollars: [50000, 48000],
+      h_used: [0.5, 0.55],
+      rebalance: [1, 0],
+      rebalance_reason: ["enter_operator", ""],
+      borrow_cost: [0, 0.0001],
+      rebalance_fee: [0.0003, 0],
+    },
+  };
+  const out = Bucket4Backtest.pairChartResultFromShard(shard, { gross: 100000 });
+  assert.equal(out.ok, true);
+  assert.equal(out.rows[1].netPnl, 200);
+  assert.equal(out.rows[1].longPnl, 240);
+  assert.equal(out.rows[1].borrow, 10);
+  assert.equal(out.rows[1].transactionCosts, 30);
+  assert.equal(out.rows[1].totalGross, 96000);
+  assert.equal(out.rows[0].rebalanceReason, "enter_operator");
+});
+
+test("authoritative artifact disables client-side research reblend", () => {
+  const out = Bucket4Backtest.recomputeBookFromPairs(
+    { research_reblend_enabled: false, pair_series: {} },
+    { NBIZ: { enabled: true, weight: 1 } },
+    { gross: 100000 },
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /disabled/i);
+});
+
 test("overlayBookChartResult puts production on longPnl series", () => {
   const prod = {
     ok: true,

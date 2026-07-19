@@ -468,6 +468,52 @@ def find_close_jump_boundary(
     return min(candidates)
 
 
+def find_partial_split_jump_boundary(
+    close_points: list[tuple[dt.date, float]],
+    mult: float,
+    near: dt.date,
+    *,
+    window_days: int = 7,
+    min_log_fraction: float = 0.50,
+) -> dt.date | None:
+    """Find a nearby same-direction jump that covers most of a declared split.
+
+    A large overnight market move can make the observed close ratio materially
+    different from the mechanical split multiple. NBIZ is the canonical case:
+    its 1-for-10 reverse split moved the market close onto the new basis on
+    2026-06-01 while the underlying rose about 14%, leaving only a 6.85x raw
+    close jump. NAV switched on the declared 2026-06-03 action date.
+
+    This helper is intentionally not sufficient evidence by itself. Callers
+    must first confirm the declared multiple from issuer NAV or shares. The
+    log-space threshold merely locates the close-basis boundary without
+    requiring the economic return on that session to be near zero.
+    """
+    if not close_points or not (math.isfinite(mult) and mult > 0):
+        return None
+    declared_log = math.log(float(mult))
+    if abs(declared_log) <= 1e-12:
+        return None
+    dated = sorted(close_points)
+    candidates: list[tuple[float, dt.date]] = []
+    for i in range(1, len(dated)):
+        d_cur, c_cur = dated[i]
+        _, c_prev = dated[i - 1]
+        if abs((d_cur - near).days) > int(window_days):
+            continue
+        if not (c_prev > 0 and c_cur > 0):
+            continue
+        jump_log = math.log(float(c_cur) / float(c_prev))
+        if jump_log * declared_log <= 0:
+            continue
+        if abs(jump_log) < abs(declared_log) * float(min_log_fraction):
+            continue
+        candidates.append((abs(jump_log - declared_log), d_cur))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda x: (x[0], x[1]))[1]
+
+
 def detect_staggered_discrete_splits(
     points: list[tuple[dt.date, float, float]],
     close_points: list[tuple[dt.date, float]],
@@ -752,7 +798,7 @@ def filter_splits_needing_close_basis_fix(
                     accepted = True
                     use_eff = snapped
 
-        if not accepted and jump is None:
+        if not accepted:
             prev_row, curr_row = _metric_row_at_date(metric_rows, eff)
             if prev_row is not None and curr_row is not None:
                 issuer_mult = confirm_split_from_shares_or_nav(
@@ -764,8 +810,20 @@ def filter_splits_needing_close_basis_fix(
                     rel_tol=rel_tol,
                 )
                 if issuer_mult is not None:
-                    accepted = True
-                    use_eff = eff
+                    # The issuer transition confirms the action, but a
+                    # continuous close series still must not be scaled. Find
+                    # a nearby same-direction close-basis switch; allow the
+                    # session's economic return to obscure part of the exact
+                    # mechanical multiple (NBIZ 2026-06-01).
+                    partial = find_partial_split_jump_boundary(
+                        close_points,
+                        float(mult),
+                        eff,
+                        window_days=7,
+                    )
+                    if partial is not None:
+                        accepted = True
+                        use_eff = partial
 
         if accepted:
             out.append((use_eff, float(mult)))

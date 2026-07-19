@@ -22,8 +22,49 @@ from bucket4.bucket4_hedge_cadence import (  # noqa: E402
     build_rebal_dates,
     compute_pair_policy,
 )
+from bucket4.bucket4_price_loading import load_price_panel  # noqa: E402
 from bucket4.bucket4_sizing import concentration_scores  # noqa: E402
 from build_bucket4_backtest import build_backtest, load_universe, score_weights  # noqa: E402
+
+
+def test_b4_price_panel_repairs_nbiz_staggered_reverse_split(tmp_path: Path):
+    ca = tmp_path / "corporate_actions.json"
+    ca.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "type": "reverse_split",
+                        "ticker": "NBIZ",
+                        "execution_date": "2026-06-03",
+                        "ratio_from": 10.0,
+                        "ratio_to": 1.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    metrics = pd.DataFrame(
+        [
+            {"date": "2026-05-29", "ticker": "NBIZ", "nav": 1.2456, "shares_outstanding": 12_715_000,
+             "etf_adj_close": 1.255, "close_price": 1.255, "underlying_adj_close": 231.09},
+            {"date": "2026-06-01", "ticker": "NBIZ", "nav": 0.8858, "shares_outstanding": 36_415_000,
+             "etf_adj_close": 8.60, "close_price": 8.60, "underlying_adj_close": 264.51},
+            {"date": "2026-06-02", "ticker": "NBIZ", "nav": 0.9122, "shares_outstanding": 3_641_500,
+             "etf_adj_close": 9.10, "close_price": 9.10, "underlying_adj_close": 260.58},
+            {"date": "2026-06-03", "ticker": "NBIZ", "nav": 9.7451, "shares_outstanding": 2_711_500,
+             "etf_adj_close": 9.76, "close_price": 9.76, "underlying_adj_close": 251.68},
+        ]
+    )
+    panel = load_price_panel(
+        metrics=metrics,
+        min_days=1,
+        corporate_actions_path=ca,
+    )["NBIZ"]
+    assert panel.loc["2026-05-29", "a_px"] == pytest.approx(12.55)
+    assert panel.loc["2026-06-01", "a_px"] == pytest.approx(8.60)
+    assert float(panel["a_px"].pct_change().abs().max()) < 0.35
 
 
 def test_compute_pair_policy_v7_higher_vcr_raises_h():

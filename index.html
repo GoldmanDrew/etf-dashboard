@@ -1508,7 +1508,7 @@
 <script src="assets/trade_lab_spots.js?v=tl-spots-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v4"></script>
 <script src="assets/pair_backtest.js?v=pb-v9"></script>
-<script src="assets/bucket4_backtest.js?v=b4-v2"></script>
+<script src="assets/bucket4_backtest.js?v=b4-v4"></script>
 <link rel="stylesheet" href="assets/bucket5_product.css?v=b5p-v5">
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.7/dist/lightweight-charts.standalone.production.js"></script>
 <script src="assets/bucket5_product.js?v=b5p-v5"></script>
@@ -14426,7 +14426,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
           <div className="pair-report-toolbar">
             <div className="backtest-control">
               <label>Notional $</label>
-              <input type="number" min={1000} step={1000} value={gross} onChange={(e) => setGross(Number(e.target.value) || 0)} title="Scales unit-capital pair path into dollars (same default as B4 Book)." />
+              <input type="number" min={1000} step={1000} value={gross} onChange={(e) => setGross(Number(e.target.value) || 0)} title="Scales the exported production-ledger PnL linearly from its recorded source notional." />
             </div>
             <div className="pair-report-meta">
               <span>Entered <strong>{summary.entry_date || '—'}</strong></span>
@@ -14476,7 +14476,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
                 <div className="trade-head">
                   <div>
                     <div className="scenario-title">Equity and PnL ($)</div>
-                    <div className="scenario-sub">Production path × notional. Amber marks = policy rebalances.</div>
+                    <div className="scenario-sub">Authoritative production-ledger path, linearly scaled to display notional. Amber marks use exported execution reasons.</div>
                   </div>
                 </div>
                 <PairBacktestChart result={chartResult} focused rebalanceLog={rebalanceLog} />
@@ -14799,6 +14799,7 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
     if (!Array.isArray(dates) || !dates.length) return { first: '', last: '' };
     return { first: dates[0], last: dates[dates.length - 1] };
   }, [artifact]);
+  const researchEnabled = artifact?.research_reblend_enabled !== false;
 
   const portfolioChart = useMemo(() => (
     typeof B4.portfolioEquityChartResult === 'function'
@@ -14807,10 +14808,10 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
   ), [artifact, startDate, endDate, gross, B4]);
 
   const customBook = useMemo(() => (
-    typeof B4.recomputeBookFromPairs === 'function'
+    researchEnabled && typeof B4.recomputeBookFromPairs === 'function'
       ? B4.recomputeBookFromPairs(artifact, bookConfig, { startDate, endDate, gross })
       : null
-  ), [artifact, bookConfig, startDate, endDate, gross, B4]);
+  ), [artifact, bookConfig, startDate, endDate, gross, researchEnabled, B4]);
 
   const pairs = useMemo(() => {
     const rows = typeof B4.pairManifestRows === 'function'
@@ -14930,14 +14931,17 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
     }));
   };
   const displayBook = useMemo(() => {
+    if (!researchEnabled) return portfolioChart;
     if (customBook?.ok && typeof B4.overlayBookChartResult === 'function') {
       return B4.overlayBookChartResult(portfolioChart, customBook);
     }
     if (customBook?.ok) return customBook;
     return portfolioChart;
-  }, [customBook, portfolioChart, B4]);
+  }, [customBook, portfolioChart, researchEnabled, B4]);
   const displaySummary = displayBook?.summary || {};
-  const activePairCount = pairs.filter((p) => p.enabled && Number(p.customWeight) > 0).length;
+  const activePairCount = researchEnabled
+    ? pairs.filter((p) => p.enabled && Number(p.customWeight) > 0).length
+    : Number(artifact?.n_pairs || pairs.length);
   const prodSummary = portfolioChart?.summary || realized;
 
   return (
@@ -14945,7 +14949,7 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
       <div className="chart-header">
         <div className="chart-header-left">
           <span className="etf-sym">B4 Book — inverse decay</span>
-          <span className="chart-und">Production-faithful portfolio lab (short ETF + short underlying)</span>
+          <span className="chart-und">Authoritative ls-algo production-policy replay</span>
         </div>
         <div className="chart-header-right">
           <button type="button" className="chart-view-btn" onClick={() => { window.location.hash = '/'; }}>← Dashboard</button>
@@ -14953,16 +14957,17 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
       </div>
 
       <div className="scenario-sub" style={{ marginBottom: 12, maxWidth: 920 }}>
-        <strong>B4 Book</strong> — ls-algo production <strong>inverse_decay_bucket4</strong> method: v6 opt2
-        (decay/borrow/cov) → trim-only <strong>weight smoothing</strong> → <strong>crash budget</strong> caps
-        (trim-only; freed gross stays cash) → grow-only <strong>ratchet</strong> on the walk-forward path,
-        VCR-driven dynamic hedge <strong>h</strong>, TR/VCR cadence, PIT borrow, and drift-gated rebalances.
-        Custom weights reblend pair paths with the same deployed-fraction / max-weight cash discipline
-        (no live opt2 re-solve). Per-ticker: Pair Report. Add-$ every N days: chart <strong>Drip</strong> or <code>#/backtest-flow</code>.
-        Universe: {b4UniverseCount} screener B4 rows · {artifact?.n_pairs ?? '—'} production pairs in replay.
+        <strong>B4 Book</strong> is rendered directly from the full ls-algo production ledger: archived point-in-time
+        GTP plans, persisted sizing state, operator membership, purgatory reduce-only handling, TR/VCR cadence,
+        Phase-2b bands, ratchet guards, execution lag, turnover controls, and production accounting.
+        The dashboard does not re-solve or reblend this path. Per-ticker: Pair Report. Separate editable research:
+        chart <strong>Backtest</strong> / <strong>Drip</strong>. Universe: {artifact?.n_pairs ?? '—'} ledger pairs
+        ({b4UniverseCount} current screener B4 rows).
         {Number.isFinite(Number(artifact?.deployed_fraction)) ? <> Deployed {(Number(artifact.deployed_fraction) * 100).toFixed(1)}% · cash residual {(Number(artifact.cash_residual || Math.max(0, 1 - Number(artifact.deployed_fraction))) * 100).toFixed(1)}%.</> : null}
         {artifact?.sizing_method ? <> Sizing: <code>{artifact.sizing_method}</code>.</> : null}
-        {artifact?.parity?.crash_rho != null ? <> Crash ρ: <code>{Number(artifact.parity.crash_rho)}</code>.</> : null}
+        {artifact?.source?.commit ? <> Source: <code>{String(artifact.source.commit).slice(0, 12)}</code>{artifact.source.dirty ? ' + hashed working tree' : ''}.</> : null}
+        {artifact?.source_run?.start ? <> Replay: <code>{artifact.source_run.start}</code> → <code>{artifact.source_run.end}</code>.</> : null}
+        {artifact?.parity?.pair_reconciliation_max_abs_usd != null ? <> Pair reconciliation: <code>${Number(artifact.parity.pair_reconciliation_max_abs_usd).toExponential(2)}</code>.</> : null}
         {dashboardBuildTime ? <> Dashboard data: <code>{dashboardBuildTime}</code>.</> : null}
       </div>
 
@@ -14975,14 +14980,14 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
         <>
           <div className="chart-stats" style={{ marginBottom: 12 }}>
             <div className="chart-stat">
-              <div className="cs-label">Custom CAGR</div>
+              <div className="cs-label">Production CAGR</div>
               <div className="cs-value">{displaySummary.cagr != null ? fmtPctAnn(displaySummary.cagr) : (realized.cagr != null ? fmtPctAnn(realized.cagr) : '—')}</div>
               <div className="cs-sub">{displayBook?.inception || artifact.window_start || dateBounds.first} → {displayBook?.end || dateBounds.last}</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">Ann. vol / Sharpe</div>
               <div className="cs-value">{displaySummary.annVol != null ? fmtPctAnn(displaySummary.annVol) : (realized.ann_vol != null ? fmtPctAnn(realized.ann_vol) : '—')} / {displaySummary.sharpe != null ? Number(displaySummary.sharpe).toFixed(2) : (realized.sharpe != null ? Number(realized.sharpe).toFixed(2) : '—')}</div>
-              <div className="cs-sub">Recomputed from enabled pair returns</div>
+              <div className="cs-sub">Source B4 sleeve ledger</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">Max drawdown</div>
@@ -14990,9 +14995,9 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
               <div className="cs-sub">{activePairCount || artifact.n_pairs} enabled · policy {artifact.policy_version || '—'}</div>
             </div>
             <div className="chart-stat">
-              <div className="cs-label">Cadence (VCR/TR)</div>
-              <div className="cs-value">h mid {cadence.h_mid != null ? Number(cadence.h_mid).toFixed(2) : '—'}</div>
-              <div className="cs-sub">base {cadence.base_days ?? '—'}d · interval [{cadence.min_interval ?? '—'}, {cadence.max_interval ?? '—'}]</div>
+              <div className="cs-label">Execution</div>
+              <div className="cs-value">{cadence.execution || 'cadence'}</div>
+              <div className="cs-sub">membership {cadence.membership_clock || '—'} · operator {cadence.operator_check_days ?? '—'}d</div>
             </div>
           </div>
 
@@ -15014,15 +15019,17 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
               <div className="backtest-control" style={{ alignSelf: 'flex-end' }}>
                 <button type="button" className="chart-view-btn" onClick={() => { setStartDate(artifact.window_start || dateBounds.first || ''); setEndDate(''); }}>Reset window</button>
               </div>
-              <div className="backtest-control" style={{ alignSelf: 'flex-end' }}>
-                <button type="button" className="chart-view-btn" onClick={resetProductionWeights}>Production weights</button>
-              </div>
-              <div className="backtest-control" style={{ alignSelf: 'flex-end' }}>
-                <button type="button" className="chart-view-btn" onClick={setEqualWeights}>Equal weight</button>
-              </div>
-              <div className="backtest-control" style={{ alignSelf: 'flex-end' }}>
-                <button type="button" className="chart-view-btn" onClick={setEdgeWeights}>Edge-weighted</button>
-              </div>
+              {researchEnabled ? <>
+                <div className="backtest-control" style={{ alignSelf: 'flex-end' }}>
+                  <button type="button" className="chart-view-btn" onClick={resetProductionWeights}>Production weights</button>
+                </div>
+                <div className="backtest-control" style={{ alignSelf: 'flex-end' }}>
+                  <button type="button" className="chart-view-btn" onClick={setEqualWeights}>Equal weight</button>
+                </div>
+                <div className="backtest-control" style={{ alignSelf: 'flex-end' }}>
+                  <button type="button" className="chart-view-btn" onClick={setEdgeWeights}>Edge-weighted</button>
+                </div>
+              </> : null}
               <div className="backtest-control">
                 <label>Sort pairs</label>
                 <select value={bookSort} onChange={(e) => setBookSort(e.target.value)}>
@@ -15037,22 +15044,21 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
                   <option value="borrow">Borrow</option>
                 </select>
               </div>
-              <div className="backtest-control">
+              {researchEnabled ? <div className="backtest-control">
                 <label>Pair universe</label>
                 <select value={pairFilter} onChange={(e) => setPairFilter(e.target.value)}>
                   <option value="all">All B4</option>
                   <option value="production">Production</option>
                   <option value="research">Gated / Research</option>
                 </select>
-              </div>
+              </div> : null}
               <div className="backtest-control" style={{ alignSelf: 'flex-end' }}>
                 <button type="button" className="chart-view-btn" onClick={downloadPairCsv}>Export CSV</button>
               </div>
             </div>
             <div className="trade-note">
-              Production mode uses baked portfolio equity (opt2 → smooth → crash → ratchet walk-forward).
-              Custom weights are a what-if reblend of pair paths scaled to the production deployed fraction
-              with per-name max-weight caps; they do not re-run the weekly solver.
+              Production mode is a lossless projection of the ls-algo sleeve and pair ledgers.
+              Display notional scales exported dollar PnL linearly; it does not change positions or rerun execution.
             </div>
           </div>
 
@@ -15060,11 +15066,10 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
             <div className="trade-card" style={{ marginBottom: 12 }}>
               <div className="trade-head">
                 <div>
-                  <div className="scenario-title">Portfolio equity (custom vs production)</div>
+                  <div className="scenario-title">Production portfolio equity</div>
                   <div className="scenario-sub">
-                    Custom book net (teal) overlaid with production book net when available.
-                    Prod CAGR {prodSummary?.cagr != null ? fmtPctAnn(prodSummary.cagr) : (realized.cagr != null ? fmtPctAnn(realized.cagr) : '—')}
-                    {' · '}custom {displaySummary.cagr != null ? fmtPctAnn(displaySummary.cagr) : '—'}.
+                    Source-ledger net PnL, scaled from the exported B4 sleeve budget.
+                    CAGR {prodSummary?.cagr != null ? fmtPctAnn(prodSummary.cagr) : (realized.cagr != null ? fmtPctAnn(realized.cagr) : '—')}.
                     Drip / add-$ every N days lives on each chart&apos;s <strong>Drip</strong> tab (or <code>#/backtest-flow</code>).
                   </div>
                 </div>
@@ -15079,12 +15084,12 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
             <table className="scenario-table">
               <thead>
                 <tr>
-                  <th>Use</th>
+                  {researchEnabled ? <th>Use</th> : null}
                   <th>ETF</th>
                   <th>Und</th>
                   <th>Status</th>
                   <th>Entry</th>
-                  <th>Custom wt</th>
+                  {researchEnabled ? <th>Research wt</th> : null}
                   <th>Prod wt</th>
                   <th>B4 net edge</th>
                   <th>Borrow</th>
@@ -15095,14 +15100,14 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
                   <th>Vol / Sharpe</th>
                   <th>MaxDD</th>
                   <th>Gate</th>
-                  <th>Contrib</th>
+                  {researchEnabled ? <th>Research contrib</th> : null}
                   <th></th>
                 </tr>
               </thead>
               <tbody>
                 {pairs.map((p) => (
                   <tr key={p.etf} className={highlightEtf === p.etf ? 'row-highlight' : ''}>
-                    <td>
+                    {researchEnabled ? <td>
                       <input
                         type="checkbox"
                         checked={p.enabled}
@@ -15110,12 +15115,12 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
                         title={`Include ${p.etf} in the custom book`}
                         disabled={!p.inProduction}
                       />
-                    </td>
+                    </td> : null}
                     <td><strong>{p.etf}</strong></td>
                     <td>{p.und}</td>
                     <td>{p.inProduction ? 'Production' : 'Research'}</td>
                     <td>{p.entry_date || p.first_metrics_date || '—'}</td>
-                    <td>
+                    {researchEnabled ? <td>
                       <input
                         type="number"
                         min={0}
@@ -15126,7 +15131,7 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
                         style={{ width: 76 }}
                         disabled={!p.inProduction}
                       />
-                    </td>
+                    </td> : null}
                     <td>{(p.production_weight ?? p.portfolio_weight) != null ? fmtPctAnn(p.production_weight ?? p.portfolio_weight, 1) : '—'}</td>
                     <td>{p.bucket4_net_edge_annual != null ? fmtPctAnn(p.bucket4_net_edge_annual) : '—'}</td>
                     <td>{p.borrow != null ? fmtPctAnn(p.borrow) : '—'}</td>
@@ -15137,7 +15142,7 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
                     <td>{(p.ann_vol ?? p.vol_annual) != null ? fmtPctAnn(p.ann_vol ?? p.vol_annual) : '—'} / {p.sharpe != null ? Number(p.sharpe).toFixed(2) : '—'}</td>
                     <td>{p.max_drawdown != null ? fmtPctAnn(p.max_drawdown) : '—'}</td>
                     <td>{p.gate_reason || '—'}</td>
-                    <td className={Number(p.contribution) >= 0 ? 'val-positive' : 'val-negative'}>{fmtMoney((Number(p.contribution) || 0) * (Number(gross) || 100000))}</td>
+                    {researchEnabled ? <td className={Number(p.contribution) >= 0 ? 'val-positive' : 'val-negative'}>{fmtMoney((Number(p.contribution) || 0) * (Number(gross) || 100000))}</td> : null}
                     <td>
                       <button type="button" className="chart-view-btn" onClick={() => {
                         window.location.hash = `#/bucket-4/pair/${encodeURIComponent(p.etf)}`;

@@ -97,6 +97,12 @@
   async function loadPairShard(symbol, { force = false, artifact = null } = {}) {
     const sym = normSym(symbol);
     if (!sym) throw new Error('missing pair symbol');
+    if (artifact?.schema === 'bucket4_backtest.v4') {
+      const manifest = Array.isArray(artifact?.pair_manifest) ? artifact.pair_manifest : [];
+      if (!manifest.some((p) => normSym(p?.etf) === sym)) {
+        throw new Error(`bucket4 pair ${sym} is not in the authoritative production ledger`);
+      }
+    }
     if (!force && _pairShardCache.has(sym)) return _pairShardCache.get(sym);
     if (!force && _pairShardPromises.has(sym)) return _pairShardPromises.get(sym);
     const url = pairShardUrl(sym, artifact);
@@ -147,7 +153,7 @@
         eSlice = eSlice.map((v) => v / base);
       }
     }
-    return { dates: dSlice, equity: eSlice, error: null };
+    return { dates: dSlice, equity: eSlice, i0, i1, error: null };
   }
 
   function portfolioEquityChartResult(artifact, { startDate = '', endDate = '', gross = 100000 } = {}) {
@@ -157,17 +163,28 @@
     }
     const g = Number(gross);
     const notional = Number.isFinite(g) && g > 0 ? g : 100000;
+    const sourceBudget = Number(artifact?.sleeve_budget_usd);
+    const dollarScale = Number.isFinite(sourceBudget) && sourceBudget > 0 ? notional / sourceBudget : 1;
+    const costs = artifact?.costs || {};
+    const borrowDaily = (costs.borrow_cost_usd || []).slice(win.i0, win.i1 + 1).map(Number);
+    const marginDaily = (costs.margin_cost_usd || []).slice(win.i0, win.i1 + 1).map(Number);
+    const txnDaily = (costs.txn_cost_usd || []).slice(win.i0, win.i1 + 1).map(Number);
+    let borrowCum = 0;
+    let txnCum = 0;
     const rows = win.dates.map((date, i) => {
       const eq = Number(win.equity[i]);
       const net = Number.isFinite(eq) ? notional * (eq - 1) : 0;
+      borrowCum += ((Number.isFinite(borrowDaily[i]) ? borrowDaily[i] : 0)
+        + (Number.isFinite(marginDaily[i]) ? marginDaily[i] : 0)) * dollarScale;
+      txnCum += (Number.isFinite(txnDaily[i]) ? txnDaily[i] : 0) * dollarScale;
       return {
         date,
         netPnl: net,
-        longPnl: net,
+        longPnl: net + borrowCum + txnCum,
         shortPnl: 0,
-        borrow: 0,
+        borrow: borrowCum,
         distributions: 0,
-        transactionCosts: 0,
+        transactionCosts: txnCum,
         rebalance: false,
       };
     });
@@ -182,9 +199,9 @@
         netPnl: last?.netPnl || 0,
         longPnl: last?.longPnl || 0,
         shortPnl: 0,
-        borrowPaid: 0,
+        borrowPaid: borrowCum,
         distributionsPaid: 0,
-        tCosts: 0,
+        tCosts: txnCum,
         nRebalances: 0,
       },
     };
@@ -276,12 +293,21 @@
     const drawdown = (Array.isArray(daily.drawdown) ? daily.drawdown : []).slice(win.i0, win.i1 + 1).map(Number);
     const grossExp = (Array.isArray(daily.gross_exposure) ? daily.gross_exposure : []).slice(win.i0, win.i1 + 1).map(Number);
     const totalGrossU = (Array.isArray(daily.total_gross) ? daily.total_gross : []).slice(win.i0, win.i1 + 1).map(Number);
+    const netPnlDollars = (Array.isArray(daily.net_pnl_dollars) ? daily.net_pnl_dollars : []).slice(win.i0, win.i1 + 1).map(Number);
+    const pricePnlDollars = (Array.isArray(daily.price_pnl_cum_dollars) ? daily.price_pnl_cum_dollars : []).slice(win.i0, win.i1 + 1).map(Number);
+    const grossDollars = (Array.isArray(daily.gross_exposure_dollars) ? daily.gross_exposure_dollars : []).slice(win.i0, win.i1 + 1).map(Number);
+    const borrowCumDollars = (Array.isArray(daily.borrow_cost_cum_dollars) ? daily.borrow_cost_cum_dollars : []).slice(win.i0, win.i1 + 1).map(Number);
+    const txnCumDollars = (Array.isArray(daily.txn_cost_cum_dollars) ? daily.txn_cost_cum_dollars : []).slice(win.i0, win.i1 + 1).map(Number);
+    const reasonPath = (Array.isArray(daily.rebalance_reason) ? daily.rebalance_reason : []).slice(win.i0, win.i1 + 1);
     const etfLegU = (Array.isArray(daily.etf_leg_pnl_cum) ? daily.etf_leg_pnl_cum : []).slice(win.i0, win.i1 + 1).map(Number);
     const undLegU = (Array.isArray(daily.underlying_leg_pnl_cum) ? daily.underlying_leg_pnl_cum : []).slice(win.i0, win.i1 + 1).map(Number);
     const borrowCumU = (Array.isArray(daily.borrow_cost_cum) ? daily.borrow_cost_cum : []).slice(win.i0, win.i1 + 1).map(Number);
     const tcostCumU = (Array.isArray(daily.tcost_cum) ? daily.tcost_cum : []).slice(win.i0, win.i1 + 1).map(Number);
     const baseEq = Number(eq[0]);
     const scale = Number.isFinite(baseEq) && baseEq > 0 ? notional / baseEq : notional;
+    const sourceBasis = Number(pairMeta?.notional_basis_usd || pairMeta?.summary?.notional_basis_usd);
+    const actualDollarScale = Number.isFinite(sourceBasis) && sourceBasis > 0 ? notional / sourceBasis : 1;
+    const actualLedger = pairMeta?.ledger_mode === 'actual_dollar' || netPnlDollars.some(Number.isFinite);
     let cumBorrow = 0;
     let cumFees = 0;
     const rows = win.dates.map((date, i) => {
@@ -291,14 +317,24 @@
       const dayFee = Number.isFinite(fees[i]) ? fees[i] * scale : 0;
       cumBorrow += dayBorrow;
       cumFees += dayFee;
-      const netPnl = Number.isFinite(equity) && Number.isFinite(baseEq) ? (equity - baseEq) * scale : 0;
-      const etfLeg = Number.isFinite(etfLegU[i]) ? etfLegU[i] * scale : null;
+      const netPnl = actualLedger && Number.isFinite(netPnlDollars[i])
+        ? netPnlDollars[i] * actualDollarScale
+        : (Number.isFinite(equity) && Number.isFinite(baseEq) ? (equity - baseEq) * scale : 0);
+      const etfLeg = actualLedger && Number.isFinite(pricePnlDollars[i])
+        ? pricePnlDollars[i] * actualDollarScale
+        : (Number.isFinite(etfLegU[i]) ? etfLegU[i] * scale : null);
       const undLeg = Number.isFinite(undLegU[i]) ? undLegU[i] * scale : null;
-      const totalGross = Number.isFinite(totalGrossU[i])
+      const totalGross = actualLedger && Number.isFinite(grossDollars[i])
+        ? grossDollars[i] * actualDollarScale
+        : Number.isFinite(totalGrossU[i])
         ? totalGrossU[i] * scale
         : (Number.isFinite(etfLeg) && Number.isFinite(undLeg) ? etfLeg + undLeg : null);
-      const borrowScaled = Number.isFinite(borrowCumU[i]) ? borrowCumU[i] * scale : cumBorrow;
-      const tcostScaled = Number.isFinite(tcostCumU[i]) ? tcostCumU[i] * scale : cumFees;
+      const borrowScaled = actualLedger && Number.isFinite(borrowCumDollars[i])
+        ? borrowCumDollars[i] * actualDollarScale
+        : (Number.isFinite(borrowCumU[i]) ? borrowCumU[i] * scale : cumBorrow);
+      const tcostScaled = actualLedger && Number.isFinite(txnCumDollars[i])
+        ? txnCumDollars[i] * actualDollarScale
+        : (Number.isFinite(tcostCumU[i]) ? tcostCumU[i] * scale : cumFees);
       return {
         date,
         netPnl,
@@ -312,7 +348,7 @@
         h: Number.isFinite(hUsed[i]) ? hUsed[i] : null,
         gross: Number.isFinite(grossExp[i]) ? grossExp[i] : null,
         rebalance: Boolean(rebalance[i]),
-        rebalanceReason: Boolean(rebalance[i]) ? 'B4 policy' : '',
+        rebalanceReason: reasonPath[i] || (Boolean(rebalance[i]) ? 'B4 policy' : ''),
         exposureRatio: Number.isFinite(hUsed[i]) ? hUsed[i] : null,
         dailyRet: Number.isFinite(ret) ? ret : null,
         equityUnit: Number.isFinite(equity) ? equity : null,
@@ -331,7 +367,9 @@
       rows,
       inception: win.dates[0],
       end: win.dates[win.dates.length - 1],
-      legChartLabels: { etf: 'ETF leg PnL', und: 'Underlying leg PnL' },
+      legChartLabels: actualLedger
+        ? { etf: 'Price PnL', und: 'Other / financing' }
+        : { etf: 'ETF leg PnL', und: 'Underlying leg PnL' },
       summary: {
         netPnl: last.netPnl || 0,
         longPnl: last.longPnl || 0,
@@ -479,6 +517,9 @@
   }
 
   function recomputeBookFromPairs(artifact, config, { startDate = '', endDate = '', gross = 100000 } = {}) {
+    if (artifact?.research_reblend_enabled === false || artifact?.parity?.research_reblend_enabled === false) {
+      return { ok: false, error: 'Research reblending is disabled for the authoritative production ledger.' };
+    }
     const matchDeployed = artifact?.parity?.custom_book_match_deployed_fraction !== false;
     const normCfg = normalizeBookWeights(config || defaultBookConfig(artifact), {
       preserveCash: true,
