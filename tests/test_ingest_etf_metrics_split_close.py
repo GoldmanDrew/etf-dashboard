@@ -257,6 +257,44 @@ def test_backfill_split_adjusted_skips_continuous_close(tmp_path: Path):
         assert abs(float(row["etf_adj_close"]) - float(row["close_price"])) < 1e-9
 
 
+def test_backfill_split_adjusted_nbiz_staggered_close_and_nav(tmp_path: Path):
+    """Scale NBIZ pre-06-01 closes even though the formal action is 06-03."""
+    ca = tmp_path / "ca.json"
+    ca.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "type": "reverse_split",
+                        "ticker": "NBIZ",
+                        "execution_date": "2026-06-03",
+                        "ratio_from": 10.0,
+                        "ratio_to": 1.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    df = pd.DataFrame(
+        [
+            {"date": "2026-05-29", "ticker": "NBIZ", "nav": 1.2456, "shares_outstanding": 12_715_000,
+             "close_price": 1.255, "etf_adj_close": 1.255},
+            {"date": "2026-06-01", "ticker": "NBIZ", "nav": 0.8858, "shares_outstanding": 36_415_000,
+             "close_price": 8.60, "etf_adj_close": 8.60},
+            {"date": "2026-06-02", "ticker": "NBIZ", "nav": 0.9122, "shares_outstanding": 3_641_500,
+             "close_price": 9.10, "etf_adj_close": 9.10},
+            {"date": "2026-06-03", "ticker": "NBIZ", "nav": 9.7451, "shares_outstanding": 2_711_500,
+             "close_price": 9.76, "etf_adj_close": 9.76},
+        ]
+    )
+    out = iem.backfill_split_adjusted_etf_adj_close(df, corporate_actions_path=ca)
+    by_date = out.set_index("date")["etf_adj_close"].astype(float)
+    assert abs(by_date.loc[date(2026, 5, 29)] - 12.55) < 1e-9
+    assert abs(by_date.loc[date(2026, 6, 1)] - 8.60) < 1e-9
+    assert abs(by_date.loc[date(2026, 6, 3)] - 9.76) < 1e-9
+
+
 def test_repair_fabricated_etf_adj_basis_rebuilds_qbtz_corruption(tmp_path: Path):
     """Pre rows scaled x3 and post rows mapped /3 -> rebuild adj from close."""
     ca = _qbtz_ca(tmp_path)

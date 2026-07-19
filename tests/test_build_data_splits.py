@@ -251,6 +251,31 @@ def test_filter_keeps_aplz_style_reverse_split_declared_five():
     assert filter_splits_needing_close_basis_fix(points, events) == events
 
 
+def test_filter_snaps_nbiz_staggered_close_switch_with_nav_confirmation():
+    """NBIZ close switched basis before its NAV and formal split date."""
+    points = [
+        (dt.date(2026, 5, 29), 1.255, 1.255),
+        (dt.date(2026, 6, 1), 8.60, 8.60),
+        (dt.date(2026, 6, 2), 9.10, 9.10),
+        (dt.date(2026, 6, 3), 9.76, 9.76),
+        (dt.date(2026, 6, 4), 9.12, 9.12),
+    ]
+    events = [(dt.date(2026, 6, 3), 10.0)]
+    metric_rows = [
+        {"date": "2026-05-29", "nav": 1.2456, "shares_outstanding": 12_715_000},
+        {"date": "2026-06-01", "nav": 0.8858, "shares_outstanding": 36_415_000},
+        {"date": "2026-06-02", "nav": 0.9122, "shares_outstanding": 3_641_500},
+        {"date": "2026-06-03", "nav": 9.7451, "shares_outstanding": 2_711_500},
+        {"date": "2026-06-04", "nav": 9.1260, "shares_outstanding": 1_961_500},
+    ]
+    verified = filter_splits_needing_close_basis_fix(
+        points,
+        events,
+        metric_rows=metric_rows,
+    )
+    assert verified == [(dt.date(2026, 6, 1), 10.0)]
+
+
 def test_match_split_to_price_jump_aplz():
     from split_adjustments import match_split_to_price_jump
 
