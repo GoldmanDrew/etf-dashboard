@@ -52,7 +52,12 @@ def test_bucket4_artifact_schema_when_present():
         assert isinstance(payload.get("pair_series"), dict)
         assert isinstance(payload.get("universes"), dict)
         assert isinstance(payload.get("pair_manifest"), list)
-        assert payload.get("universes", {}).get("screener_b4", {}).get("count", 0) >= payload.get("n_pairs", 0)
+        if payload.get("schema") == "bucket4_backtest.v4" and "n_membership" in payload:
+            assert payload.get("n_membership", 0) >= payload.get("n_pairs", 0)
+            assert isinstance(payload.get("membership"), list)
+            assert "historical_membership" in payload.get("universes", {})
+        else:
+            assert payload.get("universes", {}).get("screener_b4", {}).get("count", 0) >= payload.get("n_pairs", 0)
         if payload["pair_manifest"]:
             first = payload["pair_manifest"][0]
             assert "shard_url" in first

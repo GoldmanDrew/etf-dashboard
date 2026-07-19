@@ -105,11 +105,18 @@ def _latest_gross(pair: Mapping[str, Any]) -> float:
 
 def build_dashboard_payload(root: Path, manifest: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     book = json.loads((root / "book.json").read_text(encoding="utf-8"))
+    membership_path = root / "membership.json"
+    if not membership_path.is_file():
+        raise ValueError("Bucket 4 production contract has no membership artifact")
+    membership = json.loads(membership_path.read_text(encoding="utf-8"))
+    if not isinstance(membership, list):
+        raise ValueError("Bucket 4 membership artifact is invalid")
     pair_dir = root / "pairs"
     pair_files = sorted(pair_dir.glob("*.json"))
     if not pair_files:
         raise ValueError("Bucket 4 production contract has no pair files")
     pair_shards = {p.stem.upper(): json.loads(p.read_text(encoding="utf-8")) for p in pair_files}
+    membership_by_etf = {str(row.get("ETF") or row.get("etf") or "").upper(): dict(row) for row in membership}
     budget = _finite(book.get("initial_capital_usd"), 0.0)
     gross_by_etf = {etf: _latest_gross(pair) for etf, pair in pair_shards.items()}
     deployed_gross = sum(max(0.0, value) for value in gross_by_etf.values())
@@ -149,6 +156,28 @@ def build_dashboard_payload(root: Path, manifest: Mapping[str, Any]) -> tuple[di
     book_summary = book.get("summary") or {}
     policy = manifest.get("resolved_policy") or {}
     run = manifest.get("run") or {}
+    lifecycle_rows = []
+    for etf, row in sorted(membership_by_etf.items()):
+        if not etf:
+            continue
+        normalized_row = {
+            ("etf" if key == "ETF" else "underlying" if key == "Underlying" else key): value
+            for key, value in row.items()
+        }
+        item = {
+            **normalized_row,
+            "etf": etf,
+            "underlying": str(row.get("Underlying") or row.get("underlying") or "").upper(),
+            "has_daily": etf in pair_shards,
+            "in_production_book": etf in pair_shards,
+        }
+        if item["has_daily"]:
+            item["shard_url"] = f"data/bucket4_pairs/{etf}.json"
+        lifecycle_rows.append(item)
+    open_members = [r["etf"] for r in lifecycle_rows if str(r.get("lifecycle_state", "")).lower() == "open"]
+    pending_members = [r["etf"] for r in lifecycle_rows if str(r.get("lifecycle_state", "")).lower() == "pending_entry"]
+    purgatory_members = [r["etf"] for r in lifecycle_rows if bool(r.get("latest_purgatory"))]
+    blocked_members = [r["etf"] for r in lifecycle_rows if str(r.get("lifecycle_state", "")).lower() == "blocked"]
     payload = {
         "schema": DASHBOARD_SCHEMA,
         "generated_at_utc": manifest.get("generated_at_utc"),
@@ -217,11 +246,17 @@ def build_dashboard_payload(root: Path, manifest: Mapping[str, Any]) -> tuple[di
         "pair_series": pair_series,
         "pair_manifest": pair_manifest,
         "pair_shard_base_url": "data/bucket4_pairs",
+        "membership": lifecycle_rows,
         "n_pairs": len(pairs),
+        "n_membership": len(lifecycle_rows),
         "n_obs": len(book.get("dates") or []),
         "universes": {
             "production_book": {"pairs": [p["etf"] for p in pairs], "count": len(pairs)},
-            "screener_b4": {"pairs": [p["etf"] for p in pairs], "count": len(pairs), "note": "Authoritative production-ledger pairs only."},
+            "historical_membership": {"pairs": [r["etf"] for r in lifecycle_rows], "count": len(lifecycle_rows), "note": "All point-in-time B4 plan members, including blocked and purgatory states."},
+            "current_open": {"pairs": open_members, "count": len(open_members)},
+            "pending_entry": {"pairs": pending_members, "count": len(pending_members)},
+            "purgatory": {"pairs": purgatory_members, "count": len(purgatory_members)},
+            "blocked": {"pairs": blocked_members, "count": len(blocked_members)},
         },
     }
     return payload, pair_shards
@@ -263,6 +298,7 @@ def import_contract(
         "source_run": payload.get("source_run"),
         "reconciliation": payload.get("reconciliation"),
         "n_pairs": payload.get("n_pairs"),
+        "n_membership": payload.get("n_membership"),
         "n_obs": payload.get("n_obs"),
     }
     _write_json(OUT_STATE, state)

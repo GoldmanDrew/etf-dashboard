@@ -325,7 +325,6 @@ jobs:
 
       - name: Checkout ls-algo (Bucket 4/5 backtests)
         if: steps.build_data.outcome == 'success'
-        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: GoldmanDrew/ls-algo
@@ -335,7 +334,6 @@ jobs:
 
       - name: Install ls-algo deps (Bucket 4/5)
         if: steps.build_data.outcome == 'success'
-        continue-on-error: true
         run: pip install -r ls-algo/requirements.txt
 
       - name: Build Bucket 5 product dashboard
@@ -354,8 +352,18 @@ jobs:
         env:
           LS_ALGO_ROOT: ${{ github.workspace }}/ls-algo
         run: |
-          python ls-algo/scripts/export_b4_dashboard.py --run-production --run-date "$(date -u +%F)" --start 2026-02-27
-          python scripts/build_bucket4_backtest.py --mode production
+          # The nightly run is before the US session. Replay only through the
+          # last completed weekday; do not publish an intraday/partial ledger.
+          RUN_DATE="$(python - <<'PY'
+          from datetime import datetime, timedelta, timezone
+          day = datetime.now(timezone.utc).date() - timedelta(days=1)
+          while day.weekday() >= 5:
+              day -= timedelta(days=1)
+          print(day.isoformat())
+          PY
+          )"
+          python ls-algo/scripts/export_b4_dashboard.py --run-production --run-date "$RUN_DATE" --start 2026-02-27
+          python scripts/build_bucket4_backtest.py --mode production --max-age-days 4
 
       - name: Refresh YieldBOOST VRP (sleeves + Tradier OCC)
         if: steps.build_data.outcome == 'success'

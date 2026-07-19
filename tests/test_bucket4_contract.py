@@ -38,6 +38,10 @@ def _contract(tmp_path: Path, *, dirty: bool = False) -> Path:
     hashes = {
         "book.json": _write(root / "book.json", book),
         "pairs/NBIZ.json": _write(root / "pairs" / "NBIZ.json", pair),
+        "membership.json": _write(root / "membership.json", [
+            {"ETF": "NBIZ", "Underlying": "NBIS", "lifecycle_state": "open", "block_reason": ""},
+            {"ETF": "CBRZ", "Underlying": "CBRS", "lifecycle_state": "pending_entry", "block_reason": "awaiting_operator_or_execution"},
+        ]),
     }
     manifest = {
         "schema": "bucket4_production_replay.v1", "authoritative": True,
@@ -61,6 +65,8 @@ def test_build_v4_payload_is_authoritative_and_disables_reblend(tmp_path: Path):
     assert payload["research_reblend_enabled"] is False
     assert payload["parity"]["production_execution_ledger"] is True
     assert payload["default_weights"]["NBIZ"] == pytest.approx(.48)
+    assert payload["n_membership"] == 2
+    assert payload["universes"]["pending_entry"]["pairs"] == ["CBRZ"]
     assert list(shards) == ["NBIZ"]
 
 

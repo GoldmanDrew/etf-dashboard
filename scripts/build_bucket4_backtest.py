@@ -1083,6 +1083,7 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--production-export", type=Path, default=None)
     ap.add_argument("--allow-dirty-source", action="store_true")
+    ap.add_argument("--max-age-days", type=int, default=4, help="Fail production import when the replay end is older than this many calendar days.")
     ap.add_argument("--screener", default=str(DEFAULT_SCREENER))
     ap.add_argument("--policy", default=str(DEFAULT_POLICY))
     ap.add_argument("--start", default=None)
@@ -1107,7 +1108,11 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
             return 2
-        built = import_contract(source, allow_dirty_source=bool(args.allow_dirty_source))
+        built = import_contract(
+            source,
+            allow_dirty_source=bool(args.allow_dirty_source),
+            max_age_days=int(args.max_age_days),
+        )
         print(
             f"[bucket4-bt] imported authoritative production ledger "
             f"pairs={built['n_pairs']} obs={built['n_obs']} policy={built['policy_version']}"

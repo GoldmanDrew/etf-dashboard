@@ -14866,6 +14866,10 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
     () => (Array.isArray(records) ? records : []).filter(isBucket4Record).length,
     [records],
   );
+  const membership = useMemo(
+    () => (Array.isArray(artifact?.membership) ? artifact.membership : []),
+    [artifact],
+  );
 
   const cadence = artifact?.cadence || {};
   const realized = artifact?.realized || {};
@@ -14962,6 +14966,7 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
         Phase-2b bands, ratchet guards, execution lag, turnover controls, and production accounting.
         The dashboard does not re-solve or reblend this path. Per-ticker: Pair Report. Separate editable research:
         chart <strong>Backtest</strong> / <strong>Drip</strong>. Universe: {artifact?.n_pairs ?? '—'} ledger pairs
+        {artifact?.n_membership ?? membership.length ?? '—'} historical plan members
         ({b4UniverseCount} current screener B4 rows).
         {Number.isFinite(Number(artifact?.deployed_fraction)) ? <> Deployed {(Number(artifact.deployed_fraction) * 100).toFixed(1)}% · cash residual {(Number(artifact.cash_residual || Math.max(0, 1 - Number(artifact.deployed_fraction))) * 100).toFixed(1)}%.</> : null}
         {artifact?.sizing_method ? <> Sizing: <code>{artifact.sizing_method}</code>.</> : null}
@@ -15078,6 +15083,25 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
             </div>
           ) : (
             <div className="scenario-warning">{displayBook?.error || 'Chart unavailable for selected window.'}</div>
+          )}
+
+          {membership.length > 0 && (
+            <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 250, overflow: 'auto' }}>
+              <table className="scenario-table">
+                <thead><tr><th>ETF</th><th>Und</th><th>Lifecycle</th><th>Plan window</th><th>Purgatory</th><th>Ledger</th><th>Reason</th></tr></thead>
+                <tbody>{membership.map((m) => (
+                  <tr key={m.etf || m.ETF}>
+                    <td><strong>{m.etf || m.ETF}</strong></td>
+                    <td>{m.underlying || m.Underlying || '—'}</td>
+                    <td>{m.lifecycle_state || '—'}</td>
+                    <td>{m.first_plan_date || '—'} → {m.last_plan_date || '—'}</td>
+                    <td>{m.latest_purgatory ? 'Yes' : 'No'}</td>
+                    <td>{m.has_daily ? 'Yes' : 'No'}</td>
+                    <td>{m.block_reason || '—'}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
           )}
 
           <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 420, overflow: 'auto' }}>
