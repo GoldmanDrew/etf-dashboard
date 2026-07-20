@@ -289,8 +289,9 @@
     const borrow = (Array.isArray(daily.borrow_cost) ? daily.borrow_cost : []).slice(win.i0, win.i1 + 1).map(Number);
     const fees = (Array.isArray(daily.rebalance_fee) ? daily.rebalance_fee : []).slice(win.i0, win.i1 + 1).map(Number);
     const rebalance = (Array.isArray(daily.rebalance) ? daily.rebalance : []).slice(win.i0, win.i1 + 1);
+    const bookActivity = (Array.isArray(daily.book_activity) ? daily.book_activity : []).slice(win.i0, win.i1 + 1);
     const hUsed = (Array.isArray(daily.h_used) ? daily.h_used : []).slice(win.i0, win.i1 + 1).map(Number);
-    const drawdown = (Array.isArray(daily.drawdown) ? daily.drawdown : []).slice(win.i0, win.i1 + 1).map(Number);
+    const exportedDrawdown = (Array.isArray(daily.drawdown) ? daily.drawdown : []).slice(win.i0, win.i1 + 1).map(Number);
     const grossExp = (Array.isArray(daily.gross_exposure) ? daily.gross_exposure : []).slice(win.i0, win.i1 + 1).map(Number);
     const totalGrossU = (Array.isArray(daily.total_gross) ? daily.total_gross : []).slice(win.i0, win.i1 + 1).map(Number);
     const netPnlDollars = (Array.isArray(daily.net_pnl_dollars) ? daily.net_pnl_dollars : []).slice(win.i0, win.i1 + 1).map(Number);
@@ -308,6 +309,7 @@
     const sourceBasis = Number(pairMeta?.notional_basis_usd || pairMeta?.summary?.notional_basis_usd);
     const actualDollarScale = Number.isFinite(sourceBasis) && sourceBasis > 0 ? notional / sourceBasis : 1;
     const actualLedger = pairMeta?.ledger_mode === 'actual_dollar' || netPnlDollars.some(Number.isFinite);
+    let runningPeak = -Infinity;
     let cumBorrow = 0;
     let cumFees = 0;
     const rows = win.dates.map((date, i) => {
@@ -335,6 +337,11 @@
       const tcostScaled = actualLedger && Number.isFinite(txnCumDollars[i])
         ? txnCumDollars[i] * actualDollarScale
         : (Number.isFinite(tcostCumU[i]) ? tcostCumU[i] * scale : cumFees);
+      const derivedEquity = equity;
+      if (Number.isFinite(derivedEquity)) runningPeak = Math.max(runningPeak, derivedEquity);
+      const derivedDrawdown = Number.isFinite(derivedEquity) && runningPeak > 0
+        ? derivedEquity / runningPeak - 1
+        : null;
       return {
         date,
         netPnl,
@@ -344,11 +351,14 @@
         distributions: 0,
         transactionCosts: tcostScaled,
         totalGross,
-        drawdown: Number.isFinite(drawdown[i]) ? drawdown[i] : null,
+        // Contract exports drawdown. Recompute only as a backwards-compatible
+        // guard; missing data must never be coerced into a false 0% path.
+        drawdown: Number.isFinite(exportedDrawdown[i]) ? exportedDrawdown[i] : derivedDrawdown,
         h: Number.isFinite(hUsed[i]) ? hUsed[i] : null,
         gross: Number.isFinite(grossExp[i]) ? grossExp[i] : null,
         rebalance: Boolean(rebalance[i]),
         rebalanceReason: reasonPath[i] || (Boolean(rebalance[i]) ? 'B4 policy' : ''),
+        bookActivity: Boolean(bookActivity[i]),
         exposureRatio: Number.isFinite(hUsed[i]) ? hUsed[i] : null,
         dailyRet: Number.isFinite(ret) ? ret : null,
         equityUnit: Number.isFinite(equity) ? equity : null,

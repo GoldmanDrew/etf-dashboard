@@ -14476,7 +14476,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
                 <div className="trade-head">
                   <div>
                     <div className="scenario-title">Equity and PnL ($)</div>
-                    <div className="scenario-sub">Authoritative production-ledger path, linearly scaled to display notional. Amber marks use exported execution reasons.</div>
+                    <div className="scenario-sub">Authoritative production-ledger path, linearly scaled to display notional. Amber marks are this pair&apos;s B4 executions—not unrelated book activity.</div>
                   </div>
                 </div>
                 <PairBacktestChart result={chartResult} focused rebalanceLog={rebalanceLog} />
@@ -14494,7 +14494,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
 
               <div className="pair-report-section trade-card">
                 <div className="trade-head"><div className="scenario-title">Drawdown</div></div>
-                <SimpleSeriesPlot series={rows} valueKey="drawdown" color="rgba(248,113,113,0.95)" label="Drawdown" formatValue={(v) => fmt(v)} includeZero />
+                <SimpleSeriesPlot series={rows} valueKey="drawdown" color="rgba(248,113,113,0.95)" label="Drawdown" formatValue={(v) => fmt(v)} includeZero strictNullPrimary />
               </div>
             </>
           )}
@@ -14537,7 +14537,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
               {showDailyTable ? (
                 <div className="scenario-table-wrap" style={{ maxHeight: 280, overflow: 'auto' }}>
                   <table className="scenario-table">
-                    <thead><tr><th>Date</th><th>Net PnL</th><th>Gross leg</th><th>Drawdown</th><th>h</th><th>Borrow</th><th>T-costs</th><th>Rebal</th></tr></thead>
+                    <thead><tr><th>Date</th><th>Net PnL</th><th>Gross leg</th><th>Drawdown</th><th>h</th><th>Borrow</th><th>T-costs</th><th>Book activity</th><th>Pair execution</th></tr></thead>
                     <tbody>
                       {[...rows].slice(-32).reverse().map((r) => (
                         <tr key={r.date}>
@@ -14548,6 +14548,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
                           <td>{r.h != null ? Number(r.h).toFixed(3) : '—'}</td>
                           <td>{fmtMoney(r.borrow)}</td>
                           <td>{fmtMoney(r.transactionCosts)}</td>
+                          <td>{r.bookActivity ? 'yes' : '—'}</td>
                           <td>{r.rebalance ? 'yes' : '—'}</td>
                         </tr>
                       ))}
