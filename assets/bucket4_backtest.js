@@ -238,6 +238,83 @@
     return { dates: dates.slice(i0, i1 + 1), i0, i1, error: null };
   }
 
+  function _truthyFlag(v) {
+    if (v === true || v === 1 || v === '1') return true;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      return s === 'true' || s === 'yes' || s === 'y';
+    }
+    return Boolean(Number(v));
+  }
+
+  function _reasonLooksSkipped(reason) {
+    const s = String(reason || '').toLowerCase();
+    if (!s) return false;
+    return s.includes('skip') || s.includes('drift') || s.includes('below') || s.includes('band');
+  }
+
+  /**
+   * Build a UI rebalance_log from daily ledger flags when the export left it empty.
+   * Tags each event with source: "daily_derived". Caps at 160 rows (research-legacy parity).
+   */
+  function rebalanceLogFromDaily(daily, { maxRows = 160 } = {}) {
+    if (!daily || !Array.isArray(daily.dates) || !daily.dates.length) return [];
+    const dates = daily.dates;
+    const rebalance = Array.isArray(daily.rebalance) ? daily.rebalance : [];
+    const scheduled = Array.isArray(daily.rebalance_scheduled) ? daily.rebalance_scheduled : [];
+    const hUsed = Array.isArray(daily.h_used) ? daily.h_used : [];
+    const fees = Array.isArray(daily.rebalance_fee) ? daily.rebalance_fee : [];
+    const reasons = Array.isArray(daily.rebalance_reason) ? daily.rebalance_reason : [];
+    const out = [];
+    for (let i = 0; i < dates.length; i += 1) {
+      const executed = _truthyFlag(rebalance[i]);
+      const wasScheduled = scheduled.length ? _truthyFlag(scheduled[i]) : false;
+      if (!executed && !wasScheduled) continue;
+      const reason = reasons[i] != null ? String(reasons[i]) : '';
+      const h = Number(hUsed[i]);
+      const fee = Number(fees[i]);
+      out.push({
+        date: String(dates[i]),
+        h: Number.isFinite(h) ? h : null,
+        executed,
+        rebalance_fee: Number.isFinite(fee) ? fee : null,
+        skipped_below_drift: (!executed && wasScheduled) || _reasonLooksSkipped(reason),
+        reason,
+        source: 'daily_derived',
+      });
+    }
+    return out.length > maxRows ? out.slice(out.length - maxRows) : out;
+  }
+
+  /** Prefer a non-empty exported log with real fields; else synthesize from daily. */
+  function resolveRebalanceLog(pairMeta, daily, explicitLog = null) {
+    const candidates = [
+      explicitLog,
+      pairMeta?.rebalance_log,
+    ];
+    for (const cand of candidates) {
+      if (!Array.isArray(cand) || !cand.length) continue;
+      const usable = cand.some((ev) => (
+        ev
+        && (ev.h != null || ev.executed === true || ev.executed === false
+          || Number.isFinite(Number(ev.rebalance_fee)) || ev.reason)
+      ));
+      if (!usable) continue;
+      return {
+        log: cand.map((ev) => ({
+          ...ev,
+          source: ev?.source || pairMeta?.rebalance_log_basis || 'production_export',
+        })),
+        source: 'production_export',
+      };
+    }
+    const derived = rebalanceLogFromDaily(daily);
+    return {
+      log: derived,
+      source: derived.length ? 'daily_derived' : 'empty',
+    };
+  }
+
   function summaryFromReturns(dates, rets) {
     const vals = (Array.isArray(rets) ? rets : []).map(Number).filter(Number.isFinite);
     if (vals.length < 2) return { cagr: null, annVol: null, sharpe: null, maxDrawdown: null };
@@ -367,9 +444,7 @@
     });
     const stats = summaryFromReturns(win.dates, rets);
     const last = rows[rows.length - 1] || {};
-    const log = Array.isArray(rebalanceLog)
-      ? rebalanceLog
-      : (Array.isArray(pairMeta?.rebalance_log) ? pairMeta.rebalance_log : []);
+    const resolvedLog = resolveRebalanceLog(pairMeta, daily, rebalanceLog);
     return {
       ok: true,
       notional,
@@ -394,9 +469,12 @@
         annVol: stats.annVol,
         sharpe: stats.sharpe,
         maxDrawdown: stats.maxDrawdown,
+        notionalBasisUsd: Number.isFinite(sourceBasis) && sourceBasis > 0 ? sourceBasis : null,
+        rebalanceLogFeeUnits: pairMeta?.rebalance_log_fee_units || 'fraction_of_sleeve_capital',
       },
       pairSummary: pairMeta?.summary || pairMeta || {},
-      rebalanceLog: log,
+      rebalanceLog: resolvedLog.log,
+      rebalanceLogSource: resolvedLog.source,
     };
   }
 
@@ -677,6 +755,8 @@
     sliceEquityWindow,
     portfolioEquityChartResult,
     pairSeriesFromArtifact,
+    rebalanceLogFromDaily,
+    resolveRebalanceLog,
     pairChartResultFromDaily,
     pairChartResultFromArtifact,
     pairChartResultFromShard,

@@ -1,0 +1,55 @@
+{
+  "generated_at": "2026-07-20",
+  "documented_golden_window_start": "2026-02-27",
+  "archive_floor_screened": "2025-12-28",
+  "archive_floor_plans": "2025-12-28",
+  "screened": {
+    "n_dates": 57,
+    "first": "2025-12-28",
+    "last": "2026-07-18",
+    "large_gaps": [
+      "2025-12-30->2026-02-27 (59d)",
+      "2026-03-12->2026-03-18 (6d)",
+      "2026-04-16->2026-04-22 (6d)",
+      "2026-04-27->2026-06-25 (59d)"
+    ]
+  },
+  "plans": {
+    "n_dates": 89,
+    "first": "2025-12-28",
+    "last": "2026-07-18",
+    "large_gaps": [
+      "2025-12-31->2026-03-24 (83d)",
+      "2026-03-24->2026-04-01 (8d)",
+      "2026-04-01->2026-04-07 (6d)",
+      "2026-04-07->2026-04-16 (9d)"
+    ]
+  },
+  "coverage_vs_start": [
+    {
+      "artifact": "proposed_trades.csv",
+      "n_dates": 89,
+      "first": "2025-12-28",
+      "last": "2026-07-18",
+      "n_on_or_after_start": 89,
+      "gap_before_first_plan_days": 241
+    },
+    {
+      "artifact": "etf_screened_today.csv",
+      "n_dates": 57,
+      "first": "2025-12-28",
+      "last": "2026-07-18",
+      "n_on_or_after_start": 57,
+      "gap_before_first_plan_days": 241
+    }
+  ],
+  "ops_next_steps": [
+    "Backfill missing daily etf_screened_today.csv archives before the floor where recoverable from git history.",
+    "Hash every new archive day into the B4 export manifest input_hashes.",
+    "Re-run export_b4_dashboard.py --run-production --start <new_floor> and import fail-closed in etf-dashboard.",
+    "Keep inception_research for listing \u2192 first honest plan_entry_date gap.",
+    "Do not forward-fill latest screener into missing archive days."
+  ],
+  "note": "Production plan_entry_date cannot precede the earliest archived screener/plan day used by generate_trade_plan replay. Research inception paths cover pre-floor history.",
+  "opportunity": "Archives begin 2025-12-28, earlier than documented golden start 2026-02-27; consider extending the production replay window after validation."
+}

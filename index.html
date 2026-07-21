@@ -1002,7 +1002,7 @@
     border-right: 0; vertical-align: -1px;
   }
   .pair-report-toolbar {
-    display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between;
+    display: flex; flex-wrap: wrap; align-items: end; justify-content: flex-start;
     gap: 12px 18px; margin: 0 0 16px;
   }
   .pair-report-toolbar .backtest-control { min-width: 140px; max-width: 180px; }
@@ -1012,6 +1012,45 @@
     line-height: 1.45;
   }
   .pair-report-meta strong { color: var(--text-secondary); font-weight: 600; }
+  .chart-header-left.pair-report-title {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  }
+  .pair-report-title .vs {
+    color: var(--text-muted); font-size: 14px; font-weight: 400;
+  }
+  .pair-report-title .und-sym {
+    color: var(--text-secondary); font-size: 16px; font-weight: 600;
+  }
+  .pair-report-history-toggle {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin: 0 0 12px;
+  }
+  .pair-report-history-toggle .chart-view-btn.active {
+    border-color: var(--accent); color: var(--accent);
+  }
+  .pair-report-table-wrap { max-height: 280px; overflow: auto; }
+  .pair-report-table {
+    width: 100%; border-collapse: collapse;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  }
+  .pair-report-table th, .pair-report-table td {
+    padding: 6px 10px; border-bottom: 1px solid var(--border);
+    white-space: nowrap; vertical-align: middle;
+  }
+  .pair-report-table th {
+    text-align: right; color: var(--text-muted); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.03em; font-size: 10px;
+    position: sticky; top: 0; background: var(--bg-card); z-index: 1;
+  }
+  .pair-report-table th:first-child, .pair-report-table td:first-child {
+    text-align: left; min-width: 6.5rem;
+  }
+  .pair-report-table td { text-align: right; color: var(--text-primary); }
+  .pair-report-table th:nth-child(2), .pair-report-table td:nth-child(2) { min-width: 4.5rem; }
+  .pair-report-table th:nth-child(5), .pair-report-table td:nth-child(5) { min-width: 3.5rem; }
+  .pair-report-log-note {
+    font-size: 11px; color: var(--text-muted); margin: 6px 0 8px; line-height: 1.4;
+  }
   .pair-report-kpis {
     display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 10px; margin: 0 0 10px;
@@ -14352,12 +14391,14 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
   const [gross, setGross] = useState(100000);
   const [showRebalLog, setShowRebalLog] = useState(false);
   const [showDailyTable, setShowDailyTable] = useState(false);
+  const [historyBasis, setHistoryBasis] = useState('plan');
 
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       setLoading(true);
       setError(null);
+      setHistoryBasis('plan');
       try {
         const art = typeof B4.loadArtifact === 'function' ? await B4.loadArtifact() : null;
         const pair = typeof B4.loadPairShard === 'function'
@@ -14376,40 +14417,99 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
     return () => { cancelled = true; };
   }, [sym]);
 
-  const chartResult = useMemo(() => {
+  const membershipRow = useMemo(() => {
+    const rows = Array.isArray(artifact?.membership) ? artifact.membership : [];
+    return rows.find((m) => String(m?.etf || m?.ETF || '').toUpperCase() === sym) || null;
+  }, [artifact, sym]);
+
+  const inceptionResearch = shard?.inception_research && typeof shard.inception_research === 'object'
+    ? shard.inception_research
+    : null;
+  const inceptionDaily = inceptionResearch?.daily;
+  const hasInceptionResearch = Boolean(
+    inceptionDaily && Array.isArray(inceptionDaily.dates) && inceptionDaily.dates.length >= 2
+  );
+  const activeShard = useMemo(() => {
     if (!shard) return null;
-    if (typeof B4.pairChartResultFromShard === 'function') {
-      return B4.pairChartResultFromShard(shard, { gross });
+    if (historyBasis === 'inception_research' && hasInceptionResearch) {
+      return {
+        ...shard,
+        ...inceptionResearch,
+        daily: inceptionDaily,
+        summary: { ...(shard.summary || {}), ...(inceptionResearch.summary || {}) },
+        rebalance_log: Array.isArray(inceptionResearch.rebalance_log)
+          ? inceptionResearch.rebalance_log
+          : (shard.rebalance_log || []),
+        ledger_mode: inceptionResearch.ledger_mode || shard.ledger_mode,
+        notional_basis_usd: inceptionResearch.notional_basis_usd ?? shard.notional_basis_usd,
+        history_basis: 'inception_research',
+        in_production_book: false,
+      };
     }
-    if (typeof B4.pairChartResultFromArtifact === 'function' && artifact) {
+    return shard;
+  }, [shard, historyBasis, hasInceptionResearch, inceptionResearch, inceptionDaily]);
+
+  const chartResult = useMemo(() => {
+    if (!activeShard) return null;
+    if (typeof B4.pairChartResultFromShard === 'function') {
+      return B4.pairChartResultFromShard(activeShard, { gross });
+    }
+    if (typeof B4.pairChartResultFromArtifact === 'function' && artifact && historyBasis === 'plan') {
       const fromArt = B4.pairChartResultFromArtifact(artifact, sym, { gross });
       if (fromArt?.ok) return fromArt;
     }
     return { ok: false, error: 'Pair path scaler unavailable.' };
-  }, [shard, artifact, sym, gross, B4]);
+  }, [activeShard, artifact, sym, gross, historyBasis, B4]);
 
-  const summary = shard?.summary || {};
+  const summary = activeShard?.summary || shard?.summary || {};
   const scaled = chartResult?.summary || {};
-  const prod = Boolean(shard?.in_production_book);
+  const prod = Boolean(shard?.in_production_book) && historyBasis === 'plan';
   const und = String(shard?.underlying || summary.underlying || '').toUpperCase();
   const fmtPctAnn = (x, digits = 1) => (typeof B4.fmtPctAnnual === 'function' ? B4.fmtPctAnnual(x, digits) : fmt(x));
-  const statusText = prod ? 'Production' : 'Gated / Research';
+  const statusText = historyBasis === 'inception_research'
+    ? 'Inception research'
+    : (prod ? 'Production' : 'Gated / Research');
   const rows = chartResult?.ok ? chartResult.rows : [];
   const rebalanceLog = Array.isArray(chartResult?.rebalanceLog)
     ? chartResult.rebalanceLog
-    : (Array.isArray(shard?.rebalance_log) ? shard.rebalance_log : []);
+    : (Array.isArray(activeShard?.rebalance_log) ? activeShard.rebalance_log : []);
+  const rebalanceLogSource = chartResult?.rebalanceLogSource
+    || (rebalanceLog.some((ev) => ev?.source === 'daily_derived') ? 'daily_derived' : 'production_export');
   const notional = Number(gross) > 0 ? Number(gross) : 100000;
   const nRebals = scaled.nRebalances || summary.n_rebalances || rebalanceLog.length || 0;
   const hLast = summary.h_last != null ? Number(summary.h_last) : (rows.length ? Number(rows[rows.length - 1]?.h) : null);
   const hMean = summary.mean_h != null ? Number(summary.mean_h) : null;
+  const planEntered = summary.plan_entry_date
+    || membershipRow?.first_plan_date
+    || summary.entry_date
+    || '—';
+  const etfInception = summary.etf_inception_date
+    || shard?.etf_inception_date
+    || membershipRow?.etf_inception_date
+    || null;
+  const sourceBasis = Number(
+    scaled.notionalBasisUsd
+    || activeShard?.notional_basis_usd
+    || summary.notional_basis_usd
+  );
+  const feeUnits = String(
+    scaled.rebalanceLogFeeUnits
+    || activeShard?.rebalance_log_fee_units
+    || 'fraction_of_sleeve_capital'
+  );
+  const cagrTitle = 'Compounds daily sleeve equity returns from the production ledger; annualized on calendar time. Not PnL ÷ Notional. Not based on gross short exposure.';
+  const grossLegTitle = Number.isFinite(sourceBasis) && sourceBasis > 0
+    ? `Gross leg = |ETF| + |und| short exposure, linearly scaled from source sleeve capital ${fmtMoney(sourceBasis)}.`
+    : 'Gross leg = |ETF| + |und| short exposure (both short sides), scaled to display notional.';
 
   return (
     <div className="backtest-page">
       <div className="chart-header">
-        <div className="chart-header-left">
+        <div className="chart-header-left pair-report-title">
           <button className="chart-view-btn" onClick={() => { window.location.hash = '/bucket-4/backtest'; }}>← B4 Book</button>
           <span className="etf-sym">{sym || 'Bucket 4 Pair'}</span>
-          <span className="chart-und">vs {und || '—'}</span>
+          <span className="vs">vs</span>
+          <span className="und-sym">{und || '—'}</span>
           <span className={cls('bucket-pill', prod ? 'bucket_3_inverse' : '')}>{statusText}</span>
         </div>
         <div className="chart-header-right">
@@ -14426,21 +14526,61 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
           <div className="pair-report-toolbar">
             <div className="backtest-control">
               <label>Notional $</label>
-              <input type="number" min={1000} step={1000} value={gross} onChange={(e) => setGross(Number(e.target.value) || 0)} title="Scales the exported production-ledger PnL linearly from its recorded source notional." />
+              <input
+                type="number"
+                min={1000}
+                step={1000}
+                value={gross}
+                onChange={(e) => setGross(Number(e.target.value) || 0)}
+                title="Scales the exported ledger PnL linearly from its recorded source sleeve capital (notional_basis_usd). Does not change positions or rerun execution."
+              />
             </div>
             <div className="pair-report-meta">
-              <span>Entered <strong>{summary.entry_date || '—'}</strong></span>
+              <span title="First day this pair has a production-ledger path / plan membership. Not the ETF listing date.">
+                Plan entered <strong>{planEntered}</strong>
+              </span>
+              {etfInception ? (
+                <span title="First tradable ETF session from metrics / listing metadata. Not production membership.">
+                  ETF inception <strong>{etfInception}</strong>
+                </span>
+              ) : null}
               <span>Latest <strong>{summary.latest_date || '—'}</strong></span>
               <span>Gate <strong>{summary.gate_reason || shard.gate_reason || '—'}</strong></span>
               <span>Model <strong>{summary.model_status || shard.model_status || '—'}</strong></span>
             </div>
           </div>
 
+          <div className="pair-report-history-toggle">
+            <button
+              type="button"
+              className={cls('chart-view-btn', historyBasis === 'plan' && 'active')}
+              onClick={() => setHistoryBasis('plan')}
+            >
+              Plan path (production)
+            </button>
+            <button
+              type="button"
+              className={cls('chart-view-btn', historyBasis === 'inception_research' && 'active')}
+              disabled={!hasInceptionResearch}
+              title={hasInceptionResearch
+                ? 'Research path from ETF/underlying overlap. Not production-policy replay.'
+                : 'Inception research series not exported yet for this pair.'}
+              onClick={() => { if (hasInceptionResearch) setHistoryBasis('inception_research'); }}
+            >
+              Inception research
+            </button>
+          </div>
+          {historyBasis === 'inception_research' && (
+            <div className="scenario-warning">
+              Research path from ETF/underlying overlap. Not production-policy replay. Not used for book PnL.
+            </div>
+          )}
+
           <div className="pair-report-kpis chart-stats">
-            <div className="chart-stat">
+            <div className="chart-stat" title={cagrTitle}>
               <div className="cs-label">CAGR</div>
               <div className="cs-value">{(scaled.cagr != null ? fmtPctAnn(scaled.cagr) : (summary.cagr != null ? fmtPctAnn(summary.cagr) : '—'))}</div>
-              <div className="cs-sub">{scaled.nDays || summary.price_rows || 0} days · {fmtMoney(notional)}</div>
+              <div className="cs-sub">{scaled.nDays || summary.price_rows || 0} days · sleeve equity CAGR · display {fmtMoney(notional)}</div>
             </div>
             <div className="chart-stat">
               <div className="cs-label">Ann. vol / Sharpe</div>
@@ -14452,7 +14592,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
               <div className="cs-value">{(scaled.maxDrawdown != null ? fmtPctAnn(scaled.maxDrawdown) : (summary.max_drawdown != null ? fmtPctAnn(summary.max_drawdown) : '—'))}</div>
               <div className="cs-sub">peak-to-trough equity</div>
             </div>
-            <div className="chart-stat">
+            <div className="chart-stat" title={grossLegTitle}>
               <div className="cs-label">Net PnL</div>
               <div className="cs-value">{chartResult?.ok ? fmtMoney(scaled.netPnl) : '—'}</div>
               <div className="cs-sub">gross leg {chartResult?.ok ? fmtMoney(scaled.totalGross) : '—'}</div>
@@ -14476,7 +14616,11 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
                 <div className="trade-head">
                   <div>
                     <div className="scenario-title">Equity and PnL ($)</div>
-                    <div className="scenario-sub">Authoritative production-ledger path, linearly scaled to display notional. Amber marks are this pair&apos;s B4 executions—not unrelated book activity.</div>
+                    <div className="scenario-sub">
+                      {historyBasis === 'inception_research'
+                        ? 'Labeled inception research path, linearly scaled to display notional. Not used for book PnL.'
+                        : 'Authoritative production-ledger path, linearly scaled to display notional. Amber marks are this pair\u2019s B4 executions—not unrelated book activity.'}
+                    </div>
                   </div>
                 </div>
                 <PairBacktestChart result={chartResult} focused rebalanceLog={rebalanceLog} />
@@ -14505,26 +14649,37 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
                 {showRebalLog ? '▾' : '▸'} Rebalance log ({rebalanceLog.length})
               </button>
               {showRebalLog ? (
-                <div className="scenario-table-wrap" style={{ maxHeight: 260, overflow: 'auto' }}>
-                  <table className="scenario-table">
-                    <thead><tr><th>Date</th><th>h</th><th>Executed</th><th>Fee ($)</th><th>Skipped</th></tr></thead>
-                    <tbody>
-                      {[...rebalanceLog].slice().reverse().map((ev, i) => {
-                        const feeU = Number(ev?.rebalance_fee);
-                        const fee$ = Number.isFinite(feeU) ? feeU * notional : null;
-                        return (
-                          <tr key={`${ev?.date || 'rb'}-${i}`}>
-                            <td>{ev?.date || '—'}</td>
-                            <td>{ev?.h != null ? Number(ev.h).toFixed(3) : '—'}</td>
-                            <td>{ev?.executed ? 'yes' : '—'}</td>
-                            <td>{fee$ != null ? fmtMoney(fee$) : '—'}</td>
-                            <td>{ev?.skipped_below_drift ? 'below drift' : '—'}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                <>
+                  {rebalanceLogSource === 'daily_derived' && (
+                    <div className="pair-report-log-note">
+                      Derived from daily ledger flags until ls-algo exports a filled rebalance_log.
+                    </div>
+                  )}
+                  <div className="pair-report-table-wrap">
+                    <table className="pair-report-table">
+                      <thead><tr><th>Date</th><th>h (hedge)</th><th>Executed</th><th>Fee ($)</th><th>Skipped</th></tr></thead>
+                      <tbody>
+                        {[...rebalanceLog].slice().reverse().map((ev, i) => {
+                          const feeRaw = Number(ev?.rebalance_fee);
+                          const feeMissing = ev?.rebalance_fee == null || !Number.isFinite(feeRaw);
+                          const fee$ = feeMissing
+                            ? null
+                            : (feeUnits === 'usd' ? feeRaw * (notional / (Number.isFinite(sourceBasis) && sourceBasis > 0 ? sourceBasis : notional)) : feeRaw * notional);
+                          const executedMissing = ev?.executed == null;
+                          return (
+                            <tr key={`${ev?.date || 'rb'}-${i}`} title={ev?.reason || undefined}>
+                              <td>{ev?.date || '—'}</td>
+                              <td>{ev?.h != null && Number.isFinite(Number(ev.h)) ? Number(ev.h).toFixed(3) : '—'}</td>
+                              <td>{executedMissing ? '—' : (ev.executed ? 'yes' : 'no')}</td>
+                              <td>{fee$ != null ? fmtMoney(fee$) : '—'}</td>
+                              <td>{ev?.skipped_below_drift == null ? '—' : (ev.skipped_below_drift ? 'below drift' : 'no')}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               ) : null}
             </div>
           )}
@@ -14535,9 +14690,9 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
                 {showDailyTable ? '▾' : '▸'} Daily path (last 32)
               </button>
               {showDailyTable ? (
-                <div className="scenario-table-wrap" style={{ maxHeight: 280, overflow: 'auto' }}>
-                  <table className="scenario-table">
-                    <thead><tr><th>Date</th><th>Net PnL</th><th>Gross leg</th><th>Drawdown</th><th>h</th><th>Borrow</th><th>T-costs</th><th>Book activity</th><th>Pair execution</th></tr></thead>
+                <div className="pair-report-table-wrap">
+                  <table className="pair-report-table">
+                    <thead><tr><th>Date</th><th>Net PnL</th><th>Gross leg</th><th>Drawdown</th><th>h (hedge)</th><th>Borrow</th><th>T-costs</th><th>Book activity</th><th>Pair execution</th></tr></thead>
                     <tbody>
                       {[...rows].slice(-32).reverse().map((r) => (
                         <tr key={r.date}>
@@ -14548,8 +14703,8 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
                           <td>{r.h != null ? Number(r.h).toFixed(3) : '—'}</td>
                           <td>{fmtMoney(r.borrow)}</td>
                           <td>{fmtMoney(r.transactionCosts)}</td>
-                          <td>{r.bookActivity ? 'yes' : '—'}</td>
-                          <td>{r.rebalance ? 'yes' : '—'}</td>
+                          <td>{r.bookActivity ? 'yes' : 'no'}</td>
+                          <td>{r.rebalance ? 'yes' : 'no'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -14966,7 +15121,7 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
         GTP plans, persisted sizing state, operator membership, purgatory reduce-only handling, TR/VCR cadence,
         Phase-2b bands, ratchet guards, execution lag, turnover controls, and production accounting.
         The dashboard does not re-solve or reblend this path. Per-ticker: Pair Report. Separate editable research:
-        chart <strong>Backtest</strong> / <strong>Drip</strong>. Universe: {artifact?.n_pairs ?? '—'} ledger pairs
+        chart <strong>Backtest</strong> / <strong>Drip</strong>. Universe: {artifact?.n_pairs ?? '—'} ledger pairs,
         {artifact?.n_membership ?? membership.length ?? '—'} historical plan members
         ({b4UniverseCount} current screener B4 rows).
         {Number.isFinite(Number(artifact?.deployed_fraction)) ? <> Deployed {(Number(artifact.deployed_fraction) * 100).toFixed(1)}% · cash residual {(Number(artifact.cash_residual || Math.max(0, 1 - Number(artifact.deployed_fraction))) * 100).toFixed(1)}%.</> : null}
@@ -15089,13 +15244,14 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
           {membership.length > 0 && (
             <div className="scenario-table-wrap" style={{ marginTop: 12, maxHeight: 250, overflow: 'auto' }}>
               <table className="scenario-table">
-                <thead><tr><th>ETF</th><th>Und</th><th>Lifecycle</th><th>Plan window</th><th>Purgatory</th><th>Ledger</th><th>Reason</th></tr></thead>
+                <thead><tr><th>ETF</th><th>Und</th><th>Lifecycle</th><th>Plan window</th><th>Inception</th><th>Purgatory</th><th>Ledger</th><th>Reason</th></tr></thead>
                 <tbody>{membership.map((m) => (
                   <tr key={m.etf || m.ETF}>
                     <td><strong>{m.etf || m.ETF}</strong></td>
                     <td>{m.underlying || m.Underlying || '—'}</td>
                     <td>{m.lifecycle_state || '—'}</td>
                     <td>{m.first_plan_date || '—'} → {m.last_plan_date || '—'}</td>
+                    <td title="ETF listing / first metrics session — not plan membership">{m.etf_inception_date || '—'}</td>
                     <td>{m.latest_purgatory ? 'Yes' : 'No'}</td>
                     <td>{m.has_daily ? 'Yes' : 'No'}</td>
                     <td>{m.block_reason || '—'}</td>

@@ -430,6 +430,16 @@ Add a cross-repository compatibility check: an `ls-algo` exporter schema change 
 
 Never regenerate a “production” artifact with the local legacy engine during rollback. Rollback means serving the last known-good authoritative artifact or clearly showing it as stale.
 
+## Pair Report / inception exit criteria (Phases 2–4 of pair-report fix plan)
+
+- [x] Normalized `rebalance_log` emitted from daily `is_rebalance` (+ trade-ledger enrichment) with `rebalance_log_basis` / `rebalance_log_fee_units`.
+- [x] Dashboard prefers exported log; falls back to `rebalanceLogFromDaily`; soft-limits empty logs with daily flags.
+- [x] Pair fields: `plan_entry_date`, `history_basis=plan`, optional `etf_inception_date`, optional nested `inception_research` (`authoritative=false`).
+- [x] Pair Report UI: Plan entered vs ETF inception; history toggle; book KPIs stay on plan path.
+- [x] Archive inventory script + ops doc (`inventory_b4_screener_archives.py`, `docs/b4_archive_extension_ops.md`).
+- [ ] Production replay `--start` extended to the live archive floor after validation (ops track; see inventory opportunity when floor < 2026-02-27).
+- [ ] Nightly export attaches `inception_research/{ETF}.json` beside production replay when research series are staged.
+
 ## Completion checklist
 
 - [ ] Clean `ls-algo` reference revision selected and golden manifest archived.

@@ -122,6 +122,70 @@ test("authoritative pair shard uses exported dollar ledger fields", () => {
   assert.equal(out.rows[1].transactionCosts, 30);
   assert.equal(out.rows[1].totalGross, 96000);
   assert.equal(out.rows[0].rebalanceReason, "enter_operator");
+  // Empty export log → derive from daily.rebalance flags
+  assert.equal(out.rebalanceLogSource, "daily_derived");
+  assert.equal(out.rebalanceLog.length, 1);
+  assert.equal(out.rebalanceLog[0].executed, true);
+  assert.equal(out.rebalanceLog[0].h, 0.5);
+});
+
+test("rebalanceLogFromDaily builds events from rebalance flags", () => {
+  const daily = {
+    dates: ["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07"],
+    rebalance: [0, 1, 0, 1],
+    rebalance_scheduled: [0, 1, 1, 1],
+    h_used: [0.4, 0.5, 0.55, 0.6],
+    rebalance_fee: [0, 0.001, 0, 0.002],
+    rebalance_reason: ["", "cadence", "skipped_below_drift", "cadence"],
+  };
+  const log = Bucket4Backtest.rebalanceLogFromDaily(daily);
+  assert.equal(log.length, 3);
+  assert.equal(log[0].date, "2026-01-05");
+  assert.equal(log[0].executed, true);
+  assert.equal(log[0].source, "daily_derived");
+  assert.equal(log[1].executed, false);
+  assert.equal(log[1].skipped_below_drift, true);
+  assert.equal(log[2].h, 0.6);
+});
+
+test("resolveRebalanceLog prefers exported log over daily synthesis", () => {
+  const daily = {
+    dates: ["2026-01-02", "2026-01-05"],
+    rebalance: [0, 1],
+    h_used: [0.4, 0.5],
+    rebalance_fee: [0, 0.001],
+  };
+  const exported = [{ date: "2026-01-05", h: 0.77, executed: true, rebalance_fee: 0.002 }];
+  const resolved = Bucket4Backtest.resolveRebalanceLog(
+    { rebalance_log: exported, rebalance_log_basis: "production_execution_ledger" },
+    daily,
+  );
+  assert.equal(resolved.source, "production_export");
+  assert.equal(resolved.log.length, 1);
+  assert.equal(resolved.log[0].h, 0.77);
+  assert.equal(resolved.log[0].source, "production_execution_ledger");
+});
+
+test("date-only stub rebalance_log falls back to daily_derived", () => {
+  const shard = {
+    etf: "QBTZ",
+    rebalance_log: [{ date: "2026-06-09" }, { date: "2026-06-10" }],
+    daily: {
+      dates: ["2026-06-09", "2026-06-10", "2026-06-11"],
+      equity: [1, 1.01, 0.99],
+      ret: [0, 0.01, -0.02],
+      h_used: [0.9, 0.8, 0.7],
+      rebalance: [1, 1, 0],
+      rebalance_fee: [0.001, 0.002, 0],
+      borrow_cost: [0, 0, 0],
+    },
+  };
+  const out = Bucket4Backtest.pairChartResultFromShard(shard, { gross: 100000 });
+  assert.equal(out.ok, true);
+  assert.equal(out.rebalanceLogSource, "daily_derived");
+  assert.equal(out.rebalanceLog.length, 2);
+  assert.equal(out.rebalanceLog[0].executed, true);
+  assert.equal(out.rebalanceLog[1].h, 0.8);
 });
 
 test("authoritative artifact disables client-side research reblend", () => {
