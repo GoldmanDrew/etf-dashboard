@@ -806,11 +806,18 @@ class DefianceHoldingsProvider:
     def supports_ticker(self, ticker: str, as_of: date) -> bool:
         try:
             from etf_providers import DefianceProvider
-            # DefianceProvider's catalog is loaded lazily; trigger it.
+            # Share KNOWN_TICKERS ∪ catalog membership with the NAV provider.
             probe = DefianceProvider(self.session)
             return probe.supports_ticker(ticker, as_of)
         except Exception:
-            return True
+            # Fail open only if import/provider construction breaks; otherwise
+            # false negatives from a broken catalog gate hide real holdings pages.
+            t = (ticker or "").strip().upper()
+            try:
+                from etf_providers import DefianceProvider as _DP
+                return t in _DP.KNOWN_TICKERS
+            except Exception:
+                return False
 
     @staticmethod
     def _strip_tags(s: str) -> str:

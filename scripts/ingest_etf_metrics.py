@@ -3372,6 +3372,11 @@ def main() -> None:
         help="Multi-day ingest for Mon 6 AM ET: backfill last N business days through prior Fri",
     )
     parser.add_argument("--disable-yfinance", action="store_true", help="skip the Yahoo Finance fallback")
+    parser.add_argument(
+        "--tickers",
+        default=None,
+        help="Comma-separated ticker subset (default: full screener universe)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -3383,6 +3388,15 @@ def main() -> None:
     )
 
     tickers = load_universe_tickers()
+    if args.tickers:
+        want = {_normalize_symbol(x) for x in str(args.tickers).split(",") if str(x).strip()}
+        tickers = [t for t in tickers if t in want]
+        missing = sorted(want - set(tickers))
+        if missing:
+            # Allow heal/ops runs for tickers present in the metrics store but not
+            # currently on the screener CSV (still normalize + sort).
+            tickers = sorted(set(tickers) | want)
+            LOGGER.warning("Including %d ticker(s) outside screener universe: %s", len(missing), ",".join(missing))
     LOGGER.info("Universe tickers: %d", len(tickers))
 
     # Resolve end_date: CLI arg wins, else use previous business day (the data-date

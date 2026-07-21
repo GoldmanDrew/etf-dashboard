@@ -13,6 +13,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from etf_providers import (
+    DefianceProvider,
     GraniteSharesProvider,
     REXSharesProvider,
     YieldMaxProvider,
@@ -40,6 +41,7 @@ def test_issuer_valuation_stale_flags_lag_is_stale():
 def test_skip_anchor_provider_set_includes_merged():
     assert "merged" in SKIP_SESSION_DATE_ANCHOR_PROVIDERS
     assert "rex_shares" in SKIP_SESSION_DATE_ANCHOR_PROVIDERS
+    assert "defiance" in SKIP_SESSION_DATE_ANCHOR_PROVIDERS
 
 
 def test_granite_product_id_from_catalog_table_row():
@@ -66,6 +68,77 @@ def test_granite_supports_static_new_ticker_fallback(monkeypatch):
     assert provider.supports_ticker("BBYY", date(2026, 6, 26)) is True
     assert provider.supports_ticker("BAIG", date(2026, 6, 26)) is True
     assert provider.supports_ticker("NOTA", date(2026, 6, 26)) is False
+
+
+def test_granite_does_not_claim_defiance_collisions(monkeypatch):
+    provider = GraniteSharesProvider()
+    monkeypatch.setattr(provider, "_load_catalog", lambda: None)
+    provider._catalog = set()
+    for sym in ("QSU", "ASTN", "AVXX", "NVOX", "OSCX", "STSM"):
+        assert sym not in GraniteSharesProvider.KNOWN_TICKERS
+        assert provider.supports_ticker(sym, date(2026, 7, 17)) is False
+
+
+def test_defiance_supports_static_known_fallback(monkeypatch):
+    provider = DefianceProvider()
+    monkeypatch.setattr(provider, "_load_catalog", lambda: None)
+    provider._catalog = set()
+
+    assert provider.supports_ticker("POEL", date(2026, 7, 17)) is True
+    assert provider.supports_ticker("QSU", date(2026, 7, 17)) is True
+    assert provider.supports_ticker("MPL", date(2026, 7, 17)) is True
+    assert provider.supports_ticker("MSTX", date(2026, 7, 17)) is True
+    assert provider.supports_ticker("NOTA", date(2026, 7, 17)) is False
+
+
+def test_defiance_catalog_parses_etf_insights_links():
+    html = """
+    <a href="/etfs/">ETFs</a>
+    <a href="/etf-insights/poel">POEL alert</a>
+    <a href="https://defianceetfs.com/etf-insights/qbtz/">QBTZ</a>
+    <a href="/spcu/">SPCU</a>
+    <a href="/privacy-policy/">Privacy</a>
+    <a href="/mpl/">MPL</a>
+    """
+    found = DefianceProvider.tickers_from_listing_html(html)
+    assert "POEL" in found
+    assert "QBTZ" in found
+    assert "SPCU" in found
+    assert "MPL" in found
+    assert "ETFS" not in found
+
+
+def test_defiance_blocklist_excludes_only_marketing_slugs():
+    assert "qsu" not in DefianceProvider._SLUG_BLOCKLIST
+    assert "mpl" not in DefianceProvider._SLUG_BLOCKLIST
+    assert "mst" not in DefianceProvider._SLUG_BLOCKLIST
+    assert "etf-insights" in DefianceProvider._SLUG_BLOCKLIST
+
+
+def test_defiance_fetch_uses_html_data_as_of_session_date(monkeypatch):
+    html = """
+    <h2>Fund Details</h2>
+    <p>Data as of 07/20/2026 Net Assets $15.09M Premium/Discount 0.30%
+    NAV $10.13 Closing Price $ 10.16 Shares Outstanding 1,490,000
+    Top Holdings</p>
+    """
+
+    class Resp:
+        status_code = 200
+        text = html
+
+    provider = DefianceProvider()
+    monkeypatch.setattr("etf_providers._get", lambda *a, **k: Resp())
+    as_of = date(2026, 7, 21)
+    r = provider.fetch_for_date("POEL", as_of)
+    assert r.date == date(2026, 7, 20)
+    assert r.source_provider == "defiance"
+    assert r.status == "ok"
+    assert r.nav is not None and abs(r.nav - 10.13) < 1e-6
+    assert r.stale is True
+    assert r.stale_kind == "issuer_lag"
+    assert r.market_close is not None and abs(r.market_close - 10.16) < 1e-6
+    assert "#as_of=2026-07-20" in (r.source_url or "")
 
 
 def test_granite_uses_canonical_non_www_host():

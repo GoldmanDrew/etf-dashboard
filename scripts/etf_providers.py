@@ -139,6 +139,7 @@ SKIP_SESSION_DATE_ANCHOR_PROVIDERS: frozenset[str] = frozenset({
     "roundhill",
     "direxion",
     "granite_shares",
+    "defiance",
     "merged",
 })
 
@@ -1184,12 +1185,14 @@ class GraniteSharesProvider:
         # Newer Granite single-stock / thematic leveraged tickers observed in the
         # dashboard universe. If a symbol is not actually live on Granite, fetch
         # returns missing and the stack falls through to market-data providers.
-        "ADBU", "APHG", "ASTG", "ASTN", "AVAZ", "AVXX", "AXPG", "AXTL", "BAIG",
+        "ADBU", "APHG", "ASTG", "AVAZ", "AXPG", "AXTL", "BAIG",
         "BULG", "CDNG", "CIEG", "CIFG", "COTG", "CRCG", "CRY", "ELIL", "ENTL",
         "FCXG", "FOMG", "FPSX", "GFSG", "GLGG", "HODU", "HONG", "HPEL", "HUTG",
-        "IREG", "KLAG", "LACG", "LMTL", "LOFF", "MCHG", "MSOO", "MUZ", "NVOX",
-        "ONDG", "OSCG", "OSCX", "PBRG", "PLTG", "QSU", "SMTG", "SPOG", "STLU",
-        "STSM", "SUIL", "TECY", "TSDD", "TSEG", "TSLO", "TTXD",
+        "IREG", "KLAG", "LACG", "LMTL", "LOFF", "MCHG", "MSOO", "MUZ",
+        "ONDG", "OSCG", "PBRG", "PLTG", "SMTG", "SPOG", "STLU",
+        "SUIL", "TECY", "TSDD", "TSEG", "TSLO", "TTXD",
+        # Removed Defiance product collisions (issuer pages live on defianceetfs.com):
+        # ASTN, AVXX, NVOX, OSCX, QSU, STSM.
     }
 
     def __init__(self, session: requests.Session | None = None):
@@ -1461,23 +1464,74 @@ class DefianceProvider:
     Defiance ETFs publish NAV / Net Assets / Shares Outstanding in a **Fund Details** section
     on each product page, e.g. https://defianceetfs.com/qbtz/
 
-    We strip HTML to text and parse the block between ``Fund Details`` and ``Top Holdings``.
+    Membership = static ``KNOWN_TICKERS`` ∪ live catalog from ``/etfs/``. The public listing
+    page often links leveraged single-stock funds only via ``/etf-insights/{ticker}`` (not
+    ``/{ticker}/`` product hrefs); catalog parsing must include those slugs. ``KNOWN_TICKERS``
+    is the Granite-style fallback when the listing HTML drifts again.
     """
 
     name = "defiance"
     BASE_HOST = "defianceetfs.com"
 
-    # Slugs on listing/marketing pages that are not single-ETF tickers.
+    # Marketing / CMS path segments that are not ETF tickers. Do **not** put real fund
+    # tickers here (MPL / MST / QSU are live Defiance products).
     _SLUG_BLOCKLIST = frozenset({
         "etfs", "insights", "in-the-news", "privacy-policy", "prospectuses", "who-we-are",
-        "wp-content", "etf-insights", "author", "category", "tag", "page", "feed", "bu", "mpl",
-        "mst", "qsu",
+        "wp-content", "etf-insights", "author", "category", "tag", "page", "feed", "bu",
     })
+
+    # Static fallback: historical metrics ``source_provider=defiance`` cohort + newer
+    # product pages confirmed via Fund Details scrape (POEL, QSU, MPL, …). Fetch still
+    # returns ``missing`` for delisted/404 names so the stack can fall through.
+    KNOWN_TICKERS: set[str] = {
+        # Thematic / index (usually on /etfs/ listing)
+        "AIPO", "AIX", "DRAL", "FAQS", "JEDI", "QTUM", "SPCL", "SPCQ", "SPCU", "UFOX", "XIGV",
+        # Income
+        "QQQY", "WDTE", "IWMY",
+        # Single-stock / leveraged (often missing from product-href catalog)
+        "AMA", "AMKL", "AMPU", "ANEL", "ASTN", "ASTY", "AVGX", "AVXX", "BMNZ", "BTFL",
+        "COPZ", "CVNX", "DAMD", "DKNX", "DRNL", "HIMZ", "HOOX", "HOOZ", "INFH", "IONX",
+        "IONZ", "IRE", "KEEX", "LLYX", "LMNX", "LNOK", "LUNL", "MPL", "MRNX", "MST",
+        "MSTX", "NVOX", "OKLL", "OKLS", "ONDL", "ORCX", "OSCX", "OSSL", "OUSL", "PLTZ",
+        "PLU", "POEL", "PUR", "QBTZ", "QPUX", "QSU", "RCAX", "RGTX", "RGTZ", "RIOX",
+        "RKLX", "RKLZ", "RKTL", "SMCX", "SMCZ", "SMST", "SOFX", "SOUX", "STSM", "STXL",
+        "UMAL", "VELL", "VSTL", "ZETX",
+    }
 
     def __init__(self, session: requests.Session | None = None):
         self.session = session or _build_session()
         self._catalog: set[str] | None = None
         self._cache: dict[str, ProviderResult] = {}
+
+    @classmethod
+    def _accept_slug(cls, slug: str) -> str | None:
+        sl = (slug or "").strip().lower()
+        if not sl or sl in cls._SLUG_BLOCKLIST or "full-holdings" in sl:
+            return None
+        if not (2 <= len(sl) <= 6) or not re.fullmatch(r"[a-z0-9]+", sl):
+            return None
+        return sl.upper()
+
+    @classmethod
+    def tickers_from_listing_html(cls, html: str) -> set[str]:
+        """Extract candidate tickers from Defiance ``/etfs/`` (or similar) HTML."""
+        found: set[str] = set()
+        if not html:
+            return found
+        patterns = (
+            r"https://(?:www\.)?defianceetfs\.com/([a-z0-9]{2,6})/",
+            r'href="/([a-z0-9]{2,6})/"',
+            # Leveraged names often appear only as insights deep-links after site redesigns.
+            r"https://(?:www\.)?defianceetfs\.com/etf-insights/([a-z0-9]{2,6})(?:/|[\"#?]|$)",
+            r'href="/etf-insights/([a-z0-9]{2,6})(?:/|[\"#?]|$)"',
+            r"/etf-insights/([a-z0-9]{2,6})(?:/|[\"#?]|$)",
+        )
+        for pat in patterns:
+            for s in re.findall(pat, html, re.I):
+                sym = cls._accept_slug(s)
+                if sym:
+                    found.add(sym)
+        return found
 
     def _load_catalog(self) -> None:
         if self._catalog is not None:
@@ -1488,27 +1542,22 @@ class DefianceProvider:
             if r.status_code != 200 or not r.text:
                 LOGGER.warning("Defiance catalog fetch http=%s", r.status_code)
                 return
-            found = set(
-                re.findall(
-                    r"https://(?:www\.)?defianceetfs\.com/([a-z0-9]{2,6})/",
-                    r.text,
-                    re.I,
-                )
-            )
-            found |= set(re.findall(r'href="/([a-z0-9]{2,6})/"', r.text, re.I))
-            for s in found:
-                sl = s.lower()
-                if sl in self._SLUG_BLOCKLIST or "full-holdings" in sl:
-                    continue
-                if 2 <= len(sl) <= 6:
-                    self._catalog.add(sl.upper())
+            self._catalog = self.tickers_from_listing_html(r.text)
             LOGGER.info("Defiance ETF catalog: %d symbols", len(self._catalog))
+            if len(self._catalog) < 20:
+                LOGGER.warning(
+                    "Defiance catalog unusually small (%d); relying on KNOWN_TICKERS fallback",
+                    len(self._catalog),
+                )
         except Exception as e:
             LOGGER.warning("Defiance catalog load failed: %s", e)
 
     def supports_ticker(self, ticker: str, as_of: date) -> bool:
+        t = ticker.upper()
+        if t in self.KNOWN_TICKERS:
+            return True
         self._load_catalog()
-        return ticker.upper() in (self._catalog or set())
+        return t in (self._catalog or set())
 
     @staticmethod
     def _html_to_text(html: str) -> str:
@@ -1528,9 +1577,34 @@ class DefianceProvider:
         return float(val * mult)
 
     @classmethod
-    def _parse_fund_details(cls, text: str) -> tuple[float | None, float | None, float | None]:
+    def _fund_details_block(cls, text: str) -> str:
         fd = re.search(r"Fund Details\s*(.*?)(?:Top Holdings|Distributions)", text, re.I | re.DOTALL)
-        block = fd.group(1) if fd else text
+        return fd.group(1) if fd else text
+
+    @classmethod
+    def _parse_as_of_date(cls, text: str) -> date | None:
+        """Parse ``Data as of MM/DD/YYYY`` from the Fund Details block when present."""
+        block = cls._fund_details_block(text)
+        m = re.search(
+            r"Data\s+as\s+of\s+(\d{1,2}/\d{1,2}/\d{4})",
+            block,
+            re.I,
+        )
+        if not m:
+            m = re.search(r"Data\s+as\s+of\s+(\d{4}-\d{2}-\d{2})", block, re.I)
+        if not m:
+            return None
+        raw = m.group(1).strip()
+        for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except Exception:
+                continue
+        return None
+
+    @classmethod
+    def _parse_fund_details(cls, text: str) -> tuple[float | None, float | None, float | None]:
+        block = cls._fund_details_block(text)
         m = re.search(
             r"Net Assets\s*\$?\s*([\d,.]+)\s*([KMB]?)\s*.*?NAV\s*\$?\s*([\d,.]+)\s*.*?Shares Outstanding\s*([\d,]+)",
             block,
@@ -1573,10 +1647,13 @@ class DefianceProvider:
         if t in self._cache:
             c = self._cache[t]
             return ProviderResult(
-                date=as_of, ticker=t, nav=c.nav, aum=c.aum,
+                date=c.date, ticker=t, nav=c.nav, aum=c.aum,
                 shares_outstanding=c.shares_outstanding,
                 source_provider=self.name, source_url=c.source_url,
                 status=c.status, stale=c.stale, stale_age_bdays=c.stale_age_bdays,
+                stale_kind=getattr(c, "stale_kind", None),
+                market_close=getattr(c, "market_close", None),
+                issuer_prem_disc_pct=getattr(c, "issuer_prem_disc_pct", None),
             )
 
         try:
@@ -1600,12 +1677,46 @@ class DefianceProvider:
             if (sh_f is None or sh_f <= 0) and aum_f and nav_f and nav_f > 0:
                 sh_f = float(aum_f / nav_f)
 
+            row_date = self._parse_as_of_date(text)
+            valuation_date = row_date if row_date is not None else as_of
+            stale, age_b, stale_kind = issuer_valuation_stale_flags(row_date, as_of)
+
+            # Issuer closing price when present (for prem/disc eligibility downstream).
+            close_m = re.search(
+                r"Closing Price\s*\$?\s*([\d,.]+)",
+                self._fund_details_block(text),
+                re.I,
+            )
+            market_close = None
+            if close_m:
+                try:
+                    market_close = float(close_m.group(1).replace(",", ""))
+                except (TypeError, ValueError):
+                    market_close = None
+            prem_m = re.search(
+                r"Premium/Discount\s*([+-]?\d+(?:\.\d+)?)\s*%",
+                self._fund_details_block(text),
+                re.I,
+            )
+            issuer_prem = None
+            if prem_m:
+                try:
+                    issuer_prem = float(prem_m.group(1)) / 100.0
+                except (TypeError, ValueError):
+                    issuer_prem = None
+
             status = _classify_status(nav_f, aum_f, sh_f)
+            src_url = url
+            if row_date is not None:
+                src_url = f"{url}#as_of={row_date.isoformat()}"
             res = ProviderResult(
-                date=as_of, ticker=t,
+                date=valuation_date, ticker=t,
                 nav=nav_f, aum=aum_f, shares_outstanding=sh_f,
-                source_provider=self.name, source_url=url,
-                status=status, stale=False, stale_age_bdays=None,
+                source_provider=self.name, source_url=src_url,
+                status=status, stale=stale, stale_age_bdays=age_b,
+                stale_kind=stale_kind,
+                market_close=market_close,
+                issuer_prem_disc_pct=issuer_prem,
             )
             self._cache[t] = res
             return res
