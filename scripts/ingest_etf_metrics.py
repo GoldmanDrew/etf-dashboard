@@ -145,6 +145,7 @@ REQUIRED_COLUMNS = [
 ]
 
 # Issuer NAV missing but session market close present — Decay-usable (not carry_forward).
+# String must match ``etf_providers.STALE_KIND_MARKET_BACKED``.
 STALE_KIND_MARKET_BACKED = "market_backed_no_issuer_nav"
 
 

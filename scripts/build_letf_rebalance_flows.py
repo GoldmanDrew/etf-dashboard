@@ -350,6 +350,51 @@ def _derive_aum_from_identity(df: pd.DataFrame) -> pd.DataFrame:
 
 _PARTIAL_AUM_FILL_BDAYS = 8
 _SESSION_EXTEND_BDAYS = 2
+# Don't let a thin issuer heal (e.g. 62 Defiance rows on a new max date) become
+# the session-extend target — that fabricates a global latest day where most
+# funds only have market-backed/session-extend priors and trip the freshness gate.
+_FLOW_SESSION_MIN_COVERAGE = float(os.environ.get("LETF_FLOW_SESSION_MIN_COVERAGE", "0.20") or 0.20)
+
+
+def _choose_flow_session_date(metrics: pd.DataFrame) -> date | None:
+    """Pick the metrics session used for ``extend_metrics_session_coverage``.
+
+    Prefer the panel max date when it already covers a meaningful share of
+    tickers; otherwise fall back to the densest recent session so a partial
+    issuer heal cannot advance the flow "global latest" alone.
+    """
+    if metrics.empty or "date" not in metrics.columns or "ticker" not in metrics.columns:
+        return None
+    work = metrics.copy()
+    work["date"] = pd.to_datetime(work["date"], errors="coerce")
+    work = work.dropna(subset=["date"])
+    if work.empty:
+        return None
+    work["ticker"] = work["ticker"].astype(str).str.upper()
+    n_tickers = int(work["ticker"].nunique())
+    if n_tickers <= 0:
+        return None
+    by_date = work.groupby(work["date"].dt.normalize())["ticker"].nunique().sort_index()
+    if by_date.empty:
+        return None
+    max_ts = by_date.index.max()
+    max_n = int(by_date.loc[max_ts])
+    if (max_n / n_tickers) >= _FLOW_SESSION_MIN_COVERAGE:
+        return pd.Timestamp(max_ts).date()
+    # Densest among the last ~10 calendar sessions present in the panel.
+    recent = by_date.tail(10)
+    dense_ts = recent.idxmax()
+    LOGGER.warning(
+        "Flow session date: panel max %s covers only %d/%d tickers (<%.0f%%); "
+        "using densest recent session %s (%d tickers) for extend",
+        pd.Timestamp(max_ts).date(),
+        max_n,
+        n_tickers,
+        100.0 * _FLOW_SESSION_MIN_COVERAGE,
+        pd.Timestamp(dense_ts).date(),
+        int(recent.loc[dense_ts]),
+    )
+    return pd.Timestamp(dense_ts).date()
 
 
 def _apply_underlying_close_from_volume_panel(
@@ -1283,11 +1328,11 @@ def build_all(
     )
 
     metrics = load_metrics(metrics_parquet, metrics_csv)
-    session_date = pd.to_datetime(metrics["date"], errors="coerce").max()
-    if pd.notna(session_date):
+    session_date = _choose_flow_session_date(metrics)
+    if session_date is not None:
         metrics = extend_metrics_session_coverage(
             metrics,
-            session_date=session_date.date(),
+            session_date=session_date,
             tickers=sorted(universe["ticker"].astype(str).str.upper().unique()),
             max_lag_bdays=_SESSION_EXTEND_BDAYS,
         )

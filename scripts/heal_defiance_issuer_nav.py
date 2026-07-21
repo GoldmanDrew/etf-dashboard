@@ -155,6 +155,29 @@ def apply_heal(tickers: list[str], *, as_of: date) -> dict:
     )
 
     existing = load_existing()
+    # Guardrail: a thin heal that advances panel max alone causes flow session-extend
+    # to fabricate a sparse "global latest" and trip freshness gates. Warn loudly.
+    if not existing.empty and "date" in existing.columns:
+        ex = existing.copy()
+        ex["date"] = pd.to_datetime(ex["date"], errors="coerce")
+        by = ex.groupby(ex["date"].dt.normalize())["ticker"].nunique()
+        if not by.empty:
+            dense_n = int(by.max())
+            heal_dates = pd.to_datetime(incoming["date"], errors="coerce")
+            heal_max = heal_dates.max()
+            if pd.notna(heal_max):
+                on_heal = int(by.get(heal_max.normalize(), 0)) + int(incoming["ticker"].nunique())
+                if on_heal < max(20, int(0.2 * dense_n)):
+                    LOGGER.warning(
+                        "Heal writes %s with ~%d tickers vs densest session %d — "
+                        "flow builder will prefer the denser session for extend; "
+                        "run a full metrics ingest for %s when possible",
+                        heal_max.date(),
+                        on_heal,
+                        dense_n,
+                        heal_max.date(),
+                    )
+
     merged = upsert(existing, incoming)
     merged = stamp_metric_asof_metadata(merged)
     validate_df(merged)

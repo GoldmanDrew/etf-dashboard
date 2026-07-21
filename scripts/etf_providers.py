@@ -154,6 +154,7 @@ _MERGE_IDENTITY_MAX_REL_ERR = float(os.getenv("ETF_METRICS_MERGE_IDENTITY_MAX_RE
 STALE_KIND_ISSUER_LAG = "issuer_lag"
 STALE_KIND_ISSUER_EARLY = "issuer_early"
 STALE_KIND_CARRY_FORWARD = "carry_forward"
+STALE_KIND_MARKET_BACKED = "market_backed_no_issuer_nav"
 STALE_KIND_ANCHOR_LAG = "anchor_lag"
 STALE_KIND_PROSHARES_FALLBACK = "proshares_fallback"
 STALE_KIND_ISSUER_SESSION_EXTEND = "issuer_session_extend"
@@ -240,7 +241,17 @@ def prior_stale_aum_blocks_flow(
             source_provider=source_provider_prior_close,
         ) or ""
 
-    if kind in ("", STALE_KIND_ISSUER_EARLY, STALE_KIND_ISSUER_LAG, STALE_KIND_ISSUER_SESSION_EXTEND, STALE_KIND_CARRY_FORWARD):
+    # Market-backed rows are carry-forward issuer fundamentals with a session
+    # market close attached. For flow sizing they are the same AUM basis as CF:
+    # allow within the stale_bdays budget (the age>budget check above still bites).
+    if kind in (
+        "",
+        STALE_KIND_ISSUER_EARLY,
+        STALE_KIND_ISSUER_LAG,
+        STALE_KIND_ISSUER_SESSION_EXTEND,
+        STALE_KIND_CARRY_FORWARD,
+        STALE_KIND_MARKET_BACKED,
+    ):
         return False
     if kind in (STALE_KIND_ANCHOR_LAG, STALE_KIND_PROSHARES_FALLBACK):
         return stale_age is not None and stale_age > 0
@@ -248,7 +259,7 @@ def prior_stale_aum_blocks_flow(
     if not stale_prior_close:
         return False
     src = str(source_provider_prior_close or "").strip().lower()
-    if src == STALE_KIND_CARRY_FORWARD:
+    if src in (STALE_KIND_CARRY_FORWARD, "market_backed", STALE_KIND_MARKET_BACKED):
         return stale_age is not None and stale_age > stale_bdays
     if stale_age is not None and stale_age <= 0:
         return False

@@ -220,6 +220,20 @@ def test_carry_forward_prior_within_stale_budget_allows_flow():
     assert bool(upro["included_in_aggregate"]) is True
 
 
+def test_market_backed_prior_within_stale_budget_allows_flow():
+    """market_backed is CF+market close; prior AUM must not trip stale_aum within budget."""
+    metrics = _metrics()
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale"] = True
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_age_bdays"] = 1
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "source_provider"] = "market_backed"
+    metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale_kind"] = "market_backed_no_issuer_nav"
+
+    fund = flows.build_fund_flows(_universe(), metrics)
+    upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
+    assert upro["quality_flag"] == "ok"
+    assert bool(upro["included_in_aggregate"]) is True
+
+
 def test_carry_forward_prior_older_than_stale_budget_blocks_flow():
     metrics = _metrics()
     metrics.loc[(metrics["ticker"].eq("UPRO")) & (metrics["date"].eq(pd.Timestamp("2026-05-18"))), "stale"] = True
@@ -230,6 +244,18 @@ def test_carry_forward_prior_older_than_stale_budget_blocks_flow():
     fund = flows.build_fund_flows(_universe(), metrics, stale_bdays=3)
     upro = fund[(fund["date"].eq("2026-05-19")) & (fund["ticker"].eq("UPRO"))].iloc[0]
     assert upro["quality_flag"] == "stale_aum"
+
+
+def test_choose_flow_session_date_skips_thin_panel_max():
+    rows = []
+    for i in range(20):
+        rows.append({"date": pd.Timestamp("2026-07-17"), "ticker": f"T{i:02d}"})
+    # Thin heal cohort on a newer max date.
+    for i in range(3):
+        rows.append({"date": pd.Timestamp("2026-07-20"), "ticker": f"D{i}"})
+    metrics = pd.DataFrame(rows)
+    chosen = flows._choose_flow_session_date(metrics)
+    assert chosen == date(2026, 7, 17)
 
 
 def test_session_extend_enables_flow_on_global_session():
