@@ -1,23 +1,22 @@
 {
-  "generated_at": "2026-07-20",
+  "generated_at": "2026-07-21",
   "documented_golden_window_start": "2026-02-27",
   "archive_floor_screened": "2025-12-28",
   "archive_floor_plans": "2025-12-28",
   "screened": {
-    "n_dates": 57,
+    "n_dates": 113,
     "first": "2025-12-28",
-    "last": "2026-07-18",
+    "last": "2026-07-20",
     "large_gaps": [
-      "2025-12-30->2026-02-27 (59d)",
+      "2025-12-30->2026-02-19 (51d)",
       "2026-03-12->2026-03-18 (6d)",
-      "2026-04-16->2026-04-22 (6d)",
-      "2026-04-27->2026-06-25 (59d)"
+      "2026-04-16->2026-04-22 (6d)"
     ]
   },
   "plans": {
-    "n_dates": 89,
+    "n_dates": 91,
     "first": "2025-12-28",
-    "last": "2026-07-18",
+    "last": "2026-07-20",
     "large_gaps": [
       "2025-12-31->2026-03-24 (83d)",
       "2026-03-24->2026-04-01 (8d)",
@@ -28,18 +27,18 @@
   "coverage_vs_start": [
     {
       "artifact": "proposed_trades.csv",
-      "n_dates": 89,
+      "n_dates": 91,
       "first": "2025-12-28",
-      "last": "2026-07-18",
-      "n_on_or_after_start": 89,
+      "last": "2026-07-20",
+      "n_on_or_after_start": 91,
       "gap_before_first_plan_days": 241
     },
     {
       "artifact": "etf_screened_today.csv",
-      "n_dates": 57,
+      "n_dates": 113,
       "first": "2025-12-28",
-      "last": "2026-07-18",
-      "n_on_or_after_start": 57,
+      "last": "2026-07-20",
+      "n_on_or_after_start": 113,
       "gap_before_first_plan_days": 241
     }
   ],
@@ -51,5 +50,14 @@
     "Do not forward-fill latest screener into missing archive days."
   ],
   "note": "Production plan_entry_date cannot precede the earliest archived screener/plan day used by generate_trade_plan replay. Research inception paths cover pre-floor history.",
-  "opportunity": "Archives begin 2025-12-28, earlier than documented golden start 2026-02-27; consider extending the production replay window after validation."
+  "opportunity": "Archives begin 2025-12-28, earlier than documented golden start 2026-02-27; consider extending the production replay window after validation.",
+  "book_window_policy": {
+    "aggregate_book_start": "2026-02-27",
+    "pair_drilldown": "inception_research to ETF listing / overlap",
+    "do_not_extend_book_to": "2025-12-28"
+  },
+  "git_recoverability": {
+    "post_backfill_n_screened": 113,
+    "may_jun_hole": "closed via backfill_screened_history.py (49 days written)"
+  }
 }

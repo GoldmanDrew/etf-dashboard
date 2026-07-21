@@ -20,7 +20,7 @@ Book envelope snapshot (do not mutate for acceptance):
 | `window_start` | `2026-02-27` |
 | `window_end` | `2026-07-13` |
 | `n_pairs` | 5 (MSTZ, QBTZ, APLZ, CLSZ, SMZ) |
-| Archive floor reason | Point-in-time screened archives begin 2026-02-27 (see parity plan §P0) |
+| Archive floor reason | Aggregate book starts 2026-02-27 (golden). PIT screened archives densified inside that window via git backfill; pair drill-down may use Inception research back to listing. |
 
 ## Locked product wording
 
