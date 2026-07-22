@@ -42,6 +42,62 @@ def load_metrics_frame() -> pd.DataFrame:
     )
 
 
+# Single-day |return| above this on the ETF leg means the split pipeline left a
+# fabricated cliff (e.g. QBTZ 2026-02-02: history ÷3, later days unscaled → +207%).
+_PANEL_CLIFF_ABS_RET = 1.0
+
+
+def sanitize_panel_vs_session_close(
+    panel: dict[str, pd.DataFrame],
+    metrics: pd.DataFrame,
+    *,
+    cliff_abs_ret: float = _PANEL_CLIFF_ABS_RET,
+) -> dict[str, pd.DataFrame]:
+    """Replace ETF panel prices with session close when split-apply invents cliffs.
+
+    ls-algo ``frames_from_metrics(apply_splits=True)`` can scale only a prefix of
+    history (QBTZ Jan≤30 at close/3, Feb≥2 at raw close). Holding shorts through
+    that cliff wipes research equity and leaves ghost rebalances.
+    """
+    if not panel or metrics is None or metrics.empty:
+        return panel
+    if "close_price" not in metrics.columns:
+        return panel
+    md = metrics.copy()
+    md["ticker"] = md["ticker"].map(_norm_sym)
+    md["date"] = pd.to_datetime(md["date"], errors="coerce").dt.normalize()
+    out: dict[str, pd.DataFrame] = {}
+    for etf, px in panel.items():
+        if px is None or px.empty or "a_px" not in px.columns:
+            out[etf] = px
+            continue
+        fixed = px.copy()
+        ret = fixed["a_px"].astype(float).pct_change()
+        if not bool((ret.abs() > float(cliff_abs_ret)).fillna(False).any()):
+            out[etf] = fixed
+            continue
+        g = md.loc[md["ticker"] == _norm_sym(etf), ["date", "close_price"]].dropna()
+        if g.empty:
+            out[etf] = fixed
+            continue
+        close = pd.Series(
+            g["close_price"].astype(float).to_numpy(),
+            index=pd.DatetimeIndex(g["date"]),
+            dtype=float,
+        )
+        close = close[~close.index.duplicated(keep="last")].sort_index()
+        aligned = close.reindex(fixed.index)
+        # Only swap days where we have a positive session close.
+        use = aligned.notna() & (aligned > 0)
+        min_overlap = min(len(fixed), max(3, len(fixed) // 4))
+        if int(use.sum()) < min_overlap:
+            out[etf] = fixed
+            continue
+        fixed.loc[use, "a_px"] = aligned.loc[use].to_numpy()
+        out[etf] = fixed
+    return out
+
+
 def load_price_panel(
     *,
     min_days: int = MIN_PRICE_PANEL_DAYS,
@@ -68,7 +124,9 @@ def load_price_panel(
         md,
         corporate_actions_path=corporate_actions_path,
     )
+    md_for_close = md
 
+    panel: dict[str, pd.DataFrame] | None = None
     # Then prefer shared ls-algo crater/override logic when a sibling checkout
     # is available. Keep path discovery aligned with the sizing bridge and CI.
     try:
@@ -90,36 +148,38 @@ def load_price_panel(
 
         flex = ls_algo / "data" / "splits_from_flex.csv"
         split_map = split_events_by_symbol(flex_csv=flex if flex.is_file() else None, repo=ls_algo)
-        return frames_from_metrics(
+        panel = frames_from_metrics(
             md[cols],
             min_days=min_days,
             apply_splits=True,
             split_map=split_map,
         )
     except Exception:
-        pass
+        panel = None
 
-    md = md[cols].copy()
-    md["ticker"] = md["ticker"].map(_norm_sym)
-    md["date"] = pd.to_datetime(md["date"], errors="coerce").dt.normalize()
-    md = md.dropna(subset=["date"]).sort_values(["ticker", "date"])
+    if panel is None:
+        md = md[cols].copy()
+        md["ticker"] = md["ticker"].map(_norm_sym)
+        md["date"] = pd.to_datetime(md["date"], errors="coerce").dt.normalize()
+        md = md.dropna(subset=["date"]).sort_values(["ticker", "date"])
 
-    out: dict[str, pd.DataFrame] = {}
-    for etf, g in md.groupby("ticker"):
-        g = g.dropna(subset=["etf_adj_close", "underlying_adj_close"])
-        if len(g) < min_days:
-            continue
-        df = pd.DataFrame(
-            {
-                "a_px": g["etf_adj_close"].to_numpy(dtype=float),
-                "b_px": g["underlying_adj_close"].to_numpy(dtype=float),
-            },
-            index=pd.DatetimeIndex(g["date"]),
-        )
-        df = df[~df.index.duplicated(keep="last")].sort_index()
-        if len(df) >= min_days:
-            out[etf] = df
-    return out
+        panel = {}
+        for etf, g in md.groupby("ticker"):
+            g = g.dropna(subset=["etf_adj_close", "underlying_adj_close"])
+            if len(g) < min_days:
+                continue
+            df = pd.DataFrame(
+                {
+                    "a_px": g["etf_adj_close"].to_numpy(dtype=float),
+                    "b_px": g["underlying_adj_close"].to_numpy(dtype=float),
+                },
+                index=pd.DatetimeIndex(g["date"]),
+            )
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+            if len(df) >= min_days:
+                panel[etf] = df
+
+    return sanitize_panel_vs_session_close(panel, md_for_close)
 
 
 def load_pair_prices(

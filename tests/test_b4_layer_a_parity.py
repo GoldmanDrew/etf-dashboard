@@ -26,6 +26,52 @@ from bucket4.layer_a_parity import (  # noqa: E402
 )
 
 
+def test_sanitize_panel_replaces_fabricated_etf_cliff():
+    from bucket4.bucket4_price_loading import sanitize_panel_vs_session_close
+
+    idx = pd.to_datetime(["2026-01-30", "2026-02-02", "2026-02-03"])
+    panel = {
+        "QBTZ": pd.DataFrame(
+            {"a_px": [12.12, 37.23, 35.70], "b_px": [21.0, 21.0, 21.0]},
+            index=idx,
+        )
+    }
+    metrics = pd.DataFrame(
+        {
+            "date": idx,
+            "ticker": ["QBTZ", "QBTZ", "QBTZ"],
+            "close_price": [36.36, 37.23, 35.70],
+            "etf_adj_close": [36.36, 37.23, 35.70],
+            "underlying_adj_close": [21.0, 21.0, 21.0],
+        }
+    )
+    out = sanitize_panel_vs_session_close(panel, metrics)
+    assert float(out["QBTZ"].loc["2026-01-30", "a_px"]) == pytest.approx(36.36, rel=1e-6)
+    assert float(out["QBTZ"]["a_px"].pct_change().abs().max()) < 0.05
+
+
+def test_equity_wipeout_stops_ghost_rebalances():
+    idx = pd.bdate_range("2024-01-02", periods=12)
+    # Sudden 3× ETF spike wipes a short book sized at unit equity.
+    a = np.full(len(idx), 10.0)
+    a[5:] = 40.0
+    px = pd.DataFrame({"a_px": a, "b_px": np.full(len(idx), 20.0)}, index=idx)
+    h = pd.Series(0.5, index=idx)
+    bt = run_bucket4_backtest_dynamic_h(
+        px,
+        h,
+        idx[::3],
+        initial_capital=1.0,
+        beta_a=-2.0,
+        opt2_h_base=0.5,
+    )
+    wipe = bt[bt["rebalance_reason"] == "equity_wipeout"]
+    assert len(wipe) >= 1
+    after = bt.loc[wipe.index[0] :].iloc[1:]
+    assert (after["gross_exposure"] == 0).all()
+    assert not after["rebalance"].any()
+
+
 def test_realized_hedge_ratio_matches_production_formula():
     assert realized_hedge_ratio(-1068.0, -1601.16, beta_abs=2.0) == pytest.approx(0.75, abs=1e-3)
     assert realized_hedge_ratio(-238.0, -2469.79, beta_abs=2.0) == pytest.approx(5.189, abs=1e-2)

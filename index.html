@@ -14409,8 +14409,16 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
         setArtifact(art);
         setShard(pair);
         const ir = pair?.inception_research?.daily;
-        const hasIr = Boolean(ir && Array.isArray(ir.dates) && ir.dates.length >= 2);
-        setHistoryBasis(hasIr ? 'inception_research' : 'plan');
+        const eq = Array.isArray(ir?.equity) ? ir.equity : [];
+        const ret = Array.isArray(ir?.ret) ? ir.ret : [];
+        const sane = Boolean(
+          ir && Array.isArray(ir.dates) && ir.dates.length >= 2
+          && !eq.some((e) => Number.isFinite(Number(e)) && Number(e) <= 0)
+          && !ret.some((r) => Number.isFinite(Number(r)) && Math.abs(Number(r)) > 1)
+          && !(Number.isFinite(Number(pair?.inception_research?.summary?.final_equity))
+            && Number(pair.inception_research.summary.final_equity) <= 0)
+        );
+        setHistoryBasis(sane ? 'inception_research' : 'plan');
       } catch (e) {
         if (!cancelled) setError(e?.message || 'Bucket 4 pair report unavailable');
       } finally {
@@ -14430,8 +14438,25 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
     ? shard.inception_research
     : null;
   const inceptionDaily = inceptionResearch?.daily;
+  // Reject wiped / cliff-corrupted research paths (equity ≤ 0 or |daily ret| > 100%).
+  const inceptionPathSane = (() => {
+    if (!inceptionDaily || !Array.isArray(inceptionDaily.dates) || inceptionDaily.dates.length < 2) return false;
+    const eq = Array.isArray(inceptionDaily.equity) ? inceptionDaily.equity : [];
+    const ret = Array.isArray(inceptionDaily.ret) ? inceptionDaily.ret : [];
+    for (let i = 0; i < eq.length; i += 1) {
+      const e = Number(eq[i]);
+      if (Number.isFinite(e) && e <= 0) return false;
+    }
+    for (let i = 0; i < ret.length; i += 1) {
+      const r = Number(ret[i]);
+      if (Number.isFinite(r) && Math.abs(r) > 1) return false;
+    }
+    const fe = Number(inceptionResearch?.summary?.final_equity);
+    if (Number.isFinite(fe) && fe <= 0) return false;
+    return true;
+  })();
   const hasInceptionResearch = Boolean(
-    inceptionDaily && Array.isArray(inceptionDaily.dates) && inceptionDaily.dates.length >= 2
+    inceptionDaily && Array.isArray(inceptionDaily.dates) && inceptionDaily.dates.length >= 2 && inceptionPathSane
   );
   const activeShard = useMemo(() => {
     if (!shard) return null;

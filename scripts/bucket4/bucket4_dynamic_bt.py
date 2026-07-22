@@ -183,6 +183,63 @@ def run_bucket4_backtest_dynamic_h(
         cash += financing_pnl
         equity = cash + a_pos_notional + b_pos_notional
 
+        # Mark-to-market wipeout (e.g. fabricated split cliff on a short): flatten
+        # once and stop the cadence clock so we do not emit ghost rebalances on a
+        # zero book with frozen negative equity.
+        if entered and not exited and equity <= 0.0 and (abs(a_sh) > 0.0 or abs(b_sh) > 0.0):
+            target_a_pos, target_b_pos = 0.0, 0.0
+            delta_a, delta_b = target_a_pos - a_pos_notional, target_b_pos - b_pos_notional
+            traded = abs(delta_a) + abs(delta_b)
+            fee = traded * fee_rate
+            slip = traded * slip_rate
+            rebalance_commission = float(fee)
+            rebalance_fee = float(fee + slip)
+            slippage_cost = float(slip)
+            cash -= delta_a + delta_b + fee + slip
+            a_sh, b_sh = 0.0, 0.0
+            a_pos_notional, b_pos_notional = 0.0, 0.0
+            equity = cash
+            actually_rebal = True
+            scheduled_today = True
+            rebalance_reason = "equity_wipeout"
+            exited = True
+            entered = False
+            first_row = False
+            days_since_rebal = 0
+            h_realized = realized_hedge_ratio(a_pos_notional, b_pos_notional, beta_abs=beta_inv_abs)
+            beta_notional = (
+                (-1.0) * float(beta_a) * abs(a_pos_notional)
+                + (-1.0) * float(beta_b) * abs(b_pos_notional)
+            )
+            rows.append(
+                {
+                    "date": dt,
+                    "a_px": ap,
+                    "b_px": bp,
+                    "cash": cash,
+                    "a_shares": a_sh,
+                    "b_shares": b_sh,
+                    "equity": equity,
+                    "h_used": h_target,
+                    "h_target": h_target,
+                    "h_realized": h_realized,
+                    "rebalance": True,
+                    "rebalance_scheduled": True,
+                    "rebalance_skipped_below_drift": False,
+                    "rebalance_reason": rebalance_reason,
+                    "drift_share_of_gross": float("nan"),
+                    "beta_notional": beta_notional,
+                    "borrow_cost": borrow_cost,
+                    "short_proceeds_credit": short_proceeds_credit,
+                    "financing_pnl": financing_pnl,
+                    "rebalance_fee": rebalance_fee,
+                    "rebalance_commission": rebalance_commission,
+                    "slippage_cost": slippage_cost,
+                    "gross_exposure": 0.0,
+                }
+            )
+            continue
+
         scheduled_today = bool(row["rebalance"]) and not exited and not is_exit_day
         actually_rebal = scheduled_today
         drift_share = float("nan")
@@ -240,27 +297,46 @@ def run_bucket4_backtest_dynamic_h(
             else:
                 target_gross = max(0.0, float(gross_multiplier) * equity)
 
-            denom = 1.0 + h_target * beta_inv_abs
-            n_a = target_gross / denom if denom > 1e-12 else 0.5 * target_gross
-            n_b = max(0.0, target_gross - n_a)
-            target_a_pos, target_b_pos = -n_a, -n_b
-            delta_a, delta_b = target_a_pos - a_pos_notional, target_b_pos - b_pos_notional
-            traded = abs(delta_a) + abs(delta_b)
-            fee = traded * fee_rate
-            slip = traded * slip_rate
-            rebalance_commission = float(fee)
-            rebalance_fee = float(fee + slip)
-            slippage_cost = float(slip)
-            cash -= delta_a + delta_b + fee + slip
-            a_sh = target_a_pos / ap if ap > 0 else 0.0
-            b_sh = target_b_pos / bp if bp > 0 else 0.0
-            a_pos_notional, b_pos_notional = a_sh * ap, b_sh * bp
-            equity = cash + a_pos_notional + b_pos_notional
-            if not entered:
-                rebalance_reason = "enter_membership"
-                entered = True
+            # Non-positive equity → flatten and stop (unit-equity path used to keep
+            # scheduling cadence_resize on a zero book after a wipe).
+            if (not sleeve_mode) and target_gross <= 0.0 and entered:
+                target_a_pos, target_b_pos = 0.0, 0.0
+                delta_a, delta_b = target_a_pos - a_pos_notional, target_b_pos - b_pos_notional
+                traded = abs(delta_a) + abs(delta_b)
+                fee = traded * fee_rate
+                slip = traded * slip_rate
+                rebalance_commission = float(fee)
+                rebalance_fee = float(fee + slip)
+                slippage_cost = float(slip)
+                cash -= delta_a + delta_b + fee + slip
+                a_sh, b_sh = 0.0, 0.0
+                a_pos_notional, b_pos_notional = 0.0, 0.0
+                equity = cash
+                rebalance_reason = "equity_wipeout"
+                exited = True
+                entered = False
             else:
-                rebalance_reason = "cadence_resize"
+                denom = 1.0 + h_target * beta_inv_abs
+                n_a = target_gross / denom if denom > 1e-12 else 0.5 * target_gross
+                n_b = max(0.0, target_gross - n_a)
+                target_a_pos, target_b_pos = -n_a, -n_b
+                delta_a, delta_b = target_a_pos - a_pos_notional, target_b_pos - b_pos_notional
+                traded = abs(delta_a) + abs(delta_b)
+                fee = traded * fee_rate
+                slip = traded * slip_rate
+                rebalance_commission = float(fee)
+                rebalance_fee = float(fee + slip)
+                slippage_cost = float(slip)
+                cash -= delta_a + delta_b + fee + slip
+                a_sh = target_a_pos / ap if ap > 0 else 0.0
+                b_sh = target_b_pos / bp if bp > 0 else 0.0
+                a_pos_notional, b_pos_notional = a_sh * ap, b_sh * bp
+                equity = cash + a_pos_notional + b_pos_notional
+                if not entered:
+                    rebalance_reason = "enter_membership"
+                    entered = True
+                else:
+                    rebalance_reason = "cadence_resize"
 
         first_row = False
         days_since_rebal = 0 if actually_rebal else days_since_rebal + 1
