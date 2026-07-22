@@ -6,9 +6,9 @@
 
 | Surface | Start / history |
 |---|---|
-| **Aggregate B4 Book** (equity, Production CAGR, book KPIs) | **`2026-02-27`** golden production start — do **not** extend book `window_start` to `2025-12-28` |
+| **Aggregate B4 sleeve chart** (diagnostic book KPIs) | **`2026-02-27`** golden production start — do **not** extend book `window_start` to `2025-12-28` |
 | **Pair Report — Plan path** | Production ledger from first plan membership day (≥ book start when in book) |
-| **Pair Report — Inception research** | ETF/underlying overlap back toward listing; `authoritative: false`; never feeds book PnL |
+| **Pair Report — Inception / isolation (default)** | Per-pair path; ignores book blacklist/`hard_exit` cuts. Layer A twin: `scripts/b4_layer_a_parity.py` (sleeve-dollar pins, pin-date calendar inject, isolation default). `authoritative: false`; never feeds book PnL |
 
 ## Inventory
 
@@ -56,4 +56,14 @@ python scripts/build_b4_inception_research.py --out-dir data/bucket4_inception_r
 
 ETF listing → first honest `plan_entry_date` stays on **Inception research** (`scripts/build_b4_inception_research.py` → nested `inception_research` on pair shards).
 
-B4 Book equity / Production CAGR must remain on the plan path only, starting **2026-02-27**.
+B4 Pairs book equity / Production CAGR must remain on the plan path only, starting **2026-02-27**.
+
+## Layer A parity (ops)
+
+```bash
+python scripts/b4_layer_a_parity.py --etfs QBTZ,MSTZ,CLSZ,APLZ,SMZ
+# report: data/_layer_a_parity/report.json
+python -m pytest tests/test_b4_layer_a_parity.py -q
+```
+
+Gates: h-definition, realized-h, return corr, enter/cadence/hard_exit Jaccard, equity-norm. Isolation ignores production blacklist exits. Return-corr allows a residual band (`>0.60` when realized-h already matches) for metrics calendar holes (e.g. QBTZ missing `2026-05-26`).

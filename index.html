@@ -11274,7 +11274,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               {b4CadenceHint?.hLast != null ? <> (last h = <strong>{fmtNum(b4CadenceHint.hLast)}</strong></> : null}
               {b4CadenceHint?.lastIntervalDays != null ? <>, cadence ≈ <strong>{b4CadenceHint.lastIntervalDays}d</strong></> : null}.
               Production path: <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 6 }} onClick={() => { window.location.hash = `/bucket-4/pair/${encodeURIComponent(etfSym)}`; }}>Pair Report</button>
-              <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/bucket-4/backtest/${encodeURIComponent(etfSym)}`; }}>B4 Book</button>
+              <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/bucket-4/backtest/${encodeURIComponent(etfSym)}`; }}>B4 Pairs</button>
               · add-$ every N days: chart <strong>Drip</strong> tab or <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/backtest-flow/${encodeURIComponent(etfSym)}`; }}>Flow Program</button>.
             </div>
           ) : null}
@@ -14391,14 +14391,15 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
   const [gross, setGross] = useState(100000);
   const [showRebalLog, setShowRebalLog] = useState(false);
   const [showDailyTable, setShowDailyTable] = useState(false);
-  const [historyBasis, setHistoryBasis] = useState('plan');
+  // Default to inception / isolation research when present — per-pair path is the
+  // product surface; plan/production ledger remains available as a toggle.
+  const [historyBasis, setHistoryBasis] = useState('inception_research');
 
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       setLoading(true);
       setError(null);
-      setHistoryBasis('plan');
       try {
         const art = typeof B4.loadArtifact === 'function' ? await B4.loadArtifact() : null;
         const pair = typeof B4.loadPairShard === 'function'
@@ -14407,6 +14408,9 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
         if (cancelled) return;
         setArtifact(art);
         setShard(pair);
+        const ir = pair?.inception_research?.daily;
+        const hasIr = Boolean(ir && Array.isArray(ir.dates) && ir.dates.length >= 2);
+        setHistoryBasis(hasIr ? 'inception_research' : 'plan');
       } catch (e) {
         if (!cancelled) setError(e?.message || 'Bucket 4 pair report unavailable');
       } finally {
@@ -14506,7 +14510,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
     <div className="backtest-page">
       <div className="chart-header">
         <div className="chart-header-left pair-report-title">
-          <button className="chart-view-btn" onClick={() => { window.location.hash = '/bucket-4/backtest'; }}>← B4 Book</button>
+          <button className="chart-view-btn" onClick={() => { window.location.hash = '/bucket-4/backtest'; }}>← B4 Pairs</button>
           <span className="etf-sym">{sym || 'Bucket 4 Pair'}</span>
           <span className="vs">vs</span>
           <span className="und-sym">{und || '—'}</span>
@@ -14556,7 +14560,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
               className={cls('chart-view-btn', historyBasis === 'plan' && 'active')}
               onClick={() => setHistoryBasis('plan')}
             >
-              Plan path (production)
+              Plan path (book ledger)
             </button>
             <button
               type="button"
@@ -14835,7 +14839,7 @@ function InverseFlowProgramPage({ records = [], preloadSymbol = '' }) {
           <span className="chart-und">Drip — add short $ every N days (multi-leg)</span>
         </div>
         <div className="chart-header-right">
-          <button className="chart-view-btn" onClick={() => { window.location.hash = '/bucket-4/backtest'; }}>B4 Book</button>
+          <button className="chart-view-btn" onClick={() => { window.location.hash = '/bucket-4/backtest'; }}>B4 Pairs</button>
         </div>
       </div>
       <div className="scenario-sub" style={{ marginBottom: 12 }}>
@@ -15108,7 +15112,7 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
     <div className="backtest-page">
       <div className="chart-header">
         <div className="chart-header-left">
-          <span className="etf-sym">B4 Book — inverse decay</span>
+          <span className="etf-sym">B4 Pairs — inverse decay</span>
           <span className="chart-und">Authoritative ls-algo production-policy replay</span>
         </div>
         <div className="chart-header-right">
@@ -15117,7 +15121,9 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
       </div>
 
       <div className="scenario-sub" style={{ marginBottom: 12, maxWidth: 920 }}>
-        <strong>B4 Book</strong> is rendered directly from the full ls-algo production ledger: archived point-in-time
+        <strong>B4 Pairs</strong> lists production membership; open each <strong>Pair Report</strong> for the
+        inception / isolation path (no book blacklist cut). The aggregate sleeve chart below is diagnostic ledger
+        context from ls-algo, not the primary per-pair product. Book source: archived point-in-time
         GTP plans, persisted sizing state, operator membership, purgatory reduce-only handling, TR/VCR cadence,
         Phase-2b bands, ratchet guards, execution lag, turnover controls, and production accounting.
         The dashboard does not re-solve or reblend this path. Per-ticker: Pair Report. Separate editable research:
@@ -15957,9 +15963,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           <button
             className={cls('topbar-btn', showBacktestFlow && !chartRecord && 'active')}
             onClick={() => { if (showBacktestFlow) navigateBack(); else navigateToBacktestFlow(); }}
-            title="B4 Book — production inverse-decay portfolio lab (custom weight reblend)"
+            title="B4 Pairs — open per-pair reports (inception / isolation default). Book ledger kept for diagnostics."
           >
-            B4 Book
+            B4 Pairs
           </button>
           <button
             className={cls('topbar-btn', showBucket5 && !chartRecord && 'active')}

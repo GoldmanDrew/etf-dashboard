@@ -133,11 +133,13 @@ def _rebalance_log(bt: pd.DataFrame, max_rows: int = 160) -> list[dict]:
         out.append(
             {
                 "date": pd.Timestamp(dt).strftime("%Y-%m-%d"),
-                "h": _round_or_none(row.get("h_used"), 4),
+                "h": _round_or_none(row.get("h_target", row.get("h_used")), 4),
+                "h_realized": _round_or_none(row.get("h_realized"), 4),
                 "drift_share": _round_or_none(row.get("drift_share_of_gross"), 6),
                 "skipped_below_drift": bool(row.get("rebalance_skipped_below_drift", False)),
                 "executed": bool(row.get("rebalance", False)),
                 "rebalance_fee": _round_or_none(row.get("rebalance_fee"), 6),
+                "reason": str(row.get("rebalance_reason") or "") or None,
             }
         )
     return out
@@ -161,10 +163,18 @@ def _pair_daily_payload(bt: pd.DataFrame) -> dict:
         "equity": _compact_series(bt["equity"]),
         "drawdown": _compact_series(bt["drawdown"]),
         "h_used": _compact_series(bt["h_used"], 4),
+        "h_target": _compact_series(bt["h_target"] if "h_target" in bt.columns else bt["h_used"], 4),
+        "h_realized": _compact_series(
+            bt["h_realized"] if "h_realized" in bt.columns else pd.Series(np.nan, index=bt.index),
+            4,
+        ),
         "rebalance": [1 if bool(x) else 0 for x in bt.get("rebalance", pd.Series(False, index=bt.index)).to_numpy()],
         "rebalance_scheduled": [
             1 if bool(x) else 0
             for x in bt.get("rebalance_scheduled", pd.Series(False, index=bt.index)).to_numpy()
+        ],
+        "rebalance_reason": [
+            str(x or "") for x in bt.get("rebalance_reason", pd.Series("", index=bt.index)).to_numpy()
         ],
         "borrow_cost": _compact_series(bt["borrow_cost"]),
         "financing_pnl": _compact_series(bt["financing_pnl"]),
@@ -454,14 +464,32 @@ def run_pair_backtest_for_row(
     signal_window: int,
     vol_history: dict[str, pd.DataFrame],
     borrow_history: dict | None = None,
+    membership_start: str | None = None,
+    membership_end: str | None = None,
+    hard_exit: bool = False,
+    rebal_dates_override: list[str] | pd.DatetimeIndex | None = None,
+    target_gross_by_date: dict | pd.Series | None = None,
+    h_target_by_date: dict | pd.Series | None = None,
+    capital_mode: str = "unit_equity",
 ) -> tuple[pd.DataFrame | None, pd.Series | None, pd.DataFrame | None, str]:
     etf = _norm(row.get("ETF"))
     und = _norm(row.get("Underlying"))
     px = panel.get(etf)
     if px is None or px.empty:
         return None, None, None, "missing_price"
-    cal = pd.DatetimeIndex([d for d in px.index if d >= pd.Timestamp(start)])
-    if len(cal) < min_days:
+    cal_start = pd.Timestamp(membership_start) if membership_start else pd.Timestamp(start)
+    cal = pd.DatetimeIndex([d for d in px.index if d >= cal_start])
+    if membership_end:
+        hi = pd.Timestamp(membership_end)
+        cal = pd.DatetimeIndex([d for d in cal if d <= hi])
+    # Warmup signals from prices before membership when possible.
+    warm_floor = pd.Timestamp(start)
+    signal_cal = pd.DatetimeIndex([d for d in px.index if d >= warm_floor])
+    if membership_end:
+        signal_cal = pd.DatetimeIndex([d for d in signal_cal if d <= pd.Timestamp(membership_end)])
+    if len(cal) < max(2, min(min_days, 5)):
+        return None, None, None, "short_history"
+    if len(signal_cal) < min_days and membership_start is None:
         return None, None, None, "short_history"
     rules = (policy.get("inverse_decay_bucket4") or {}).get("rules") or {}
     bt_cfg = policy.get("backtest") or {}
@@ -475,24 +503,45 @@ def run_pair_backtest_for_row(
     sig = get_pair_signal(
         etf,
         und,
-        cal,
+        signal_cal if len(signal_cal) >= len(cal) else cal,
         history=vol_history,
         underlying_prices=px["b_px"],
         window=signal_window,
         lookahead_shift=1,
     )
     tilt = tilts.get(etf) or tilts.get(und)
-    h_daily = build_h_series(sig, cal, knobs=knobs, name_tilt=tilt)
-    rb, rb_diag = build_rebal_dates(sig, cal, knobs=knobs, name_tilt=tilt, warmup_bdays=warmup_bdays)
+    h_daily = build_h_series(sig, signal_cal if len(signal_cal) >= len(cal) else cal, knobs=knobs, name_tilt=tilt)
+    rb, rb_diag = build_rebal_dates(
+        sig,
+        signal_cal if len(signal_cal) >= len(cal) else cal,
+        knobs=knobs,
+        name_tilt=tilt,
+        warmup_bdays=warmup_bdays,
+    )
+    force_rb = None
+    if rebal_dates_override is not None:
+        rb = pd.DatetimeIndex([pd.Timestamp(d) for d in rebal_dates_override])
+        force_rb = rb
+        if rb_diag is None or rb_diag.empty:
+            rb_diag = pd.DataFrame({"date": rb})
     eng = _pair_engine_kwargs(policy, row, cal, hist)
+    # Sleeve-dollar Layer A: unit NAV seed with production gross pins.
+    init_cap = float(bt_cfg.get("initial_capital", 1.0))
     bt = run_bucket4_backtest_dynamic_h(
         px.reindex(cal),
         h_daily,
         rb,
-        initial_capital=float(bt_cfg.get("initial_capital", 1.0)),
+        initial_capital=init_cap,
         gross_multiplier=1.0,
         beta_a=-abs(_finite_float(row.get("Delta"), -2.0)),
         beta_b=1.0,
+        membership_start=membership_start or (cal[0].strftime("%Y-%m-%d") if len(cal) else None),
+        membership_end=membership_end,
+        hard_exit=bool(hard_exit),
+        force_rebal_dates=force_rb,
+        target_gross_by_date=target_gross_by_date,
+        h_target_by_date=h_target_by_date,
+        capital_mode=str(capital_mode or "unit_equity"),
         **eng,
     )
     return bt, h_daily, rb_diag, "ok"

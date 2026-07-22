@@ -365,6 +365,11 @@ jobs:
           python ls-algo/scripts/export_b4_dashboard.py --run-production --run-date "$RUN_DATE" --start 2026-02-27
           python scripts/build_bucket4_backtest.py --mode production --max-age-days 4
 
+      - name: Bucket 4 Layer A twin unit tests
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python -m pytest tests/test_b4_layer_a_parity.py -q
+
       - name: Refresh YieldBOOST VRP (sleeves + Tradier OCC)
         if: steps.build_data.outcome == 'success'
         continue-on-error: true

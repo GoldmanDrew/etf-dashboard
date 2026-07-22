@@ -53,8 +53,8 @@ Book envelope snapshot (do not mutate for acceptance):
 
 - [x] Meta label is **Plan entered** (not bare “Entered”).
 - [x] **ETF inception** chip shown when `etf_inception_date` is present (metadata OK without research series).
-- [x] History toggle defaults to **Plan path (production)**; Inception research enabled when `inception_research.daily` exists (nested for golden prod pairs).
-- [x] B4 Book equity / Production CAGR never switch to inception research.
+- [x] History toggle defaults to **Inception research** when `inception_research.daily` exists; otherwise Plan path (production).
+- [x] B4 Pairs book equity / Production CAGR never switch to inception research.
 
 ## Non-goals (acceptance)
 
