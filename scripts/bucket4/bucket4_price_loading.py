@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 from pathlib import Path
@@ -10,7 +11,14 @@ import numpy as np
 import pandas as pd
 
 REPO = Path(__file__).resolve().parents[2]
+_SCRIPTS = REPO / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
 MIN_PRICE_PANEL_DAYS = 40
+
+# Whitelist reverse-split multiples used when provider restates a segment onto a
+# split basis while neighbors stay on the old print (TECS/TZA/SOXS May-2026).
+_PANEL_SPLIT_MULTS = (2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 50.0)
 
 
 def _norm_sym(x: str) -> str:
@@ -45,6 +53,64 @@ def load_metrics_frame() -> pd.DataFrame:
 # Single-day |return| above this on the ETF leg means the split pipeline left a
 # fabricated cliff (e.g. QBTZ 2026-02-02: history ÷3, later days unscaled → +207%).
 _PANEL_CLIFF_ABS_RET = 1.0
+# Relative gap between early vs late median(panel/close) that implies a prefix
+# scale (APLZ/BEZ/NBIZ) even when no single day exceeds 100%.
+_PANEL_RATIO_STEP_REL = 0.25
+
+
+def _panel_needs_close_sanitize(
+    a_px: pd.Series,
+    close_aligned: pd.Series,
+    *,
+    cliff_abs_ret: float = _PANEL_CLIFF_ABS_RET,
+    ratio_step_rel: float = _PANEL_RATIO_STEP_REL,
+) -> bool:
+    """True when ETF panel has a day cliff or an early/late panel÷close step."""
+    a = a_px.astype(float)
+    ret = a.pct_change()
+    if bool((ret.abs() > float(cliff_abs_ret)).fillna(False).any()):
+        return True
+    c = close_aligned.astype(float)
+    use = a.notna() & c.notna() & (c > 0) & (a > 0)
+    if int(use.sum()) < 10:
+        return False
+    ratio = (a.loc[use] / c.loc[use]).replace([np.inf, -np.inf], np.nan).dropna()
+    if len(ratio) < 10:
+        return False
+    n = max(5, len(ratio) // 5)
+    early = float(ratio.iloc[:n].median())
+    late = float(ratio.iloc[-n:].median())
+    if not (np.isfinite(early) and np.isfinite(late) and early > 0 and late > 0):
+        return False
+    rel = abs(early - late) / max(early, late)
+    return rel > float(ratio_step_rel)
+
+
+def _max_abs_day_ret(series: pd.Series) -> float:
+    ret = series.astype(float).pct_change().abs()
+    if ret.empty or not bool(ret.notna().any()):
+        return float("inf")
+    return float(ret.max())
+
+
+def _metrics_price_series(
+    md: pd.DataFrame,
+    etf: str,
+    column: str,
+    index: pd.DatetimeIndex,
+) -> pd.Series | None:
+    if column not in md.columns:
+        return None
+    g = md.loc[md["ticker"] == _norm_sym(etf), ["date", column]].dropna()
+    if g.empty:
+        return None
+    s = pd.Series(
+        g[column].astype(float).to_numpy(),
+        index=pd.DatetimeIndex(g["date"]),
+        dtype=float,
+    )
+    s = s[~s.index.duplicated(keep="last")].sort_index()
+    return s.reindex(index)
 
 
 def sanitize_panel_vs_session_close(
@@ -52,12 +118,18 @@ def sanitize_panel_vs_session_close(
     metrics: pd.DataFrame,
     *,
     cliff_abs_ret: float = _PANEL_CLIFF_ABS_RET,
+    ratio_step_rel: float = _PANEL_RATIO_STEP_REL,
 ) -> dict[str, pd.DataFrame]:
-    """Replace ETF panel prices with session close when split-apply invents cliffs.
+    """Replace ETF panel prices when split-apply invents cliffs or prefix scales.
 
     ls-algo ``frames_from_metrics(apply_splits=True)`` can scale only a prefix of
-    history (QBTZ Jan≤30 at close/3, Feb≥2 at raw close). Holding shorts through
-    that cliff wipes research equity and leaves ghost rebalances.
+    history (QBTZ Jan≤30 at close/3, Feb≥2 at raw close; APLZ early×5 vs late×1).
+    Holding shorts through that cliff wipes research equity and leaves ghost rebalances.
+
+    Preference when sanitizing:
+    1. ``etf_adj_close`` when it removes the cliff (APLZ/BEZ/NBIZ reverse-split
+       days where raw ``close_price`` jumps but adj is continuous)
+    2. else ``close_price`` (QBTZ fabricated adj / partial scale vs session close)
     """
     if not panel or metrics is None or metrics.empty:
         return panel
@@ -72,28 +144,106 @@ def sanitize_panel_vs_session_close(
             out[etf] = px
             continue
         fixed = px.copy()
-        ret = fixed["a_px"].astype(float).pct_change()
-        if not bool((ret.abs() > float(cliff_abs_ret)).fillna(False).any()):
+        aligned_close = _metrics_price_series(md, etf, "close_price", fixed.index)
+        if aligned_close is None:
             out[etf] = fixed
             continue
-        g = md.loc[md["ticker"] == _norm_sym(etf), ["date", "close_price"]].dropna()
-        if g.empty:
+        if not _panel_needs_close_sanitize(
+            fixed["a_px"],
+            aligned_close,
+            cliff_abs_ret=cliff_abs_ret,
+            ratio_step_rel=ratio_step_rel,
+        ):
             out[etf] = fixed
             continue
-        close = pd.Series(
-            g["close_price"].astype(float).to_numpy(),
-            index=pd.DatetimeIndex(g["date"]),
-            dtype=float,
-        )
-        close = close[~close.index.duplicated(keep="last")].sort_index()
-        aligned = close.reindex(fixed.index)
-        # Only swap days where we have a positive session close.
-        use = aligned.notna() & (aligned > 0)
         min_overlap = min(len(fixed), max(3, len(fixed) // 4))
-        if int(use.sum()) < min_overlap:
+        baseline = _max_abs_day_ret(fixed["a_px"])
+        best_score = baseline
+        best_series: pd.Series | None = None
+        best_use: pd.Series | None = None
+        # Prefer adj when it is the smoother continuous basis; fall back to close.
+        for column in ("etf_adj_close", "close_price"):
+            candidate = (
+                aligned_close
+                if column == "close_price"
+                else _metrics_price_series(md, etf, column, fixed.index)
+            )
+            if candidate is None:
+                continue
+            use = candidate.notna() & (candidate > 0)
+            if int(use.sum()) < min_overlap:
+                continue
+            trial = fixed["a_px"].astype(float).copy()
+            trial.loc[use] = candidate.loc[use].to_numpy()
+            score = _max_abs_day_ret(trial)
+            if score < best_score - 1e-12:
+                best_score = score
+                best_series = candidate
+                best_use = use
+        if best_series is not None and best_use is not None:
+            fixed.loc[best_use, "a_px"] = best_series.loc[best_use].to_numpy()
+        out[etf] = fixed
+    return out
+
+
+def _match_panel_split_jump(jump_abs: float, *, rel_tol: float = 0.18) -> float | None:
+    if not (math.isfinite(jump_abs) and jump_abs > 1.0):
+        return None
+    best: tuple[float, float] | None = None
+    for mult in _PANEL_SPLIT_MULTS:
+        err = abs(jump_abs / mult - 1.0)
+        if err <= rel_tol and (best is None or err < best[0]):
+            best = (err, mult)
+    return best[1] if best else None
+
+
+def sanitize_panel_split_sized_basis_jumps(
+    panel: dict[str, pd.DataFrame],
+    *,
+    max_underlying_log_move: float = 0.25,
+    min_etf_log_jump: float = 0.55,
+) -> dict[str, pd.DataFrame]:
+    """Scale ETF segments when an ETF-only jump matches a split multiple.
+
+    Mirrors ``price_basis._normalize_split_sized_basis_jumps`` (Decay / Backtest
+    TR already apply this). Without it, B4 Optimized loads raw ``etf_adj_close``
+    spikes (TECS/TZA/SOXS ~10× May-2026) and wipes the unit-equity book.
+    """
+    if not panel:
+        return panel
+    out: dict[str, pd.DataFrame] = {}
+    for etf, px in panel.items():
+        if px is None or px.empty or "a_px" not in px.columns or "b_px" not in px.columns:
+            out[etf] = px
+            continue
+        fixed = px.sort_index().copy()
+        a = fixed["a_px"].astype(float).to_numpy()
+        b = fixed["b_px"].astype(float).to_numpy()
+        n = len(a)
+        if n < 2:
             out[etf] = fixed
             continue
-        fixed.loc[use, "a_px"] = aligned.loc[use].to_numpy()
+        scale = 1.0
+        adjusted = np.full(n, np.nan, dtype=float)
+        adjusted[-1] = a[-1]
+        for i in range(n - 2, -1, -1):
+            prev_raw = float(a[i])
+            cur_adj = float(adjusted[i + 1])
+            u0 = float(b[i])
+            u1 = float(b[i + 1])
+            if not (prev_raw > 0 and cur_adj > 0 and u0 > 0 and u1 > 0):
+                adjusted[i] = prev_raw * scale if prev_raw > 0 else np.nan
+                continue
+            prev_adj = prev_raw * scale
+            lr_e = math.log(prev_adj / cur_adj)
+            lr_u = abs(math.log(u1 / u0))
+            if abs(lr_e) >= min_etf_log_jump and lr_u < max_underlying_log_move:
+                matched = _match_panel_split_jump(math.exp(abs(lr_e)))
+                if matched is not None:
+                    scale = scale / matched if lr_e > 0 else scale * matched
+                    prev_adj = prev_raw * scale
+            adjusted[i] = prev_adj
+        fixed["a_px"] = adjusted
         out[etf] = fixed
     return out
 
@@ -179,7 +329,8 @@ def load_price_panel(
             if len(df) >= min_days:
                 panel[etf] = df
 
-    return sanitize_panel_vs_session_close(panel, md_for_close)
+    sanitized = sanitize_panel_vs_session_close(panel, md_for_close)
+    return sanitize_panel_split_sized_basis_jumps(sanitized)
 
 
 def load_pair_prices(

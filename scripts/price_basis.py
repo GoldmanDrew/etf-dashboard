@@ -7,6 +7,7 @@ from typing import Any
 
 from split_adjustments import (
     adj_basis_switch_tr_price,
+    cum_split_factor_to_latest,
     detect_adj_basis_switch_splits,
     detect_adj_boundary,
     detect_forward_normalized_splits,
@@ -357,6 +358,22 @@ def resolve_split_context(
         split_events,
         metric_rows=metric_rows,
     )
+    if len(filtered) > 1:
+        boundaries: list[tuple[dt.date, float]] = []
+        for eff, m in filtered:
+            b = detect_split_boundary(close_points, float(m)) or eff
+            boundaries.append((b, float(m)))
+        boundaries.sort(key=lambda x: x[0])
+        cum_mult = 1.0
+        for _b, m in boundaries:
+            cum_mult *= float(m)
+        return {
+            "mode": "multi_discrete_split",
+            "boundary": boundaries[0][0],
+            "mult": cum_mult,
+            "filtered": boundaries,
+            "boundaries": boundaries,
+        }
     if filtered:
         mult = filtered[0][1]
         boundary = detect_split_boundary(close_points, mult)
@@ -443,6 +460,8 @@ def _tr_mode_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> str:
     mult = float(ctx.get("mult") or 0)
     mode = ctx.get("mode")
 
+    if mode == "multi_discrete_split":
+        return "multi_split_close_scaled"
     if mode == "adj_basis_switch":
         return "pre_split_back_adj" if pre_split else "post_split_back_adj_mapped"
     if mode == "continuous_close_tr":
@@ -572,6 +591,13 @@ def etf_tr_price_for_row(row: dict[str, Any], ctx: dict[str, Any]) -> float | No
 
     mult = float(ctx.get("mult") or 0)
     mode = ctx.get("mode")
+
+    if mode == "multi_discrete_split":
+        d0 = _row_date(ds)
+        if d0 is None:
+            return None
+        bounds = ctx.get("boundaries") or ctx.get("filtered") or []
+        return close * cum_split_factor_to_latest(d0, list(bounds))
 
     if mode == "forward_normalized":
         if _is_pre_split(ds, ctx) and math.isfinite(adj_f) and adj_f > 0:
@@ -861,6 +887,8 @@ def _repair_split_outlier_bars(
     split_events: list[tuple[dt.date, float]],
 ) -> list[dict[str, Any]]:
     """Replace orphan post-split bad prints when ETF cliff is not mirrored in underlying."""
+    if ctx.get("mode") == "multi_discrete_split":
+        return tr
     boundary = ctx.get("boundary")
     if not boundary or len(tr) < 3:
         return tr

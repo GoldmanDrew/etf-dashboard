@@ -50,6 +50,81 @@ def test_sanitize_panel_replaces_fabricated_etf_cliff():
     assert float(out["QBTZ"]["a_px"].pct_change().abs().max()) < 0.05
 
 
+def test_sanitize_panel_replaces_ratio_step_without_100pct_day():
+    """APLZ-style: early history scaled ×5 vs close, late unscaled; day moves <100%."""
+    from bucket4.bucket4_price_loading import sanitize_panel_vs_session_close
+
+    idx = pd.bdate_range("2026-01-02", periods=25)
+    close = np.linspace(10.0, 12.0, len(idx))
+    # First half of panel is 5× close; second half matches close. Day-to-day
+    # returns stay modest except a single ~20% step at the join (still <100%).
+    a = close.copy()
+    a[:12] = close[:12] * 5.0
+    panel = {"APLZ": pd.DataFrame({"a_px": a, "b_px": np.full(len(idx), 50.0)}, index=idx)}
+    metrics = pd.DataFrame(
+        {
+            "date": idx,
+            "ticker": ["APLZ"] * len(idx),
+            "close_price": close,
+            "etf_adj_close": close,
+            "underlying_adj_close": np.full(len(idx), 50.0),
+        }
+    )
+    out = sanitize_panel_vs_session_close(panel, metrics)
+    assert float(out["APLZ"].loc[idx[0], "a_px"]) == pytest.approx(float(close[0]), rel=1e-6)
+    assert float(out["APLZ"].loc[idx[-1], "a_px"]) == pytest.approx(float(close[-1]), rel=1e-6)
+    # No residual 5× prefix after sanitize
+    ratio = out["APLZ"]["a_px"].astype(float) / close
+    assert float(ratio.median()) == pytest.approx(1.0, abs=0.05)
+
+
+def test_sanitize_panel_prefers_adj_when_close_has_reverse_split_cliff():
+    """APLZ/BEZ/NBIZ: panel==close jumps on reverse-split day; etf_adj_close is continuous."""
+    from bucket4.bucket4_price_loading import sanitize_panel_vs_session_close
+
+    idx = pd.to_datetime(["2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02"])
+    close = np.array([2.51, 2.72, 13.30, 13.30])
+    adj = np.array([12.55, 13.60, 13.30, 13.30])
+    panel = {
+        "APLZ": pd.DataFrame(
+            {"a_px": close.copy(), "b_px": np.full(len(idx), 47.0)},
+            index=idx,
+        )
+    }
+    metrics = pd.DataFrame(
+        {
+            "date": idx,
+            "ticker": ["APLZ"] * len(idx),
+            "close_price": close,
+            "etf_adj_close": adj,
+            "underlying_adj_close": np.full(len(idx), 47.0),
+        }
+    )
+    out = sanitize_panel_vs_session_close(panel, metrics)
+    assert float(out["APLZ"].loc["2026-05-29", "a_px"]) == pytest.approx(13.60, rel=1e-6)
+    assert float(out["APLZ"].loc["2026-06-01", "a_px"]) == pytest.approx(13.30, rel=1e-6)
+    assert float(out["APLZ"]["a_px"].pct_change().abs().max()) < 0.10
+
+
+def test_sanitize_panel_scales_tecs_style_split_sized_basis_jumps():
+    """Provider restates a ~10× segment while underlying barely moves (TECS May-2026)."""
+    from bucket4.bucket4_price_loading import sanitize_panel_split_sized_basis_jumps
+
+    idx = pd.to_datetime(
+        ["2026-05-15", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-28", "2026-05-29"]
+    )
+    a = np.array([85.5, 902.0, 841.0, 822.0, 79.6, 715.0, 66.7])
+    b = np.array([176.0, 173.0, 177.0, 178.0, 180.0, 187.0, 191.0])
+    panel = {"TECS": pd.DataFrame({"a_px": a, "b_px": b}, index=idx)}
+    out = sanitize_panel_split_sized_basis_jumps(panel)
+    px = out["TECS"]["a_px"].astype(float)
+    # Spikes map onto a continuous basis — no residual ~10× day (raw max was ~10×).
+    assert float(px.pct_change().abs().max()) < 0.35
+    assert float(px.iloc[0]) == pytest.approx(85.5, rel=0.05)
+    assert float(px.loc["2026-05-19"]) == pytest.approx(90.2, rel=0.05)
+    assert float(px.iloc[-1]) == pytest.approx(66.7, rel=1e-6)
+
+
 def test_equity_wipeout_stops_ghost_rebalances():
     idx = pd.bdate_range("2024-01-02", periods=12)
     # Sudden 3× ETF spike wipes a short book sized at unit equity.

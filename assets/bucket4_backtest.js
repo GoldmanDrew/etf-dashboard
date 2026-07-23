@@ -57,6 +57,8 @@
     const p = String(panel || '').trim().toLowerCase();
     if (p === 'backtest') return 'backtest';
     if (p === 'backtest-flow') return 'backtest-flow';
+    // Optimized backtest (listing→latest research). Legacy hash `inception` still maps here.
+    if (p === 'optimized' || p === 'inception') return 'optimized';
     if (p === 'flow') return 'flow';
     if (p === 'trade') return 'trade';
     if (p === 'decay') return 'decay';
@@ -97,12 +99,9 @@
   async function loadPairShard(symbol, { force = false, artifact = null } = {}) {
     const sym = normSym(symbol);
     if (!sym) throw new Error('missing pair symbol');
-    if (artifact?.schema === 'bucket4_backtest.v4') {
-      const manifest = Array.isArray(artifact?.pair_manifest) ? artifact.pair_manifest : [];
-      if (!manifest.some((p) => normSym(p?.etf) === sym)) {
-        throw new Error(`bucket4 pair ${sym} is not in the authoritative production ledger`);
-      }
-    }
+    // Allow research / Optimized-backtest shards that are not in the v4 book
+    // manifest (e.g. CBRZ). Book membership stays authoritative via pair_manifest;
+    // missing names still load local data/bucket4_pairs/{ETF}.json when present.
     if (!force && _pairShardCache.has(sym)) return _pairShardCache.get(sym);
     if (!force && _pairShardPromises.has(sym)) return _pairShardPromises.get(sym);
     const url = pairShardUrl(sym, artifact);
@@ -322,9 +321,13 @@
     let peak = 1;
     let maxDd = 0;
     vals.forEach((r) => {
-      eq *= (1 + Math.max(-0.95, Math.min(0.95, r)));
+      if (r <= -1 || eq <= 0) {
+        eq = 0;
+      } else {
+        eq *= (1 + r);
+      }
       peak = Math.max(peak, eq);
-      maxDd = Math.min(maxDd, peak > 0 ? (eq / peak - 1) : 0);
+      maxDd = Math.min(maxDd, peak > 0 ? (eq / peak - 1) : -1);
     });
     const first = Date.parse(`${dates?.[0] || ''}T12:00:00Z`);
     const last = Date.parse(`${dates?.[dates.length - 1] || ''}T12:00:00Z`);
@@ -335,7 +338,7 @@
     const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, vals.length - 1);
     const vol = Math.sqrt(variance) * Math.sqrt(252);
     return {
-      cagr: years > 0 && eq > 0 ? (eq ** (1 / years) - 1) : null,
+      cagr: years > 0 ? (eq > 0 ? (eq ** (1 / years) - 1) : -1) : null,
       annVol: vol,
       sharpe: vol > 0 ? (mean * 252) / vol : null,
       maxDrawdown: maxDd,
@@ -370,7 +373,6 @@
     const hUsed = (Array.isArray(daily.h_used) ? daily.h_used : []).slice(win.i0, win.i1 + 1).map(Number);
     const exportedDrawdown = (Array.isArray(daily.drawdown) ? daily.drawdown : []).slice(win.i0, win.i1 + 1).map(Number);
     const grossExp = (Array.isArray(daily.gross_exposure) ? daily.gross_exposure : []).slice(win.i0, win.i1 + 1).map(Number);
-    const totalGrossU = (Array.isArray(daily.total_gross) ? daily.total_gross : []).slice(win.i0, win.i1 + 1).map(Number);
     const netPnlDollars = (Array.isArray(daily.net_pnl_dollars) ? daily.net_pnl_dollars : []).slice(win.i0, win.i1 + 1).map(Number);
     const pricePnlDollars = (Array.isArray(daily.price_pnl_cum_dollars) ? daily.price_pnl_cum_dollars : []).slice(win.i0, win.i1 + 1).map(Number);
     const grossDollars = (Array.isArray(daily.gross_exposure_dollars) ? daily.gross_exposure_dollars : []).slice(win.i0, win.i1 + 1).map(Number);
@@ -379,6 +381,8 @@
     const reasonPath = (Array.isArray(daily.rebalance_reason) ? daily.rebalance_reason : []).slice(win.i0, win.i1 + 1);
     const etfLegU = (Array.isArray(daily.etf_leg_pnl_cum) ? daily.etf_leg_pnl_cum : []).slice(win.i0, win.i1 + 1).map(Number);
     const undLegU = (Array.isArray(daily.underlying_leg_pnl_cum) ? daily.underlying_leg_pnl_cum : []).slice(win.i0, win.i1 + 1).map(Number);
+    const etfGrossU = (Array.isArray(daily.etf_gross) ? daily.etf_gross : []).slice(win.i0, win.i1 + 1).map(Number);
+    const undGrossU = (Array.isArray(daily.underlying_gross) ? daily.underlying_gross : []).slice(win.i0, win.i1 + 1).map(Number);
     const borrowCumU = (Array.isArray(daily.borrow_cost_cum) ? daily.borrow_cost_cum : []).slice(win.i0, win.i1 + 1).map(Number);
     const tcostCumU = (Array.isArray(daily.tcost_cum) ? daily.tcost_cum : []).slice(win.i0, win.i1 + 1).map(Number);
     const baseEq = Number(eq[0]);
@@ -386,6 +390,9 @@
     const sourceBasis = Number(pairMeta?.notional_basis_usd || pairMeta?.summary?.notional_basis_usd);
     const actualDollarScale = Number.isFinite(sourceBasis) && sourceBasis > 0 ? notional / sourceBasis : 1;
     const actualLedger = pairMeta?.ledger_mode === 'actual_dollar' || netPnlDollars.some(Number.isFinite);
+    const betaAbs = Math.abs(Number(
+      pairMeta?.summary?.Delta ?? pairMeta?.summary?.delta ?? pairMeta?.Delta ?? pairMeta?.delta,
+    ));
     let runningPeak = -Infinity;
     let cumBorrow = 0;
     let cumFees = 0;
@@ -403,11 +410,18 @@
         ? pricePnlDollars[i] * actualDollarScale
         : (Number.isFinite(etfLegU[i]) ? etfLegU[i] * scale : null);
       const undLeg = Number.isFinite(undLegU[i]) ? undLegU[i] * scale : null;
+      // Leg market values (abs $). Unit-capital research stores these in etf_gross /
+      // underlying_gross; total_gross is cumulative leg *PnL* and must not be used as exposure.
+      const mvEtfAbs = Number.isFinite(etfGrossU[i]) ? Math.abs(etfGrossU[i]) * scale : null;
+      const mvUndAbs = Number.isFinite(undGrossU[i]) ? Math.abs(undGrossU[i]) * scale : null;
       const totalGross = actualLedger && Number.isFinite(grossDollars[i])
-        ? grossDollars[i] * actualDollarScale
-        : Number.isFinite(totalGrossU[i])
-        ? totalGrossU[i] * scale
-        : (Number.isFinite(etfLeg) && Number.isFinite(undLeg) ? etfLeg + undLeg : null);
+        ? Math.abs(grossDollars[i]) * actualDollarScale
+        : Number.isFinite(grossExp[i])
+          ? Math.abs(grossExp[i]) * scale
+          : (Number.isFinite(mvEtfAbs) && Number.isFinite(mvUndAbs) ? mvEtfAbs + mvUndAbs : null);
+      const mvEtfBetaAdj = Number.isFinite(mvEtfAbs) && Number.isFinite(betaAbs) && betaAbs > 0
+        ? mvEtfAbs * betaAbs
+        : null;
       const borrowScaled = actualLedger && Number.isFinite(borrowCumDollars[i])
         ? borrowCumDollars[i] * actualDollarScale
         : (Number.isFinite(borrowCumU[i]) ? borrowCumU[i] * scale : cumBorrow);
@@ -428,6 +442,9 @@
         distributions: 0,
         transactionCosts: tcostScaled,
         totalGross,
+        mvEtfAbs,
+        mvUndAbs,
+        mvEtfBetaAdj,
         // Contract exports drawdown. Recompute only as a backwards-compatible
         // guard; missing data must never be coerced into a false 0% path.
         drawdown: Number.isFinite(exportedDrawdown[i]) ? exportedDrawdown[i] : derivedDrawdown,

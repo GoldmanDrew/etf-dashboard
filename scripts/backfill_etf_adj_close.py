@@ -41,8 +41,8 @@ def main() -> None:
     parser.add_argument(
         "--only-missing",
         action="store_true",
-        default=True,
-        help="Only fill rows where etf_adj_close is null (default).",
+        default=False,
+        help="Skip save when no new non-null etf_adj_close cells were filled.",
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -59,7 +59,8 @@ def main() -> None:
     if "etf_adj_close" not in df.columns:
         df["etf_adj_close"] = None
 
-    before = int(pd.to_numeric(df["etf_adj_close"], errors="coerce").notna().sum())
+    before_adj = pd.to_numeric(df["etf_adj_close"], errors="coerce")
+    before = int(before_adj.notna().sum())
     updated = backfill_etf_adj_close_gaps(df)
     updated, n_copy = backfill_etf_adj_close_from_close_gaps(updated)
     if n_copy:
@@ -68,11 +69,27 @@ def main() -> None:
     updated, n_fab = repair_fabricated_etf_adj_basis(updated)
     if n_fab:
         LOGGER.info("Repaired fabricated adj basis on %d row(s)", n_fab)
-    after = int(pd.to_numeric(updated["etf_adj_close"], errors="coerce").notna().sum())
-    LOGGER.info("etf_adj_close non-null: %d -> %d (+%d)", before, after, after - before)
+    after_adj = pd.to_numeric(updated["etf_adj_close"], errors="coerce")
+    after = int(after_adj.notna().sum())
+    # Split scaling rewrites existing adj cells without changing the non-null count.
+    n_changed = 0
+    if len(before_adj) == len(after_adj):
+        n_changed = int(
+            (
+                (before_adj.isna() != after_adj.isna())
+                | ((before_adj - after_adj).abs() > 1e-9)
+            ).sum()
+        )
+    LOGGER.info(
+        "etf_adj_close non-null: %d -> %d (+%d); value changes: %d",
+        before,
+        after,
+        after - before,
+        n_changed,
+    )
 
-    if after <= before and n_fab == 0 and args.only_missing:
-        LOGGER.info("No new etf_adj_close values; skipping save.")
+    if args.only_missing and after <= before and n_fab == 0 and n_changed == 0:
+        LOGGER.info("No etf_adj_close changes; skipping save.")
         return
 
     validate_df(updated)

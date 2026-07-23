@@ -1541,13 +1541,13 @@
 <script src="assets/vendor/react-dom.production.min.js"></script>
 <script src="assets/expected_decay.js"></script>
 <script src="assets/scenario_returns.js?v=mc-v3"></script>
-<script src="assets/chart_returns.js?v=cr-v3"></script>
-<script src="assets/price_basis.js?v=pb-v3"></script>
+<script src="assets/chart_returns.js?v=cr-v4"></script>
+<script src="assets/price_basis.js?v=pb-v5"></script>
 <script src="assets/income_scenario.js?v=ic-v1"></script>
 <script src="assets/trade_lab_spots.js?v=tl-spots-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v4"></script>
-<script src="assets/pair_backtest.js?v=pb-v9"></script>
-<script src="assets/bucket4_backtest.js?v=b4-v4"></script>
+<script src="assets/pair_backtest.js?v=pb-v10"></script>
+<script src="assets/bucket4_backtest.js?v=b4-opt1"></script>
 <link rel="stylesheet" href="assets/bucket5_product.css?v=b5p-v5">
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.7/dist/lightweight-charts.standalone.production.js"></script>
 <script src="assets/bucket5_product.js?v=b5p-v5"></script>
@@ -4961,6 +4961,10 @@ function TrCoverageBadge({ coverage, etfLabel }) {
   const pct = (x) => (Number.isFinite(Number(x)) ? `${Math.round(Number(x) * 100)}%` : '—');
   const splitLabel = coverage.splitMode === 'staggered_reverse_adj_first'
     ? `split ${coverage.splitMult || '?'}× adj@${coverage.adjBoundary || '?'} close@${coverage.splitBoundary || '?'}`
+    : coverage.splitMode === 'multi_discrete_split'
+    ? `splits ${(Array.isArray(coverage.splitLabels) && coverage.splitLabels.length)
+      ? coverage.splitLabels.join(' · ')
+      : `${coverage.splitMult || '?'}× multi`}`
     : coverage.splitMode === 'discrete_split'
     ? `split ${coverage.splitMult || '?'}× @ ${coverage.splitBoundary || '?'}`
     : coverage.splitMode === 'adj_basis_switch'
@@ -6394,11 +6398,20 @@ function buildUnderlyingVolShapeHistory(rows, window = VOL_SHAPE_PRIMARY_WINDOW)
     });
   }
 
-  const vcrVals = out.map(x => Number(x.vcr)).filter(Number.isFinite).sort((a, b) => a - b);
-  const mid = Math.floor(vcrVals.length / 2);
-  const vcrMedian = vcrVals.length ? (vcrVals.length % 2 ? vcrVals[mid] : 0.5 * (vcrVals[mid - 1] + vcrVals[mid])) : null;
+  const seenVcr = [];
+  const series = out.map((row) => {
+    const v = Number(row.vcr);
+    if (Number.isFinite(v)) seenVcr.push(v);
+    const sorted = [...seenVcr].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const vcrMedian = sorted.length
+      ? (sorted.length % 2 ? sorted[mid] : 0.5 * (sorted[mid - 1] + sorted[mid]))
+      : null;
+    return { ...row, vcr_median: vcrMedian };
+  });
+  const vcrMedian = series.length ? series[series.length - 1].vcr_median : null;
   return {
-    series: out.map(row => ({ ...row, vcr_median: vcrMedian })),
+    series,
     vcrMedian,
     window,
   };
@@ -6633,7 +6646,7 @@ function PairHedgePathChart({ rows, rebalanceLog = null }) {
         </svg>
       </div>
       <div className="backtest-chart-legend">
-        <span><span className="backtest-legend-dot" style={{ background: 'rgba(167,139,250,0.98)' }} />h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>|</span>
+        <span><span className="backtest-legend-dot" style={{ background: 'rgba(167,139,250,0.98)' }} />h = |MV<sub>und</sub>| / (|β| × |MV<sub>ETF</sub>|)</span>
         {rebalIdx.length > 0 ? <span><span className="backtest-legend-mark" />Rebalance ({rebalIdx.length})</span> : null}
       </div>
     </div>
@@ -6693,15 +6706,24 @@ function PairBacktestRiskMetricsStats({ riskSeries, pairResult }) {
 }
 
 /** Dollar MV per leg + |β|×ETF MV (breach metric). */
-function PairBacktestExposureChart({ result }) {
+function PairBacktestExposureChart({ result, compact = false, title = 'Leg exposure ($)', subtitle = null }) {
   if (!result?.ok || !Array.isArray(result.rows) || result.rows.length < 2) return null;
   const series = result.rows;
-  const labEtf = result?.legChartLabels?.etf || 'ETF';
-  const labUnd = result?.legChartLabels?.und || 'Und';
+  const labEtf = result?.legChartLabels?.etfMv || result?.legChartLabels?.etf || 'ETF';
+  const labUnd = result?.legChartLabels?.undMv || result?.legChartLabels?.und || 'Und';
   const vals = [];
+  let hasBetaAdj = false;
+  let hasTotalGross = false;
   series.forEach((row) => {
-    vals.push(Number(row.mvEtfAbs), Number(row.mvUndAbs), Number(row.mvEtfBetaAdj));
+    [row.mvEtfAbs, row.mvUndAbs, row.mvEtfBetaAdj, row.totalGross].forEach((v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return;
+      vals.push(n);
+      if (v === row.mvEtfBetaAdj) hasBetaAdj = true;
+      if (v === row.totalGross) hasTotalGross = true;
+    });
   });
+  if (!vals.length) return <div className="scenario-warning">No leg exposure series on this path.</div>;
   const minRaw = Math.min(...vals, 0);
   const maxRaw = Math.max(...vals, 0);
   const pad = (maxRaw - minRaw || Math.max(1, Math.abs(maxRaw))) * 0.1;
@@ -6717,20 +6739,27 @@ function PairBacktestExposureChart({ result }) {
   const PH = H - T - B;
   const x = (i) => L + (i / Math.max(1, series.length - 1)) * PW;
   const y = (v) => T + (1 - ((v - yMin) / Math.max(1e-12, yMax - yMin))) * PH;
-  const pathFor = (key) => series.map((r, i) => {
-    const v = Number(r?.[key]);
-    return Number.isFinite(v) ? `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(2)} ${y(v).toFixed(2)}` : '';
-  }).filter(Boolean).join(' ');
+  const pathFor = (key) => {
+    let started = false;
+    return series.map((r, i) => {
+      const v = Number(r?.[key]);
+      if (!Number.isFinite(v)) return '';
+      const cmd = started ? 'L' : 'M';
+      started = true;
+      return `${cmd} ${x(i).toFixed(2)} ${y(v).toFixed(2)}`;
+    }).filter(Boolean).join(' ');
+  };
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((q) => yMin + (yMax - yMin) * q).reverse();
   const dateStrs = series.map((r) => r.date);
   const xTicks = pickDistinctBacktestDateTickIndices(dateStrs);
   const tol = result?.breachTolerancePct != null ? Number(result.breachTolerancePct).toFixed(1) : '—';
+  const defaultSub = compact
+    ? 'Abs dollar MV per leg and combined |ETF|+|und| gross. Exposure grows when prices move against the short book before rebalance; it is not cumulative PnL.'
+    : <>Abs dollar MV per leg; <strong>|β| × ETF MV</strong> (teal dashed) is the β-scaled ETF side used in the breach ratio. On each <strong>Every N</strong> day, rebalance if <strong>|ratio − anchor|</strong> exceeds your max drift (defaults: inverse 10 / regular 5 / YieldBOOST 2 <strong>pp</strong>). Current limit: <strong>{tol} pp</strong> (vs anchor at last rebalance).</>;
   return (
-    <div style={{ marginTop: 20 }}>
-      <div className="scenario-title" style={{ marginBottom: 4 }}>Leg exposure ($)</div>
-      <div className="scenario-sub" style={{ marginBottom: 8 }}>
-        Abs dollar MV per leg; <strong>|β| × ETF MV</strong> (teal dashed) is the β-scaled ETF side used in the breach ratio. On each <strong>Every N</strong> day, rebalance if <strong>|ratio − anchor|</strong> exceeds your max drift (defaults: inverse 10 / regular 5 / YieldBOOST 2 <strong>pp</strong>). Current limit: <strong>{tol} pp</strong> (vs anchor at last rebalance).
-      </div>
+    <div style={{ marginTop: compact ? 0 : 20 }}>
+      <div className="scenario-title" style={{ marginBottom: 4 }}>{title}</div>
+      <div className="scenario-sub" style={{ marginBottom: 8 }}>{subtitle || defaultSub}</div>
       <div className="mc-plot" style={{ height: H, marginBottom: 0 }}>
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
           <rect x={L} y={T} width={PW} height={PH} fill="rgba(11,19,34,0.14)" stroke="rgba(56,72,96,0.4)" />
@@ -6744,18 +6773,28 @@ function PairBacktestExposureChart({ result }) {
           {xTicks.map((idx) => (
             <text key={idx} x={x(idx)} y={H - 10} textAnchor={idx === 0 ? 'start' : idx === series.length - 1 ? 'end' : 'middle'} fontSize="11" fill="#8b9cbb" fontFamily="DM Sans">{formatBacktestAxisDate(dateStrs[idx])}</text>
           ))}
+          {hasTotalGross ? (
+            <path d={pathFor('totalGross')} fill="none" stroke="rgba(96,165,250,0.9)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+          ) : null}
           <path d={pathFor('mvEtfAbs')} fill="none" stroke="rgba(16,185,129,0.95)" strokeWidth={2.3} strokeLinejoin="round" strokeLinecap="round" />
           <path d={pathFor('mvUndAbs')} fill="none" stroke="rgba(139,92,246,0.95)" strokeWidth={2.3} strokeLinejoin="round" strokeLinecap="round" />
-          <path d={pathFor('mvEtfBetaAdj')} fill="none" stroke="rgba(6,182,212,0.85)" strokeWidth={2} strokeDasharray="6 4" strokeLinejoin="round" strokeLinecap="round" />
+          {hasBetaAdj ? (
+            <path d={pathFor('mvEtfBetaAdj')} fill="none" stroke="rgba(6,182,212,0.85)" strokeWidth={2} strokeDasharray="6 4" strokeLinejoin="round" strokeLinecap="round" />
+          ) : null}
           {series.map((r, i) => (r.rebalance ? (
             <line key={`ex-rb-${i}`} x1={x(i)} x2={x(i)} y1={T} y2={H - B} stroke="rgba(148,163,184,0.22)" />
           ) : null))}
         </svg>
       </div>
       <div className="backtest-chart-legend">
+        {hasTotalGross ? (
+          <span><span className="backtest-legend-dot" style={{ background: 'rgba(96,165,250,0.9)' }} />Gross |ETF|+|und| ($)</span>
+        ) : null}
         <span><span className="backtest-legend-dot" style={{ background: 'rgba(16,185,129,0.95)' }} />{labEtf} MV ($)</span>
         <span><span className="backtest-legend-dot" style={{ background: 'rgba(139,92,246,0.95)' }} />{labUnd} MV ($)</span>
-        <span><span className="backtest-legend-dot" style={{ background: 'rgba(6,182,212,0.85)' }} />|β| × ETF MV ($)</span>
+        {hasBetaAdj ? (
+          <span><span className="backtest-legend-dot" style={{ background: 'rgba(6,182,212,0.85)' }} />|β| × ETF MV ($)</span>
+        ) : null}
       </div>
     </div>
   );
@@ -7676,6 +7715,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [btFlowAddSymbol, setBtFlowAddSymbol] = useState('');
   const [btFlowLegs, setBtFlowLegs] = useState([]);
   const [b4Artifact, setB4Artifact] = useState(null);
+  const [b4PairShard, setB4PairShard] = useState(null);
+  const [incGross, setIncGross] = useState(100000);
+  // Optimized tab hedge controller: prefer frozen deadband+slew when nested.
+  const [optimizedHMode, setOptimizedHMode] = useState('stable'); // 'stable' | 'current'
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -7709,15 +7752,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       ? window.Bucket4Backtest.mapChartDefaultPanel(panel)
       : (panel === 'backtest' ? 'backtest'
         : panel === 'backtest-flow' ? 'backtest-flow'
-          : panel === 'flow' ? 'flow'
-            : panel === 'trade' ? 'trade'
-              : panel === 'decay' ? 'decay'
-                : panel === 'basket' ? 'basket'
-                  : panel === 'vrp' ? 'vrp'
-                    : panel === 'borrow' ? 'borrow'
-                      : panel === 'stats' ? 'stats'
-                        : panel === 'scenarios' ? 'scenarios'
-                          : 'chart')
+          : (panel === 'optimized' || panel === 'inception') ? 'optimized'
+            : panel === 'flow' ? 'flow'
+              : panel === 'trade' ? 'trade'
+                : panel === 'decay' ? 'decay'
+                  : panel === 'basket' ? 'basket'
+                    : panel === 'vrp' ? 'vrp'
+                      : panel === 'borrow' ? 'borrow'
+                        : panel === 'stats' ? 'stats'
+                          : panel === 'scenarios' ? 'scenarios'
+                            : 'chart')
   );
   useEffect(() => {
     setActivePanel(mapDefaultPanel(defaultPanel));
@@ -7854,6 +7898,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (!showBacktestPanel && activePanel === 'flow') setActivePanel('chart');
   }, [showBacktestPanel, activePanel]);
   useEffect(() => {
+    if (!isB4Row && activePanel === 'optimized') setActivePanel('chart');
+  }, [isB4Row, activePanel]);
+  useEffect(() => {
     if (!showDecayPanel && activePanel === 'decay') setActivePanel('chart');
   }, [showDecayPanel, activePanel]);
   useEffect(() => {
@@ -7908,6 +7955,54 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       .catch(() => { if (!cancelled) setB4Artifact(null); });
     return () => { cancelled = true; };
   }, [isB4Row, etfSym]);
+
+  useEffect(() => {
+    if (!isB4Row || typeof B4Fns.loadPairShard !== 'function') {
+      setB4PairShard(null);
+      return undefined;
+    }
+    let cancelled = false;
+    B4Fns.loadPairShard(etfSym)
+      .then((pair) => { if (!cancelled) setB4PairShard(pair); })
+      .catch(() => { if (!cancelled) setB4PairShard(null); });
+    return () => { cancelled = true; };
+  }, [isB4Row, etfSym]);
+
+  const inceptionResearchCurrent = b4PairShard?.inception_research && typeof b4PairShard.inception_research === 'object'
+    ? b4PairShard.inception_research
+    : null;
+  const inceptionResearchStable = b4PairShard?.inception_research_stable && typeof b4PairShard.inception_research_stable === 'object'
+    ? b4PairShard.inception_research_stable
+    : null;
+  const hasStableOptimized = Boolean(inceptionResearchStable);
+  const effectiveOptimizedHMode = (optimizedHMode === 'stable' && hasStableOptimized)
+    ? 'stable'
+    : (inceptionResearchCurrent ? 'current' : (hasStableOptimized ? 'stable' : 'current'));
+  const inceptionResearch = effectiveOptimizedHMode === 'stable' ? inceptionResearchStable : inceptionResearchCurrent;
+  const inceptionPathAudit = b4DailyPathAudit(inceptionResearch?.daily, inceptionResearch?.summary);
+  const hasSaneInception = Boolean(inceptionResearch && inceptionPathAudit.sane);
+  const inceptionCurrentAudit = b4DailyPathAudit(inceptionResearchCurrent?.daily, inceptionResearchCurrent?.summary);
+  const inceptionStableAudit = b4DailyPathAudit(inceptionResearchStable?.daily, inceptionResearchStable?.summary);
+  const inceptionChartResult = useMemo(() => {
+    if (!hasSaneInception || typeof B4Fns.pairChartResultFromShard !== 'function') return null;
+    const active = {
+      ...b4PairShard,
+      ...inceptionResearch,
+      daily: inceptionResearch.daily,
+      summary: { ...(b4PairShard?.summary || {}), ...(inceptionResearch.summary || {}) },
+      rebalance_log: Array.isArray(inceptionResearch.rebalance_log)
+        ? inceptionResearch.rebalance_log
+        : (b4PairShard?.rebalance_log || []),
+      history_basis: inceptionResearch.history_basis || (effectiveOptimizedHMode === 'stable' ? 'inception_research_stable' : 'inception_research'),
+      in_production_book: false,
+    };
+    return B4Fns.pairChartResultFromShard(active, { gross: incGross });
+  }, [hasSaneInception, b4PairShard, inceptionResearch, incGross, B4Fns, effectiveOptimizedHMode]);
+  useEffect(() => {
+    if (optimizedHMode === 'stable' && !hasStableOptimized && inceptionResearchCurrent) {
+      setOptimizedHMode('current');
+    }
+  }, [optimizedHMode, hasStableOptimized, inceptionResearchCurrent]);
 
   const b4CadenceHint = useMemo(() => {
     if (!isB4Row || !b4Artifact || typeof B4Fns.pairCadenceHint !== 'function') return null;
@@ -8303,17 +8398,30 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     }
     return withNavTr;
   }, [etfMetricsMap, etfSym, etfDistributionsSeries, etfSplitEvents, undSplitEvents]);
-  const etfMetricsChartSeries = useMemo(() => (
-    etfMetricsSeries.map((m) => {
+  const etfMetricsChartSeries = useMemo(() => {
+    const PB = window.PriceBasis;
+    const scaled = (PB && typeof PB.scaleMetricsSeriesToLatestShareBasis === 'function')
+      ? PB.scaleMetricsSeriesToLatestShareBasis(etfMetricsSeries, etfSplitEvents)
+      : etfMetricsSeries.map((m) => ({
+        ...m,
+        share_basis_factor: 1,
+        close_plot: Number(m.close_price) > 0 ? Number(m.close_price) : null,
+      }));
+    return scaled.map((m) => {
       const nav = Number(m.nav);
       const close = Number(m.close_price);
-      // Do not plot stale carried NAV against a live close — that fabricates
-      // a fake premium/discount spike (e.g. SNDQ +45% on market-backed rows).
-      const nav_plot = issuerNavForPlot(m);
+      const factor = Number(m.share_basis_factor) > 0 ? Number(m.share_basis_factor) : 1;
+      // Issuer NAV on the same latest-share basis as close_plot so reverse
+      // splits from corporate_actions.json do not cliff the Stats chart.
+      const navIssuer = issuerNavForPlot(m);
+      const nav_plot = Number.isFinite(navIssuer) && navIssuer > 0
+        ? navIssuer * factor
+        : null;
+      // Prem/disc stays on raw same-session levels (ratio invariant to share basis).
       const prem_disc_pct = premiumDiscountPct(nav, close, m);
       return { ...m, nav_plot, prem_disc_pct };
-    })
-  ), [etfMetricsSeries]);
+    });
+  }, [etfMetricsSeries, etfSplitEvents]);
   // Pair Backtest: joint days (ETF px + underlying_adj_close) from etf_metrics_daily.
   // When Yahoo listing predates issuer rows, CI prepends yahoo_bootstrap rows via
   // scripts/bootstrap_metrics_yahoo_history.py so inception can align with listing.
@@ -9124,6 +9232,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       )
       : null);
   // Repair window returns when Yahoo left a forward-split cliff unadjusted.
+  // Skip inference when corp-actions reverse splits fall in the window (SNDQ).
   const etfWindowPriceRet = (typeof chartRetFns.splitAwareWindowPriceReturn === 'function'
     && Number.isFinite(etfStartClose) && Number.isFinite(etfEndClose))
     ? chartRetFns.splitAwareWindowPriceReturn({
@@ -9131,6 +9240,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       endClose: etfEndClose,
       splitFactorStartToEnd: divPoint?.etf_split_factor_start_to_end,
       fallback: etfPriceRet,
+      splitEvents: etfSplitEvents,
+      startDate: divPoint?.etf_start_date,
+      endDate: divPoint?.etf_end_date,
     })
     : etfPriceRet;
   const undWindowPriceRet = (typeof chartRetFns.splitAwareWindowPriceReturn === 'function'
@@ -9140,6 +9252,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       endClose: undEndClose,
       splitFactorStartToEnd: divPoint?.underlying_split_factor_start_to_end,
       fallback: undPriceRet,
+      splitEvents: undSplitEvents,
+      startDate: divPoint?.underlying_start_date,
+      endDate: divPoint?.underlying_end_date,
     })
     : undPriceRet;
   const etfWindowAdjRet = (typeof chartRetFns.splitAwareWindowPriceReturn === 'function'
@@ -9150,6 +9265,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       endClose: etfEndAdjClose,
       splitFactorStartToEnd: divPoint?.etf_split_factor_start_to_end,
       fallback: etfAdjRet,
+      splitEvents: etfSplitEvents,
+      startDate: divPoint?.etf_start_date,
+      endDate: divPoint?.etf_end_date,
     })
     : etfAdjRet;
   const undWindowAdjRet = (typeof chartRetFns.splitAwareWindowPriceReturn === 'function'
@@ -9160,6 +9278,9 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       endClose: undEndAdjClose,
       splitFactorStartToEnd: divPoint?.underlying_split_factor_start_to_end,
       fallback: undAdjRet,
+      splitEvents: undSplitEvents,
+      startDate: divPoint?.underlying_start_date,
+      endDate: divPoint?.underlying_end_date,
     })
     : undAdjRet;
   const etfLivePriceRet = (hasCachedSpotEtf && Number.isFinite(etfEndClose) && etfEndClose > 0)
@@ -9583,6 +9704,18 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           )}
           {showBacktestPanel && (
             <button className={cls('chart-view-btn', activePanel === 'backtest' && 'active')} onClick={() => navigateChartPanel('backtest')} title="Hedged pair what-if replay">Backtest</button>
+          )}
+          {isB4Row && (
+            <button
+              className={cls('chart-view-btn', activePanel === 'optimized' && 'active')}
+              onClick={() => navigateChartPanel('optimized')}
+              title={hasSaneInception
+                ? 'Optimized backtest from ETF listing → latest (not production book PnL)'
+                : (b4PairShard ? 'Optimized backtest series unavailable for this pair' : 'Loading optimized backtest…')}
+              style={!hasSaneInception && b4PairShard ? { opacity: 0.65 } : undefined}
+            >
+              Optimized
+            </button>
           )}
           {showBacktestPanel && (
             <button className={cls('chart-view-btn', activePanel === 'backtest-flow' && 'active')} onClick={() => navigateChartPanel('backtest-flow')} title="Add a fixed short $ every N trading days (drip / DCA)">Drip</button>
@@ -10138,12 +10271,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   series={etfMetricsChartSeries}
                   valueKey="nav_plot"
                   color="rgba(59,130,246,0.95)"
-                  label={`${etfSym} NAV vs. market close (issuer NAV, not AUM/shares implied)`}
+                  label={`${etfSym} NAV vs. market close (issuer NAV on latest share basis; corp-action splits applied)`}
                   formatValue={(v) => fmtUsd(v)}
                   zeroLabel="$0"
-                  overlayValueKey="close_price"
+                  overlayValueKey="close_plot"
                   overlayColor="rgba(234,179,8,0.95)"
-                  overlayLabel="Market close"
+                  overlayLabel="Market close (latest share basis)"
                   strictNullPrimary
                 />
                 <SimpleSeriesPlot
@@ -11273,8 +11406,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               Default <strong>h</strong> is prefilled from the production Bucket 4 policy snapshot when available
               {b4CadenceHint?.hLast != null ? <> (last h = <strong>{fmtNum(b4CadenceHint.hLast)}</strong></> : null}
               {b4CadenceHint?.lastIntervalDays != null ? <>, cadence ≈ <strong>{b4CadenceHint.lastIntervalDays}d</strong></> : null}.
-              Production path: <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 6 }} onClick={() => { window.location.hash = `/bucket-4/pair/${encodeURIComponent(etfSym)}`; }}>Pair Report</button>
-              <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/bucket-4/backtest/${encodeURIComponent(etfSym)}`; }}>B4 Pairs</button>
+              Listing→latest: {hasSaneInception
+                ? <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 6 }} onClick={() => navigateChartPanel('optimized')}>Optimized</button>
+                : <span style={{ marginLeft: 6 }}>Optimized unavailable</span>}.
+              Book ledger: <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 6 }} onClick={() => { window.location.hash = `/bucket-4/pair/${encodeURIComponent(etfSym)}`; }}>Pair Report</button>
               · add-$ every N days: chart <strong>Drip</strong> tab or <button type="button" className="chart-view-btn" style={{ display: 'inline', padding: '2px 8px', marginLeft: 4 }} onClick={() => { window.location.hash = `/backtest-flow/${encodeURIComponent(etfSym)}`; }}>Flow Program</button>.
             </div>
           ) : null}
@@ -11411,6 +11546,232 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   </tbody>
                 </table>
               </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {activePanel === 'optimized' && isB4Row && (
+        <div className="chart-section">
+          <div className="scenario-title">Optimized backtest — listing → latest</div>
+          <div className="scenario-sub" style={{ marginBottom: 10 }}>
+            {effectiveOptimizedHMode === 'stable'
+              ? 'From ETF inception (first metrics session). Stabilized hedge (5pt deadband + 2.5pt slew). Early days may use neutral h until TR/VCR warms. Research only — not book PnL.'
+              : 'From ETF inception (first metrics session). Unfiltered TR/VCR dynamic h. Early days may use neutral h until signals warm. Research only — not book PnL.'}
+          </div>
+          {!b4PairShard && <div className="scenario-warning">Loading pair shard…</div>}
+          {b4PairShard && !hasSaneInception && (
+            <div className="error-banner">
+              Optimized backtest unavailable{inceptionPathAudit.issues?.length ? `: ${inceptionPathAudit.issues.join('; ')}` : ''}.
+            </div>
+          )}
+          {b4PairShard && !hasStableOptimized && inceptionResearchCurrent && (
+            <div className="scenario-warning" style={{ marginBottom: 10 }}>
+              Stabilized path not nested yet — showing current dynamic h. Rebuild with{' '}
+              <code>python scripts/build_b4_inception_research.py --with-stable</code>.
+            </div>
+          )}
+          {hasSaneInception && inceptionPathAudit.cleanWipe && (
+            <div className="scenario-warning" style={{ marginBottom: 10 }}>
+              Research book hit equity wipeout{inceptionResearch?.summary?.exit_date ? ` on ${inceptionResearch.summary.exit_date}` : ''}.
+              Path is shown through the stop — not production book PnL.
+            </div>
+          )}
+          {hasSaneInception && inceptionPathAudit.continueThrough && (
+            <div className="scenario-warning" style={{ marginBottom: 10 }}>
+              Continue-through research: kept short shares through equity≤0
+              {inceptionResearch?.summary?.equity_underwater_first
+                ? ` (first underwater ${inceptionResearch.summary.equity_underwater_first}`
+                  + (inceptionResearch?.summary?.equity_underwater_days
+                    ? `, ${inceptionResearch.summary.equity_underwater_days}d`
+                    : '')
+                  + ')'
+                : ''}
+              . Max DD can exceed −100% of capital — shorts have no natural floor. Not production book PnL.
+            </div>
+          )}
+          {hasSaneInception && (
+            <>
+              <div className="pair-report-toolbar" style={{ marginBottom: 10 }}>
+                <div className="backtest-control">
+                  <label>Hedge controller</label>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      type="button"
+                      className={cls('chart-view-btn', effectiveOptimizedHMode === 'stable' && 'active')}
+                      disabled={!hasStableOptimized || !inceptionStableAudit.sane}
+                      title={hasStableOptimized ? 'Frozen deadband 0.05 + slew 0.025' : 'Stabilized path not available'}
+                      onClick={() => setOptimizedHMode('stable')}
+                    >
+                      Stabilized
+                    </button>
+                    <button
+                      type="button"
+                      className={cls('chart-view-btn', effectiveOptimizedHMode === 'current' && 'active')}
+                      disabled={!inceptionResearchCurrent || !inceptionCurrentAudit.sane}
+                      title="Unfiltered TR/VCR h"
+                      onClick={() => setOptimizedHMode('current')}
+                    >
+                      Current h
+                    </button>
+                  </div>
+                </div>
+                <div className="backtest-control">
+                  <label>Notional $</label>
+                  <input
+                    type="number"
+                    min={1000}
+                    step={1000}
+                    value={incGross}
+                    onChange={(e) => setIncGross(Number(e.target.value) || 0)}
+                    title="Scales the optimized backtest ledger linearly for display."
+                  />
+                </div>
+                <div className="pair-report-meta">
+                  <span title="First overlapping ETF/underlying metrics session (listing proxy)">
+                    ETF inception <strong>{
+                      inceptionResearch?.etf_inception_date
+                      || inceptionResearch?.summary?.etf_inception_date
+                      || inceptionResearch?.research_parameters?.first_metrics_date
+                      || inceptionResearch?.summary?.first_metrics_date
+                      || b4PairShard?.etf_inception_date
+                      || '—'
+                    }</strong>
+                  </span>
+                  <span title="First research trade day after signal warmup / PIT borrow gate">
+                    Research start <strong>{
+                      inceptionResearch?.research_parameters?.effective_trade_start
+                      || inceptionResearch?.summary?.entry_date
+                      || inceptionChartResult?.inception
+                      || '—'
+                    }</strong>
+                  </span>
+                  <span>Latest <strong>{inceptionResearch?.summary?.latest_date || inceptionChartResult?.end || '—'}</strong></span>
+                  <span>{inceptionChartResult?.ok ? `${inceptionChartResult.rows?.length || 0} days` : '—'}</span>
+                  {effectiveOptimizedHMode === 'stable' && (
+                    <span title="Frozen Optimized stabilizer">
+                      band <strong>0.05</strong> · step <strong>0.025</strong>
+                    </span>
+                  )}
+                </div>
+              </div>
+              {!inceptionChartResult?.ok ? (
+                <div className="scenario-warning">{inceptionChartResult?.error || 'Optimized backtest chart unavailable.'}</div>
+              ) : (
+                <>
+                  <div className="pair-report-kpis chart-stats">
+                    <div className="chart-stat">
+                      <div className="cs-label">CAGR</div>
+                      <div className="cs-value">{inceptionChartResult.summary?.cagr != null ? (typeof B4Fns.fmtPctAnnual === 'function' ? B4Fns.fmtPctAnnual(inceptionChartResult.summary.cagr) : fmt(inceptionChartResult.summary.cagr)) : '—'}</div>
+                      <div className="cs-sub">sleeve equity · display {fmtMoney(incGross)}</div>
+                    </div>
+                    <div className="chart-stat">
+                      <div className="cs-label">Ann. vol / Sharpe</div>
+                      <div className="cs-value">{inceptionChartResult.summary?.annVol != null ? (typeof B4Fns.fmtPctAnnual === 'function' ? B4Fns.fmtPctAnnual(inceptionChartResult.summary.annVol) : fmt(inceptionChartResult.summary.annVol)) : '—'} / {inceptionChartResult.summary?.sharpe != null ? Number(inceptionChartResult.summary.sharpe).toFixed(2) : '—'}</div>
+                      <div className="cs-sub">daily replay returns</div>
+                    </div>
+                    <div className="chart-stat">
+                      <div className="cs-label">Max drawdown</div>
+                      <div className="cs-value">{inceptionChartResult.summary?.maxDrawdown != null ? (typeof B4Fns.fmtPctAnnual === 'function' ? B4Fns.fmtPctAnnual(inceptionChartResult.summary.maxDrawdown) : fmt(inceptionChartResult.summary.maxDrawdown)) : '—'}</div>
+                      <div className="cs-sub">peak-to-trough equity</div>
+                    </div>
+                    <div className="chart-stat">
+                      <div className="cs-label">Net PnL</div>
+                      <div className="cs-value">{fmtMoney(inceptionChartResult.summary?.netPnl)}</div>
+                      <div className="cs-sub" title="End-of-path combined |ETF|+|und| short exposure (not PnL)">
+                        end gross {fmtMoney(inceptionChartResult.summary?.totalGross)}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="pair-report-section trade-card" style={{ marginTop: 12 }}>
+                    <div className="trade-head">
+                      <div>
+                        <div className="scenario-title">Equity and PnL ($)</div>
+                        <div className="scenario-sub">
+                          {effectiveOptimizedHMode === 'stable' ? 'Stabilized' : 'Current'} Optimized research path, linearly scaled. Not used for book PnL.
+                        </div>
+                      </div>
+                    </div>
+                    <PairBacktestChart
+                      result={inceptionChartResult}
+                      focused
+                      rebalanceLog={inceptionChartResult.rebalanceLog || inceptionResearch?.rebalance_log || []}
+                    />
+                  </div>
+                  {(() => {
+                    const rows = inceptionChartResult.rows || [];
+                    const first = rows[0] || {};
+                    const last = rows[rows.length - 1] || {};
+                    const fmtMv = (v) => (Number.isFinite(Number(v)) ? fmtMoney(Number(v)) : '—');
+                    return (
+                      <div className="pair-report-section trade-card" style={{ marginTop: 12 }}>
+                        <PairBacktestExposureChart
+                          result={{
+                            ...inceptionChartResult,
+                            legChartLabels: {
+                              etfMv: String(etfSym || 'ETF'),
+                              undMv: String(undSym || 'Underlying'),
+                              etf: String(etfSym || 'ETF'),
+                              und: String(undSym || 'Underlying'),
+                            },
+                          }}
+                          compact
+                          title="Leg exposure ($)"
+                          subtitle={(
+                            <>
+                              Absolute short market value per leg (green = {String(etfSym || 'ETF')}, purple = {String(undSym || 'Underlying')})
+                              plus combined gross (blue). This is <strong>position size</strong>, not PnL.
+                              Equity can fall while ETF MV <strong>rises</strong> when the short leg moves against you
+                              (price up on a short) — that is adverse mark-to-market / leverage drift, not a vanished hedge.
+                            </>
+                          )}
+                        />
+                        <div className="pair-report-strip" style={{ marginTop: 10 }}>
+                          <span>Start {String(etfSym || 'ETF')} <strong>{fmtMv(first.mvEtfAbs)}</strong></span>
+                          <span>Start {String(undSym || 'und')} <strong>{fmtMv(first.mvUndAbs)}</strong></span>
+                          <span>Start gross <strong>{fmtMv(first.totalGross)}</strong></span>
+                          <span>End {String(etfSym || 'ETF')} <strong>{fmtMv(last.mvEtfAbs)}</strong></span>
+                          <span>End {String(undSym || 'und')} <strong>{fmtMv(last.mvUndAbs)}</strong></span>
+                          <span>End gross <strong>{fmtMv(last.totalGross)}</strong></span>
+                          <span>End equity <strong>{fmtMv(last.equityDollars)}</strong></span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                  <div className="pair-report-section trade-card" style={{ marginTop: 12 }}>
+                    <div className="trade-head">
+                      <div>
+                        <div className="scenario-title">Drawdown</div>
+                        <div className="scenario-sub">Peak-to-trough on sleeve equity (optimized research path).</div>
+                      </div>
+                    </div>
+                    <SimpleSeriesPlot
+                      series={inceptionChartResult.rows || []}
+                      valueKey="drawdown"
+                      color="rgba(248,113,113,0.95)"
+                      label="Drawdown"
+                      formatValue={(v) => fmt(v)}
+                      includeZero
+                      strictNullPrimary
+                    />
+                  </div>
+                  <div className="pair-report-section trade-card" style={{ marginTop: 12 }}>
+                    <div className="trade-head">
+                      <div>
+                        <div className="scenario-title">Dynamic hedge ratio (h)</div>
+                        <div className="scenario-sub">
+                          Research path h = |MV<sub>und</sub>| / (|β| × |MV<sub>ETF</sub>|)
+                          {effectiveOptimizedHMode === 'stable' ? ' after deadband+slew acceptance.' : '.'}
+                        </div>
+                      </div>
+                    </div>
+                    <PairHedgePathChart
+                      rows={inceptionChartResult.rows || []}
+                      rebalanceLog={inceptionChartResult.rebalanceLog || inceptionResearch?.rebalance_log || []}
+                    />
+                  </div>
+                </>
+              )}
             </>
           )}
         </div>
@@ -14381,6 +14742,68 @@ function isBucket4Record(record) {
   return Boolean(record?.protected) && String(record?.product_class || '').toLowerCase() === 'inverse';
 }
 
+/** Sanity gates for B4 daily ledgers / inception_research (equity wipe, |ret|>100%). */
+function b4DailyPathAudit(daily, summary) {
+  const issues = [];
+  if (!daily || !Array.isArray(daily.dates) || daily.dates.length < 2) {
+    return { ok: false, fail: true, warn: false, sane: false, issues: ['no_daily'] };
+  }
+  const eq = Array.isArray(daily.equity) ? daily.equity : [];
+  const ret = Array.isArray(daily.ret) ? daily.ret : [];
+  const reasons = Array.isArray(daily.rebalance_reason) ? daily.rebalance_reason : [];
+  let maxAbsRet = 0;
+  let maxAbsRetD = null;
+  let negN = 0;
+  let negFirst = null;
+  let wipeIdx = -1;
+  for (let i = 0; i < daily.dates.length; i += 1) {
+    const e = Number(eq[i]);
+    const r = Number(ret[i]);
+    if (Number.isFinite(e) && e <= 0) {
+      negN += 1;
+      if (negFirst == null) negFirst = daily.dates[i];
+    }
+    if (Number.isFinite(r) && Math.abs(r) > maxAbsRet) {
+      maxAbsRet = Math.abs(r);
+      maxAbsRetD = daily.dates[i];
+    }
+    if (String(reasons[i] || '') === 'equity_wipeout' && wipeIdx < 0) wipeIdx = i;
+  }
+  const fe = Number(summary?.final_equity);
+  const exitWipe = String(summary?.exit_reason || '') === 'equity_wipeout'
+    || (wipeIdx >= 0 && wipeIdx >= daily.dates.length - 1);
+  if (negN) issues.push(`equity≤0 ×${negN} first=${negFirst}`);
+  if (Number.isFinite(fe) && fe <= 0) issues.push(`final_equity=${fe}`);
+  if (maxAbsRet > 1) issues.push(`|ret|>100% ${maxAbsRetD} ${(maxAbsRet * 100).toFixed(0)}%`);
+  else if (maxAbsRet > 0.5) issues.push(`|ret|>50% ${maxAbsRetD} ${(maxAbsRet * 100).toFixed(0)}%`);
+  if (exitWipe) {
+    const ed = summary?.exit_date || (wipeIdx >= 0 ? daily.dates[wipeIdx] : maxAbsRetD);
+    issues.push(`research stopped: equity wipeout${ed ? ` on ${ed}` : ''}`);
+  }
+  // Clean wipeout-at-end (no long flat bankrupt tail) is viewable research, not a bad ledger.
+  const cleanWipe = exitWipe && negN <= 2 && wipeIdx >= daily.dates.length - 2;
+  // Research path that keeps marking through equity≤0 to show recovery to latest.
+  const continueThrough = Boolean(summary?.continue_through_wipeout)
+    || String(summary?.path_mode || '') === 'continue_through_wipeout';
+  if (continueThrough && negN) {
+    issues.push(`underwater ×${negN} (continue-through research)`);
+  }
+  const fail = !cleanWipe && !continueThrough
+    && issues.some((x) => x.startsWith('equity') || x.startsWith('final_equity') || x.includes('>100%'));
+  const warn = !fail && issues.length > 0;
+  return {
+    ok: issues.length === 0,
+    fail,
+    warn,
+    sane: !fail && daily.dates.length >= 2,
+    issues,
+    maxAbsRet,
+    maxAbsRetD,
+    cleanWipe,
+    continueThrough,
+  };
+}
+
 function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
   const B4 = window.Bucket4Backtest || {};
   const sym = String(symbol || '').toUpperCase();
@@ -14391,9 +14814,9 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
   const [gross, setGross] = useState(100000);
   const [showRebalLog, setShowRebalLog] = useState(false);
   const [showDailyTable, setShowDailyTable] = useState(false);
-  // Default to inception / isolation research when present — per-pair path is the
-  // product surface; plan/production ledger remains available as a toggle.
-  const [historyBasis, setHistoryBasis] = useState('inception_research');
+  // Pair Report defaults to the production plan/book ledger. Optimized backtest
+  // lives on the chart Optimized tab; optional preview remains for side-by-side.
+  const [historyBasis, setHistoryBasis] = useState('plan');
 
   useEffect(() => {
     let cancelled = false;
@@ -14408,17 +14831,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
         if (cancelled) return;
         setArtifact(art);
         setShard(pair);
-        const ir = pair?.inception_research?.daily;
-        const eq = Array.isArray(ir?.equity) ? ir.equity : [];
-        const ret = Array.isArray(ir?.ret) ? ir.ret : [];
-        const sane = Boolean(
-          ir && Array.isArray(ir.dates) && ir.dates.length >= 2
-          && !eq.some((e) => Number.isFinite(Number(e)) && Number(e) <= 0)
-          && !ret.some((r) => Number.isFinite(Number(r)) && Math.abs(Number(r)) > 1)
-          && !(Number.isFinite(Number(pair?.inception_research?.summary?.final_equity))
-            && Number(pair.inception_research.summary.final_equity) <= 0)
-        );
-        setHistoryBasis(sane ? 'inception_research' : 'plan');
+        setHistoryBasis('plan');
       } catch (e) {
         if (!cancelled) setError(e?.message || 'Bucket 4 pair report unavailable');
       } finally {
@@ -14434,30 +14847,18 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
     return rows.find((m) => String(m?.etf || m?.ETF || '').toUpperCase() === sym) || null;
   }, [artifact, sym]);
 
-  const inceptionResearch = shard?.inception_research && typeof shard.inception_research === 'object'
+  const inceptionResearchStable = shard?.inception_research_stable && typeof shard.inception_research_stable === 'object'
+    ? shard.inception_research_stable
+    : null;
+  const inceptionResearchCurrent = shard?.inception_research && typeof shard.inception_research === 'object'
     ? shard.inception_research
     : null;
+  // Pair Report optimized preview defaults to stabilized path when nested.
+  const inceptionResearch = inceptionResearchStable || inceptionResearchCurrent;
   const inceptionDaily = inceptionResearch?.daily;
-  // Reject wiped / cliff-corrupted research paths (equity ≤ 0 or |daily ret| > 100%).
-  const inceptionPathSane = (() => {
-    if (!inceptionDaily || !Array.isArray(inceptionDaily.dates) || inceptionDaily.dates.length < 2) return false;
-    const eq = Array.isArray(inceptionDaily.equity) ? inceptionDaily.equity : [];
-    const ret = Array.isArray(inceptionDaily.ret) ? inceptionDaily.ret : [];
-    for (let i = 0; i < eq.length; i += 1) {
-      const e = Number(eq[i]);
-      if (Number.isFinite(e) && e <= 0) return false;
-    }
-    for (let i = 0; i < ret.length; i += 1) {
-      const r = Number(ret[i]);
-      if (Number.isFinite(r) && Math.abs(r) > 1) return false;
-    }
-    const fe = Number(inceptionResearch?.summary?.final_equity);
-    if (Number.isFinite(fe) && fe <= 0) return false;
-    return true;
-  })();
-  const hasInceptionResearch = Boolean(
-    inceptionDaily && Array.isArray(inceptionDaily.dates) && inceptionDaily.dates.length >= 2 && inceptionPathSane
-  );
+  const inceptionPathAudit = b4DailyPathAudit(inceptionDaily, inceptionResearch?.summary);
+  const planPathAudit = b4DailyPathAudit(shard?.daily, shard?.summary);
+  const hasInceptionResearch = Boolean(inceptionPathAudit.sane);
   const activeShard = useMemo(() => {
     if (!shard) return null;
     if (historyBasis === 'inception_research' && hasInceptionResearch) {
@@ -14471,12 +14872,12 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
           : (shard.rebalance_log || []),
         ledger_mode: inceptionResearch.ledger_mode || shard.ledger_mode,
         notional_basis_usd: inceptionResearch.notional_basis_usd ?? shard.notional_basis_usd,
-        history_basis: 'inception_research',
+        history_basis: inceptionResearch.history_basis || (inceptionResearchStable ? 'inception_research_stable' : 'inception_research'),
         in_production_book: false,
       };
     }
     return shard;
-  }, [shard, historyBasis, hasInceptionResearch, inceptionResearch, inceptionDaily]);
+  }, [shard, historyBasis, hasInceptionResearch, inceptionResearch, inceptionDaily, inceptionResearchStable]);
 
   const chartResult = useMemo(() => {
     if (!activeShard) return null;
@@ -14496,7 +14897,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
   const und = String(shard?.underlying || summary.underlying || '').toUpperCase();
   const fmtPctAnn = (x, digits = 1) => (typeof B4.fmtPctAnnual === 'function' ? B4.fmtPctAnnual(x, digits) : fmt(x));
   const statusText = historyBasis === 'inception_research'
-    ? 'Inception research'
+    ? 'Optimized backtest'
     : (prod ? 'Production' : 'Gated / Research');
   const rows = chartResult?.ok ? chartResult.rows : [];
   const rebalanceLog = Array.isArray(chartResult?.rebalanceLog)
@@ -14535,7 +14936,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
     <div className="backtest-page">
       <div className="chart-header">
         <div className="chart-header-left pair-report-title">
-          <button className="chart-view-btn" onClick={() => { window.location.hash = '/bucket-4/backtest'; }}>← B4 Pairs</button>
+          <button className="chart-view-btn" onClick={() => { window.location.hash = '/'; }}>← Dashboard</button>
           <span className="etf-sym">{sym || 'Bucket 4 Pair'}</span>
           <span className="vs">vs</span>
           <span className="und-sym">{und || '—'}</span>
@@ -14589,19 +14990,35 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
             </button>
             <button
               type="button"
-              className={cls('chart-view-btn', historyBasis === 'inception_research' && 'active')}
-              disabled={!hasInceptionResearch}
-              title={hasInceptionResearch
-                ? 'Research path from ETF/underlying overlap. Not production-policy replay.'
-                : 'Inception research series not exported yet for this pair.'}
-              onClick={() => { if (hasInceptionResearch) setHistoryBasis('inception_research'); }}
+              className="chart-view-btn"
+              onClick={() => { window.location.hash = `/chart/${encodeURIComponent(sym)}/optimized`; }}
+              title="Open the chart Optimized backtest tab (listing → latest research)"
             >
-              Inception research
+              Open chart Optimized tab
             </button>
+            {hasInceptionResearch ? (
+              <button
+                type="button"
+                className={cls('chart-view-btn', historyBasis === 'inception_research' && 'active')}
+                title="Optional: preview optimized research here. Primary surface is the chart Optimized tab."
+                onClick={() => setHistoryBasis('inception_research')}
+              >
+                Preview optimized here
+              </button>
+            ) : null}
           </div>
+          {historyBasis === 'plan' && planPathAudit.fail && (
+            <div className="error-banner" style={{ marginBottom: 10 }}>
+              <strong>Ledger anomaly on plan path.</strong>{' '}
+              {(planPathAudit.issues || []).join('; ') || 'equity wipe / extreme day return'}.
+              Do not treat book KPIs for this pair as reliable until ls-algo re-exports a repaired production ledger
+              (CONI wipe / LITZ / RKLZ class). Chart <strong>Optimized</strong> is the listing→latest research path.
+            </div>
+          )}
           {historyBasis === 'inception_research' && (
             <div className="scenario-warning">
               Research path from ETF/underlying overlap. Not production-policy replay. Not used for book PnL.
+              Prefer the chart <strong>Optimized</strong> tab for this view.
             </div>
           )}
 
@@ -14647,7 +15064,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
                     <div className="scenario-title">Equity and PnL ($)</div>
                     <div className="scenario-sub">
                       {historyBasis === 'inception_research'
-                        ? 'Labeled inception research path, linearly scaled to display notional. Not used for book PnL.'
+                        ? 'Optimized research path, linearly scaled to display notional. Not used for book PnL.'
                         : 'Authoritative production-ledger path, linearly scaled to display notional. Amber marks are this pair\u2019s B4 executions—not unrelated book activity.'}
                     </div>
                   </div>
@@ -14659,7 +15076,7 @@ function Bucket4PairReportPage({ symbol = '', onNavigateToChart = null }) {
                 <div className="trade-head">
                   <div>
                     <div className="scenario-title">Dynamic hedge ratio (h)</div>
-                    <div className="scenario-sub">Policy path h = |MV<sub>ETF</sub>| / |MV<sub>und</sub>|; markers show rebalance steps.</div>
+                    <div className="scenario-sub">Policy path h = |MV<sub>und</sub>| / (|β| × |MV<sub>ETF</sub>|); markers show rebalance steps.</div>
                   </div>
                 </div>
                 <PairHedgePathChart rows={rows} rebalanceLog={rebalanceLog} />
@@ -14863,9 +15280,7 @@ function InverseFlowProgramPage({ records = [], preloadSymbol = '' }) {
           <span className="etf-sym">Inverse Flow Program</span>
           <span className="chart-und">Drip — add short $ every N days (multi-leg)</span>
         </div>
-        <div className="chart-header-right">
-          <button className="chart-view-btn" onClick={() => { window.location.hash = '/bucket-4/backtest'; }}>B4 Pairs</button>
-        </div>
+        <div className="chart-header-right" />
       </div>
       <div className="scenario-sub" style={{ marginBottom: 12 }}>
         Add fixed short notional to selected inverse/Bucket 4 ETFs every N valid trading days. Each ETF begins on its own first tradable row.
@@ -15146,13 +15561,13 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
       </div>
 
       <div className="scenario-sub" style={{ marginBottom: 12, maxWidth: 920 }}>
-        <strong>B4 Pairs</strong> lists production membership; open each <strong>Pair Report</strong> for the
-        inception / isolation path (no book blacklist cut). The aggregate sleeve chart below is diagnostic ledger
-        context from ls-algo, not the primary per-pair product. Book source: archived point-in-time
-        GTP plans, persisted sizing state, operator membership, purgatory reduce-only handling, TR/VCR cadence,
-        Phase-2b bands, ratchet guards, execution lag, turnover controls, and production accounting.
-        The dashboard does not re-solve or reblend this path. Per-ticker: Pair Report. Separate editable research:
-        chart <strong>Backtest</strong> / <strong>Drip</strong>. Universe: {artifact?.n_pairs ?? '—'} ledger pairs,
+        <strong>B4 book index</strong> (deep-link only). Open each <strong>Pair Report</strong> for the
+        plan/book ledger. Listing→latest research lives on each ticker&apos;s chart <strong>Optimized</strong> tab
+        (<code>#/chart/SYM/optimized</code>). The aggregate sleeve chart below is diagnostic ledger context from ls-algo.
+        Book source: archived point-in-time GTP plans, persisted sizing state, operator membership, purgatory
+        reduce-only handling, TR/VCR cadence, Phase-2b bands, ratchet guards, execution lag, turnover controls,
+        and production accounting. The dashboard does not re-solve or reblend this path.
+        Editable what-if: chart <strong>Backtest</strong> / <strong>Drip</strong>. Universe: {artifact?.n_pairs ?? '—'} ledger pairs,
         {artifact?.n_membership ?? membership.length ?? '—'} historical plan members
         ({b4UniverseCount} current screener B4 rows).
         {Number.isFinite(Number(artifact?.deployed_fraction)) ? <> Deployed {(Number(artifact.deployed_fraction) * 100).toFixed(1)}% · cash residual {(Number(artifact.cash_residual || Math.max(0, 1 - Number(artifact.deployed_fraction))) * 100).toFixed(1)}%.</> : null}
@@ -15637,7 +16052,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setChartDefaultPanel('chart');
         return;
       }
-      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest-flow|backtest|flow|trade|vrp|decay))?$/i.exec(hash);
+      const chartMatch = /^#\/chart\/([^/]+)(?:\/(backtest-flow|backtest|optimized|inception|flow|trade|vrp|decay))?$/i.exec(hash);
       if (chartMatch && data) {
         const sym = decodeURIComponent(chartMatch[1]).toUpperCase();
         const rec = (data.records || []).find(r => r.symbol === sym);
@@ -15657,13 +16072,16 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           setBucket4PairSymbol('');
           const panel = String(chartMatch[2] || '').toLowerCase();
           setChartDefaultPanel(
-            panel === 'backtest-flow' ? 'backtest-flow'
-              : panel === 'backtest' ? 'backtest'
-                : panel === 'flow' ? 'flow'
-                  : panel === 'trade' ? 'trade'
-                    : panel === 'vrp' ? 'vrp'
-                      : panel === 'decay' ? 'decay'
-                        : 'chart',
+            typeof window.Bucket4Backtest?.mapChartDefaultPanel === 'function'
+              ? window.Bucket4Backtest.mapChartDefaultPanel(panel)
+              : (panel === 'backtest-flow' ? 'backtest-flow'
+                : panel === 'backtest' ? 'backtest'
+                  : (panel === 'optimized' || panel === 'inception') ? 'optimized'
+                    : panel === 'flow' ? 'flow'
+                      : panel === 'trade' ? 'trade'
+                        : panel === 'vrp' ? 'vrp'
+                          : panel === 'decay' ? 'decay'
+                            : 'chart'),
           );
           return;
         }
@@ -15984,13 +16402,6 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             title="LETF rebalance flow ranked by underlying"
           >
             ⌁ Flow
-          </button>
-          <button
-            className={cls('topbar-btn', showBacktestFlow && !chartRecord && 'active')}
-            onClick={() => { if (showBacktestFlow) navigateBack(); else navigateToBacktestFlow(); }}
-            title="B4 Pairs — open per-pair reports (inception / isolation default). Book ledger kept for diagnostics."
-          >
-            B4 Pairs
           </button>
           <button
             className={cls('topbar-btn', showBucket5 && !chartRecord && 'active')}

@@ -468,6 +468,36 @@ def find_close_jump_boundary(
     return min(candidates)
 
 
+def residual_after_declared_split(jump: float, mult: float) -> float | None:
+    """``observed_close_jump / declared_mult`` when both are finite and positive."""
+    try:
+        j = float(jump)
+        m = float(mult)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(j) and math.isfinite(m) and j > 0 and m > 0):
+        return None
+    return j / m
+
+
+def is_plausible_post_split_residual(
+    jump: float,
+    mult: float,
+    *,
+    residual_lo: float = 0.45,
+    residual_hi: float = 1.55,
+) -> bool:
+    """True when the leftover jump after removing ``mult`` looks like a market day.
+
+    NBIZ 2026-07-21: declared 1-for-3 with close 12.17→22.80 (jump≈1.87). Residual
+    1.87/3≈0.62 matches a ~−38% inverse day vs NBIS +19%, not a continuous series.
+    """
+    residual = residual_after_declared_split(jump, mult)
+    if residual is None:
+        return False
+    return float(residual_lo) <= residual <= float(residual_hi)
+
+
 def find_partial_split_jump_boundary(
     close_points: list[tuple[dt.date, float]],
     mult: float,
@@ -484,10 +514,9 @@ def find_partial_split_jump_boundary(
     2026-06-01 while the underlying rose about 14%, leaving only a 6.85x raw
     close jump. NAV switched on the declared 2026-06-03 action date.
 
-    This helper is intentionally not sufficient evidence by itself. Callers
-    must first confirm the declared multiple from issuer NAV or shares. The
-    log-space threshold merely locates the close-basis boundary without
-    requiring the economic return on that session to be near zero.
+    Also used for market-obscured reverse splits where issuer NAV/shares do not
+    confirm (NBIZ 2026-07-21 1-for-3 × large inverse day) — callers must still
+    require a plausible residual via ``is_plausible_post_split_residual``.
     """
     if not close_points or not (math.isfinite(mult) and mult > 0):
         return None
@@ -824,6 +853,29 @@ def filter_splits_needing_close_basis_fix(
                     if partial is not None:
                         accepted = True
                         use_eff = partial
+
+        if not accepted and float(mult) >= 1.05:
+            # Declared reverse split with market-obscured close jump and no
+            # issuer NAV/shares confirm (NBIZ 2026-07-21 1-for-3 × inverse day).
+            # Continuous Yahoo closes (MTYY) still reject via abs(jump-1)<=0.08.
+            partial = find_partial_split_jump_boundary(
+                close_points,
+                float(mult),
+                eff,
+                window_days=7,
+            )
+            if partial is not None:
+                jump_p = split_close_jump_ratio(points, partial)
+                if (
+                    jump_p is not None
+                    and abs(jump_p - 1.0) > 0.08
+                    and is_plausible_post_split_residual(jump_p, float(mult))
+                    and not yahoo_adj_looks_back_adjusted(
+                        points, partial, float(mult), rel_tol=rel_tol
+                    )
+                ):
+                    accepted = True
+                    use_eff = partial
 
         if accepted:
             out.append((use_eff, float(mult)))

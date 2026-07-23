@@ -432,23 +432,22 @@ def build_underlying_vol_shape_history(
             }
         )
 
-    if max_points > 0 and len(out) > max_points:
-        out = out[-max_points:]
-
-    vcr_vals = sorted(
-        float(x["vcr"]) for x in out if x.get("vcr") is not None and np.isfinite(float(x["vcr"]))
+    # Point-in-time baseline: every historical row may only use VCR observations
+    # available through that row.  A full-sample median stamped onto all rows
+    # leaks future volatility concentration into historical hedge/cadence targets.
+    vcr_path = pd.Series(
+        [float(x["vcr"]) if x.get("vcr") is not None else np.nan for x in out],
+        dtype=float,
     )
-    if vcr_vals:
-        mid = len(vcr_vals) // 2
-        vcr_median = (
-            vcr_vals[mid]
-            if len(vcr_vals) % 2
-            else 0.5 * (vcr_vals[mid - 1] + vcr_vals[mid])
-        )
-    else:
-        vcr_median = None
-    vcr_median_r = _round_hist(vcr_median)
-    series = [{**row, "vcr_median": vcr_median_r} for row in out]
+    expanding_median = vcr_path.expanding(min_periods=1).median()
+    series = [
+        {**row, "vcr_median": _round_hist(expanding_median.iloc[i])}
+        for i, row in enumerate(out)
+    ]
+    if max_points > 0 and len(series) > max_points:
+        series = series[-max_points:]
+
+    vcr_median_r = series[-1].get("vcr_median") if series else None
     return {"series": series, "vcrMedian": vcr_median_r, "window": window}
 
 

@@ -26,6 +26,28 @@ from split_adjustments import (
 )
 
 
+def test_nbiz_dual_reverse_splits_use_close_cum_factors():
+    rows = [
+        {"date": "2026-05-29", "close_price": 1.255, "etf_adj_close": 12.55, "shares_outstanding": 12715000, "nav": 1.2456, "underlying_adj_close": 231.09},
+        {"date": "2026-06-01", "close_price": 8.600, "etf_adj_close": 25.80, "shares_outstanding": 36415000, "nav": 0.8858, "underlying_adj_close": 264.51},
+        {"date": "2026-06-02", "close_price": 9.100, "etf_adj_close": 27.30, "shares_outstanding": 3641500, "nav": 0.9122, "underlying_adj_close": 260.58},
+        {"date": "2026-07-20", "close_price": 12.17, "etf_adj_close": 36.51, "shares_outstanding": 515494, "nav": 12.1979, "underlying_adj_close": 182.62},
+        {"date": "2026-07-21", "close_price": 22.80, "etf_adj_close": 22.80, "shares_outstanding": 790494, "nav": 22.8638, "underlying_adj_close": 216.92},
+    ]
+    events = [(dt.date(2026, 6, 3), 10.0), (dt.date(2026, 7, 21), 3.0)]
+    pts = [(dt.date.fromisoformat(r["date"]), r["close_price"]) for r in rows]
+    ctx = resolve_split_context(pts, events, metric_rows=rows, adj_by_date={
+        dt.date.fromisoformat(r["date"]): r["etf_adj_close"] for r in rows
+    })
+    assert ctx["mode"] == "multi_discrete_split"
+    tr = build_tr_series_from_metrics(rows, events)
+    by_date = {r["date"]: r for r in tr}
+    assert abs(by_date["2026-05-29"]["tr_etf_px"] - 1.255 * 30) < 1e-6
+    assert abs(by_date["2026-06-01"]["tr_etf_px"] - 8.6 * 3) < 1e-6
+    assert abs(by_date["2026-06-02"]["tr_etf_px"] - 9.1 * 3) < 1e-6
+    assert abs(by_date["2026-07-21"]["tr_etf_px"] - 22.80) < 1e-6
+
+
 def test_filter_skips_continuous_yahoo_mtyy():
     dated = [
         (dt.date(2026, 5, 28), 24.0, 24.0),

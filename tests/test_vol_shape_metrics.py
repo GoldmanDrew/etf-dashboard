@@ -72,6 +72,18 @@ def test_build_underlying_vol_shape_history_caps_points():
     assert hist["series"][-1]["rebalance_cadence_score"] is not None
 
 
+def test_vol_shape_history_is_invariant_to_appended_future_prices():
+    returns = ([0.004, -0.003, 0.005, -0.002] * 30) + ([0.04, -0.03] * 20)
+    prefix = _prices_from_log_returns(returns[:100])
+    full = _prices_from_log_returns(returns)
+    prefix_hist = build_underlying_vol_shape_history(prefix, window=20, max_points=0)["series"]
+    full_hist = build_underlying_vol_shape_history(full, window=20, max_points=0)["series"]
+    full_by_date = {row["date"]: row for row in full_hist}
+
+    for row in prefix_hist:
+        assert full_by_date[row["date"]]["vcr_median"] == row["vcr_median"]
+
+
 def test_vol_shape_panel_covers_both_windows():
     px = _prices_from_log_returns([0.004] * 80)
     panel = underlying_vol_shape_panel_from_prices(px)

@@ -18,6 +18,61 @@ test("filter skips continuous Yahoo MTYY reverse split", () => {
   assert.equal(ctx.mode, "continuous");
 });
 
+test("NBIZ dual reverse splits use close×cum factors (no June geom-mean cliff)", () => {
+  const rows = [
+    { date: "2026-05-28", close_price: 1.305, etf_adj_close: 13.05, shares_outstanding: 11555000, nav: 1.3001, underlying_adj_close: 226.34 },
+    { date: "2026-05-29", close_price: 1.255, etf_adj_close: 12.55, shares_outstanding: 12715000, nav: 1.2456, underlying_adj_close: 231.09 },
+    { date: "2026-06-01", close_price: 8.600, etf_adj_close: 25.80, shares_outstanding: 36415000, nav: 0.8858, underlying_adj_close: 264.51 },
+    { date: "2026-06-02", close_price: 9.100, etf_adj_close: 27.30, shares_outstanding: 3641500, nav: 0.9122, underlying_adj_close: 260.58 },
+    { date: "2026-06-03", close_price: 9.760, etf_adj_close: 29.28, shares_outstanding: 2711500, nav: 9.7451, underlying_adj_close: 251.68 },
+    { date: "2026-07-20", close_price: 12.17, etf_adj_close: 36.51, shares_outstanding: 515494, nav: 12.1979, underlying_adj_close: 182.62 },
+    { date: "2026-07-21", close_price: 22.80, etf_adj_close: 22.80, shares_outstanding: 790494, nav: 22.8638, underlying_adj_close: 216.92 },
+  ];
+  const events = [
+    { date: "2026-06-03", mult: 10 },
+    { date: "2026-07-21", mult: 3 },
+  ];
+  const ctx = PB.resolveSplitContext(
+    rows.map((r) => ({ date: r.date, close: r.close_price, adj: r.etf_adj_close })),
+    events,
+    rows,
+  );
+  assert.equal(ctx.mode, "multi_discrete_split");
+  assert.equal(ctx.boundaries.length, 2);
+  const tr = PB.buildTrSeriesFromMetrics(rows, events);
+  const byDate = Object.fromEntries(tr.map((r) => [r.date, r]));
+  assert.ok(Math.abs(byDate["2026-05-29"].trEtfPx - 1.255 * 30) < 1e-6, byDate["2026-05-29"].trEtfPx);
+  assert.ok(Math.abs(byDate["2026-06-01"].trEtfPx - 8.6 * 3) < 1e-6, byDate["2026-06-01"].trEtfPx);
+  assert.ok(Math.abs(byDate["2026-06-02"].trEtfPx - 9.1 * 3) < 1e-6, byDate["2026-06-02"].trEtfPx);
+  assert.ok(Math.abs(byDate["2026-07-20"].trEtfPx - 12.17 * 3) < 1e-6, byDate["2026-07-20"].trEtfPx);
+  assert.ok(Math.abs(byDate["2026-07-21"].trEtfPx - 22.80) < 1e-6, byDate["2026-07-21"].trEtfPx);
+  const cov = PB.summarizeTrCoverage(rows, events);
+  assert.equal(cov.splitMode, "multi_discrete_split");
+  assert.ok(cov.maxUnexplainedEtfDailyLogReturn < 0.35, cov.maxUnexplainedEtfDailyLogReturn);
+  assert.equal(cov.warnings.some((w) => w.includes("Large unexplained ETF TR daily move")), false);
+});
+
+test("filter accepts NBIZ market-obscured 1-for-3 reverse split", () => {
+  const points = [
+    { date: "2026-07-17", close: 11.50, adj: 11.50 },
+    { date: "2026-07-20", close: 12.17, adj: 12.17 },
+    { date: "2026-07-21", close: 22.80, adj: 22.80 },
+    { date: "2026-07-22", close: 21.40, adj: 21.40 },
+  ];
+  const events = [{ date: "2026-07-21", mult: 3 }];
+  const verified = PB.filterSplitsNeedingCloseBasisFix(points, events);
+  assert.deepEqual(verified, [{ date: "2026-07-21", mult: 3 }]);
+  const rows = [
+    { date: "2026-07-20", close_price: 12.17, etf_adj_close: 12.17, underlying_adj_close: 100 },
+    { date: "2026-07-21", close_price: 22.80, etf_adj_close: 22.80, underlying_adj_close: 119 },
+  ];
+  const tr = PB.buildTrSeriesFromMetrics(rows, events);
+  const pre = tr.find((x) => x.date === "2026-07-20");
+  assert.ok(Math.abs(pre.trEtfPx - 36.51) < 1e-6, `pre TR ${pre.trEtfPx}`);
+  const post = tr.find((x) => x.date === "2026-07-21");
+  assert.ok(Math.abs(post.trEtfPx - 22.80) < 1e-6);
+});
+
 test("discrete split scales pre-split close not inflated navTr", () => {
   const rows = [
     { date: "2026-05-28", close_price: 4.0, nav_total_return: 264, underlying_adj_close: 150 },
@@ -301,4 +356,22 @@ test("coverage does not warn on underlying-explained leveraged move", () => {
   assert.equal(cov.warnings.some((w) => w.includes("Large unexplained ETF TR daily move")), false);
   assert.ok(cov.maxEtfDailyLogReturn > 0.35);
   assert.equal(cov.maxUnexplainedEtfDailyLogReturn, 0);
+});
+
+test("scaleMetricsSeriesToLatestShareBasis removes SNDQ reverse-split close cliff", () => {
+  const rows = [
+    { date: "2026-07-17", close_price: 4.19, etf_adj_close: 41.9, nav: 4.20, shares_outstanding: 1000000 },
+    { date: "2026-07-20", close_price: 4.0, etf_adj_close: 40.0, nav: 4.01, shares_outstanding: 1000000 },
+    { date: "2026-07-21", close_price: 28.6, etf_adj_close: 28.6, nav: 28.57, shares_outstanding: 100000 },
+  ];
+  const events = [{ date: "2026-07-21", mult: 10 }];
+  const scaled = PB.scaleMetricsSeriesToLatestShareBasis(rows, events);
+  const pre = scaled.find((r) => r.date === "2026-07-20");
+  const post = scaled.find((r) => r.date === "2026-07-21");
+  assert.ok(pre.share_basis_factor > 5, `pre factor ${pre.share_basis_factor}`);
+  assert.equal(post.share_basis_factor, 1);
+  assert.ok(Math.abs(pre.close_plot - 40) < 1e-6, `pre close_plot ${pre.close_plot}`);
+  assert.ok(Math.abs(post.close_plot - 28.6) < 1e-6, `post close_plot ${post.close_plot}`);
+  // No vertical spike: pre and post on same basis stay in the same order of magnitude.
+  assert.ok(pre.close_plot / post.close_plot < 2.5);
 });

@@ -163,20 +163,43 @@
     return Math.abs((db - da) / 86400000);
   }
 
-  function matchDeclaredSplitJump(events, rowDate, jump, windowDays = 5) {
+  /**
+   * Return the declared share-factor (rf/rt) to divide quantity by when a close
+   * jump is a corp split — including market-obscured days where observed jump
+   * is declared×economic (e.g. NBIZ 6.85× on a 10× reverse split).
+   */
+  function resolveDeclaredSplitShareFactor(events, rowDate, jump, windowDays = 7) {
     if (!(jump > 0) || !Number.isFinite(jump)) return null;
     const PB = globalObj.PriceBasis;
-    const absJump = jump >= 1 ? jump : 1 / jump;
+    let best = null;
     for (const ev of events) {
+      const m = Number(ev && ev.mult);
+      if (!(m > 0)) continue;
       if (splitEventWindowDays(ev.date, rowDate) > windowDays) continue;
-      const mRaw = ev.mult >= 1 ? ev.mult : 1 / ev.mult;
+      const absJump = jump >= 1 ? jump : 1 / jump;
+      const absMult = m >= 1 ? m : 1 / m;
+      let exact = false;
       if (PB && typeof PB.matchSplitToPriceJump === "function") {
-        if (PB.matchSplitToPriceJump(absJump, mRaw) != null) return jump;
-      } else if (Math.abs(absJump / mRaw - 1) <= 0.18) {
-        return jump;
+        const matched = PB.matchSplitToPriceJump(absJump, absMult);
+        exact = matched != null && Math.abs(absJump / absMult - 1) <= 0.18;
+      } else {
+        exact = Math.abs(absJump / absMult - 1) <= 0.18;
+      }
+      const obscured = PB && typeof PB.isPlausiblePostSplitResidual === "function"
+        ? PB.isPlausiblePostSplitResidual(jump, m)
+        : false;
+      if (!exact && !obscured) continue;
+      const dist = splitEventWindowDays(ev.date, rowDate);
+      if (!best || dist < best.dist || (dist === best.dist && exact && !best.exact)) {
+        best = { m, dist, exact };
       }
     }
-    return null;
+    return best ? best.m : null;
+  }
+
+  function matchDeclaredSplitJump(events, rowDate, jump, windowDays = 7) {
+    const factor = resolveDeclaredSplitShareFactor(events, rowDate, jump, windowDays);
+    return factor != null ? jump : null;
   }
 
   /**
@@ -185,21 +208,22 @@
    * A split-like vendor bar without a matching declared action is deliberately
    * ignored: treating familiar 2x/3x/6x glitches as corporate actions creates
    * permanent share-count and P&L errors.
+   *
+   * When the observed jump is declared×economic (market-obscured), scale by the
+   * declared factor — not the raw jump — so residual economics stay in MV.
    */
   function applyCrossSplitQuantityAdjust(qE, qU, prev, cur, etfEvents, undEvents) {
     let nextE = qE;
     let nextU = qU;
     if (prev && cur && prev.pl > 0 && cur.pl > 0) {
       const etfJump = cur.pl / prev.pl;
-      if (matchDeclaredSplitJump(etfEvents, cur.date, etfJump)) {
-        nextE = qE * (prev.pl / cur.pl);
-      }
+      const etfFactor = resolveDeclaredSplitShareFactor(etfEvents, cur.date, etfJump);
+      if (etfFactor) nextE = qE / etfFactor;
     }
     if (prev && cur && prev.ps > 0 && cur.ps > 0) {
       const undJump = cur.ps / prev.ps;
-      if (matchDeclaredSplitJump(undEvents, cur.date, undJump)) {
-        nextU = qU * (prev.ps / cur.ps);
-      }
+      const undFactor = resolveDeclaredSplitShareFactor(undEvents, cur.date, undJump);
+      if (undFactor) nextU = qU / undFactor;
     }
     return { qE: nextE, qU: nextU };
   }

@@ -135,9 +135,10 @@ def get_pair_signal(
         return empty
 
     aligned = df.reindex(df.index.union(cal)).sort_index().ffill().reindex(cal)
-    if "vcr_med" not in aligned or aligned["vcr_med"].isna().all():
-        aligned["vcr_med"] = aligned["vcr"].expanding(min_periods=1).median()
-    aligned["vcr_med"] = aligned["vcr_med"].fillna(aligned["vcr"].expanding(min_periods=1).median())
+    # Recompute the baseline from the aligned VCR path even when an upstream
+    # artifact supplies vcr_med.  Older artifacts stamped a terminal median on
+    # every row, so trusting that column would preserve lookahead in research.
+    aligned["vcr_med"] = aligned["vcr"].expanding(min_periods=1).median()
 
     if lookahead_shift:
         aligned = aligned.shift(int(lookahead_shift))

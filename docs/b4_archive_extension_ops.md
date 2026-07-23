@@ -7,8 +7,8 @@
 | Surface | Start / history |
 |---|---|
 | **Aggregate B4 sleeve chart** (diagnostic book KPIs) | **`2026-02-27`** golden production start — do **not** extend book `window_start` to `2025-12-28` |
-| **Pair Report — Plan path** | Production ledger from first plan membership day (≥ book start when in book) |
-| **Pair Report — Inception / isolation (default)** | Per-pair path; ignores book blacklist/`hard_exit` cuts. Layer A twin: `scripts/b4_layer_a_parity.py` (sleeve-dollar pins, pin-date calendar inject, isolation default). `authoritative: false`; never feeds book PnL |
+| **B4 Pairs / Pair Report — Plan path (default)** | Production ledger from first plan membership day (≥ book start when in book) |
+| **Chart Optimized tab** (`#/chart/SYM/optimized`) | Per-pair **listing/inception → latest** research nested on `bucket4_pairs/{ETF}.json` (legacy hash `/inception` still maps). Trade starts on first overlapping metrics session (`--trade-from-inception`, default on); early `h` may be `h_mid` until TR/VCR warms; borrow uses spot/zero until first PIT obs. Default view is **Stabilized** (`inception_research_stable`: deadband 0.05 + slew 0.025); toggle to **Current h**. Built for book ∪ production shards ∪ screener B4. `authoritative: false`; never feeds book PnL |
 
 ## Inventory
 
@@ -50,13 +50,30 @@ python scripts/build_bucket4_backtest.py --mode production
 
 ```bash
 python scripts/build_b4_inception_research.py --out-dir data/bucket4_inception_research
+# Also nests inception_research_stable (deadband+slew) by default (--with-stable).
+python scripts/audit_b4_inception_paths.py --fail-on-inception-fail
 ```
+
+Panel sanitize (`scripts/bucket4/bucket4_price_loading.py::sanitize_panel_vs_session_close`) replaces ETF `a_px` when day \|ret\| > 100% **or** early/late `panel/close` median steps >25%, preferring `etf_adj_close` when it removes reverse-split cliffs (APLZ/BEZ/NBIZ) else session `close_price` (QBTZ fabricated scale).
 
 ## Remaining gap
 
-ETF listing → first honest `plan_entry_date` stays on **Inception research** (`scripts/build_b4_inception_research.py` → nested `inception_research` on pair shards).
+ETF listing → first honest `plan_entry_date` stays on the chart **Inception** tab (`scripts/build_b4_inception_research.py` → nested `inception_research` on pair shards).
 
 B4 Pairs book equity / Production CAGR must remain on the plan path only, starting **2026-02-27**.
+
+## Plan-ledger anomalies (ls-algo re-export follow-up)
+
+Dashboard **does not** rewrite production plan ledgers. Pair Report shows a red banner when plan-path sanity fails. As of the Jul 2026 fleet audit:
+
+| ETF | Plan path | Ops action |
+|---|---|---|
+| **CONI** | equity wipe (2026-06-03+) + \|ret\|≈455% on 2026-06-05 | Re-export from ls-algo after price/split repair |
+| **LITZ** | \|ret\|≈105% on 2026-07-09 | Re-export after panel repair |
+| **RKLZ** | \|ret\|≈207% on 2026-06-11 | Re-export after panel repair |
+| SNDQ | WARN \|ret\|≈54% | Monitor |
+
+Inception research for those names can still be sane on the chart tab after local panel sanitize + rebuild.
 
 ## Layer A parity (ops)
 
@@ -64,6 +81,7 @@ B4 Pairs book equity / Production CAGR must remain on the plan path only, starti
 python scripts/b4_layer_a_parity.py --etfs QBTZ,MSTZ,CLSZ,APLZ,SMZ
 # report: data/_layer_a_parity/report.json
 python -m pytest tests/test_b4_layer_a_parity.py -q
+python scripts/audit_b4_inception_paths.py
 ```
 
-Gates: h-definition, realized-h, return corr, enter/cadence/hard_exit Jaccard, equity-norm. Isolation ignores production blacklist exits. Return-corr allows a residual band (`>0.60` when realized-h already matches) for metrics calendar holes (e.g. QBTZ missing `2026-05-26`).
+Gates: h-definition, realized-h, return corr, enter/cadence/hard_exit Jaccard, equity-norm. Isolation ignores production blacklist exits. Return-corr allows a residual band (`>0.60` when realized-h already matches) for metrics calendar holes (e.g. QBTZ missing `2026-05-26`). Nightly soft-gates Layer A tests + inception path audit (`continue-on-error`).

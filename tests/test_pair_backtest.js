@@ -53,6 +53,8 @@ test("chart mapChartDefaultPanel keeps drip distinct from issuer flow", () => {
   assert.equal(Bucket4Backtest.mapChartDefaultPanel("backtest-flow"), "backtest-flow");
   assert.equal(Bucket4Backtest.mapChartDefaultPanel("flow"), "flow");
   assert.equal(Bucket4Backtest.mapChartDefaultPanel("backtest"), "backtest");
+  assert.equal(Bucket4Backtest.mapChartDefaultPanel("optimized"), "optimized");
+  assert.equal(Bucket4Backtest.mapChartDefaultPanel("inception"), "optimized");
   assert.equal(Bucket4Backtest.mapChartDefaultPanel("unknown"), "chart");
 });
 
@@ -75,6 +77,8 @@ test("pairChartResultFromShard scales unit-capital PnL to notional dollars", () 
       total_gross: [0, 0.12, 0.55],
       etf_leg_pnl_cum: [0, 0.08, 0.35],
       underlying_leg_pnl_cum: [0, 0.04, 0.2],
+      etf_gross: [0.5, 0.52, 0.55],
+      underlying_gross: [0.5, 0.53, 0.55],
       borrow_cost_cum: [0, 0.001, 0.002],
       tcost_cum: [0, 0.001, 0.001],
       gross_exposure: [1.0, 1.05, 1.1],
@@ -84,12 +88,34 @@ test("pairChartResultFromShard scales unit-capital PnL to notional dollars", () 
   assert.equal(out.ok, true);
   assert.equal(out.notional, 100000);
   assert.equal(Math.round(out.rows[2].netPnl), 50000);
-  assert.equal(Math.round(out.rows[2].totalGross), 55000);
+  // totalGross = |ETF|+|und| exposure from gross_exposure, not cumulative leg PnL
+  assert.equal(Math.round(out.rows[2].totalGross), 110000);
+  assert.equal(Math.round(out.rows[2].mvEtfAbs), 55000);
+  assert.equal(Math.round(out.rows[2].mvUndAbs), 55000);
   assert.equal(Math.round(out.rows[2].borrow), 200);
   assert.equal(Math.round(out.rows[2].transactionCosts), 100);
   assert.equal(out.rows[2].drawdown, -0.05);
   assert.equal(out.summary.nRebalances, 1);
   assert.equal(out.rebalanceLog.length, 1);
+});
+
+test("pair summary treats a wipeout as -100% without clipping the path", () => {
+  const shard = {
+    daily: {
+      dates: ["2026-01-02", "2026-01-05", "2026-01-06"],
+      equity: [1, 0, 0],
+      ret: [0, -1, 0],
+      drawdown: [0, -1, -1],
+      h_used: [0.5, 0.5, 0.5],
+      rebalance: [1, 0, 0],
+      borrow_cost: [0, 0, 0],
+      rebalance_fee: [0, 0, 0],
+      gross_exposure: [1, 0, 0],
+    },
+  };
+  const out = Bucket4Backtest.pairChartResultFromShard(shard, { gross: 100000 });
+  assert.equal(out.summary.cagr, -1);
+  assert.equal(out.summary.maxDrawdown, -1);
 });
 
 test("authoritative pair shard uses exported dollar ledger fields", () => {
@@ -803,6 +829,45 @@ test("simulateInversePairBacktest uses split-aware TR across reverse split", () 
   if (prev && splitDay) {
     const dayPnl = splitDay.longPnl - prev.longPnl;
     assert.ok(dayPnl > -50000 && dayPnl < 50000, `absurd split-day ETF PnL ${dayPnl}`);
+  }
+});
+
+test("NBIZ-style market-obscured 10x reverse split does not spike ETF exposure", () => {
+  const rows = [
+    { date: "2026-05-28", close_price: 1.305, etf_adj_close: 13.05, shares_outstanding: 11555000, nav: 1.3001, underlying_adj_close: 226.34 },
+    { date: "2026-05-29", close_price: 1.255, etf_adj_close: 12.55, shares_outstanding: 12715000, nav: 1.2456, underlying_adj_close: 231.09 },
+    // Declared 10×, observed ~6.85× (economic day on top of reverse split).
+    { date: "2026-06-01", close_price: 8.600, etf_adj_close: 25.80, shares_outstanding: 36415000, nav: 0.8858, underlying_adj_close: 264.51 },
+    { date: "2026-06-02", close_price: 9.100, etf_adj_close: 27.30, shares_outstanding: 3641500, nav: 0.9122, underlying_adj_close: 260.58 },
+    { date: "2026-07-20", close_price: 12.17, etf_adj_close: 36.51, shares_outstanding: 515494, nav: 12.1979, underlying_adj_close: 182.62 },
+    { date: "2026-07-21", close_price: 22.80, etf_adj_close: 22.80, shares_outstanding: 790494, nav: 22.8638, underlying_adj_close: 216.92 },
+  ];
+  const gross = 100000;
+  const h = 0.5;
+  const targetEtfMv = (gross * h) / (1 + h);
+  const out = simulateInversePairBacktest(rows, {
+    gross,
+    hedgeRatio: h,
+    beta: -2,
+    everyNDays: 100,
+    netGrossTolerancePct: 50,
+    slippageBps: 0,
+    avgBorrowAnnual: 0,
+    splitEvents: [
+      { date: "2026-06-03", mult: 10 },
+      { date: "2026-07-21", mult: 3 },
+    ],
+  });
+  assert.equal(out.ok, true);
+  for (const d of out.daily) {
+    assert.ok(
+      d.mvEtfAbs <= targetEtfMv * 2.5,
+      `${d.date}: ETF MV spike ${d.mvEtfAbs} vs target ${targetEtfMv}`,
+    );
+    assert.ok(
+      d.mvEtfBetaAdj <= targetEtfMv * 2 * 2.5,
+      `${d.date}: |β|·ETF MV spike ${d.mvEtfBetaAdj}`,
+    );
   }
 });
 

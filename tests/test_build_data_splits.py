@@ -294,6 +294,28 @@ def test_filter_skips_continuous_yahoo_mtyy():
     assert filter_splits_needing_close_basis_fix(points, events) == []
 
 
+def test_filter_accepts_nbiz_market_obscured_reverse_split():
+    """NBIZ 1-for-3 on 2026-07-21: close jump ~1.87× (split × inverse day), not ~3×."""
+    points = [
+        (dt.date(2026, 7, 17), 11.50, 11.50),
+        (dt.date(2026, 7, 20), 12.17, 12.17),
+        (dt.date(2026, 7, 21), 22.80, 22.80),
+        (dt.date(2026, 7, 22), 21.40, 21.40),
+    ]
+    events = [(dt.date(2026, 7, 21), 3.0)]
+    # Issuer NAV tracks the same obscured jump; shares do not confirm 3× either.
+    metric_rows = [
+        {"date": "2026-07-20", "nav": 12.10, "shares_outstanding": 2_500_000},
+        {"date": "2026-07-21", "nav": 22.70, "shares_outstanding": 2_600_000},
+    ]
+    verified = filter_splits_needing_close_basis_fix(
+        points,
+        events,
+        metric_rows=metric_rows,
+    )
+    assert verified == [(dt.date(2026, 7, 21), 3.0)]
+
+
 def test_build_market_windows_mtyy_continuous_yahoo_6m():
     points = [
         (dt.date(2025, 12, 3), 64.08, 36.502),

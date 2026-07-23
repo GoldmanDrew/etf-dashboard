@@ -7,6 +7,7 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS) not in sys.path:
@@ -293,6 +294,48 @@ def test_backfill_split_adjusted_nbiz_staggered_close_and_nav(tmp_path: Path):
     assert abs(by_date.loc[date(2026, 5, 29)] - 12.55) < 1e-9
     assert abs(by_date.loc[date(2026, 6, 1)] - 8.60) < 1e-9
     assert abs(by_date.loc[date(2026, 6, 3)] - 9.76) < 1e-9
+
+
+def test_backfill_split_adjusted_nbiz_market_obscured_july_reverse(tmp_path: Path):
+    """Scale pre-07-21 adj ×3 when close jump is split × large inverse day (~1.87×)."""
+    ca = tmp_path / "ca.json"
+    ca.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "type": "reverse_split",
+                        "ticker": "NBIZ",
+                        "execution_date": "2026-07-21",
+                        "ratio_from": 3.0,
+                        "ratio_to": 1.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    df = pd.DataFrame(
+        [
+            {"date": "2026-07-17", "ticker": "NBIZ", "nav": 11.40, "shares_outstanding": 2_500_000,
+             "close_price": 11.50, "etf_adj_close": 11.50},
+            {"date": "2026-07-20", "ticker": "NBIZ", "nav": 12.10, "shares_outstanding": 2_500_000,
+             "close_price": 12.17, "etf_adj_close": 12.17},
+            {"date": "2026-07-21", "ticker": "NBIZ", "nav": 22.70, "shares_outstanding": 2_600_000,
+             "close_price": 22.80, "etf_adj_close": 22.80},
+            {"date": "2026-07-22", "ticker": "NBIZ", "nav": 21.30, "shares_outstanding": 2_600_000,
+             "close_price": 21.40, "etf_adj_close": 21.40},
+        ]
+    )
+    out = iem.backfill_split_adjusted_etf_adj_close(df, corporate_actions_path=ca)
+    by_date = out.set_index("date")["etf_adj_close"].astype(float)
+    assert abs(by_date.loc[date(2026, 7, 17)] - 34.50) < 1e-9
+    assert abs(by_date.loc[date(2026, 7, 20)] - 36.51) < 1e-9
+    assert abs(by_date.loc[date(2026, 7, 21)] - 22.80) < 1e-9
+    # Economic return ≈ −37.6%, not the raw +87% close cliff.
+    ret = by_date.loc[date(2026, 7, 21)] / by_date.loc[date(2026, 7, 20)] - 1.0
+    assert ret == pytest.approx(22.80 / 36.51 - 1.0, abs=1e-9)
+    assert ret < -0.30
 
 
 def test_repair_fabricated_etf_adj_basis_rebuilds_qbtz_corruption(tmp_path: Path):

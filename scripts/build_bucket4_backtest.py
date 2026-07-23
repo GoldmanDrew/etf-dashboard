@@ -145,7 +145,23 @@ def _rebalance_log(bt: pd.DataFrame, max_rows: int = 160) -> list[dict]:
     return out
 
 
+def _trim_equity_wipeout_tail(bt: pd.DataFrame) -> pd.DataFrame:
+    """Drop flat post-wipeout days so KPIs are not polluted by a dead book."""
+    if bt is None or bt.empty or "rebalance_reason" not in bt.columns:
+        return bt
+    wipe = bt["rebalance_reason"].astype(str).eq("equity_wipeout")
+    if not bool(wipe.any()):
+        return bt
+    cut = int(np.flatnonzero(wipe.to_numpy())[0])
+    trimmed = bt.iloc[: cut + 1].copy()
+    if "equity" in trimmed.columns:
+        trimmed["ret"] = trimmed["equity"].pct_change().fillna(0.0)
+        trimmed["drawdown"] = trimmed["equity"].div(trimmed["equity"].cummax()).sub(1.0)
+    return trimmed
+
+
 def _pair_daily_payload(bt: pd.DataFrame) -> dict:
+    bt = _trim_equity_wipeout_tail(bt)
     a_mv = bt["a_shares"].mul(bt["a_px"]) if {"a_shares", "a_px"}.issubset(bt.columns) else pd.Series(0.0, index=bt.index)
     b_mv = bt["b_shares"].mul(bt["b_px"]) if {"b_shares", "b_px"}.issubset(bt.columns) else pd.Series(0.0, index=bt.index)
     a_pnl_daily = a_mv.shift(1).fillna(a_mv).div(bt["a_px"].shift(1).fillna(bt["a_px"])).mul(bt["a_px"].diff().fillna(0.0))
@@ -154,8 +170,9 @@ def _pair_daily_payload(bt: pd.DataFrame) -> dict:
     und_leg_cum = b_pnl_daily.cumsum()
     borrow_cum = bt["borrow_cost"].cumsum() if "borrow_cost" in bt.columns else pd.Series(0.0, index=bt.index)
     fee_cum = bt["rebalance_fee"].cumsum() if "rebalance_fee" in bt.columns else pd.Series(0.0, index=bt.index)
-    slip_cum = bt["slippage_cost"].cumsum() if "slippage_cost" in bt.columns else pd.Series(0.0, index=bt.index)
-    tcost_cum = fee_cum + slip_cum
+    # rebalance_fee is the engine's all-in transaction cost (commission +
+    # slippage).  Adding slippage_cost again overstates displayed costs.
+    tcost_cum = fee_cum
     equity0 = float(bt["equity"].iloc[0]) if len(bt) else 0.0
     return {
         "dates": [pd.Timestamp(d).strftime("%Y-%m-%d") for d in bt.index],
@@ -471,6 +488,8 @@ def run_pair_backtest_for_row(
     target_gross_by_date: dict | pd.Series | None = None,
     h_target_by_date: dict | pd.Series | None = None,
     capital_mode: str = "unit_equity",
+    stop_on_equity_wipeout: bool = True,
+    h_stabilizer: dict | None = None,
 ) -> tuple[pd.DataFrame | None, pd.Series | None, pd.DataFrame | None, str]:
     etf = _norm(row.get("ETF"))
     und = _norm(row.get("Underlying"))
@@ -524,6 +543,10 @@ def run_pair_backtest_for_row(
         force_rb = rb
         if rb_diag is None or rb_diag.empty:
             rb_diag = pd.DataFrame({"date": rb})
+    if h_stabilizer:
+        from bucket4.bucket4_h_stability import stabilize_h_targets
+
+        h_daily = stabilize_h_targets(h_daily, rb, h_stabilizer)
     eng = _pair_engine_kwargs(policy, row, cal, hist)
     # Sleeve-dollar Layer A: unit NAV seed with production gross pins.
     init_cap = float(bt_cfg.get("initial_capital", 1.0))
@@ -542,6 +565,7 @@ def run_pair_backtest_for_row(
         target_gross_by_date=target_gross_by_date,
         h_target_by_date=h_target_by_date,
         capital_mode=str(capital_mode or "unit_equity"),
+        stop_on_equity_wipeout=bool(stop_on_equity_wipeout),
         **eng,
     )
     return bt, h_daily, rb_diag, "ok"
@@ -561,6 +585,7 @@ def pair_shard_from_result(
     generated_at_utc: str | None = None,
     policy_version: str | None = None,
     price_rows: int = 0,
+    trim_wipeout_tail: bool = True,
 ) -> dict:
     if bt is None or h_daily is None or rb_diag is None or status != "ok":
         summary = _empty_pair_summary(row, status=status, gate_reason=gate_reason, price_rows=price_rows)
@@ -579,9 +604,10 @@ def pair_shard_from_result(
             "daily": {"dates": []},
             "rebalance_log": [],
         }
+    bt_use = _trim_equity_wipeout_tail(bt) if trim_wipeout_tail else bt
     summary = _pair_summary(
         row,
-        bt,
+        bt_use,
         h_daily,
         rb_diag,
         production_weight=production_weight,
@@ -589,6 +615,13 @@ def pair_shard_from_result(
         in_production_book=in_production_book,
         gate_reason=gate_reason,
     )
+    if (
+        len(bt_use)
+        and "rebalance_reason" in bt_use.columns
+        and str(bt_use["rebalance_reason"].iloc[-1] or "") == "equity_wipeout"
+    ):
+        summary["exit_reason"] = "equity_wipeout"
+        summary["exit_date"] = pd.Timestamp(bt_use.index[-1]).strftime("%Y-%m-%d")
     return {
         "schema": PAIR_SCHEMA,
         "generated_at_utc": generated_at_utc,
@@ -604,8 +637,8 @@ def pair_shard_from_result(
         "latest_date": summary["latest_date"],
         "summary": summary,
         "screener": _screener_payload(row),
-        "daily": _pair_daily_payload(bt),
-        "rebalance_log": _rebalance_log(bt),
+        "daily": _pair_daily_payload(bt_use),
+        "rebalance_log": _rebalance_log(bt_use),
     }
 
 

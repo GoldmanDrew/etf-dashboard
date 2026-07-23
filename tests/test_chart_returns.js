@@ -111,3 +111,20 @@ test("genuine LETF drawdown is not mistaken for a split", () => {
   });
   assert.ok(Math.abs(ret - ((419.19 / 999.25) - 1)) < 1e-6);
 });
+
+test("SNDQ-style reverse-split window does not invent a forward 1/N repair", () => {
+  // Yahoo 3M path ~274 → 28.6 looks like 0.1 (1-for-10 forward) but is a
+  // reverse-split LETF grind; stored return already matches the chart (~-90%).
+  const stored = 28.6 / 274.399994 - 1;
+  const ret = splitAwareWindowPriceReturn({
+    startClose: 274.399994,
+    endClose: 28.6,
+    splitFactorStartToEnd: 1,
+    fallback: stored,
+    splitEvents: [{ date: "2026-07-21", mult: 10 }],
+    startDate: "2026-04-23",
+    endDate: "2026-07-21",
+  });
+  assert.ok(Math.abs(ret - stored) < 1e-9, `got ${ret}, want ${stored}`);
+  assert.ok(ret < -0.85, "must stay near the chart drawdown, not +4%");
+});

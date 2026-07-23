@@ -130,14 +130,40 @@
   }
 
   /**
+   * True when a reverse split (price mult > 1) falls inside [startDate, endDate].
+   * Used to block forward-cliff inference that misreads LETF grind + reverse-split
+   * level changes as a 1-for-N forward split (SNDQ 3M → false +4%).
+   */
+  function windowHasReverseSplit(splitEvents, startDate, endDate) {
+    if (!Array.isArray(splitEvents) || !splitEvents.length) return false;
+    const a = String(startDate || "").slice(0, 10);
+    const b = String(endDate || "").slice(0, 10);
+    if (!a || !b) return false;
+    for (const ev of splitEvents) {
+      const d = String(ev?.date || "").slice(0, 10);
+      const m = Number(ev?.mult);
+      if (!d || !(m > 1.05)) continue;
+      if (d >= a && d <= b) return true;
+    }
+    return false;
+  }
+
+  /**
    * Recompute window price return on end-close basis using corp/Yahoo split events.
    * Repairs builds where a forward-split cliff was left unadjusted (KORU 20-for-1).
+   *
+   * When ``reverseSplitInWindow`` (or detectable from ``splitEvents``) is set,
+   * never infer a 1/N forward factor — trust ``fallback`` / raw path instead.
    */
   function splitAwareWindowPriceReturn({
     startClose,
     endClose,
     splitFactorStartToEnd,
     fallback,
+    reverseSplitInWindow,
+    splitEvents,
+    startDate,
+    endDate,
   }) {
     const start = Number(startClose);
     const end = Number(endClose);
@@ -146,6 +172,12 @@
     let factor = Number(splitFactorStartToEnd);
     if (!(Number.isFinite(factor) && factor > 0)) factor = 1;
     const raw = end / start;
+    const hasReverse = reverseSplitInWindow === true
+      || windowHasReverseSplit(splitEvents, startDate, endDate);
+    if (hasReverse) {
+      if (Number.isFinite(stored)) return stored;
+      return raw - 1;
+    }
     // When stored factor is 1 but the raw path looks like a discrete split cliff,
     // infer the whitelist ratio (guards fresh forward splits Yahoo has not tagged).
     if (Math.abs(factor - 1) <= 1e-9 && Math.abs(raw - 1) > 0.45) {
@@ -163,6 +195,7 @@
     liveTrReturnFromWindow,
     liveAdjReturnFromWindow,
     splitAdjustedDividendYield,
+    windowHasReverseSplit,
     splitAwareWindowPriceReturn,
   };
 });

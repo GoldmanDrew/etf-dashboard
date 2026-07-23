@@ -49,6 +49,7 @@ def run_bucket4_backtest_dynamic_h(
     target_gross_by_date: pd.Series | dict | None = None,
     h_target_by_date: pd.Series | dict | None = None,
     capital_mode: str = "unit_equity",
+    stop_on_equity_wipeout: bool = True,
 ) -> pd.DataFrame:
     """Mark-to-market two-leg short book with dynamic hedge *h* on rebalance days.
 
@@ -62,6 +63,10 @@ def run_bucket4_backtest_dynamic_h(
 
     ``h_target_by_date``: optional override of policy h on specific sessions
     (typically production h_used on enter/cadence days).
+
+    ``stop_on_equity_wipeout``: when True (default), flatten and halt once marked
+    equity ≤ 0. When False, keep holding shares through negative equity and only
+    resize again after equity recovers above 0 (research “path to today”).
     """
     h_base = float(opt2_h_base if opt2_h_base is not None else V6_OPT2_H_BASE)
     sleeve_mode = str(capital_mode or "unit_equity").lower() == "sleeve_dollars"
@@ -185,8 +190,15 @@ def run_bucket4_backtest_dynamic_h(
 
         # Mark-to-market wipeout (e.g. fabricated split cliff on a short): flatten
         # once and stop the cadence clock so we do not emit ghost rebalances on a
-        # zero book with frozen negative equity.
-        if entered and not exited and equity <= 0.0 and (abs(a_sh) > 0.0 or abs(b_sh) > 0.0):
+        # zero book with frozen negative equity. Disabled for research paths that
+        # want to keep marking through a margin-call and resume after recovery.
+        if (
+            stop_on_equity_wipeout
+            and entered
+            and not exited
+            and equity <= 0.0
+            and (abs(a_sh) > 0.0 or abs(b_sh) > 0.0)
+        ):
             target_a_pos, target_b_pos = 0.0, 0.0
             delta_a, delta_b = target_a_pos - a_pos_notional, target_b_pos - b_pos_notional
             traded = abs(delta_a) + abs(delta_b)
@@ -242,8 +254,12 @@ def run_bucket4_backtest_dynamic_h(
 
         scheduled_today = bool(row["rebalance"]) and not exited and not is_exit_day
         actually_rebal = scheduled_today
+        # Negative equity: keep shares; do not resize to a non-positive gross.
+        if (not stop_on_equity_wipeout) and entered and equity <= 0.0 and scheduled_today:
+            actually_rebal = False
+            rebalance_reason = "skip_negative_equity"
         drift_share = float("nan")
-        if scheduled_today and drift_thr is not None and not first_row and entered and not forced_today:
+        if scheduled_today and drift_thr is not None and not first_row and entered and not forced_today and actually_rebal:
             denom_target = 1.0 + h_target * beta_inv_abs
             target_a_share = 1.0 / denom_target if denom_target > 1e-12 else 0.5
             cur_gross = abs(a_pos_notional) + abs(b_pos_notional)
@@ -299,7 +315,12 @@ def run_bucket4_backtest_dynamic_h(
 
             # Non-positive equity → flatten and stop (unit-equity path used to keep
             # scheduling cadence_resize on a zero book after a wipe).
-            if (not sleeve_mode) and target_gross <= 0.0 and entered:
+            if (
+                stop_on_equity_wipeout
+                and (not sleeve_mode)
+                and target_gross <= 0.0
+                and entered
+            ):
                 target_a_pos, target_b_pos = 0.0, 0.0
                 delta_a, delta_b = target_a_pos - a_pos_notional, target_b_pos - b_pos_notional
                 traded = abs(delta_a) + abs(delta_b)
@@ -315,6 +336,9 @@ def run_bucket4_backtest_dynamic_h(
                 rebalance_reason = "equity_wipeout"
                 exited = True
                 entered = False
+            elif (not stop_on_equity_wipeout) and (not sleeve_mode) and target_gross <= 0.0 and entered:
+                # Hold shares; do not invent a zero-gross resize.
+                rebalance_reason = "skip_negative_equity"
             else:
                 denom = 1.0 + h_target * beta_inv_abs
                 n_a = target_gross / denom if denom > 1e-12 else 0.5 * target_gross
