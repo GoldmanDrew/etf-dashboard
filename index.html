@@ -1574,6 +1574,257 @@
     .news-toolbar-right { margin-left: 0; width: 100%; }
     .news-search { min-width: 0; width: 100%; }
   }
+
+  /* ── B1 Underlying Views ─────────────────── */
+  .b1-views-page {
+    padding: 22px 28px 48px;
+    max-width: 1180px;
+    margin: 0 auto;
+    background:
+      radial-gradient(ellipse 80% 40% at 10% -10%, rgba(59,130,246,0.10), transparent 55%),
+      radial-gradient(ellipse 60% 30% at 90% 0%, rgba(6,182,212,0.06), transparent 50%),
+      var(--bg-primary);
+    min-height: calc(100vh - 56px);
+  }
+  .b1-views-header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .b1-views-header-left {
+    display: flex; flex-direction: column; gap: 8px; min-width: 0;
+  }
+  .b1-views-nav {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .b1-views-title {
+    margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.4px;
+    color: var(--text-primary); font-family: 'DM Sans', sans-serif;
+  }
+  .b1-views-badge {
+    display: inline-flex; align-items: center;
+    padding: 2px 8px; border-radius: 999px;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
+    color: var(--accent-amber);
+    background: rgba(245,158,11,0.12);
+    border: 1px solid rgba(245,158,11,0.35);
+  }
+  .b1-views-lede {
+    margin: 0; max-width: 640px;
+    font-size: 13px; line-height: 1.5; color: var(--text-secondary);
+  }
+  .b1-views-actions {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .b1-views-save {
+    padding: 8px 16px; border-radius: 8px; font-size: 12px; font-weight: 700;
+    border: 1px solid var(--border); background: var(--bg-card);
+    color: var(--text-secondary); cursor: pointer; transition: all 0.15s;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .b1-views-save:hover:not(:disabled) {
+    border-color: var(--accent-blue); color: var(--text-primary);
+  }
+  .b1-views-save:disabled { opacity: 0.45; cursor: not-allowed; }
+  .b1-views-save.dirty {
+    background: var(--accent-blue); border-color: var(--accent-blue); color: #fff;
+    box-shadow: 0 0 0 1px rgba(59,130,246,0.25);
+  }
+  .b1-views-save.dirty:hover:not(:disabled) { filter: brightness(1.06); }
+  .b1-views-discard {
+    padding: 8px 12px; border-radius: 8px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text-muted); cursor: pointer; font-family: 'DM Sans', sans-serif;
+  }
+  .b1-views-discard:hover { color: var(--text-primary); border-color: var(--text-muted); }
+  .b1-views-status {
+    margin-bottom: 12px; padding: 10px 14px; border-radius: 8px;
+    font-size: 12px; font-family: 'JetBrains Mono', monospace;
+  }
+  .b1-views-status.ok {
+    background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.28);
+    color: var(--positive);
+  }
+  .b1-views-status.err {
+    background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.28);
+    color: var(--accent-red);
+  }
+  .b1-views-toolbar {
+    display: flex; align-items: center; flex-wrap: wrap;
+    gap: 10px 12px; margin-bottom: 14px;
+    padding: 12px 14px; border-radius: 10px;
+    background: var(--bg-card); border: 1px solid var(--border);
+  }
+  .b1-views-search {
+    flex: 1; min-width: 180px; max-width: 280px;
+    padding: 8px 12px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--bg-input);
+    color: var(--text-primary); font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+    outline: none; transition: border-color 0.12s;
+  }
+  .b1-views-search::placeholder { color: var(--text-muted); }
+  .b1-views-search:focus { border-color: var(--accent-blue); }
+  .b1-views-filters { display: flex; gap: 4px; flex-wrap: wrap; }
+  .b1-views-filter {
+    padding: 5px 12px; border-radius: 999px; font-size: 11px; font-weight: 600;
+    border: 1px solid var(--border); background: var(--bg-input);
+    color: var(--text-secondary); cursor: pointer; transition: all 0.12s;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .b1-views-filter:hover { color: var(--text-primary); border-color: var(--border-active); }
+  .b1-views-filter.active {
+    background: var(--accent-blue); border-color: var(--accent-blue); color: #fff;
+  }
+  .b1-views-count {
+    margin-left: auto;
+    font-size: 11px; color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .b1-views-count strong { color: var(--text-secondary); font-weight: 600; }
+  .b1-views-help {
+    margin-bottom: 14px;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg-card); font-size: 12px; color: var(--text-muted);
+  }
+  .b1-views-help > summary {
+    padding: 10px 14px; cursor: pointer; font-weight: 600;
+    color: var(--text-secondary); list-style-position: outside;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .b1-views-help[open] > summary { border-bottom: 1px solid var(--border); }
+  .b1-views-help-body { padding: 12px 14px 14px; }
+  .b1-views-help-body p {
+    margin: 0 0 10px; font-size: 12px; line-height: 1.5; color: var(--text-secondary);
+  }
+  .b1-views-help-body code {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--accent-cyan);
+    background: rgba(6,182,212,0.08); padding: 1px 5px; border-radius: 4px;
+  }
+  .b1-views-ladder {
+    width: auto; min-width: 280px; border-collapse: collapse;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  }
+  .b1-views-ladder th, .b1-views-ladder td {
+    padding: 5px 12px 5px 0; text-align: left; border-bottom: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+  .b1-views-ladder th {
+    color: var(--text-muted); text-transform: uppercase;
+    letter-spacing: 0.4px; font-size: 10px; font-weight: 600;
+  }
+  .b1-views-ladder tr:last-child td { border-bottom: none; }
+  .b1-views-table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: var(--bg-secondary);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.22);
+  }
+  .b1-views-table {
+    width: 100%; border-collapse: collapse;
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  }
+  .b1-views-table thead th {
+    position: sticky; top: 0; z-index: 2;
+    padding: 11px 14px; text-align: left;
+    background: #162033;
+    color: var(--text-muted); text-transform: uppercase;
+    letter-spacing: 0.45px; font-size: 10px; font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .b1-views-table thead th.num { text-align: right; }
+  .b1-views-table tbody td {
+    padding: 11px 14px; text-align: left;
+    border-bottom: 1px solid rgba(30,45,70,0.85);
+    color: var(--text-secondary); vertical-align: middle;
+  }
+  .b1-views-table tbody td.num { text-align: right; }
+  .b1-views-table tbody tr:nth-child(even) td { background: rgba(255,255,255,0.015); }
+  .b1-views-table tbody tr:hover td { background: var(--bg-card-hover); }
+  .b1-views-table tbody tr.dirty td {
+    background: rgba(56,189,248,0.06);
+  }
+  .b1-views-table tbody tr.dirty:hover td {
+    background: rgba(56,189,248,0.10);
+  }
+  .b1-views-table tbody tr:last-child td { border-bottom: none; }
+  .b1-views-und {
+    font-weight: 700; color: var(--text-primary); font-size: 13px;
+  }
+  .b1-views-und-tag {
+    margin-left: 8px; font-size: 10px; font-weight: 500;
+    color: var(--text-muted);
+  }
+  .b1-views-sleeves { display: flex; flex-wrap: wrap; gap: 4px 8px; max-width: 300px; }
+  .b1-views-sleeves .sym-link-btn {
+    text-decoration: none; font-size: 11px;
+    padding: 1px 0;
+  }
+  .b1-views-sleeves .sym-link-btn:hover { text-decoration: underline; }
+  .b1-views-score {
+    display: inline-flex; align-items: center; gap: 2px;
+    padding: 2px; border-radius: 8px;
+    background: var(--bg-input); border: 1px solid var(--border);
+  }
+  .b1-views-score-btn {
+    width: 28px; height: 26px; padding: 0;
+    border: none; border-radius: 6px;
+    background: transparent; color: var(--text-muted);
+    font-size: 14px; font-weight: 700; line-height: 1;
+    cursor: pointer; font-family: 'DM Sans', sans-serif;
+    transition: all 0.12s;
+  }
+  .b1-views-score-btn:hover:not(:disabled) {
+    background: var(--bg-card); color: var(--text-primary);
+  }
+  .b1-views-score-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .b1-views-score-val {
+    min-width: 28px; text-align: center; font-weight: 700; font-size: 13px;
+    color: var(--text-primary);
+  }
+  .b1-views-score-val.pos { color: var(--positive); }
+  .b1-views-score-val.neg { color: var(--negative); }
+  .b1-views-chip {
+    display: inline-flex; align-items: center;
+    padding: 3px 9px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; white-space: nowrap;
+    background: rgba(86,101,128,0.14); color: var(--text-muted);
+    border: 1px solid rgba(86,101,128,0.25);
+  }
+  .b1-views-chip.pos {
+    background: rgba(16,185,129,0.10); color: var(--positive);
+    border-color: rgba(16,185,129,0.28);
+  }
+  .b1-views-chip.neg {
+    background: rgba(239,68,68,0.10); color: var(--negative);
+    border-color: rgba(239,68,68,0.28);
+  }
+  .b1-views-h { font-weight: 600; color: var(--text-primary); }
+  .b1-views-h.pos { color: var(--positive); }
+  .b1-views-h.neg { color: var(--negative); }
+  .b1-views-updated { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+  .b1-views-updated.unsaved { color: var(--accent-cyan); font-weight: 600; }
+  .b1-views-note {
+    width: 100%; min-width: 160px; max-width: 320px;
+    padding: 7px 10px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--bg-input);
+    color: var(--text-primary); font-size: 12px;
+    font-family: 'DM Sans', sans-serif;
+    outline: none; transition: border-color 0.12s;
+  }
+  .b1-views-note::placeholder { color: var(--text-muted); }
+  .b1-views-note:focus { border-color: var(--accent-blue); }
+  .b1-views-empty {
+    text-align: center; padding: 36px 16px !important;
+    color: var(--text-muted); font-family: 'DM Sans', sans-serif;
+  }
+  @media (max-width: 768px) {
+    .b1-views-page { padding: 16px 12px 36px; }
+    .b1-views-count { margin-left: 0; width: 100%; }
+    .b1-views-search { max-width: none; }
+  }
 </style>
 </head>
 <body>
@@ -2087,9 +2338,9 @@ function Bucket1ViewsPage({ records, onNavigateToChart, onBack }) {
 
   const dirtyCount = Object.keys(draft).length;
   const nActive = rows.filter((r) => r.score !== 0).length;
-  const scoreCls = (score) => {
-    if (score <= -1) return 'val-negative';
-    if (score >= 1) return 'val-positive';
+  const polarity = (score) => {
+    if (score <= -1) return 'neg';
+    if (score >= 1) return 'pos';
     return '';
   };
 
@@ -2170,73 +2421,93 @@ function Bucket1ViewsPage({ records, onNavigateToChart, onBack }) {
   };
 
   return (
-    <div className="info-page" style={{ padding: '24px 32px', maxWidth: 1100 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
-        <button type="button" className="topbar-btn" onClick={onBack}>← Dashboard</button>
-        <h2 style={{ margin: 0, fontSize: 20 }}>B1 Underlying Views</h2>
-        <span className="badge" title="Research/ops overlay — not wired to production sizing">research</span>
-        <button
-          type="button"
-          className="topbar-btn"
-          disabled={dirtyCount === 0 || saveState === 'saving'}
-          onClick={saveViews}
-          title="Write scores to config/bucket1_underlying_views.yml and refresh data/bucket1_underlying_views.json"
-        >
-          {saveState === 'saving' ? 'Saving…' : `Save${dirtyCount ? ` (${dirtyCount})` : ''}`}
-        </button>
-        {dirtyCount > 0 && (
-          <button type="button" className="chart-view-btn" onClick={() => { setDraft({}); setSaveState(''); }}>
-            Discard
+    <div className="b1-views-page">
+      <div className="b1-views-header">
+        <div className="b1-views-header-left">
+          <div className="b1-views-nav">
+            <button type="button" className="topbar-btn" onClick={onBack}>← Dashboard</button>
+            <h2 className="b1-views-title">B1 Underlying Views</h2>
+            <span className="b1-views-badge" title="Research/ops overlay — not wired to production sizing">research</span>
+          </div>
+          <p className="b1-views-lede">
+            Score each underlying (−2…+2); hedge coverage <strong>h</strong> updates live.
+            Score 0 keeps h = 1. Not wired to production sizing yet.
+            {payload?.generated_at ? (
+              <span style={{ color: 'var(--text-muted)' }}> · artifact {payload.generated_at}</span>
+            ) : null}
+            {loadError ? (
+              <span style={{ color: 'var(--warning)' }}>
+                {' '}· views file missing; using defaults + live B1 list
+              </span>
+            ) : null}
+          </p>
+        </div>
+        <div className="b1-views-actions">
+          {dirtyCount > 0 && (
+            <button
+              type="button"
+              className="b1-views-discard"
+              onClick={() => { setDraft({}); setSaveState(''); }}
+            >
+              Discard
+            </button>
+          )}
+          <button
+            type="button"
+            className={cls('b1-views-save', dirtyCount > 0 && 'dirty')}
+            disabled={dirtyCount === 0 || saveState === 'saving'}
+            onClick={saveViews}
+            title="Write scores to config/bucket1_underlying_views.yml and refresh data/bucket1_underlying_views.json"
+          >
+            {saveState === 'saving' ? 'Saving…' : `Save${dirtyCount ? ` (${dirtyCount})` : ''}`}
           </button>
-        )}
+        </div>
       </div>
-      <p style={{ color: 'var(--text-muted)', fontSize: 13, lineHeight: 1.5, marginTop: 0 }}>
-        Toggle score (−2…+2) on the <strong>underlying</strong>; <code>h</code> updates live.
-        <strong> Save</strong> writes <code>config/bucket1_underlying_views.yml</code> via
-        <code> POST /api/bucket1-views</code> (needs <code>python run.py</code>).
-        Score <code>0</code> → <code>h = 1</code>. Not wired to production sizing yet.
-        {payload?.generated_at ? ` · artifact ${payload.generated_at}` : ''}
-        {loadError ? ` · views file missing (${loadError}); using defaults + live B1 list` : ''}
-      </p>
+
       {saveState && (
-        <div
-          className={saveState.startsWith('error') ? 'error-banner' : 'scenario-warning'}
-          style={{ marginBottom: 12 }}
-        >
+        <div className={cls('b1-views-status', saveState.startsWith('error') ? 'err' : 'ok')}>
           {saveState}
         </div>
       )}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' }}>
+
+      <div className="b1-views-toolbar">
         <input
-          className="search-input"
-          style={{ maxWidth: 220 }}
+          className="b1-views-search"
           placeholder="Search und / sleeve…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        {[
-          { key: 'all', label: 'All' },
-          { key: 'b1', label: 'In B1' },
-          { key: 'active', label: 'Active scores' },
-        ].map((f) => (
-          <button
-            key={f.key}
-            type="button"
-            className={cls('chart-view-btn', filter === f.key && 'active')}
-            onClick={() => setFilter(f.key)}
-          >
-            {f.label}
-          </button>
-        ))}
-        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-          {rows.length} shown · {nActive} non-zero in view
-          {dirtyCount ? ` · ${dirtyCount} unsaved` : ''}
+        <div className="b1-views-filters">
+          {[
+            { key: 'all', label: 'All' },
+            { key: 'b1', label: 'In B1' },
+            { key: 'active', label: 'Active scores' },
+          ].map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              className={cls('b1-views-filter', filter === f.key && 'active')}
+              onClick={() => setFilter(f.key)}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <span className="b1-views-count">
+          <strong>{rows.length}</strong> shown · <strong>{nActive}</strong> non-zero
+          {dirtyCount ? <> · <strong>{dirtyCount}</strong> unsaved</> : null}
         </span>
       </div>
-      <details className="decay-methodology" style={{ marginBottom: 14 }}>
-        <summary>Score → h ladder</summary>
-        <div className="dm-body">
-          <table className="scenario-table">
+
+      <details className="b1-views-help">
+        <summary>Score → h ladder &amp; save notes</summary>
+        <div className="b1-views-help-body">
+          <p>
+            Save writes <code>config/bucket1_underlying_views.yml</code> via
+            <code> POST /api/bucket1-views</code> (needs <code>python run.py</code>, not plain http.server).
+            Lower h → residual short und; higher h → residual long und.
+          </p>
+          <table className="b1-views-ladder">
             <thead><tr><th>Score</th><th>Meaning</th><th>h</th></tr></thead>
             <tbody>
               {[-2, -1, 0, 1, 2].map((s) => (
@@ -2248,82 +2519,96 @@ function Bucket1ViewsPage({ records, onNavigateToChart, onBack }) {
               ))}
             </tbody>
           </table>
-          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 0 }}>
+          <p style={{ marginTop: 10, marginBottom: 0, color: 'var(--text-muted)' }}>
             Bounds [{payload?.h_min ?? 0.25}, {payload?.h_max ?? 1.75}].
-            Lower h → residual short und; higher h → residual long und. Not production-wired.
           </p>
         </div>
       </details>
-      <table className="scenario-table">
-        <thead>
-          <tr>
-            <th>Underlying</th>
-            <th>B1 sleeves</th>
-            <th>Score</th>
-            <th>View</th>
-            <th title="Long und $ per $1 short ETF">h</th>
-            <th>Updated</th>
-            <th>Note</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 ? (
-            <tr><td colSpan={7} style={{ color: 'var(--text-muted)' }}>No underlyings match.</td></tr>
-          ) : rows.map((r) => (
-            <tr key={r.underlying} style={r.dirty ? { outline: '1px solid rgba(56,189,248,0.35)' } : undefined}>
-              <td>
-                <strong>{r.underlying}</strong>
-                {!r.in_bucket1 && <span style={{ marginLeft: 6, fontSize: 11, color: 'var(--text-muted)' }}>not in B1</span>}
-              </td>
-              <td style={{ maxWidth: 280 }}>
-                {r.sleeves.length === 0 ? '—' : r.sleeves.map((sym, i) => (
-                  <span key={sym}>
-                    {i > 0 ? ', ' : ''}
-                    <button
-                      type="button"
-                      className="sym-link-btn"
-                      onClick={() => onNavigateToChart && onNavigateToChart(sym)}
-                    >
-                      {sym}
-                    </button>
-                  </span>
-                ))}
-              </td>
-              <td className={scoreCls(r.score)} style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
-                <button
-                  type="button"
-                  className="chart-view-btn"
-                  style={{ padding: '0 8px', minWidth: 28 }}
-                  disabled={r.score <= -2}
-                  onClick={() => bumpScore(r.underlying, -1)}
-                  title="More short / lower h"
-                >−</button>
-                <span style={{ display: 'inline-block', minWidth: 28, textAlign: 'center' }}>{r.score}</span>
-                <button
-                  type="button"
-                  className="chart-view-btn"
-                  style={{ padding: '0 8px', minWidth: 28 }}
-                  disabled={r.score >= 2}
-                  onClick={() => bumpScore(r.underlying, 1)}
-                  title="More long / higher h"
-                >+</button>
-              </td>
-              <td>{r.score_label}</td>
-              <td className={scoreCls(r.score)}>{Number(r.h).toFixed(3)}</td>
-              <td style={{ whiteSpace: 'nowrap' }}>{r.dirty ? 'unsaved' : (r.updated || '—')}</td>
-              <td style={{ maxWidth: 320 }}>
-                <input
-                  className="search-input"
-                  style={{ width: '100%', fontSize: 12 }}
-                  value={r.note || ''}
-                  placeholder="optional note"
-                  onChange={(e) => setNote(r.underlying, e.target.value)}
-                />
-              </td>
+
+      <div className="b1-views-table-wrap">
+        <table className="b1-views-table">
+          <thead>
+            <tr>
+              <th>Underlying</th>
+              <th>B1 sleeves</th>
+              <th>Score</th>
+              <th>View</th>
+              <th className="num" title="Long und $ per $1 short ETF">h</th>
+              <th>Updated</th>
+              <th>Note</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr><td colSpan={7} className="b1-views-empty">No underlyings match.</td></tr>
+            ) : rows.map((r) => {
+              const pol = polarity(r.score);
+              return (
+                <tr key={r.underlying} className={r.dirty ? 'dirty' : undefined}>
+                  <td>
+                    <span className="b1-views-und">{r.underlying}</span>
+                    {!r.in_bucket1 && <span className="b1-views-und-tag">not in B1</span>}
+                  </td>
+                  <td>
+                    {r.sleeves.length === 0 ? (
+                      <span style={{ color: 'var(--text-muted)' }}>—</span>
+                    ) : (
+                      <div className="b1-views-sleeves">
+                        {r.sleeves.map((sym) => (
+                          <button
+                            key={sym}
+                            type="button"
+                            className="sym-link-btn"
+                            onClick={() => onNavigateToChart && onNavigateToChart(sym)}
+                          >
+                            {sym}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    <div className="b1-views-score">
+                      <button
+                        type="button"
+                        className="b1-views-score-btn"
+                        disabled={r.score <= -2}
+                        onClick={() => bumpScore(r.underlying, -1)}
+                        title="More short / lower h"
+                      >−</button>
+                      <span className={cls('b1-views-score-val', pol)}>{r.score}</span>
+                      <button
+                        type="button"
+                        className="b1-views-score-btn"
+                        disabled={r.score >= 2}
+                        onClick={() => bumpScore(r.underlying, 1)}
+                        title="More long / higher h"
+                      >+</button>
+                    </div>
+                  </td>
+                  <td>
+                    <span className={cls('b1-views-chip', pol)}>{r.score_label}</span>
+                  </td>
+                  <td className={cls('num', 'b1-views-h', pol)}>{Number(r.h).toFixed(3)}</td>
+                  <td>
+                    <span className={cls('b1-views-updated', r.dirty && 'unsaved')}>
+                      {r.dirty ? 'unsaved' : (r.updated || '—')}
+                    </span>
+                  </td>
+                  <td>
+                    <input
+                      className="b1-views-note"
+                      value={r.note || ''}
+                      placeholder="optional note"
+                      onChange={(e) => setNote(r.underlying, e.target.value)}
+                    />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
