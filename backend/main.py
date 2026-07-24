@@ -813,6 +813,87 @@ def trigger_github_sync():
     return result
 
 
+@app.get("/api/bucket1-views")
+def get_bucket1_views():
+    """Return current B1 underlying views artifact (rebuilds from YAML if needed)."""
+    import json
+    import sys
+
+    root = Path(__file__).resolve().parent.parent
+    scripts = root / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    from bucket1_underlying_views import (  # type: ignore
+        DEFAULT_ARTIFACT,
+        load_config,
+        write_views_artifact,
+    )
+
+    cfg = load_config()
+    art = DEFAULT_ARTIFACT
+    if art.is_file():
+        try:
+            return json.loads(art.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return write_views_artifact(config=cfg, records=None)
+
+
+@app.post("/api/bucket1-views")
+async def save_bucket1_views(body: dict):
+    """Persist B1 view scores to config YAML and refresh the JSON artifact.
+
+    Body: ``{ "views": { "NVDA": { "score": 2, "note": "..." }, ... } }``
+    Score 0 with empty note removes the underlying from the config.
+    """
+    import json
+    import sys
+
+    root = Path(__file__).resolve().parent.parent
+    scripts = root / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    from bucket1_underlying_views import (  # type: ignore
+        save_views_config,
+        write_views_artifact,
+    )
+
+    views = body.get("views") if isinstance(body, dict) else None
+    if views is not None and not isinstance(views, dict):
+        raise HTTPException(status_code=400, detail="views must be an object keyed by underlying")
+    try:
+        cfg = save_views_config(views or {}, replace=True)
+        records = []
+        for sym, rec in RECORDS.items():
+            records.append(
+                {
+                    "symbol": str(getattr(rec, "symbol", sym) or sym).upper(),
+                    "underlying": str(getattr(rec, "underlying", "") or "").upper(),
+                    "bucket": str(getattr(rec, "bucket", "") or ""),
+                }
+            )
+        if not records:
+            dash = root / "data" / "dashboard_data.json"
+            if dash.is_file():
+                try:
+                    payload = json.loads(dash.read_text(encoding="utf-8"))
+                    records = payload.get("records") or payload.get("rows") or []
+                except (OSError, json.JSONDecodeError):
+                    records = []
+        artifact = write_views_artifact(config=cfg, records=records)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("bucket1-views save failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "n_active_views": artifact.get("n_active_views"),
+        "generated_at": artifact.get("generated_at"),
+        "config_path": "config/bucket1_underlying_views.yml",
+        "artifact_path": "data/bucket1_underlying_views.json",
+        "by_underlying": artifact.get("by_underlying"),
+    }
+
+
 @app.get("/api/sync/status")
 def get_github_sync_status():
     """Get the last GitHub sync result."""

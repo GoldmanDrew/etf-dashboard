@@ -281,6 +281,53 @@
     margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--border);
   }
 
+  /* IPO float unlock strip (DetailRow + Stats) */
+  .ipo-unlock-strip {
+    border-left: 3px solid var(--accent-amber);
+    background: rgba(245, 158, 11, 0.06);
+    border-top: 1px solid rgba(245, 158, 11, 0.18);
+    border-right: 1px solid rgba(245, 158, 11, 0.12);
+    border-bottom: 1px solid rgba(245, 158, 11, 0.12);
+    border-radius: 0 6px 6px 0;
+    padding: 8px 12px 9px;
+    margin-bottom: 12px;
+  }
+  .ipo-unlock-strip.ipo-unlock-stats { margin-bottom: 10px; }
+  .ipo-unlock-head {
+    display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px;
+    margin-bottom: 6px;
+  }
+  .ipo-unlock-title {
+    font-size: 12px; font-weight: 700; color: var(--accent-amber);
+    letter-spacing: 0.2px;
+  }
+  .ipo-unlock-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--text-secondary);
+  }
+  .ipo-unlock-metrics {
+    display: flex; flex-wrap: wrap; gap: 10px 22px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .ipo-unlock-metric { min-width: 0; }
+  .ipo-unlock-metric .ium-label {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.4px; color: var(--text-muted); margin-bottom: 1px;
+  }
+  .ipo-unlock-metric .ium-value {
+    font-size: 13px; font-weight: 700; color: var(--text-primary);
+  }
+  .ipo-unlock-foot {
+    margin-top: 5px;
+    font-size: 10px; color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .ipo-unlock-extra {
+    margin-top: 5px;
+    font-size: 11px; color: var(--text-secondary);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
   /* Net edge visual grammar (table fan + expand charts — same colors) */
   .net-edge-merged {
     display: flex; flex-direction: column; align-items: stretch; gap: 5px; min-width: 0;
@@ -1925,6 +1972,360 @@ function mocFlowTooltip(r) {
   if (Number.isFinite(fl)) lines.push(`Remaining vs tradable float: ${fmtPctDecimal(fl, 3)}`);
   if (r?.moc_flow_as_of) lines.push(`As of: ${r.moc_flow_as_of}`);
   return lines.join('\n');
+}
+
+const BUCKET1_VIEWS_URL = "data/bucket1_underlying_views.json";
+const BUCKET1_VIEW_SCORE_LABELS = {
+  '-2': 'max short',
+  '-1': 'lean short',
+  '0': 'no opinion',
+  '1': 'lean long',
+  '2': 'max long',
+};
+const BUCKET1_DEFAULT_SCORE_TO_H = { '-2': 0.25, '-1': 0.625, '0': 1.0, '1': 1.25, '2': 1.5 };
+
+function bucket1ViewHForScore(score, scoreToH, hMin, hMax) {
+  const ladder = scoreToH || BUCKET1_DEFAULT_SCORE_TO_H;
+  let s = Number(score);
+  if (!Number.isFinite(s) || ![-2, -1, 0, 1, 2].includes(s)) s = 0;
+  const raw = Number(ladder[String(s)] ?? ladder[s] ?? 1);
+  const lo = Number.isFinite(Number(hMin)) ? Number(hMin) : 0.25;
+  const hi = Number.isFinite(Number(hMax)) ? Number(hMax) : 1.75;
+  return Math.min(hi, Math.max(lo, raw));
+}
+
+function buildBucket1ViewsRows(records, viewsPayload) {
+  const scoreToH = viewsPayload?.score_to_h || BUCKET1_DEFAULT_SCORE_TO_H;
+  const hMin = viewsPayload?.h_min;
+  const hMax = viewsPayload?.h_max;
+  const byCfg = viewsPayload?.by_underlying || {};
+  const sleevesByUnd = {};
+  for (const r of records || []) {
+    if (String(r?.bucket || '') !== 'bucket_1_high_beta') continue;
+    const und = String(r?.underlying || '').trim().toUpperCase();
+    const sym = String(r?.symbol || '').trim().toUpperCase();
+    if (!und || !sym) continue;
+    if (!sleevesByUnd[und]) sleevesByUnd[und] = [];
+    if (!sleevesByUnd[und].includes(sym)) sleevesByUnd[und].push(sym);
+  }
+  const unds = Array.from(new Set([...Object.keys(sleevesByUnd), ...Object.keys(byCfg)])).sort();
+  return unds.map((und) => {
+    const cfg = byCfg[und] || {};
+    let score = Number(cfg.score);
+    if (!Number.isFinite(score) || ![-2, -1, 0, 1, 2].includes(score)) score = 0;
+    const sleeves = (sleevesByUnd[und] || cfg.sleeves || []).slice().sort();
+    const h = Number.isFinite(Number(cfg.h))
+      ? Number(cfg.h)
+      : bucket1ViewHForScore(score, scoreToH, hMin, hMax);
+    return {
+      underlying: und,
+      score,
+      score_label: cfg.score_label || BUCKET1_VIEW_SCORE_LABELS[String(score)] || 'no opinion',
+      h,
+      note: cfg.note || '',
+      updated: cfg.updated || null,
+      sleeves,
+      n_sleeves: sleeves.length,
+      in_bucket1: sleeves.length > 0,
+      from_config: !!cfg.from_config || score !== 0 || !!(cfg.note),
+    };
+  });
+}
+
+function Bucket1ViewsPage({ records, onNavigateToChart, onBack }) {
+  const [payload, setPayload] = useState(null);
+  const [loadError, setLoadError] = useState('');
+  const [filter, setFilter] = useState('all'); // all | active | b1
+  const [search, setSearch] = useState('');
+  /** Draft edits: { UND: { score, note } } — overlays saved payload until Save. */
+  const [draft, setDraft] = useState({});
+  const [saveState, setSaveState] = useState(''); // '', 'saving', 'saved', 'error:…'
+  const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const bust = `?t=${Date.now()}`;
+    fetch(`${BUCKET1_VIEWS_URL}${bust}`, { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((p) => { if (!cancelled) { setPayload(p); setLoadError(''); } })
+      .catch((e) => { if (!cancelled) { setPayload(null); setLoadError(String(e?.message || e)); } });
+    return () => { cancelled = true; };
+  }, [reloadToken]);
+
+  const baseRows = useMemo(() => buildBucket1ViewsRows(records, payload), [records, payload]);
+
+  const rows = useMemo(() => {
+    let list = baseRows.map((r) => {
+      const d = draft[r.underlying];
+      if (!d) return r;
+      const score = Number.isFinite(Number(d.score)) ? Number(d.score) : r.score;
+      const note = d.note != null ? String(d.note) : r.note;
+      return {
+        ...r,
+        score,
+        note,
+        score_label: BUCKET1_VIEW_SCORE_LABELS[String(score)] || r.score_label,
+        h: bucket1ViewHForScore(score, payload?.score_to_h, payload?.h_min, payload?.h_max),
+        dirty: true,
+      };
+    });
+    if (filter === 'active') list = list.filter((r) => r.score !== 0);
+    if (filter === 'b1') list = list.filter((r) => r.in_bucket1);
+    const q = search.trim().toUpperCase();
+    if (q) {
+      list = list.filter((r) =>
+        r.underlying.includes(q) || r.sleeves.some((s) => s.includes(q)) || String(r.note || '').toUpperCase().includes(q));
+    }
+    list = list.slice().sort((a, b) => {
+      const as = Math.abs(a.score); const bs = Math.abs(b.score);
+      if (bs !== as) return bs - as;
+      if (b.score !== a.score) return b.score - a.score;
+      return a.underlying.localeCompare(b.underlying);
+    });
+    return list;
+  }, [baseRows, draft, payload, filter, search]);
+
+  const dirtyCount = Object.keys(draft).length;
+  const nActive = rows.filter((r) => r.score !== 0).length;
+  const scoreCls = (score) => {
+    if (score <= -1) return 'val-negative';
+    if (score >= 1) return 'val-positive';
+    return '';
+  };
+
+  const bumpScore = (und, delta) => {
+    const base = baseRows.find((r) => r.underlying === und);
+    const cur = draft[und]?.score != null ? Number(draft[und].score)
+      : (base ? Number(base.score) : 0);
+    const next = Math.max(-2, Math.min(2, (Number.isFinite(cur) ? cur : 0) + delta));
+    setDraft((prev) => ({
+      ...prev,
+      [und]: {
+        score: next,
+        note: prev[und]?.note != null ? prev[und].note : (base?.note || ''),
+      },
+    }));
+    setSaveState('');
+  };
+
+  const setNote = (und, note) => {
+    const base = baseRows.find((r) => r.underlying === und);
+    const score = draft[und]?.score != null ? Number(draft[und].score)
+      : (base ? Number(base.score) : 0);
+    setDraft((prev) => ({
+      ...prev,
+      [und]: { score: Number.isFinite(score) ? score : 0, note },
+    }));
+    setSaveState('');
+  };
+
+  const saveViews = async () => {
+    // Full views map: saved payload + draft overlays (score 0 dropped server-side if no note).
+    const views = {};
+    for (const r of baseRows) {
+      const d = draft[r.underlying];
+      const score = d?.score != null ? Number(d.score) : Number(r.score);
+      const note = d?.note != null ? String(d.note) : String(r.note || '');
+      if (!Number.isFinite(score)) continue;
+      if (score === 0 && !note.trim()) continue;
+      views[r.underlying] = { score, note: note.trim() };
+    }
+    // Include draft-only keys not in base (shouldn't happen, but safe).
+    for (const [und, d] of Object.entries(draft)) {
+      if (views[und]) continue;
+      const score = Number(d.score);
+      if (!Number.isFinite(score) || (score === 0 && !String(d.note || '').trim())) continue;
+      views[und] = { score, note: String(d.note || '').trim() };
+    }
+    setSaveState('saving');
+    try {
+      const res = await fetch('/api/bucket1-views', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ views }),
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(res.status === 404
+          ? 'Save API missing — run with python run.py (not plain http.server)'
+          : (detail || `HTTP ${res.status}`));
+      }
+      const body = await res.json();
+      setDraft({});
+      setSaveState(`saved · ${body.n_active_views ?? 0} active → config/bucket1_underlying_views.yml`);
+      if (body.by_underlying) {
+        setPayload((prev) => ({
+          ...(prev || {}),
+          ...body,
+          score_to_h: prev?.score_to_h,
+          h_min: prev?.h_min,
+          h_max: prev?.h_max,
+          by_underlying: body.by_underlying,
+        }));
+      }
+      setReloadToken((t) => t + 1);
+    } catch (e) {
+      setSaveState(`error: ${e?.message || e}`);
+    }
+  };
+
+  return (
+    <div className="info-page" style={{ padding: '24px 32px', maxWidth: 1100 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+        <button type="button" className="topbar-btn" onClick={onBack}>← Dashboard</button>
+        <h2 style={{ margin: 0, fontSize: 20 }}>B1 Underlying Views</h2>
+        <span className="badge" title="Research/ops overlay — not wired to production sizing">research</span>
+        <button
+          type="button"
+          className="topbar-btn"
+          disabled={dirtyCount === 0 || saveState === 'saving'}
+          onClick={saveViews}
+          title="Write scores to config/bucket1_underlying_views.yml and refresh data/bucket1_underlying_views.json"
+        >
+          {saveState === 'saving' ? 'Saving…' : `Save${dirtyCount ? ` (${dirtyCount})` : ''}`}
+        </button>
+        {dirtyCount > 0 && (
+          <button type="button" className="chart-view-btn" onClick={() => { setDraft({}); setSaveState(''); }}>
+            Discard
+          </button>
+        )}
+      </div>
+      <p style={{ color: 'var(--text-muted)', fontSize: 13, lineHeight: 1.5, marginTop: 0 }}>
+        Toggle score (−2…+2) on the <strong>underlying</strong>; <code>h</code> updates live.
+        <strong> Save</strong> writes <code>config/bucket1_underlying_views.yml</code> via
+        <code> POST /api/bucket1-views</code> (needs <code>python run.py</code>).
+        Score <code>0</code> → <code>h = 1</code>. Not wired to production sizing yet.
+        {payload?.generated_at ? ` · artifact ${payload.generated_at}` : ''}
+        {loadError ? ` · views file missing (${loadError}); using defaults + live B1 list` : ''}
+      </p>
+      {saveState && (
+        <div
+          className={saveState.startsWith('error') ? 'error-banner' : 'scenario-warning'}
+          style={{ marginBottom: 12 }}
+        >
+          {saveState}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' }}>
+        <input
+          className="search-input"
+          style={{ maxWidth: 220 }}
+          placeholder="Search und / sleeve…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        {[
+          { key: 'all', label: 'All' },
+          { key: 'b1', label: 'In B1' },
+          { key: 'active', label: 'Active scores' },
+        ].map((f) => (
+          <button
+            key={f.key}
+            type="button"
+            className={cls('chart-view-btn', filter === f.key && 'active')}
+            onClick={() => setFilter(f.key)}
+          >
+            {f.label}
+          </button>
+        ))}
+        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+          {rows.length} shown · {nActive} non-zero in view
+          {dirtyCount ? ` · ${dirtyCount} unsaved` : ''}
+        </span>
+      </div>
+      <details className="decay-methodology" style={{ marginBottom: 14 }}>
+        <summary>Score → h ladder</summary>
+        <div className="dm-body">
+          <table className="scenario-table">
+            <thead><tr><th>Score</th><th>Meaning</th><th>h</th></tr></thead>
+            <tbody>
+              {[-2, -1, 0, 1, 2].map((s) => (
+                <tr key={s}>
+                  <td>{s}</td>
+                  <td>{BUCKET1_VIEW_SCORE_LABELS[String(s)]}</td>
+                  <td>{bucket1ViewHForScore(s, payload?.score_to_h, payload?.h_min, payload?.h_max).toFixed(3)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 0 }}>
+            Bounds [{payload?.h_min ?? 0.25}, {payload?.h_max ?? 1.75}].
+            Lower h → residual short und; higher h → residual long und. Not production-wired.
+          </p>
+        </div>
+      </details>
+      <table className="scenario-table">
+        <thead>
+          <tr>
+            <th>Underlying</th>
+            <th>B1 sleeves</th>
+            <th>Score</th>
+            <th>View</th>
+            <th title="Long und $ per $1 short ETF">h</th>
+            <th>Updated</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr><td colSpan={7} style={{ color: 'var(--text-muted)' }}>No underlyings match.</td></tr>
+          ) : rows.map((r) => (
+            <tr key={r.underlying} style={r.dirty ? { outline: '1px solid rgba(56,189,248,0.35)' } : undefined}>
+              <td>
+                <strong>{r.underlying}</strong>
+                {!r.in_bucket1 && <span style={{ marginLeft: 6, fontSize: 11, color: 'var(--text-muted)' }}>not in B1</span>}
+              </td>
+              <td style={{ maxWidth: 280 }}>
+                {r.sleeves.length === 0 ? '—' : r.sleeves.map((sym, i) => (
+                  <span key={sym}>
+                    {i > 0 ? ', ' : ''}
+                    <button
+                      type="button"
+                      className="sym-link-btn"
+                      onClick={() => onNavigateToChart && onNavigateToChart(sym)}
+                    >
+                      {sym}
+                    </button>
+                  </span>
+                ))}
+              </td>
+              <td className={scoreCls(r.score)} style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
+                <button
+                  type="button"
+                  className="chart-view-btn"
+                  style={{ padding: '0 8px', minWidth: 28 }}
+                  disabled={r.score <= -2}
+                  onClick={() => bumpScore(r.underlying, -1)}
+                  title="More short / lower h"
+                >−</button>
+                <span style={{ display: 'inline-block', minWidth: 28, textAlign: 'center' }}>{r.score}</span>
+                <button
+                  type="button"
+                  className="chart-view-btn"
+                  style={{ padding: '0 8px', minWidth: 28 }}
+                  disabled={r.score >= 2}
+                  onClick={() => bumpScore(r.underlying, 1)}
+                  title="More long / higher h"
+                >+</button>
+              </td>
+              <td>{r.score_label}</td>
+              <td className={scoreCls(r.score)}>{Number(r.h).toFixed(3)}</td>
+              <td style={{ whiteSpace: 'nowrap' }}>{r.dirty ? 'unsaved' : (r.updated || '—')}</td>
+              <td style={{ maxWidth: 320 }}>
+                <input
+                  className="search-input"
+                  style={{ width: '100%', fontSize: 12 }}
+                  value={r.note || ''}
+                  placeholder="optional note"
+                  onChange={(e) => setNote(r.underlying, e.target.value)}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function OpsPage({ data, freshnessSummary, vrpHealth, onBack }) {
@@ -5572,6 +5973,97 @@ function EdgeFactsStrip({ r }) {
   );
 }
 
+/** Compact IPO float-unlock overlay (DetailRow + Stats). Not a headline replacement. */
+function formatIpoUnlockDateShort(iso) {
+  if (!iso) return null;
+  const d = new Date(`${String(iso).slice(0, 10)}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function IpoUnlockStrip({ r, density = 'compact' }) {
+  if (!r?.is_ipo_float_unlock) return null;
+  const days = r.days_to_next_ipo_unlock;
+  const dateShort = formatIpoUnlockDateShort(r.next_ipo_unlock_date);
+  const sharesM = r.next_ipo_unlock_shares != null && Number.isFinite(Number(r.next_ipo_unlock_shares))
+    ? `${(Number(r.next_ipo_unlock_shares) / 1e6).toFixed(1)}M sh`
+    : null;
+  const grade = r.ipo_unlock_data_grade ? `grade ${r.ipo_unlock_data_grade}` : null;
+  const metaBits = [dateShort, sharesM, grade].filter(Boolean);
+  const sigmaBase = r.forecast_vol_unlock_base_annual != null
+    ? r.forecast_vol_unlock_base_annual
+    : r.forecast_vol_underlying_annual;
+  const sigmaUnlock = r.forecast_vol_unlock_annual;
+  const sigmaTxt = (sigmaBase != null || sigmaUnlock != null)
+    ? `${sigmaBase != null ? fmt(sigmaBase) : '—'} → ${sigmaUnlock != null ? fmt(sigmaUnlock) : '—'}`
+    : '—';
+  const expUnlock = r.expected_gross_decay_unlock_p50_annual;
+  const tip = [
+    r.ipo_unlock_model_note || null,
+    r.next_ipo_unlock_date ? `Next: ${r.next_ipo_unlock_date}` : null,
+    r.next_ipo_unlock_shares != null ? `Shares: ${Number(r.next_ipo_unlock_shares).toLocaleString()}` : null,
+    density === 'compact' && r.net_edge_unlock_p50_annual != null
+      ? `Net edge unlock: ${fmtLogYr(r.net_edge_unlock_p50_annual)}`
+      : null,
+    density === 'compact' && r.price_car_unlock_p50_short_favorable != null
+      ? `CAR short-fav: ${fmt(r.price_car_unlock_p50_short_favorable)}`
+      : null,
+  ].filter(Boolean).join(' · ');
+  const showStatsExtra = density === 'stats';
+  return (
+    <div
+      className={cls('ipo-unlock-strip', showStatsExtra && 'ipo-unlock-stats')}
+      title={tip || undefined}
+      aria-label="IPO float unlock overlay"
+    >
+      <div className="ipo-unlock-head">
+        <span className="ipo-unlock-title">
+          IPO unlock{days != null && Number.isFinite(Number(days)) ? ` · ${Number(days)}d` : ''}
+        </span>
+        {metaBits.length > 0 ? (
+          <span className="ipo-unlock-meta">{metaBits.join(' · ')}</span>
+        ) : null}
+      </div>
+      <div className="ipo-unlock-metrics">
+        <div className="ipo-unlock-metric">
+          <div className="ium-label">σ base → unlock</div>
+          <div className="ium-value">{sigmaTxt}</div>
+        </div>
+        <div className="ipo-unlock-metric">
+          <div className="ium-label">Exp. decay unlock</div>
+          <div className="ium-value">{expUnlock != null ? fmtLogYr(expUnlock) : '—'}</div>
+        </div>
+        {showStatsExtra ? (
+          <div className="ipo-unlock-metric">
+            <div className="ium-label">Net edge unlock</div>
+            <div className="ium-value">
+              {r.net_edge_unlock_p50_annual != null ? fmtLogYr(r.net_edge_unlock_p50_annual) : '—'}
+            </div>
+          </div>
+        ) : null}
+      </div>
+      {showStatsExtra && (r.price_car_unlock_p50_short_favorable != null
+        || r.forecast_vol_unlock_event_annual != null
+        || r.forecast_vol_unlock_steady_annual != null) ? (
+        <div className="ipo-unlock-extra">
+          {r.price_car_unlock_p50_short_favorable != null
+            ? <>CAR short-fav {fmt(r.price_car_unlock_p50_short_favorable)}</>
+            : null}
+          {r.forecast_vol_unlock_event_annual != null || r.forecast_vol_unlock_steady_annual != null ? (
+            <>
+              {r.price_car_unlock_p50_short_favorable != null ? ' · ' : null}
+              event {r.forecast_vol_unlock_event_annual != null ? fmt(r.forecast_vol_unlock_event_annual) : '—'}
+              {' · ss '}
+              {r.forecast_vol_unlock_steady_annual != null ? fmt(r.forecast_vol_unlock_steady_annual) : '—'}
+            </>
+          ) : null}
+        </div>
+      ) : null}
+      <div className="ipo-unlock-foot">overlay · does not replace Exp. edge / Net edge</div>
+    </div>
+  );
+}
+
 function NetEdgeQuantileTable({ r }) {
   const rows = [
     ['p05', r.net_edge_p05_annual],
@@ -5638,6 +6130,7 @@ function DetailRow({ r, chartVolLookbackRange, dashboardBuildTime, metricsCacheT
   return (
     <tr className="detail-row">
       <td colSpan={COLS.length + 1}>
+        <IpoUnlockStrip r={r} density="compact" />
         <div className="detail-grid">
           <div className="detail-item" title={borrowOutlookTooltip(r, borrowDisplay(r, borrowHistoryMap?.[r.symbol], { dashboardBuildTime }))}>
             <div className="dlabel">Borrow outlook</div>
@@ -7717,8 +8210,8 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const [b4Artifact, setB4Artifact] = useState(null);
   const [b4PairShard, setB4PairShard] = useState(null);
   const [incGross, setIncGross] = useState(100000);
-  // Optimized tab hedge controller: prefer frozen deadband+slew when nested.
-  const [optimizedHMode, setOptimizedHMode] = useState('stable'); // 'stable' | 'current'
+  // Optimized path: cash-residual (default when nested) | stabilized unit | current-h unit.
+  const [optimizedHMode, setOptimizedHMode] = useState('cash_residual'); // 'cash_residual' | 'stable' | 'current'
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const iframeRef = useRef(null);
   const keyRef = useRef(0);
@@ -7907,7 +8400,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
     if (!showBasketPanel && activePanel === 'basket') setActivePanel('chart');
   }, [showBasketPanel, activePanel]);
 
-  const bucketLabel = isB4Row ? 'Bucket 4 - Inverse decay'
+  const bucketLabel = isB4Row ? 'Inverse decay'
     : r.bucket === 'bucket_1_high_beta' ? 'Bucket 1 — High β'
     : r.bucket === 'bucket_2_low_beta' ? 'Bucket 2 — Low β'
     : r.bucket === 'bucket_3_inverse' ? 'Bucket 3 — Inverse' : '';
@@ -7974,15 +8467,34 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
   const inceptionResearchStable = b4PairShard?.inception_research_stable && typeof b4PairShard.inception_research_stable === 'object'
     ? b4PairShard.inception_research_stable
     : null;
+  const cashResidualPath = b4PairShard?.cash_residual_path && typeof b4PairShard.cash_residual_path === 'object'
+    ? b4PairShard.cash_residual_path
+    : null;
   const hasStableOptimized = Boolean(inceptionResearchStable);
-  const effectiveOptimizedHMode = (optimizedHMode === 'stable' && hasStableOptimized)
-    ? 'stable'
-    : (inceptionResearchCurrent ? 'current' : (hasStableOptimized ? 'stable' : 'current'));
-  const inceptionResearch = effectiveOptimizedHMode === 'stable' ? inceptionResearchStable : inceptionResearchCurrent;
+  const cashResidualAudit = b4DailyPathAudit(cashResidualPath?.daily, cashResidualPath?.summary);
+  const hasCashResidualNest = Boolean(cashResidualPath && Array.isArray(cashResidualPath?.daily?.dates) && cashResidualPath.daily.dates.length >= 2);
+  const hasCashResidualPath = Boolean(hasCashResidualNest && cashResidualAudit.sane);
+  const effectiveOptimizedHMode = (() => {
+    if (optimizedHMode === 'cash_residual' && hasCashResidualPath) return 'cash_residual';
+    if (optimizedHMode === 'stable' && hasStableOptimized) return 'stable';
+    if (optimizedHMode === 'current' && inceptionResearchCurrent) return 'current';
+    if (hasCashResidualPath) return 'cash_residual';
+    if (hasStableOptimized) return 'stable';
+    if (inceptionResearchCurrent) return 'current';
+    return optimizedHMode;
+  })();
+  const inceptionResearch = effectiveOptimizedHMode === 'cash_residual'
+    ? cashResidualPath
+    : (effectiveOptimizedHMode === 'stable' ? inceptionResearchStable : inceptionResearchCurrent);
   const inceptionPathAudit = b4DailyPathAudit(inceptionResearch?.daily, inceptionResearch?.summary);
   const hasSaneInception = Boolean(inceptionResearch && inceptionPathAudit.sane);
   const inceptionCurrentAudit = b4DailyPathAudit(inceptionResearchCurrent?.daily, inceptionResearchCurrent?.summary);
   const inceptionStableAudit = b4DailyPathAudit(inceptionResearchStable?.daily, inceptionResearchStable?.summary);
+  const crBudgetBasis = Number(
+    cashResidualPath?.notional_basis_usd
+    ?? cashResidualPath?.summary?.pair_target_usd
+    ?? cashResidualPath?.research_parameters?.pair_target_usd,
+  );
   const inceptionChartResult = useMemo(() => {
     if (!hasSaneInception || typeof B4Fns.pairChartResultFromShard !== 'function') return null;
     const active = {
@@ -7993,16 +8505,67 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
       rebalance_log: Array.isArray(inceptionResearch.rebalance_log)
         ? inceptionResearch.rebalance_log
         : (b4PairShard?.rebalance_log || []),
-      history_basis: inceptionResearch.history_basis || (effectiveOptimizedHMode === 'stable' ? 'inception_research_stable' : 'inception_research'),
+      history_basis: inceptionResearch.history_basis
+        || (effectiveOptimizedHMode === 'cash_residual'
+          ? 'cash_residual_path'
+          : (effectiveOptimizedHMode === 'stable' ? 'inception_research_stable' : 'inception_research')),
+      ledger_mode: inceptionResearch.ledger_mode || b4PairShard?.ledger_mode,
+      notional_basis_usd: inceptionResearch.notional_basis_usd ?? b4PairShard?.notional_basis_usd,
       in_production_book: false,
     };
     return B4Fns.pairChartResultFromShard(active, { gross: incGross });
   }, [hasSaneInception, b4PairShard, inceptionResearch, incGross, B4Fns, effectiveOptimizedHMode]);
+  const cashResidualSeries = useMemo(() => {
+    if (effectiveOptimizedHMode !== 'cash_residual' || !cashResidualPath?.daily?.dates) return [];
+    const d = cashResidualPath.daily;
+    const basis = Number.isFinite(crBudgetBasis) && crBudgetBasis > 0 ? crBudgetBasis : incGross;
+    const scale = basis > 0 ? incGross / basis : 1;
+    return (d.dates || []).map((date, i) => ({
+      date,
+      grossApplied: d.gross_applied_usd?.[i] != null ? Number(d.gross_applied_usd[i]) * scale : null,
+      grossTarget: d.gross_target_usd?.[i] != null ? Number(d.gross_target_usd[i]) * scale : null,
+      residualPct: d.cash_residual_pct?.[i] != null ? Number(d.cash_residual_pct[i]) : null,
+      deltaGross: d.delta_gross_usd?.[i] != null ? Number(d.delta_gross_usd[i]) * scale : null,
+      h0: d.h0?.[i] != null ? Number(d.h0[i]) : null,
+      h1: d.h1?.[i] != null ? Number(d.h1[i]) : (d.h_used?.[i] != null ? Number(d.h_used[i]) : null),
+      cadenceDue: Boolean(d.cadence_due?.[i]),
+      reason: d.reason?.[i] || '',
+    }));
+  }, [effectiveOptimizedHMode, cashResidualPath, crBudgetBasis, incGross]);
+  const cashResidualKpis = useMemo(() => {
+    if (!cashResidualSeries.length) return null;
+    const last = cashResidualSeries[cashResidualSeries.length - 1] || {};
+    const adds = cashResidualSeries.filter((p) => Number(p.deltaGross) > 1e-6).length;
+    const cuts = cashResidualSeries.filter((p) => Number(p.deltaGross) < -1e-6).length;
+    return {
+      endApplied: last.grossApplied,
+      endResidualPct: last.residualPct,
+      endH: last.h1,
+      nAdds: adds,
+      nCuts: cuts,
+    };
+  }, [cashResidualSeries]);
   useEffect(() => {
-    if (optimizedHMode === 'stable' && !hasStableOptimized && inceptionResearchCurrent) {
-      setOptimizedHMode('current');
+    // Prefer cash-residual when the nest appears (e.g. after rebuild); fall back if missing.
+    if (hasCashResidualPath && optimizedHMode !== 'cash_residual' && optimizedHMode !== 'stable' && optimizedHMode !== 'current') {
+      setOptimizedHMode('cash_residual');
+      return;
     }
-  }, [optimizedHMode, hasStableOptimized, inceptionResearchCurrent]);
+    if (optimizedHMode === 'cash_residual' && !hasCashResidualPath) {
+      setOptimizedHMode(hasStableOptimized ? 'stable' : 'current');
+    } else if (optimizedHMode === 'stable' && !hasStableOptimized && inceptionResearchCurrent) {
+      setOptimizedHMode(hasCashResidualPath ? 'cash_residual' : 'current');
+    }
+  }, [optimizedHMode, hasStableOptimized, hasCashResidualPath, inceptionResearchCurrent]);
+  // When navigating to a symbol that already has a cash-residual nest, land on it.
+  useEffect(() => {
+    if (hasCashResidualPath) setOptimizedHMode('cash_residual');
+  }, [etfSym, hasCashResidualPath]);
+  useEffect(() => {
+    if (effectiveOptimizedHMode === 'cash_residual' && Number.isFinite(crBudgetBasis) && crBudgetBasis > 0) {
+      setIncGross(Math.round(crBudgetBasis));
+    }
+  }, [etfSym, effectiveOptimizedHMode, crBudgetBasis]);
 
   const b4CadenceHint = useMemo(() => {
     if (!isB4Row || !b4Artifact || typeof B4Fns.pairCadenceHint !== 'function') return null;
@@ -9685,20 +10248,6 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             {productClassLabel}
           </span>
         )}
-        {r.is_ipo_float_unlock && (
-          <span
-            className="chart-bucket-badge b3"
-            title={[
-              'IPO float unlock active (dashboard overlay — does not replace HARQ headline).',
-              r.next_ipo_unlock_date ? `Next: ${r.next_ipo_unlock_date}` : null,
-              r.next_ipo_unlock_shares != null ? `Shares: ${Number(r.next_ipo_unlock_shares).toLocaleString()}` : null,
-              r.ipo_unlock_data_grade ? `Grade: ${r.ipo_unlock_data_grade}` : null,
-              r.days_to_next_ipo_unlock != null ? `Days: ${r.days_to_next_ipo_unlock}` : null,
-            ].filter(Boolean).join(' · ')}
-          >
-            Unlock{r.days_to_next_ipo_unlock != null ? ` ${r.days_to_next_ipo_unlock}d` : ''}
-          </span>
-        )}
         <div className="chart-view-switch">
           <button className={cls('chart-view-btn', activePanel === 'chart' && 'active')} onClick={() => navigateChartPanel('chart')}>Chart</button>
           <button className={cls('chart-view-btn', activePanel === 'stats' && 'active')} onClick={() => navigateChartPanel('stats')}>Stats</button>
@@ -9724,8 +10273,10 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               className={cls('chart-view-btn', activePanel === 'optimized' && 'active')}
               onClick={() => navigateChartPanel('optimized')}
               title={hasSaneInception
-                ? 'Optimized backtest from ETF listing → latest (not production book PnL)'
-                : (b4PairShard ? 'Optimized backtest series unavailable for this pair' : 'Loading optimized backtest…')}
+                ? (hasCashResidualPath
+                  ? 'Cash-residual Optimized path (listing → latest) — not book PnL'
+                  : 'Optimized research from ETF listing → latest (not production book PnL)')
+                : (b4PairShard ? 'Optimized path unavailable for this pair' : 'Loading optimized path…')}
               style={!hasSaneInception && b4PairShard ? { opacity: 0.65 } : undefined}
             >
               Optimized
@@ -9844,70 +10395,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             </div>
           </div>
           )}
-          {r.is_ipo_float_unlock && (
-            <div className="chart-section" style={{ marginTop: 12 }} title={r.ipo_unlock_model_note || ''}>
-              <div className="scenario-title" style={{ marginBottom: 6 }}>
-                IPO float unlock — alternate view
-                <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>
-                  overlay · does not replace headline Exp. edge / Net edge
-                </span>
-              </div>
-              <div className="chart-stats" style={{ marginTop: 0 }}>
-                <div className="chart-stat">
-                  <div className="cs-label">Next unlock</div>
-                  <div className="cs-value">{r.next_ipo_unlock_date || '—'}</div>
-                  <div className="cs-sub">
-                    {r.next_ipo_unlock_shares != null
-                      ? `${(Number(r.next_ipo_unlock_shares) / 1e6).toFixed(1)}M sh`
-                      : '—'}
-                    {r.days_to_next_ipo_unlock != null ? ` · ${r.days_to_next_ipo_unlock}d` : ''}
-                    {r.ipo_unlock_data_grade ? ` · grade ${r.ipo_unlock_data_grade}` : ''}
-                  </div>
-                </div>
-                <div className="chart-stat">
-                  <div className="cs-label">σ base → unlock</div>
-                  <div className="cs-value">
-                    {r.forecast_vol_unlock_base_annual != null ? fmt(r.forecast_vol_unlock_base_annual) : (r.forecast_vol_underlying_annual != null ? fmt(r.forecast_vol_underlying_annual) : '—')}
-                    {' → '}
-                    {r.forecast_vol_unlock_annual != null ? fmt(r.forecast_vol_unlock_annual) : '—'}
-                  </div>
-                  <div className="cs-sub">
-                    event {r.forecast_vol_unlock_event_annual != null ? fmt(r.forecast_vol_unlock_event_annual) : '—'}
-                    {' · ss '}
-                    {r.forecast_vol_unlock_steady_annual != null ? fmt(r.forecast_vol_unlock_steady_annual) : '—'}
-                  </div>
-                </div>
-                <div className="chart-stat">
-                  <div className="cs-label">Exp. decay unlock</div>
-                  <div className="cs-value">
-                    {r.expected_gross_decay_unlock_p50_annual != null
-                      ? fmtLogYr(r.expected_gross_decay_unlock_p50_annual)
-                      : '—'}
-                  </div>
-                  <div className="cs-sub">
-                    {r.expected_gross_decay_unlock_p10_annual != null && r.expected_gross_decay_unlock_p90_annual != null
-                      ? `${fmtLogYr(r.expected_gross_decay_unlock_p10_annual)} / ${fmtLogYr(r.expected_gross_decay_unlock_p90_annual)}`
-                      : 'Itô on unlock σ path'}
-                  </div>
-                </div>
-                <div className="chart-stat">
-                  <div className="cs-label">Net edge unlock</div>
-                  <div className="cs-value">
-                    {r.net_edge_unlock_p50_annual != null ? fmtLogYr(r.net_edge_unlock_p50_annual) : '—'}
-                  </div>
-                  <div className="cs-sub">
-                    CAR short-fav {r.price_car_unlock_p50_short_favorable != null ? fmt(r.price_car_unlock_p50_short_favorable) : '—'}
-                    {' · diagnostic'}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
       {activePanel === 'stats' && (
         <div className="chart-section">
+          <IpoUnlockStrip r={r} density="stats" />
           {isFoF ? (
             <FoFStatsPanel r={r} borrowDisp={borrowDisp} chartVolLookbackRange={chartVolLookbackRange} />
           ) : (
@@ -11626,22 +12119,27 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
 
       {activePanel === 'optimized' && isB4Row && (
         <div className="chart-section">
-          <div className="scenario-title">Optimized backtest — listing → latest</div>
+          <div className="scenario-title">Optimized — listing → latest</div>
           <div className="scenario-sub" style={{ marginBottom: 10 }}>
-            {effectiveOptimizedHMode === 'stable'
-              ? 'From ETF inception (first metrics session). Stabilized hedge (5pt deadband + 2.5pt slew). Early days may use neutral h until TR/VCR warms. Research only — not book PnL.'
-              : 'From ETF inception (first metrics session). Unfiltered TR/VCR dynamic h. Early days may use neutral h until signals warm. Research only — not book PnL.'}
+            {effectiveOptimizedHMode === 'cash_residual'
+              ? 'Cash-residual research path: crash caps leave cash undeployed; gross can add back on cadence-DUE when L/run-up ease. h-first may raise hedge before cutting size. Not book PnL.'
+              : effectiveOptimizedHMode === 'stable'
+                ? 'Unit-equity path with stabilized hedge (5pt deadband + 2.5pt slew). Static display notional — not cash-residual sizing. Research only.'
+                : 'Unit-equity path with unfiltered TR/VCR dynamic h. Static display notional — not cash-residual sizing. Research only.'}
           </div>
           {!b4PairShard && <div className="scenario-warning">Loading pair shard…</div>}
           {b4PairShard && !hasSaneInception && (
             <div className="error-banner">
-              Optimized backtest unavailable{inceptionPathAudit.issues?.length ? `: ${inceptionPathAudit.issues.join('; ')}` : ''}.
+              Optimized path unavailable{inceptionPathAudit.issues?.length ? `: ${inceptionPathAudit.issues.join('; ')}` : ''}.
+              {!hasCashResidualPath ? <> Rebuild with <code>python scripts/build_b4_cash_residual_path.py --etfs {etfSym}</code>.</> : null}
             </div>
           )}
-          {b4PairShard && !hasStableOptimized && inceptionResearchCurrent && (
+          {b4PairShard && !hasCashResidualPath && (hasStableOptimized || inceptionResearchCurrent) && (
             <div className="scenario-warning" style={{ marginBottom: 10 }}>
-              Stabilized path not nested yet — showing current dynamic h. Rebuild with{' '}
-              <code>python scripts/build_b4_inception_research.py --with-stable</code>.
+              {hasCashResidualNest
+                ? <>Cash-residual nest failed path audit{cashResidualAudit.issues?.length ? ` (${cashResidualAudit.issues.join('; ')})` : ''} — showing unit-equity Optimized. Rebuild with{' '}</>
+                : <>Cash-residual path not nested yet — showing unit-equity Optimized. Rebuild with{' '}</>}
+              <code>python scripts/build_b4_cash_residual_path.py --etfs {etfSym}</code>.
             </div>
           )}
           {hasSaneInception && inceptionPathAudit.cleanWipe && (
@@ -11667,13 +12165,22 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             <>
               <div className="pair-report-toolbar" style={{ marginBottom: 10 }}>
                 <div className="backtest-control">
-                  <label>Hedge controller</label>
-                  <div style={{ display: 'flex', gap: 6 }}>
+                  <label>Path</label>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className={cls('chart-view-btn', effectiveOptimizedHMode === 'cash_residual' && 'active')}
+                      disabled={!hasCashResidualPath}
+                      title={hasCashResidualPath ? 'Cash residual · scale_to_budget=false' : 'Path not built yet'}
+                      onClick={() => setOptimizedHMode('cash_residual')}
+                    >
+                      Cash residual
+                    </button>
                     <button
                       type="button"
                       className={cls('chart-view-btn', effectiveOptimizedHMode === 'stable' && 'active')}
                       disabled={!hasStableOptimized || !inceptionStableAudit.sane}
-                      title={hasStableOptimized ? 'Frozen deadband 0.05 + slew 0.025' : 'Stabilized path not available'}
+                      title={hasStableOptimized ? 'Unit equity · frozen deadband 0.05 + slew 0.025' : 'Stabilized path not available'}
                       onClick={() => setOptimizedHMode('stable')}
                     >
                       Stabilized
@@ -11682,7 +12189,7 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       type="button"
                       className={cls('chart-view-btn', effectiveOptimizedHMode === 'current' && 'active')}
                       disabled={!inceptionResearchCurrent || !inceptionCurrentAudit.sane}
-                      title="Unfiltered TR/VCR h"
+                      title="Unit equity · unfiltered TR/VCR h"
                       onClick={() => setOptimizedHMode('current')}
                     >
                       Current h
@@ -11690,14 +12197,16 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   </div>
                 </div>
                 <div className="backtest-control">
-                  <label>Notional $</label>
+                  <label>{effectiveOptimizedHMode === 'cash_residual' ? 'Budget $' : 'Notional $'}</label>
                   <input
                     type="number"
                     min={1000}
                     step={1000}
                     value={incGross}
                     onChange={(e) => setIncGross(Number(e.target.value) || 0)}
-                    title="Scales the optimized backtest ledger linearly for display."
+                    title={effectiveOptimizedHMode === 'cash_residual'
+                      ? 'Scales the cash-residual path for display (does not re-solve L).'
+                      : 'Scales the unit-equity Optimized ledger linearly for display.'}
                   />
                 </div>
                 <div className="pair-report-meta">
@@ -11721,6 +12230,12 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                   </span>
                   <span>Latest <strong>{inceptionResearch?.summary?.latest_date || inceptionChartResult?.end || '—'}</strong></span>
                   <span>{inceptionChartResult?.ok ? `${inceptionChartResult.rows?.length || 0} days` : '—'}</span>
+                  {effectiveOptimizedHMode === 'cash_residual' && (
+                    <span title="Cash-residual policy">
+                      ρ <strong>{inceptionResearch?.policy?.rho != null ? (Number(inceptionResearch.policy.rho) * 100).toFixed(2) + '%' : '—'}</strong>
+                      {' · '}h-first <strong>{inceptionResearch?.policy?.h_first ? 'on' : 'off'}</strong>
+                    </span>
+                  )}
                   {effectiveOptimizedHMode === 'stable' && (
                     <span title="Frozen Optimized stabilizer">
                       band <strong>0.05</strong> · step <strong>0.025</strong>
@@ -11732,6 +12247,30 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                 <div className="scenario-warning">{inceptionChartResult?.error || 'Optimized backtest chart unavailable.'}</div>
               ) : (
                 <>
+                  {effectiveOptimizedHMode === 'cash_residual' && cashResidualKpis ? (
+                    <div className="pair-report-kpis chart-stats">
+                      <div className="chart-stat">
+                        <div className="cs-label">End applied gross</div>
+                        <div className="cs-value">{fmtMoney(cashResidualKpis.endApplied)}</div>
+                        <div className="cs-sub">of budget {fmtMoney(incGross)}</div>
+                      </div>
+                      <div className="chart-stat">
+                        <div className="cs-label">Cash residual</div>
+                        <div className="cs-value">{cashResidualKpis.endResidualPct != null ? `${Number(cashResidualKpis.endResidualPct).toFixed(1)}%` : '—'}</div>
+                        <div className="cs-sub">undeployed vs pair target</div>
+                      </div>
+                      <div className="chart-stat">
+                        <div className="cs-label">Cadence adds / cuts</div>
+                        <div className="cs-value">{cashResidualKpis.nAdds} / {cashResidualKpis.nCuts}</div>
+                        <div className="cs-sub">Δgross on path</div>
+                      </div>
+                      <div className="chart-stat" title="Policy h_mid is 0.45. Flat end-h usually means TR/VCR never left mid and h-first did not bump (often runup_gate on tail-only crash caps).">
+                        <div className="cs-label">End h</div>
+                        <div className="cs-value">{cashResidualKpis.endH != null ? Number(cashResidualKpis.endH).toFixed(2) : '—'}</div>
+                        <div className="cs-sub">post h-first / cadence · h_mid=0.45</div>
+                      </div>
+                    </div>
+                  ) : (
                   <div className="pair-report-kpis chart-stats">
                     <div className="chart-stat">
                       <div className="cs-label">CAGR</div>
@@ -11756,12 +12295,89 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
                       </div>
                     </div>
                   </div>
+                  )}
+                  {effectiveOptimizedHMode === 'cash_residual' && cashResidualSeries.length > 1 && (
+                    <>
+                      <div className="pair-report-section trade-card" style={{ marginTop: 12 }}>
+                        <div className="trade-head">
+                          <div>
+                            <div className="scenario-title">Gross path ($)</div>
+                            <div className="scenario-sub">
+                              Applied gross (strong) vs pair target (muted). Residual = target − applied. Markers = cadence-DUE / emergency Δgross.
+                            </div>
+                          </div>
+                        </div>
+                        <SimpleSeriesPlot
+                          series={cashResidualSeries}
+                          valueKey="grossApplied"
+                          overlayValueKey="grossTarget"
+                          color="var(--accent-cyan)"
+                          overlayColor="var(--text-muted)"
+                          label="Applied"
+                          overlayLabel="Target"
+                          formatValue={(v) => fmtMoney(v)}
+                          includeZero
+                          gapMarkerAt={(p) => p?.cadenceDue && Number.isFinite(Number(p.deltaGross)) && Math.abs(Number(p.deltaGross)) > 1}
+                          gapMarkerLabel="Δgross"
+                        />
+                      </div>
+                      <div className="pair-report-section trade-card" style={{ marginTop: 12 }}>
+                        <div className="trade-head">
+                          <div>
+                            <div className="scenario-title">Hedge path (h)</div>
+                            <div className="scenario-sub">
+                              h₀ (policy) → h₁ after optional h-first bump. Flat near 0.45 means policy stayed at h_mid and/or h-first was gated (e.g. runup too low on tail-driven caps). Cadence freeze holds h between DUE days.
+                            </div>
+                          </div>
+                        </div>
+                        <SimpleSeriesPlot
+                          series={cashResidualSeries}
+                          valueKey="h1"
+                          overlayValueKey="h0"
+                          color="var(--accent-amber)"
+                          overlayColor="var(--text-muted)"
+                          label="h₁"
+                          overlayLabel="h₀"
+                          formatValue={(v) => Number(v).toFixed(2)}
+                          includeZero={false}
+                        />
+                      </div>
+                    </>
+                  )}
+                  {effectiveOptimizedHMode === 'cash_residual' && inceptionChartResult?.ok && (
+                    <div className="pair-report-kpis chart-stats" style={{ marginTop: 12 }}>
+                      <div className="chart-stat">
+                        <div className="cs-label">CAGR</div>
+                        <div className="cs-value">{inceptionChartResult.summary?.cagr != null ? (typeof B4Fns.fmtPctAnnual === 'function' ? B4Fns.fmtPctAnnual(inceptionChartResult.summary.cagr) : fmt(inceptionChartResult.summary.cagr)) : '—'}</div>
+                        <div className="cs-sub">sleeve equity · display {fmtMoney(incGross)}</div>
+                      </div>
+                      <div className="chart-stat">
+                        <div className="cs-label">Ann. vol / Sharpe</div>
+                        <div className="cs-value">{inceptionChartResult.summary?.annVol != null ? (typeof B4Fns.fmtPctAnnual === 'function' ? B4Fns.fmtPctAnnual(inceptionChartResult.summary.annVol) : fmt(inceptionChartResult.summary.annVol)) : '—'} / {inceptionChartResult.summary?.sharpe != null ? Number(inceptionChartResult.summary.sharpe).toFixed(2) : '—'}</div>
+                        <div className="cs-sub">daily replay returns</div>
+                      </div>
+                      <div className="chart-stat">
+                        <div className="cs-label">Max drawdown</div>
+                        <div className="cs-value">{inceptionChartResult.summary?.maxDrawdown != null ? (typeof B4Fns.fmtPctAnnual === 'function' ? B4Fns.fmtPctAnnual(inceptionChartResult.summary.maxDrawdown) : fmt(inceptionChartResult.summary.maxDrawdown)) : '—'}</div>
+                        <div className="cs-sub">peak-to-trough equity</div>
+                      </div>
+                      <div className="chart-stat">
+                        <div className="cs-label">Net PnL</div>
+                        <div className="cs-value">{fmtMoney(inceptionChartResult.summary?.netPnl)}</div>
+                        <div className="cs-sub" title="End-of-path combined |ETF|+|und| short exposure (not PnL)">
+                          end gross {fmtMoney(inceptionChartResult.summary?.totalGross)}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   <div className="pair-report-section trade-card" style={{ marginTop: 12 }}>
                     <div className="trade-head">
                       <div>
                         <div className="scenario-title">Equity and PnL ($)</div>
                         <div className="scenario-sub">
-                          {effectiveOptimizedHMode === 'stable' ? 'Stabilized' : 'Current'} Optimized research path, linearly scaled. Not used for book PnL.
+                          {effectiveOptimizedHMode === 'cash_residual'
+                            ? 'Cash-residual research path · not book PnL.'
+                            : (effectiveOptimizedHMode === 'stable' ? 'Stabilized' : 'Current') + ' Optimized research path, linearly scaled. Not used for book PnL.'}
                         </div>
                       </div>
                     </div>
@@ -15409,6 +16025,7 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
   const [artifact, setArtifact] = useState(null);
   const [artifactError, setArtifactError] = useState(null);
   const [artifactLoading, setArtifactLoading] = useState(true);
+  const [cashResidualBook, setCashResidualBook] = useState(null);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [gross, setGross] = useState(100000);
@@ -15440,6 +16057,19 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
       }
     };
     run();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await fetchJsonSafe('data/cash_residual_book_latest.json');
+        if (!cancelled) setCashResidualBook(data && data.schema ? data : null);
+      } catch (_) {
+        if (!cancelled) setCashResidualBook(null);
+      }
+    })();
     return () => { cancelled = true; };
   }, []);
 
@@ -15650,6 +16280,95 @@ function BacktestFlowPage({ records = [], preloadSymbol = '', dashboardBuildTime
         {artifact?.parity?.pair_reconciliation_max_abs_usd != null ? <> Pair reconciliation: <code>${Number(artifact.parity.pair_reconciliation_max_abs_usd).toExponential(2)}</code>.</> : null}
         {dashboardBuildTime ? <> Dashboard data: <code>{dashboardBuildTime}</code>.</> : null}
       </div>
+
+      {cashResidualBook && (
+        <div className="trade-card" style={{ marginBottom: 14 }}>
+          <div className="trade-head">
+            <div>
+              <div className="scenario-title">{cashResidualBook.policy_label || 'Cash-residual policy'}</div>
+              <div className="scenario-sub">
+                Live inverse-sleeve sizing with cash left undeployed after crash caps (no sleeve refill),
+                VCR-tilt hedge, gated h-up before gross cuts, and exec cadence DUE alignment.
+                Separate from the production refill book ledger above.
+                {cashResidualBook.asof ? <> As-of <code>{cashResidualBook.asof}</code>.</> : null}
+                {cashResidualBook.source_kind ? <> Source: <code>{cashResidualBook.source_kind}</code>.</> : null}
+              </div>
+            </div>
+          </div>
+          <div className="chart-stats" style={{ marginBottom: 10 }}>
+            <div className="chart-stat">
+              <div className="cs-label">Deployed</div>
+              <div className="cs-value">{cashResidualBook.sleeve?.deployed_usd != null ? fmtMoney(cashResidualBook.sleeve.deployed_usd) : '—'}</div>
+              <div className="cs-sub">of {cashResidualBook.sleeve?.budget_usd != null ? fmtMoney(cashResidualBook.sleeve.budget_usd) : '—'} sleeve</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">Cash residual</div>
+              <div className="cs-value">{cashResidualBook.sleeve?.cash_residual_pct != null ? `${Number(cashResidualBook.sleeve.cash_residual_pct).toFixed(1)}%` : '—'}</div>
+              <div className="cs-sub">{cashResidualBook.sleeve?.cash_residual_usd != null ? fmtMoney(cashResidualBook.sleeve.cash_residual_usd) : '—'}</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">Crash-capped</div>
+              <div className="cs-value">{cashResidualBook.sleeve?.n_capped != null ? String(cashResidualBook.sleeve.n_capped) : '—'}</div>
+              <div className="cs-sub">of {cashResidualBook.sleeve?.n_pairs ?? '—'} pairs · ρ {cashResidualBook.sleeve?.rho != null ? (Number(cashResidualBook.sleeve.rho) * 100).toFixed(2) + '% sleeve' : '—'}</div>
+            </div>
+            <div className="chart-stat">
+              <div className="cs-label">vs crash-only residual</div>
+              <div className="cs-value">{cashResidualBook.baseline_crash_only?.cash_residual_pct != null ? `${Number(cashResidualBook.baseline_crash_only.cash_residual_pct).toFixed(1)}%` : '—'}</div>
+              <div className="cs-sub">{cashResidualBook.sleeve?.h_first_enabled ? 'h-first on' : 'h-first off'}</div>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table className="pair-report-table">
+              <thead>
+                <tr>
+                  <th>ETF</th>
+                  <th>Und</th>
+                  <th>Weight</th>
+                  <th>Gross $</th>
+                  <th>Crash mult</th>
+                  <th>L</th>
+                  <th>h₀ → h₁</th>
+                  <th>Cadence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(cashResidualBook.pairs || []).map((p) => (
+                  <tr key={`${p.etf}|${p.underlying}`}>
+                    <td>
+                      <button
+                        type="button"
+                        className="chart-view-btn"
+                        style={{ display: 'inline', padding: '1px 6px' }}
+                        onClick={() => { window.location.hash = `#/chart/${encodeURIComponent(p.etf)}/optimized`; }}
+                      >
+                        {p.etf}
+                      </button>
+                    </td>
+                    <td>{p.underlying || '—'}</td>
+                    <td>{p.weight != null ? (Number(p.weight) * 100).toFixed(1) + '%' : '—'}</td>
+                    <td>{p.gross_usd != null ? fmtMoney(p.gross_usd) : '—'}</td>
+                    <td>{p.crash_mult != null ? Number(p.crash_mult).toFixed(3) : '—'}</td>
+                    <td>{p.L != null ? Number(p.L).toFixed(3) : '—'}</td>
+                    <td>
+                      {p.h0 != null || p.h1 != null
+                        ? `${p.h0 != null ? Number(p.h0).toFixed(2) : '—'} → ${p.h1 != null ? Number(p.h1).toFixed(2) : '—'}`
+                        : '—'}
+                    </td>
+                    <td>{p.cadence_due == null ? '—' : (p.cadence_due ? 'due' : 'defer')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="trade-note" style={{ marginTop: 8 }}>
+            Methods: {(cashResidualBook.methods || []).join(' · ') || '—'}.
+            Refresh snapshot: <code>python scripts/build_cash_residual_book_view.py</code>
+            {' '}(or <code>--from-run &lt;gtp_run_dir&gt;</code> after a live GTP).
+            Path charts: open Optimized on a row, or rebuild with{' '}
+            <code>python scripts/build_b4_cash_residual_path.py --etfs SYM</code>.
+          </div>
+        </div>
+      )}
 
       {artifactLoading && <div className="scenario-warning">Loading Bucket 4 backtest artifact…</div>}
       {artifactError && !artifactLoading && (
@@ -15881,6 +16600,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [showFlow, setShowFlow] = useState(false);
   const [showYbEdge, setShowYbEdge] = useState(false);
   const [showOps, setShowOps] = useState(false);
+  const [showViews, setShowViews] = useState(false);
   const [showBacktestFlow, setShowBacktestFlow] = useState(false);
   const [showInverseFlowProgram, setShowInverseFlowProgram] = useState(false);
   const [showBucket4PairReport, setShowBucket4PairReport] = useState(false);
@@ -16075,6 +16795,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowFlow(false);
         setShowYbEdge(false);
         setShowOps(false);
+        setShowViews(false);
         setShowBacktestFlow(false);
         setShowInverseFlowProgram(false);
         setShowBucket4PairReport(true);
@@ -16095,6 +16816,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowFlow(false);
         setShowYbEdge(false);
         setShowOps(false);
+        setShowViews(false);
         setShowBacktestFlow(false);
         setShowInverseFlowProgram(true);
         setShowBucket4PairReport(false);
@@ -16115,6 +16837,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowFlow(false);
         setShowYbEdge(false);
         setShowOps(false);
+        setShowViews(false);
         setShowBacktestFlow(true);
         setShowInverseFlowProgram(false);
         setShowBucket4PairReport(false);
@@ -16136,6 +16859,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           setShowFlow(false);
           setShowYbEdge(false);
           setShowOps(false);
+          setShowViews(false);
           setShowBacktestFlow(false);
           setShowInverseFlowProgram(false);
           setShowBucket4PairReport(false);
@@ -16168,6 +16892,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowFlow(false);
         setShowYbEdge(false);
         setShowOps(false);
+        setShowViews(false);
         setShowBacktestFlow(false);
         setShowInverseFlowProgram(false);
         setShowBucket4PairReport(false);
@@ -16184,6 +16909,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowFlow(false);
         setShowYbEdge(false);
         setShowOps(false);
+        setShowViews(false);
         setShowBacktestFlow(false);
         setShowInverseFlowProgram(false);
         setShowBucket4PairReport(false);
@@ -16200,6 +16926,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowFlow(true);
         setShowYbEdge(false);
         setShowOps(false);
+        setShowViews(false);
         setShowBacktestFlow(false);
         setShowInverseFlowProgram(false);
         setShowBucket4PairReport(false);
@@ -16216,6 +16943,24 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowFlow(false);
         setShowYbEdge(true);
         setShowOps(false);
+        setShowViews(false);
+        setShowBacktestFlow(false);
+        setShowInverseFlowProgram(false);
+        setShowBucket4PairReport(false);
+        setShowBucket5(false);
+        setBacktestFlowPreloadSymbol('');
+        setInverseFlowPreloadSymbol('');
+        setBucket4PairSymbol('');
+        return;
+      }
+      if (hash === '#/views') {
+        setChartRecord(null);
+        setShowInfo(false);
+        setShowNews(false);
+        setShowFlow(false);
+        setShowYbEdge(false);
+        setShowOps(false);
+        setShowViews(true);
         setShowBacktestFlow(false);
         setShowInverseFlowProgram(false);
         setShowBucket4PairReport(false);
@@ -16232,6 +16977,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         setShowFlow(false);
         setShowYbEdge(false);
         setShowOps(true);
+        setShowViews(false);
         setShowBacktestFlow(false);
         setShowInverseFlowProgram(false);
         setShowBucket4PairReport(false);
@@ -16250,6 +16996,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
       setShowFlow(false);
       setShowYbEdge(false);
       setShowOps(false);
+      setShowViews(false);
       setShowBacktestFlow(false);
       setShowInverseFlowProgram(false);
       setShowBucket4PairReport(false);
@@ -16286,6 +17033,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
 
   const navigateToOps = useCallback(() => {
     window.location.hash = '/ops';
+  }, []);
+
+  const navigateToViews = useCallback(() => {
+    window.location.hash = '/views';
   }, []);
 
   const navigateToBucket5 = useCallback(() => {
@@ -16463,6 +17214,13 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
             Health
           </button>
           <button
+            className={cls('topbar-btn', showViews && !chartRecord && 'active')}
+            onClick={() => { if (showViews) navigateBack(); else navigateToViews(); }}
+            title="Bucket 1 underlying views — score (−2…+2) → hedge coverage h"
+          >
+            B1 Views
+          </button>
+          <button
             className={cls('topbar-btn', showYbEdge && !chartRecord && 'active')}
             onClick={() => { if (showYbEdge) navigateBack(); else navigateToYbEdge(); }}
             title="YieldBOOST σ-space edge ranking + earnings overlay"
@@ -16489,7 +17247,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           >
             ▦ News
           </button>
-          <button className={cls('topbar-btn', showInfo && !chartRecord && !showNews && !showFlow && !showYbEdge && !showBacktestFlow && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
+          <button className={cls('topbar-btn', showInfo && !chartRecord && !showNews && !showFlow && !showYbEdge && !showViews && !showBacktestFlow && 'active')} onClick={() => { navigateBack(); setShowInfo(s => !s); }}>
             ◉ Info
           </button>
         </div>
@@ -16516,6 +17274,12 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           data={data}
           freshnessSummary={freshnessSummary}
           vrpHealth={vrpHealth}
+          onBack={navigateBack}
+        />
+      ) : showViews ? (
+        <Bucket1ViewsPage
+          records={records}
+          onNavigateToChart={navigateToChart}
           onBack={navigateBack}
         />
       ) : showYbEdge ? (

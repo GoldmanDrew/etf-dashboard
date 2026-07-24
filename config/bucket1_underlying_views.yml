@@ -1,0 +1,23 @@
+# Bucket 1 underlying views — discretionary hedge coverage overlay.
+# Research/ops only until explicitly wired into production sizing.
+# Edit scores here, then: python scripts/build_bucket1_underlying_views.py
+schema: bucket1_underlying_views.v1
+
+# score → h (long-und dollars per $1 short ETF)
+score_to_h:
+  -2: 0.25
+  -1: 0.625
+  0: 1.0
+  1: 1.25
+  2: 1.50
+
+h_min: 0.25
+h_max: 1.75
+
+# Keyed by underlying ticker. Missing → score 0 → h = 1.0
+# Example:
+#   NVDA:
+#     score: 2
+#     note: "optional free text"
+#     updated: "2026-07-24"
+views: {}

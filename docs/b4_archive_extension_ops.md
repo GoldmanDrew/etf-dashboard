@@ -8,7 +8,7 @@
 |---|---|
 | **Aggregate B4 sleeve chart** (diagnostic book KPIs) | **`2026-02-27`** golden production start — do **not** extend book `window_start` to `2025-12-28` |
 | **B4 Pairs / Pair Report — Plan path (default)** | Production ledger from first plan membership day (≥ book start when in book) |
-| **Chart Optimized tab** (`#/chart/SYM/optimized`) | Per-pair **listing/inception → latest** research nested on `bucket4_pairs/{ETF}.json` (legacy hash `/inception` still maps). Trade starts on first overlapping metrics session (`--trade-from-inception`, default on); early `h` may be `h_mid` until TR/VCR warms; borrow uses spot/zero until first PIT obs. Default view is **Stabilized** (`inception_research_stable`: deadband 0.05 + slew 0.025); toggle to **Current h**. Built for book ∪ production shards ∪ screener B4. `authoritative: false`; never feeds book PnL |
+| **Chart Optimized tab** (`#/chart/SYM/optimized`) | Per-pair **listing → latest** research on `bucket4_pairs/{ETF}.json`. Default path is **`cash_residual_path`** (`scale_to_budget=false`, crash caps + optional h-first + cadence freeze) when nested; toggles to unit-equity **Stabilized** / **Current h**. Rebuild: `python scripts/build_b4_cash_residual_path.py --etfs SYM`. `authoritative: false`; never feeds book PnL |
 
 ## Inventory
 
@@ -53,6 +53,17 @@ python scripts/build_b4_inception_research.py --out-dir data/bucket4_inception_r
 # Also nests inception_research_stable (deadband+slew) by default (--with-stable).
 python scripts/audit_b4_inception_paths.py --fail-on-inception-fail
 ```
+
+8. Refresh cash-residual Optimized paths (does not change book):
+
+```bash
+python scripts/build_b4_cash_residual_path.py
+# Or targeted: python scripts/build_b4_cash_residual_path.py --etfs CONI,HOOZ,NBIZ
+# Nests cash_residual_path onto data/bucket4_pairs/{ETF}.json
+# Also runs automatically at the end of build_b4_inception_research.py (--with-cash-residual, default on).
+```
+
+If Optimized shows “Cash-residual path not nested yet”, the shard has inception nests but no `cash_residual_path` — rebuild that ETF (or the fleet). Without the nest the UI correctly falls back to unit-equity Stabilized / Current h.
 
 Panel sanitize (`scripts/bucket4/bucket4_price_loading.py::sanitize_panel_vs_session_close`) replaces ETF `a_px` when day \|ret\| > 100% **or** early/late `panel/close` median steps >25%, preferring `etf_adj_close` when it removes reverse-split cliffs (APLZ/BEZ/NBIZ) else session `close_price` (QBTZ fabricated scale).
 

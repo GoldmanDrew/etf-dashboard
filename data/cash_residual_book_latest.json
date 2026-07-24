@@ -1,0 +1,113 @@
+{
+  "schema": "cash_residual_book.v1",
+  "policy_id": "cash_residual_policy",
+  "policy_label": "Cash-residual policy",
+  "generated_at": "2026-07-24T14:09:14Z",
+  "asof": "2026-07-23",
+  "source_kind": "compare_harness",
+  "source_path": "b4_h_first_compare.json",
+  "note": "rho is % of sleeve (cap = rho * budget / L). scale_to_budget=false both arms.",
+  "methods": [
+    "relative_pair_weights",
+    "vcr_hedge",
+    "crash_budget_cash_residual",
+    "h_first",
+    "exec_cadence"
+  ],
+  "sleeve": {
+    "budget_usd": 168000.0,
+    "deployed_usd": 113400.00000000001,
+    "cash_residual_usd": 54599.999999999985,
+    "cash_residual_pct": 32.49999999999999,
+    "rho": 0.0075,
+    "rho_basis": "pct_of_sleeve",
+    "n_pairs": 3,
+    "n_capped": 1,
+    "h_first_enabled": true
+  },
+  "baseline_crash_only": {
+    "deployed_usd": 66164.18532818533,
+    "cash_residual_usd": 101835.81467181467,
+    "cash_residual_pct": 60.616556352270635,
+    "n_capped": 2
+  },
+  "pairs": [
+    {
+      "etf": "AMDS",
+      "underlying": "AMD",
+      "weight": 0.375,
+      "gross_usd": 63000.0,
+      "gross_pre_crash_usd": 117599.99999999999,
+      "crash_mult": 0.5357142857142857,
+      "L": 0.010714285714285714,
+      "runup": 0.6000000000000001,
+      "h0": 0.65,
+      "h1": 0.9255236617532971,
+      "h_first_reason": "h_first_solve",
+      "cadence_due": null
+    },
+    {
+      "etf": "METD",
+      "underlying": "META",
+      "weight": 0.15,
+      "gross_usd": 25200.0,
+      "gross_pre_crash_usd": 25200.0,
+      "crash_mult": 1.0,
+      "L": 0.00840452551482754,
+      "runup": 0.0,
+      "h0": null,
+      "h1": null,
+      "h_first_reason": null,
+      "cadence_due": null
+    },
+    {
+      "etf": "CONI",
+      "underlying": "COIN",
+      "weight": 0.15,
+      "gross_usd": 25200.0,
+      "gross_pre_crash_usd": 25200.0,
+      "crash_mult": 1.0,
+      "L": 0.044189004451699807,
+      "runup": 0.5454545454545454,
+      "h0": 0.6,
+      "h1": 0.6882352941176471,
+      "h_first_reason": "h_first_solve",
+      "cadence_due": null
+    }
+  ],
+  "pair_deltas": [
+    {
+      "pair": "AMDS|AMD",
+      "gross_crash_only": 20187.42857142857,
+      "gross_h_first": 63000.0,
+      "delta_usd": 42812.571428571435,
+      "mult_crash_only": 0.17166180758017494,
+      "mult_h_first": 0.5357142857142857,
+      "L_crash_only": 0.06241508152173914,
+      "L_h_first": 0.010714285714285714,
+      "runup": 0.6000000000000001
+    },
+    {
+      "pair": "CONI|COIN",
+      "gross_crash_only": 20776.756756756757,
+      "gross_h_first": 25200.0,
+      "delta_usd": 4423.243243243243,
+      "mult_crash_only": 0.8244744744744745,
+      "mult_h_first": 1.0,
+      "L_crash_only": 0.060644691313057726,
+      "L_h_first": 0.044189004451699807,
+      "runup": 0.5454545454545454
+    },
+    {
+      "pair": "METD|META",
+      "gross_crash_only": 25200.0,
+      "gross_h_first": 25200.0,
+      "delta_usd": 0.0,
+      "mult_crash_only": 1.0,
+      "mult_h_first": 1.0,
+      "L_crash_only": 0.00840452551482754,
+      "L_h_first": 0.00840452551482754,
+      "runup": 0.0
+    }
+  ]
+}

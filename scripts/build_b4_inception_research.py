@@ -551,6 +551,13 @@ def main(argv: list[str] | None = None) -> int:
              "(default: on; ignored for Layer A membership twin)",
     )
     ap.add_argument(
+        "--with-cash-residual",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After inception nests, also build/nest cash_residual_path for Optimized "
+             "(default: on; skipped for Layer A membership twin)",
+    )
+    ap.add_argument(
         "--trade-from-inception",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -616,9 +623,25 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 written += 1
 
+    cash_residual_written = 0
+    if (
+        bool(args.with_cash_residual)
+        and not bool(args.honor_production_membership)
+        and etfs
+    ):
+        try:
+            from build_b4_cash_residual_path import main as cash_residual_main
+
+            # Reuse the same ETF list; nest onto pair shards for Optimized default path.
+            rc = cash_residual_main(["--etfs", ",".join(etfs), "--min-days", str(panel_min_days)])
+            cash_residual_written = len(etfs) if rc == 0 else 0
+        except Exception as exc:  # noqa: BLE001
+            print(f"warn: cash_residual_path build failed: {exc}", file=sys.stderr)
+
     print(json.dumps({
         "ok": written > 0,
         "written": written,
+        "cash_residual_written": cash_residual_written,
         "passes": [
             {"stabilizer": s or "none", "out_dir": str(d.resolve()), "nest_key": k}
             for s, d, k in passes

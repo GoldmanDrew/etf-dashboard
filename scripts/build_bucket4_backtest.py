@@ -490,6 +490,7 @@ def run_pair_backtest_for_row(
     capital_mode: str = "unit_equity",
     stop_on_equity_wipeout: bool = True,
     h_stabilizer: dict | None = None,
+    signal_underlying_prices: pd.Series | None = None,
 ) -> tuple[pd.DataFrame | None, pd.Series | None, pd.DataFrame | None, str]:
     etf = _norm(row.get("ETF"))
     und = _norm(row.get("Underlying"))
@@ -519,12 +520,15 @@ def run_pair_backtest_for_row(
         load_borrow_history() if bool(bt_cfg.get("pit_borrow", True)) else {}
     )
 
+    und_px_for_signal = px["b_px"]
+    if signal_underlying_prices is not None and not getattr(signal_underlying_prices, "empty", True):
+        und_px_for_signal = signal_underlying_prices
     sig = get_pair_signal(
         etf,
         und,
         signal_cal if len(signal_cal) >= len(cal) else cal,
         history=vol_history,
-        underlying_prices=px["b_px"],
+        underlying_prices=und_px_for_signal,
         window=signal_window,
         lookahead_shift=1,
     )

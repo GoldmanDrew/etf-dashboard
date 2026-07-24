@@ -333,6 +333,204 @@ def load_price_panel(
     return sanitize_panel_split_sized_basis_jumps(sanitized)
 
 
+def load_etf_underlying_map(
+    screener_path: Path | None = None,
+) -> dict[str, str]:
+    """ETF → underlying map from screener CSV (fallback: empty)."""
+    path = Path(screener_path) if screener_path is not None else (REPO / "data" / "etf_screened_today.csv")
+    if not path.is_file():
+        return {}
+    try:
+        scr = pd.read_csv(path, usecols=lambda c: str(c) in {"ETF", "Underlying", "etf", "underlying", "symbol", "Symbol"})
+    except Exception:
+        return {}
+    etf_col = next((c for c in ("ETF", "etf", "symbol", "Symbol") if c in scr.columns), None)
+    und_col = next((c for c in ("Underlying", "underlying") if c in scr.columns), None)
+    if not etf_col or not und_col:
+        return {}
+    out: dict[str, str] = {}
+    for etf, und in zip(scr[etf_col].tolist(), scr[und_col].tolist()):
+        e, u = _norm_sym(etf), _norm_sym(und)
+        if e and u and u not in {"", "NAN", "NONE"}:
+            out[e] = u
+    return out
+
+
+def load_underlying_adj_close_series(
+    underlying: str,
+    *,
+    metrics: pd.DataFrame | None = None,
+    etf_to_und: dict[str, str] | None = None,
+    panel_fallback: pd.Series | None = None,
+    asof: str | pd.Timestamp | None = None,
+    entry_date: str | pd.Timestamp | None = None,
+    min_obs_before_entry: int = 252,
+    yahoo_fallback: bool = True,
+) -> pd.Series:
+    """Full underlying adj-close history for crash / vol-shape lookbacks.
+
+    Joint ETF panels only start at listing, which blinds cash-residual crash
+    stats for ~``tail_min_obs`` sessions. This merges ``underlying_adj_close``
+    across every metrics ticker mapped to the same underlying, then optionally
+    extends with Yahoo when history *before entry* is still thin.
+    """
+    und = _norm_sym(underlying)
+    if not und:
+        return pd.Series(dtype=float)
+
+    md = metrics if metrics is not None else load_metrics_frame()
+    mapping = etf_to_und if etf_to_und is not None else load_etf_underlying_map()
+    tickers = [t for t, u in mapping.items() if u == und]
+    if "ticker" not in md.columns or "underlying_adj_close" not in md.columns:
+        series = pd.Series(dtype=float)
+    else:
+        work = md.loc[:, ["date", "ticker", "underlying_adj_close"]].copy()
+        work["ticker"] = work["ticker"].map(_norm_sym)
+        work["date"] = pd.to_datetime(work["date"], errors="coerce").dt.normalize()
+        work["underlying_adj_close"] = pd.to_numeric(work["underlying_adj_close"], errors="coerce")
+        if tickers:
+            work = work[work["ticker"].isin(tickers)]
+        work = work.dropna(subset=["date", "underlying_adj_close"])
+        if work.empty:
+            series = pd.Series(dtype=float)
+        else:
+            # Median across sleeves on a date (same und print, robust to glitches).
+            grp = work.groupby("date", sort=True)["underlying_adj_close"].median()
+            series = pd.Series(grp.to_numpy(dtype=float), index=pd.DatetimeIndex(grp.index), name=und)
+
+    if panel_fallback is not None and not panel_fallback.empty:
+        fb = pd.to_numeric(panel_fallback, errors="coerce").dropna().astype(float)
+        fb.index = pd.DatetimeIndex(pd.to_datetime(fb.index, errors="coerce")).normalize()
+        fb = fb[fb.index.notna()]
+        fb = fb[~fb.index.duplicated(keep="last")].sort_index()
+        if series.empty:
+            series = fb.rename(und)
+        else:
+            series = series.combine_first(fb).sort_index()
+            series = series[~series.index.duplicated(keep="last")]
+
+    asof_ts = pd.Timestamp(asof).normalize() if asof is not None else None
+    entry_ts = pd.Timestamp(entry_date).normalize() if entry_date is not None else None
+    if entry_ts is None and panel_fallback is not None and len(panel_fallback):
+        try:
+            entry_ts = pd.Timestamp(pd.DatetimeIndex(panel_fallback.index).min()).normalize()
+        except Exception:
+            entry_ts = None
+
+    def _n_before_entry(s: pd.Series) -> int:
+        if s is None or s.empty:
+            return 0
+        if entry_ts is None:
+            return int(s.shape[0])
+        # Observations strictly before the first trade/listing day.
+        return int(s.loc[s.index < entry_ts].shape[0])
+
+    if yahoo_fallback and _n_before_entry(series) < int(min_obs_before_entry):
+        y = _yahoo_adj_close(und, end=asof_ts or entry_ts, entry_date=entry_ts)
+        if y is not None and not y.empty:
+            if series.empty:
+                series = y.rename(und)
+            else:
+                # Yahoo fills the left (pre-listing) tail; metrics wins on overlap.
+                series = series.combine_first(y).sort_index()
+                series = series[~series.index.duplicated(keep="last")]
+
+    # Brand-new IPO underlyings (CBRS/SPCX) still have no left tail — use SPY
+    # returns as a last-resort crash/vol lookback so day-1 sizing is not blind.
+    if yahoo_fallback and _n_before_entry(series) < int(min_obs_before_entry):
+        spy = _yahoo_adj_close("SPY", end=asof_ts or entry_ts, entry_date=entry_ts, try_aliases=False)
+        if spy is not None and not spy.empty:
+            if series.empty:
+                series = spy.rename(und)
+            else:
+                series = series.combine_first(spy.rename(und)).sort_index()
+                series = series[~series.index.duplicated(keep="last")]
+
+    if asof_ts is not None and not series.empty:
+        series = series.loc[:asof_ts]
+    return series.astype(float)
+
+
+# When screener "underlying" is a co-listed ETP with no pre-history, Yahoo-fetch
+# a longer proxy for crash / vol-shape lookbacks (levels are only used for
+# returns in conditional_crash_stats / TR-VCR).
+_YAHOO_UND_ALIASES: dict[str, tuple[str, ...]] = {
+    "ETHA": ("ETH-USD",),
+    "XRPZ": ("XRP-USD",),
+    "SVIX": ("VIXY", "^VIX"),
+    "UVIX": ("VIXY", "^VIX"),
+    "BTCZ": ("BTC-USD",),
+    "BITO": ("BTC-USD",),
+}
+
+
+def _yahoo_adj_close(
+    symbol: str,
+    *,
+    end: pd.Timestamp | None = None,
+    entry_date: str | pd.Timestamp | None = None,
+    lookback_years: int = 15,
+    try_aliases: bool = True,
+) -> pd.Series | None:
+    try:
+        import yfinance as yf  # type: ignore
+    except Exception:
+        return None
+
+    def _one(sym: str) -> pd.Series | None:
+        if not sym:
+            return None
+        end_ts = pd.Timestamp(end or pd.Timestamp.utcnow()).normalize()
+        # Reach back far enough that entry_date has a full crash lookback.
+        start_ts = end_ts - pd.DateOffset(years=int(lookback_years))
+        if entry_date is not None:
+            entry_ts = pd.Timestamp(entry_date).normalize() - pd.DateOffset(years=6)
+            if entry_ts < start_ts:
+                start_ts = entry_ts
+        try:
+            hist = yf.download(
+                sym,
+                start=start_ts.strftime("%Y-%m-%d"),
+                end=(end_ts + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+        except Exception:
+            return None
+        if hist is None or getattr(hist, "empty", True):
+            return None
+        close = hist["Close"] if "Close" in hist.columns else hist.iloc[:, 0]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        s = pd.to_numeric(close, errors="coerce").dropna().astype(float)
+        s.index = pd.DatetimeIndex(pd.to_datetime(s.index, errors="coerce")).normalize()
+        s = s[s.index.notna()]
+        s = s[~s.index.duplicated(keep="last")].sort_index()
+        s.name = sym
+        return s if len(s) >= 5 else None
+
+    primary = _norm_sym(symbol)
+    # Keep ^VIX-style Yahoo tickers intact.
+    raw = str(symbol or "").strip()
+    candidates = [raw if raw.startswith("^") else primary]
+    if try_aliases:
+        for alt in _YAHOO_UND_ALIASES.get(primary, ()):
+            if alt not in candidates:
+                candidates.append(alt)
+
+    best: pd.Series | None = None
+    for cand in candidates:
+        s = _one(cand)
+        if s is None or s.empty:
+            continue
+        if best is None or s.index.min() < best.index.min() or (
+            s.index.min() == best.index.min() and len(s) > len(best)
+        ):
+            best = s
+    return best
+
+
 def load_pair_prices(
     etf: str,
     underlying: str,
