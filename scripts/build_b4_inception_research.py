@@ -569,7 +569,16 @@ def main(argv: list[str] | None = None) -> int:
     min_days = int(args.min_days if args.min_days is not None else bt_cfg.get("min_days", 60))
     warmup_bdays = int(args.warmup_bdays if args.warmup_bdays is not None else bt_cfg.get("warmup_bdays", 60))
     signal_window = int(args.signal_window if args.signal_window is not None else bt_cfg.get("signal_window", 60))
-    panel = load_price_panel(min_days=max(10, min(min_days, 40)))
+    # Optimized listing→latest path must include brand-new B4 names (<40 sessions).
+    # Policy min_days (often 60) still gates production-style sims; panel load only
+    # needs enough overlap to build a research path. Without this floor drop,
+    # CBRZ/MUZ/SNK/SPCG/SSPC-class listings get inception_research nested once
+    # (via a lower --min-days run) then permanently fail --with-stable rebuilds.
+    if bool(args.trade_from_inception) and not bool(args.honor_production_membership):
+        panel_min_days = max(10, min(int(args.min_days) if args.min_days is not None else 15, 40))
+    else:
+        panel_min_days = max(10, min(min_days, 40))
+    panel = load_price_panel(min_days=panel_min_days)
     vol_history = load_vol_shape_history(VOL_SHAPE_HISTORY) if VOL_SHAPE_HISTORY.is_file() else {}
     borrow_history = b4.load_borrow_history() if bool(bt_cfg.get("pit_borrow", True)) else {}
     require_pit_borrow = bool(bt_cfg.get("pit_borrow", True)) and not bool(args.allow_missing_pit_borrow)

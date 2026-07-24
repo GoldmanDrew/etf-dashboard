@@ -38,6 +38,8 @@ from realized_gross_decay import (
 )
 from product_taxonomy import volatility_etp_symbols, yieldboost_income_pairs, write_spa_export
 from operational_signals import enrich_records_with_operational_signals
+from ipo_unlock_model import enrich_records_with_ipo_unlock
+from ipo_unlock_calendar import build_calendar, write_calendar, SEED_PATH as IPO_UNLOCK_SEED_PATH
 from split_adjustments import (
     MAX_WINDOW_DIVIDEND_YIELD_FRAC,
     adjust_window_dividend_for_split,
@@ -5580,6 +5582,33 @@ def build():
         data_dir=OUTPUT_DIR,
     )
 
+    # IPO float-unlock overlay (parallel fields; does not replace HARQ / net_edge_*)
+    ipo_unlock_meta = None
+    try:
+        if IPO_UNLOCK_SEED_PATH.exists():
+            ipo_asof = dt.date.fromisoformat(str(today_utc)[:10])
+            ipo_cal = build_calendar(asof=ipo_asof, data_dir=OUTPUT_DIR)
+            write_calendar(ipo_cal, OUTPUT_DIR / "ipo_float_unlock_calendar.json")
+            ipo_stats = enrich_records_with_ipo_unlock(
+                records,
+                data_dir=OUTPUT_DIR,
+                calendar=ipo_cal,
+                asof=ipo_asof,
+            )
+            ipo_unlock_meta = {
+                "asof_date": ipo_cal.get("asof_date"),
+                "calendar_build_time": ipo_cal.get("build_time"),
+                "enrich_stats": ipo_stats,
+                "schema_version": 1,
+            }
+            print(
+                f"  IPO unlock overlay: flagged={ipo_stats.get('flagged')} "
+                f"modeled={ipo_stats.get('modeled')} "
+                f"active_und={sum(1 for u in (ipo_cal.get('underlyings') or []) if u.get('is_ipo_float_unlock'))}"
+            )
+    except Exception as exc:
+        print(f"  Warning: IPO unlock overlay failed: {exc}")
+
     # 6. Compute summary
     summary = _calc_summary(records)
 
@@ -5645,6 +5674,8 @@ def build():
             "chart_engine": "native_basket_index",
         },
         "vrp_live_file": "data/vrp_live.json",
+        "ipo_float_unlock_calendar_file": "data/ipo_float_unlock_calendar.json",
+        "ipo_float_unlock_meta": ipo_unlock_meta,
         "summary": summary,
         "records": records,
     }

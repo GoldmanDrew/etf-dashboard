@@ -157,10 +157,15 @@ def main(argv: list[str] | None = None) -> int:
         shard = json.loads(path.read_text(encoding="utf-8"))
         plan = audit_daily(shard.get("daily") or {})
         ir = shard.get("inception_research") or {}
+        irs = shard.get("inception_research_stable") or {}
         if ir:
             inception = audit_daily(ir.get("daily") or {})
             inception["final_equity"] = (ir.get("summary") or {}).get("final_equity")
             inception["cagr"] = (ir.get("summary") or {}).get("cagr")
+            inception["stable_nested"] = bool(irs)
+            if not irs:
+                inception.setdefault("issues", []).append("missing_stable_nest")
+                inception["warn"] = True
         else:
             inception = {"fail": True, "warn": False, "error": "no_inception", "issues": ["no_inception"]}
         rows.append(
@@ -169,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
                 "underlying": shard.get("underlying"),
                 "plan": plan,
                 "inception": inception,
+                "stable_nested": bool(irs),
             }
         )
         p_st = "FAIL" if plan.get("fail") else ("WARN" if plan.get("warn") else "OK")
@@ -196,6 +202,12 @@ def main(argv: list[str] | None = None) -> int:
         "plan_warn": [r["etf"] for r in rows if (r.get("plan") or {}).get("warn")],
         "inception_missing": [
             r["etf"] for r in rows if (r.get("inception") or {}).get("error") == "no_inception"
+        ],
+        "stable_missing": [
+            r["etf"]
+            for r in rows
+            if (r.get("inception") or {}).get("error") != "no_inception"
+            and not r.get("stable_nested")
         ],
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)

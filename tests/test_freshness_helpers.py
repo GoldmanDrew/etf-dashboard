@@ -133,6 +133,69 @@ def test_stamp_blocks_issuer_lag_and_implausible_prem_disc():
     assert sndq["premium_discount_status"] == "valid"
 
 
+def test_stamp_flags_frozen_nav_run_under_prem_cap():
+    """SPCL-style republished NAV must be issuer_lag even when |prem|<10% early."""
+    rows = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 6, 23),
+                "ticker": "SPCL",
+                "nav": 39.0,
+                "close_price": 39.07,
+                "source_provider": "defiance",
+                "source_url": "https://example/#as_of=2026-06-23",
+                "stale_kind": None,
+            },
+            {
+                "date": date(2026, 6, 24),
+                "ticker": "SPCL",
+                "nav": 34.79,
+                "close_price": 38.08,
+                "source_provider": "defiance",
+                "source_url": "https://example/#as_of=2026-06-24",
+                "stale_kind": None,
+            },
+            {
+                "date": date(2026, 6, 25),
+                "ticker": "SPCL",
+                "nav": 34.79,
+                "close_price": 37.45,
+                "source_provider": "defiance",
+                "source_url": "https://example/#as_of=2026-06-25",
+                "stale_kind": None,
+            },
+            {
+                "date": date(2026, 6, 26),
+                "ticker": "SPCL",
+                "nav": 34.79,
+                "close_price": 37.06,
+                "source_provider": "defiance",
+                "source_url": "https://example/#as_of=2026-06-26",
+                "stale_kind": None,
+            },
+            {
+                "date": date(2026, 6, 29),
+                "ticker": "SPCL",
+                "nav": 34.79,
+                "close_price": 42.59,
+                "source_provider": "defiance",
+                "source_url": "https://example/#as_of=2026-06-29",
+                "stale_kind": None,
+            },
+        ]
+    )
+    out = stamp_metric_asof_metadata(rows)
+    # Diverging days inside the frozen-NAV run are tagged; close≈NAV days are not.
+    for d in (date(2026, 6, 24), date(2026, 6, 25), date(2026, 6, 26), date(2026, 6, 29)):
+        row = out.loc[out["date"] == d].iloc[0]
+        assert row["stale_kind"] == STALE_KIND_ISSUER_LAG
+        assert bool(row["premium_discount_eligible"]) is False
+        assert row["premium_discount_status"] == "issuer_stale"
+    live = out.loc[out["date"] == date(2026, 6, 23)].iloc[0]
+    assert live["stale_kind"] in (None, "None", "") or pd.isna(live["stale_kind"])
+    assert bool(live["premium_discount_eligible"]) is True
+
+
 def test_yieldboost_targeted_refresh_symbols_keeps_underlyings():
     targets = {"SOXL": [47.89], "NUGT": [35.07]}
     held = {"SOXL": {"2026-05-27"}}

@@ -196,6 +196,22 @@ class ETFRecord(BaseModel):
     borrow_stress_borrow_annual: Optional[float] = None
     net_edge_stress_p50_annual: Optional[float] = None
     net_edge_stress_basis: Optional[str] = None
+    # IPO float-unlock overlay (dashboard-side; parallel to headline HARQ / net_edge)
+    is_ipo_float_unlock: Optional[bool] = None
+    ipo_unlock_status: Optional[str] = None
+    ipo_unlock_data_grade: Optional[str] = None
+    days_to_next_ipo_unlock: Optional[int] = None
+    next_ipo_unlock_date: Optional[str] = None
+    next_ipo_unlock_shares: Optional[float] = None
+    next_ipo_unlock_tranche_id: Optional[str] = None
+    forecast_vol_unlock_annual: Optional[float] = None
+    expected_gross_decay_unlock_p50_annual: Optional[float] = None
+    expected_gross_decay_unlock_p10_annual: Optional[float] = None
+    expected_gross_decay_unlock_p90_annual: Optional[float] = None
+    expected_pair_pnl_unlock_p50_annual: Optional[float] = None
+    net_edge_unlock_p50_annual: Optional[float] = None
+    price_car_unlock_p50_short_favorable: Optional[float] = None
+    ipo_unlock_model_note: Optional[str] = None
     borrow_ops_policy: Optional[str] = None
     borrow_ops_spike_block: Optional[bool] = None
     borrow_ops_spike_watch: Optional[bool] = None

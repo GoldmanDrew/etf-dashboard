@@ -71,7 +71,15 @@
   function issuerNavForPlot(metricsRow) {
     if (!metricsRow || isIssuerStaleMetricsRow(metricsRow)) return null;
     const nav = Number(metricsRow.nav);
-    return Number.isFinite(nav) && nav > 0 ? nav : null;
+    if (!(Number.isFinite(nav) && nav > 0)) return null;
+    // Frozen issuer NAV can still be eligible for a session or two while
+    // |prem| stays under the 10% hard-cap — do not plot that as a live NAV.
+    const close = Number(metricsRow.close_price);
+    if (Number.isFinite(close) && Math.abs((close - nav) / nav) * 100 > MAX_ABS_PREM_DISC_PCT) {
+      return null;
+    }
+    if (metricsRow.premium_discount_eligible === false) return null;
+    return nav;
   }
 
   const api = {

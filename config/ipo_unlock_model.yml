@@ -1,0 +1,31 @@
+# IPO float-unlock overlay model constants (dashboard-side; does not alter ls-algo).
+schema_version: 1
+
+# Classification
+recently_cleared_lookback_days: 30
+material_days_adv_threshold: 3.0
+
+# Sell-fraction priors by holder_class (eligible ≠ sold)
+sell_fraction_by_holder_class:
+  employees: 0.28
+  directors_officers: 0.18
+  pre_ipo: 0.22
+  founder_extended: 0.05
+  default: 0.20
+
+# Price impact (diagnostic CAR; short_favorable_positive = -CAR_long)
+car_base_3d: -0.015
+car_scale_days_adv_ref: 5.0
+car_soft_cap: -0.12
+
+# Volatility path
+event_window_calendar_days: 15
+event_uplift_floor: 0.10
+event_uplift_log_coef: 0.04
+event_uplift_cap: 0.30
+compression_log_coef: 0.10
+compression_floor: 0.70
+trading_days_year: 252
+
+# Default ADV when seed/metrics missing (shares/day)
+default_adv_shares: 5000000

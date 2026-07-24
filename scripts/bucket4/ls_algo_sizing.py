@@ -95,9 +95,12 @@ def opt2_cfg_from_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
     opt2["weight_smoothing"] = ws
     cb = dict(opt2.get("crash_budget") or {})
     cb.setdefault("enabled", True)
-    # Match live GTP (2026-07-10): relative rho + scale_to_budget refill.
+    # Match Magis/ls-algo GTP: relative rho + scale_to_budget refill.
+    # DCQ production path uses scale_to_budget=false (see port plan).
     cb.setdefault("rho", 0.0075)
     cb.setdefault("scale_to_budget", True)
+    cb.setdefault("apply_on_cadence_due_only", True)
+    cb.setdefault("emergency_cut_rel", 0.25)
     cb.setdefault("theta", 0.5)
     cb.setdefault("phi", 0.5)
     cb.setdefault("l_floor", 0.02)

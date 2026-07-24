@@ -1244,11 +1244,106 @@ def overlay_row_session_market_fields(
     return out.sort_values("_row_order").drop(columns=["_row_order"]).reset_index(drop=True)
 
 
+def flag_frozen_issuer_nav(
+    df: pd.DataFrame,
+    *,
+    min_run_days: int = 2,
+    nav_eps: float = 1e-6,
+    min_abs_prem: float = 0.03,
+    min_abs_close_move: float = 0.015,
+) -> pd.DataFrame:
+    """Stamp ``issuer_lag`` on sessions where issuer NAV is frozen vs the market.
+
+    Defiance (and peers) sometimes republish the same NAV for several sessions
+    without a lag flag. |close/NAV| can stay under the 10% prem/disc hard-cap for
+    a day or two (fake ~7–9% premium) then blank the Stats chart when it spikes.
+    Only tag days inside a frozen-NAV run that themselves show a meaningful
+    premium/discount — do not paint an entire sticky-NAV stretch when close≈NAV.
+    """
+    if df.empty or "nav" not in df.columns or "close_price" not in df.columns:
+        return df
+    out = df.copy()
+    if "stale_kind" not in out.columns:
+        out["stale_kind"] = None
+    nav = pd.to_numeric(out["nav"], errors="coerce")
+    close = pd.to_numeric(out["close_price"], errors="coerce")
+    dates = pd.to_datetime(out["date"], errors="coerce")
+    tickers = out["ticker"].astype(str).map(_normalize_symbol)
+    kind = out["stale_kind"].astype(str).str.lower()
+    already = kind.isin(
+        {
+            STALE_KIND_ISSUER_LAG,
+            STALE_KIND_ISSUER_EARLY,
+            STALE_KIND_ANCHOR_LAG,
+            STALE_KIND_MARKET_BACKED,
+            "carry_forward",
+        }
+    )
+    frozen_idx: list[int] = []
+    work = pd.DataFrame(
+        {
+            "nav": nav,
+            "close": close,
+            "date": dates,
+            "ticker": tickers,
+            "already": already.to_numpy(),
+        },
+        index=out.index,
+    ).sort_values(["ticker", "date"])
+    for _, g in work.groupby("ticker", sort=False):
+        if len(g) < min_run_days:
+            continue
+        nav_v = g["nav"].to_numpy(dtype=float)
+        close_v = g["close"].to_numpy(dtype=float)
+        idxs = list(g.index)
+        run_start = 0
+        for i in range(1, len(g) + 1):
+            cont = (
+                i < len(g)
+                and np.isfinite(nav_v[i])
+                and np.isfinite(nav_v[i - 1])
+                and abs(nav_v[i] - nav_v[i - 1]) <= nav_eps
+                and nav_v[i] > 0
+            )
+            if cont:
+                continue
+            run_end = i  # exclusive
+            run_len = run_end - run_start
+            if run_len >= min_run_days:
+                run_close = close_v[run_start:run_end]
+                run_nav = nav_v[run_start:run_end]
+                ok = np.isfinite(run_nav) & np.isfinite(run_close) & (run_nav > 0) & (run_close > 0)
+                if int(ok.sum()) >= min_run_days:
+                    prem = np.abs(run_close / run_nav - 1.0)
+                    c_move = (
+                        np.abs(np.diff(run_close[ok]) / run_close[ok][:-1])
+                        if int(ok.sum()) >= 2
+                        else np.array([0.0])
+                    )
+                    run_is_frozen = float(np.nanmax(prem[ok])) >= min_abs_prem and float(
+                        np.nanmax(c_move)
+                    ) >= min_abs_close_move
+                    if run_is_frozen:
+                        for j in range(run_start, run_end):
+                            if bool(g["already"].iloc[j]):
+                                continue
+                            if not (np.isfinite(run_nav[j - run_start]) and np.isfinite(run_close[j - run_start])):
+                                continue
+                            day_prem = abs(run_close[j - run_start] / run_nav[j - run_start] - 1.0)
+                            # Tag the diverging days only; leave close≈NAV prints alone.
+                            if day_prem >= min_abs_prem:
+                                frozen_idx.append(idxs[j])
+            run_start = i
+    if frozen_idx:
+        out.loc[frozen_idx, "stale_kind"] = STALE_KIND_ISSUER_LAG
+    return out
+
+
 def stamp_metric_asof_metadata(df: pd.DataFrame) -> pd.DataFrame:
     """Stamp issuer/market valuation dates and a safe premium/discount gate."""
     if df.empty:
         return df
-    out = df.copy()
+    out = flag_frozen_issuer_nav(df)
     row_date = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     urls = out.get("source_url", pd.Series(index=out.index, dtype=object)).fillna("").astype(str)
     carry_from = urls.str.extract(r"(?:\?|&)from=(\d{4}-\d{2}-\d{2})\b")[0]

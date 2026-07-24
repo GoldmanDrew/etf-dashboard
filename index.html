@@ -9685,6 +9685,20 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
             {productClassLabel}
           </span>
         )}
+        {r.is_ipo_float_unlock && (
+          <span
+            className="chart-bucket-badge b3"
+            title={[
+              'IPO float unlock active (dashboard overlay — does not replace HARQ headline).',
+              r.next_ipo_unlock_date ? `Next: ${r.next_ipo_unlock_date}` : null,
+              r.next_ipo_unlock_shares != null ? `Shares: ${Number(r.next_ipo_unlock_shares).toLocaleString()}` : null,
+              r.ipo_unlock_data_grade ? `Grade: ${r.ipo_unlock_data_grade}` : null,
+              r.days_to_next_ipo_unlock != null ? `Days: ${r.days_to_next_ipo_unlock}` : null,
+            ].filter(Boolean).join(' · ')}
+          >
+            Unlock{r.days_to_next_ipo_unlock != null ? ` ${r.days_to_next_ipo_unlock}d` : ''}
+          </span>
+        )}
         <div className="chart-view-switch">
           <button className={cls('chart-view-btn', activePanel === 'chart' && 'active')} onClick={() => navigateChartPanel('chart')}>Chart</button>
           <button className={cls('chart-view-btn', activePanel === 'stats' && 'active')} onClick={() => navigateChartPanel('stats')}>Stats</button>
@@ -9829,6 +9843,65 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
               <div className="cs-sub">live spot vs window end (split-adj) • dividend lift: {undDivLift == null ? '—' : fmt(undDivLift)}</div>
             </div>
           </div>
+          )}
+          {r.is_ipo_float_unlock && (
+            <div className="chart-section" style={{ marginTop: 12 }} title={r.ipo_unlock_model_note || ''}>
+              <div className="scenario-title" style={{ marginBottom: 6 }}>
+                IPO float unlock — alternate view
+                <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>
+                  overlay · does not replace headline Exp. edge / Net edge
+                </span>
+              </div>
+              <div className="chart-stats" style={{ marginTop: 0 }}>
+                <div className="chart-stat">
+                  <div className="cs-label">Next unlock</div>
+                  <div className="cs-value">{r.next_ipo_unlock_date || '—'}</div>
+                  <div className="cs-sub">
+                    {r.next_ipo_unlock_shares != null
+                      ? `${(Number(r.next_ipo_unlock_shares) / 1e6).toFixed(1)}M sh`
+                      : '—'}
+                    {r.days_to_next_ipo_unlock != null ? ` · ${r.days_to_next_ipo_unlock}d` : ''}
+                    {r.ipo_unlock_data_grade ? ` · grade ${r.ipo_unlock_data_grade}` : ''}
+                  </div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">σ base → unlock</div>
+                  <div className="cs-value">
+                    {r.forecast_vol_unlock_base_annual != null ? fmt(r.forecast_vol_unlock_base_annual) : (r.forecast_vol_underlying_annual != null ? fmt(r.forecast_vol_underlying_annual) : '—')}
+                    {' → '}
+                    {r.forecast_vol_unlock_annual != null ? fmt(r.forecast_vol_unlock_annual) : '—'}
+                  </div>
+                  <div className="cs-sub">
+                    event {r.forecast_vol_unlock_event_annual != null ? fmt(r.forecast_vol_unlock_event_annual) : '—'}
+                    {' · ss '}
+                    {r.forecast_vol_unlock_steady_annual != null ? fmt(r.forecast_vol_unlock_steady_annual) : '—'}
+                  </div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">Exp. decay unlock</div>
+                  <div className="cs-value">
+                    {r.expected_gross_decay_unlock_p50_annual != null
+                      ? fmtLogYr(r.expected_gross_decay_unlock_p50_annual)
+                      : '—'}
+                  </div>
+                  <div className="cs-sub">
+                    {r.expected_gross_decay_unlock_p10_annual != null && r.expected_gross_decay_unlock_p90_annual != null
+                      ? `${fmtLogYr(r.expected_gross_decay_unlock_p10_annual)} / ${fmtLogYr(r.expected_gross_decay_unlock_p90_annual)}`
+                      : 'Itô on unlock σ path'}
+                  </div>
+                </div>
+                <div className="chart-stat">
+                  <div className="cs-label">Net edge unlock</div>
+                  <div className="cs-value">
+                    {r.net_edge_unlock_p50_annual != null ? fmtLogYr(r.net_edge_unlock_p50_annual) : '—'}
+                  </div>
+                  <div className="cs-sub">
+                    CAR short-fav {r.price_car_unlock_p50_short_favorable != null ? fmt(r.price_car_unlock_p50_short_favorable) : '—'}
+                    {' · diagnostic'}
+                  </div>
+                </div>
+              </div>
+            </div>
           )}
         </div>
       )}

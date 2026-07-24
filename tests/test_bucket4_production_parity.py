@@ -32,6 +32,7 @@ def test_policy_crash_rho_matches_production():
     opt2 = opt2_cfg_from_policy(policy)
     assert float(opt2["crash_budget"]["rho"]) == pytest.approx(0.0075)
     assert bool(opt2["crash_budget"]["scale_to_budget"]) is True
+    assert bool(opt2["crash_budget"]["apply_on_cadence_due_only"]) is True
     assert float(opt2["crash_budget"]["l_ema_alpha"]) == pytest.approx(0.4)
     assert float(opt2["borrow_ramp_lo"]) == pytest.approx(0.80)
     assert float(opt2["borrow_ramp_hi"]) == pytest.approx(1.20)

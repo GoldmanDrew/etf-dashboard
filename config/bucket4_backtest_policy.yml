@@ -3,7 +3,7 @@
 # this file must never be used as a production fallback or parity assertion.
 # Historical snapshot of ls-algo Bucket 4 rules (2026-07-11).
 # Source: config/strategy_config.yml inverse_decay_bucket4
-# Sizing: v6 opt2 (decay/borrow/cov) + crash_budget (trim then scale_to_budget,
+# Sizing: v6 opt2 (decay/borrow/cov) + crash_budget (trim then scale_to_budget;
 #         asymmetric L EMA) + POST-CAP trim-only weight_smoothing (entry ramp +
 #         no-trade band) + grow-only ratchet on the walk-forward path.
 
@@ -51,7 +51,9 @@ inverse_decay_bucket4:
         state_json: data/b4_weight_ema_state.json
       crash_budget:
         enabled: true
-        # Relative crash-loss scale; scale_to_budget refills the 3% sleeve target.
+        # Magis/ls-algo production mirror: relative rho + scale_to_budget refill.
+        # Diamond-Creek-Quant uses scale_to_budget=false (cash residual) — see
+        # docs/dcq_b4_cash_residual_port_plan.md.
         rho: 0.0075
         scale_to_budget: true
         theta: 0.5
@@ -61,6 +63,9 @@ inverse_decay_bucket4:
         missing_l_quantile: 0.75
         # Asymmetric per-name L EMA: risk-up immediate, risk-down smoothed.
         l_ema_alpha: 0.4
+        apply_on_cadence_due_only: true
+        emergency_cut_rel: 0.25
+        applied_weights_json: data/b4_crash_applied_weights.json
       hedge_cadence_policy:
         source: tr_vcr
         hedge_ratio_model: v7

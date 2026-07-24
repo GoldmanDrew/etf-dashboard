@@ -95,4 +95,17 @@ test("issuer_lag and |prem|>10% are blocked even when eligibility flag is true",
   };
   assert.equal(isPremiumDiscountEligibleRow(absurd), false);
   assert.equal(premiumDiscountPct(14.4528, 21.67, absurd), null);
+  assert.equal(issuerNavForPlot(absurd), null);
+});
+
+test("ineligible or |prem|>10% rows omit issuer NAV from the plot", () => {
+  const frozenUnderCap = {
+    nav: 34.79,
+    close_price: 37.45,
+    premium_discount_eligible: false,
+    premium_discount_status: "issuer_stale",
+    issuer_asof_date: "2026-06-25",
+    market_asof_date: "2026-06-25",
+  };
+  assert.equal(issuerNavForPlot(frozenUnderCap), null);
 });
