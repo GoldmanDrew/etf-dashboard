@@ -2,7 +2,7 @@
 
 Simple discretionary overlay: express a bullish/bearish opinion on a **Bucket 1 underlying**, rank conviction on a 5-point scale, and map that to a hedge coverage `h` for every B1 pair on that name.
 
-**Status:** local dashboard implemented (config + artifact + `#/views` tab). Still **not** wired into `build_data.py`, production replay, Backtest `h` prefill, or live sizing.
+**Status:** local dashboard implemented (config + artifact + `#/views` tab). ls-algo EOD fetch + GTP apply landed behind `bucket1_views.enabled: false` (see [`bucket1_views_ls_algo_eod_wire_plan.md`](bucket1_views_ls_algo_eod_wire_plan.md)). Still **off** in production until ops enables the flag after a quiet dry-run.
 
 ---
 
@@ -96,6 +96,14 @@ Missing underlying → treat as score `0` → `h = 1`.
 - Columns: underlying, B1 sleeves, score (± steppers), implied `h`, note, updated.
 - Artifact: `data/bucket1_underlying_views.json`.
 - **Save** (local FastAPI): `POST /api/bucket1-views` → writes `config/bucket1_underlying_views.yml` and rebuilds the JSON artifact. Requires `python run.py` (plain `http.server` has no write API). Hand-edit YAML + `python scripts/build_bucket1_underlying_views.py` still works.
+
+### Ops for EOD (ls-algo)
+
+After Save (or hand-edit), **commit + push** `config/bucket1_underlying_views.yml` to `etf-dashboard` main. The ls-algo EOD screener job fetches that file into `data/runs/<run_date>/bucket1_underlying_views.yml` (warn on miss) and `generate_trade_plan.py` reads **only** the run-dir copy when `bucket1_views.enabled` is true.
+
+Production apply mode is **`absolute_nonzero`**: score `0` / missing leaves delta-matched B1 sizing alone; non-zero scores set absolute coverage `h = |und|/|ETF|` from the ladder.
+
+See [`bucket1_views_ls_algo_eod_wire_plan.md`](bucket1_views_ls_algo_eod_wire_plan.md).
 
 ---
 
