@@ -142,9 +142,14 @@ fi
 2. Ops: after Save, **commit/push** `config/bucket1_underlying_views.yml` so next EOD fetch succeeds.
 3. Optional: schema validator on dashboard push.
 
-### Phase 5 — Observability (optional)
+### Phase 5 — Observability
 
-- EOD email: `N` active B1 views applied (from run-dir file).
+- EOD email: hedged/unhedged headline + **B1 split** component line; attach
+  `hedged_pnl_b1_by_pair.csv` (matched vs OLS `|delta|`; views = unhedged).
+- Risk dashboard `hedged_pnl_panel`: B1 pair table + updated definitions.
+- After enabling the B1 split in `hedged_pnl.py`, ops must once run
+  `python scripts/backfill_hedged_pnl.py` on ls-algo and commit
+  `data/ledger/hedged_pnl_history.csv` so YTD is consistent.
 - No B4 export changes.
 
 ---

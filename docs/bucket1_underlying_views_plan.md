@@ -101,6 +101,8 @@ Missing underlying → treat as score `0` → `h = 1`.
 
 After Save (or hand-edit), **commit + push** `config/bucket1_underlying_views.yml` to `etf-dashboard` main. The ls-algo EOD screener job fetches that file into `data/runs/<run_date>/bucket1_underlying_views.yml` (warn on miss) and `generate_trade_plan.py` reads **only** the run-dir copy when `bucket1_views.enabled` is true.
 
+**Hedged/unhedged lens:** intentional view tilt (coverage ≠ OLS `|Δ|`) is treated as **unhedged** B1 PnL in `hedged_pnl.py` / EOD email / risk dashboard. Matched reference is delta, not `b1_view_h`. After the split lands, rebuild `data/ledger/hedged_pnl_history.csv` via `python scripts/backfill_hedged_pnl.py` once.
+
 Production apply mode is **`absolute_nonzero`**: score `0` / missing leaves delta-matched B1 sizing alone; non-zero scores set absolute coverage `h = |und|/|ETF|` from the ladder.
 
 See [`bucket1_views_ls_algo_eod_wire_plan.md`](bucket1_views_ls_algo_eod_wire_plan.md).
