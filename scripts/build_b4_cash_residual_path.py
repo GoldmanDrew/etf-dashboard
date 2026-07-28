@@ -446,7 +446,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--warmup-bdays", type=int, default=21)
     ap.add_argument("--signal-window", type=int, default=60)
-    ap.add_argument("--min-days", type=int, default=40)
+    ap.add_argument(
+        "--min-days",
+        type=int,
+        default=20,
+        help="Min ETF panel days (default 20 so short IPO names like CBRZ are included)",
+    )
     ap.add_argument("--require-pit-borrow", action="store_true")
     ap.add_argument("--honor-warmup-delay", action="store_true")
     ap.add_argument("--continue-through-wipeout", action="store_true")

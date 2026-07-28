@@ -39,6 +39,28 @@ class CashResidualParams:
     h_max: float = 1.0
     runup_min: float = 0.25
     edge_floor: float = 0.0  # Optimized research: don't gate on edge by default
+    # Residual crash vs already-realized peak drawdown (see docs/cash_residual_drawdown_shrink_C_plan.md)
+    drawdown_shrink_enabled: bool = True
+    peak_window: int = 756
+    peak_min_obs: int = 40
+    dd_floor_abs: float = 0.10
+    dd_floor_frac: float = 0.30
+    # v2 h-first gate: also allow when deep in drawdown or residual crash has shrunk
+    # (avoids emergency_cut into selloffs when runup < runup_min).
+    h_first_on_drawdown: bool = True
+    dd_h_first_min: float = 0.25
+    shrink_h_first_frac: float = 0.70
+    # Do not unlock via DD/shrink when crash size is outside a sensible envelope
+    # (e.g. ETHD D≈1 with T>1 → C≫1; hedging to h=1 would fake L≈0).
+    c_h_first_max: float = 1.0
+    dd_h_first_max: float = 0.95
+
+
+def residual_crash_from_drawdown(tail: float, drawdown: float) -> float:
+    """Remaining fractional crash to the same peak-envelope floor: (T-D)/(1-D)."""
+    T = max(0.0, float(tail))
+    D = float(np.clip(drawdown, 0.0, 1.0 - 1e-12))
+    return max(0.0, (T - D) / (1.0 - D))
 
 
 def conditional_crash_stats(close: pd.Series, p: CashResidualParams) -> dict[str, float] | None:
@@ -60,8 +82,54 @@ def conditional_crash_stats(close: pd.Series, p: CashResidualParams) -> dict[str
         return None
     ru = runup if np.isfinite(runup) else 0.0
     retrace = p.theta * ru / (1.0 + ru)
-    crash = max(tail if np.isfinite(tail) else 0.0, retrace)
-    return {"runup": float(ru), "tail": float(tail) if np.isfinite(tail) else 0.0, "retrace": float(retrace), "C": float(crash)}
+    T_raw = float(tail) if np.isfinite(tail) else 0.0
+
+    peak = float("nan")
+    D = 0.0
+    T_shrunk = T_raw
+    T_floor = T_raw
+    dd_reason = "disabled"
+    if p.drawdown_shrink_enabled and np.isfinite(T_raw):
+        wp = max(2, int(p.peak_window))
+        peak_slice = c.iloc[-wp:]
+        if len(peak_slice) >= int(p.peak_min_obs):
+            peak = float(peak_slice.max())
+            pt = float(c.iloc[-1])
+            if peak > 0 and pt > 0:
+                D = max(0.0, 1.0 - pt / peak)
+                T_shrunk = residual_crash_from_drawdown(T_raw, D)
+                T_floor = max(float(p.dd_floor_abs), float(p.dd_floor_frac) * T_raw)
+                # Floor only after a realized drawdown — at peak (D≈0) match legacy C.
+                if D > 1e-12:
+                    T_eff = max(T_shrunk, T_floor)
+                    dd_reason = "applied"
+                else:
+                    T_eff = T_raw
+                    T_shrunk = T_raw
+                    dd_reason = "at_peak"
+            else:
+                T_eff = T_raw
+                dd_reason = "bad_peak_or_spot"
+        else:
+            T_eff = T_raw
+            dd_reason = "insufficient_peak_history"
+    else:
+        T_eff = T_raw
+
+    crash = max(T_eff, retrace)
+    return {
+        "runup": float(ru),
+        "tail": float(T_raw),
+        "tail_shrunk": float(T_shrunk) if np.isfinite(T_shrunk) else float(T_raw),
+        "tail_floor": float(T_floor) if np.isfinite(T_floor) else float(T_raw),
+        "tail_effective": float(T_eff),
+        "retrace": float(retrace),
+        "peak": float(peak) if np.isfinite(peak) else None,
+        "drawdown": float(D),
+        "dd_shrink_reason": dd_reason,
+        "C": float(crash),
+        "C_raw": float(max(T_raw, retrace)),
+    }
 
 
 def pair_loss(crash: float, h: float, beta: float, phi: float) -> float:
@@ -127,6 +195,12 @@ def size_day(
             "L_raw": None,
             "runup": None,
             "C": None,
+            "C_raw": None,
+            "tail": None,
+            "tail_shrunk": None,
+            "drawdown": None,
+            "peak": None,
+            "dd_shrink_reason": "no_crash_stats",
             "h0": float(h0),
             "h1": float(h0),
             "h_first_reason": "no_crash_stats",
@@ -153,8 +227,27 @@ def size_day(
             np.isfinite(float(edge_annual)) and float(edge_annual) >= float(params.edge_floor)
         )
         runup_ok = runup >= float(params.runup_min)
-        if not runup_ok:
-            reason = "runup_gate"
+        D = float(stats.get("drawdown") or 0.0)
+        T_raw = float(stats.get("tail") or 0.0)
+        T_shrunk = float(
+            stats.get("tail_shrunk") if stats.get("tail_shrunk") is not None else T_raw
+        )
+        patho = C > float(params.c_h_first_max) or D > float(params.dd_h_first_max)
+        dd_ok = (
+            bool(params.h_first_on_drawdown)
+            and (not patho)
+            and D >= float(params.dd_h_first_min)
+        )
+        shrink_ok = (
+            bool(params.h_first_on_drawdown)
+            and (not patho)
+            and D > 1e-12
+            and T_raw > 1e-12
+            and T_shrunk <= float(params.shrink_h_first_frac) * T_raw
+        )
+        gate_ok = runup_ok or dd_ok or shrink_ok
+        if not gate_ok:
+            reason = "patho_gate" if patho and not runup_ok else "runup_gate"
         elif not edge_ok:
             reason = "edge_gate"
         else:
@@ -174,7 +267,12 @@ def size_day(
             if h_solve is not None:
                 h1 = max(h_solve, h_bump) if h_bump > h0 else h_solve
                 h1 = float(np.clip(h1, h0, params.h_max))
-                reason = "h_first_solve"
+                if runup_ok:
+                    reason = "h_first_solve"
+                elif dd_ok:
+                    reason = "h_first_solve_dd"
+                else:
+                    reason = "h_first_solve_shrink"
             else:
                 h1 = float(params.h_max)
                 reason = "h_max_then_cut"
@@ -198,6 +296,13 @@ def size_day(
         "L_raw": float(L_raw),
         "runup": runup,
         "C": C,
+        "C_raw": float(stats.get("C_raw") if stats.get("C_raw") is not None else C),
+        "tail": stats.get("tail"),
+        "tail_shrunk": stats.get("tail_shrunk"),
+        "tail_floor": stats.get("tail_floor"),
+        "drawdown": stats.get("drawdown"),
+        "peak": stats.get("peak"),
+        "dd_shrink_reason": stats.get("dd_shrink_reason"),
         "h0": float(h0),
         "h1": float(h1),
         "h_first_reason": reason,
@@ -243,6 +348,11 @@ def build_cash_residual_pins(
     crash_mult = [None] * n
     L_arr = [None] * n
     runup_arr = [None] * n
+    C_arr = [None] * n
+    C_raw_arr = [None] * n
+    tail_arr = [None] * n
+    tail_shrunk_arr = [None] * n
+    drawdown_arr = [None] * n
     h0_arr = [None] * n
     h1_arr = [None] * n
     cadence_due = [0] * n
@@ -309,6 +419,11 @@ def build_cash_residual_pins(
         crash_mult[i] = float(frozen_meta.get("crash_mult") or 1.0)
         L_arr[i] = frozen_meta.get("L")
         runup_arr[i] = frozen_meta.get("runup")
+        C_arr[i] = frozen_meta.get("C")
+        C_raw_arr[i] = frozen_meta.get("C_raw")
+        tail_arr[i] = frozen_meta.get("tail")
+        tail_shrunk_arr[i] = frozen_meta.get("tail_shrunk")
+        drawdown_arr[i] = frozen_meta.get("drawdown")
         h0_arr[i] = float(frozen_meta.get("h0") or h0)
         h1_arr[i] = frozen_h
         cadence_due[i] = 1 if due else 0
@@ -332,6 +447,11 @@ def build_cash_residual_pins(
             "crash_mult": crash_mult,
             "L": L_arr,
             "runup": runup_arr,
+            "C": C_arr,
+            "C_raw": C_raw_arr,
+            "tail": tail_arr,
+            "tail_shrunk": tail_shrunk_arr,
+            "drawdown": drawdown_arr,
             "h0": h0_arr,
             "h1": h1_arr,
             "cadence_due": cadence_due,
@@ -348,6 +468,7 @@ def build_cash_residual_pins(
             "n_days": n,
             "scale_to_budget": False,
             "h_first_enabled": bool(p.h_first_enabled),
+            "drawdown_shrink_enabled": bool(p.drawdown_shrink_enabled),
             "rho": float(p.rho),
         },
     }

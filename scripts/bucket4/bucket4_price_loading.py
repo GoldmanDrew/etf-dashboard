@@ -436,19 +436,54 @@ def load_underlying_adj_close_series(
                 series = series[~series.index.duplicated(keep="last")]
 
     # Brand-new IPO underlyings (CBRS/SPCX) still have no left tail — use SPY
-    # returns as a last-resort crash/vol lookback so day-1 sizing is not blind.
+    # *returns* as a last-resort crash/vol lookback so day-1 sizing is not blind.
+    # Never combine_first SPY price levels onto the und (that fabricates a cliff
+    # at IPO, e.g. SPY ~$740 → CBRS ~$311).
     if yahoo_fallback and _n_before_entry(series) < int(min_obs_before_entry):
         spy = _yahoo_adj_close("SPY", end=asof_ts or entry_ts, entry_date=entry_ts, try_aliases=False)
         if spy is not None and not spy.empty:
             if series.empty:
-                series = spy.rename(und)
+                # Returns-only proxy scaled to a neutral level.
+                last = float(spy.iloc[-1])
+                series = (spy / last * 100.0).rename(und) if last > 0 else spy.rename(und)
             else:
-                series = series.combine_first(spy.rename(und)).sort_index()
-                series = series[~series.index.duplicated(keep="last")]
+                series = _prepend_proxy_returns(series, spy).rename(und)
 
     if asof_ts is not None and not series.empty:
         series = series.loc[:asof_ts]
     return series.astype(float)
+
+
+def _prepend_proxy_returns(real: pd.Series, proxy: pd.Series) -> pd.Series:
+    """Prepend ``proxy`` returns onto ``real`` levels without a price-level cliff.
+
+    Scales the proxy path so its last pre-``real`` print equals the first real
+    print (flat splice). Preserves proxy daily returns in the left tail; real
+    levels win on overlap.
+    """
+    real_s = pd.to_numeric(real, errors="coerce").dropna().astype(float)
+    proxy_s = pd.to_numeric(proxy, errors="coerce").dropna().astype(float)
+    real_s.index = pd.DatetimeIndex(pd.to_datetime(real_s.index, errors="coerce")).normalize()
+    proxy_s.index = pd.DatetimeIndex(pd.to_datetime(proxy_s.index, errors="coerce")).normalize()
+    real_s = real_s[real_s.index.notna()]
+    proxy_s = proxy_s[proxy_s.index.notna()]
+    real_s = real_s[~real_s.index.duplicated(keep="last")].sort_index()
+    proxy_s = proxy_s[~proxy_s.index.duplicated(keep="last")].sort_index()
+    if real_s.empty or proxy_s.empty:
+        return real_s
+    t0 = real_s.index.min()
+    p0 = float(real_s.iloc[0])
+    if not (p0 > 0):
+        return real_s
+    pre = proxy_s.loc[proxy_s.index < t0]
+    if len(pre) < 2:
+        return real_s
+    anchor = float(pre.iloc[-1])
+    if not (anchor > 0):
+        return real_s
+    synth = (pre / anchor) * p0
+    out = pd.concat([synth, real_s]).sort_index()
+    return out[~out.index.duplicated(keep="last")]
 
 
 # When screener "underlying" is a co-listed ETP with no pre-history, Yahoo-fetch
