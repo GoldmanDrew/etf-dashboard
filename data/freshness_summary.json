@@ -1,5 +1,5 @@
 {
-  "build_time": "2026-07-28T17:43:41.364961Z",
+  "build_time": "2026-07-28T16:26:29.972352Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
@@ -28,102 +28,92 @@
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
     "oldest_symbol": "AMD",
-    "oldest_symbol_age_minutes": 159,
+    "oldest_symbol_age_minutes": 82,
     "oldest_enforced_symbol": "AMD",
-    "oldest_enforced_symbol_age_minutes": 159
+    "oldest_enforced_symbol_age_minutes": 82
   },
   "vrp": {
     "worst_underlying_symbol": "XBI",
-    "worst_underlying_options_age_minutes": 226,
+    "worst_underlying_options_age_minutes": 149,
     "underlying_options_as_of_min": "2026-07-28T13:56:56.409185Z",
     "iv_coverage_front_pct": 0.9677
   },
   "flow": {
-    "latest_date": "2026-07-28",
-    "build_time": "2026-07-28T17:43:37.856730Z",
-    "underlyings_total": 260,
-    "underlyings_stale": 232,
-    "underlyings_stale_pct": 89.23,
-    "underlyings_issuer_publish_lag": 230,
-    "underlyings_actionable_stale": 2,
-    "underlyings_actionable_stale_pct": 0.77,
+    "latest_date": "2026-07-24",
+    "build_time": "2026-07-28T16:06:06.554875Z",
+    "underlyings_total": 262,
+    "underlyings_stale": 3,
+    "underlyings_stale_pct": 1.15,
+    "underlyings_issuer_publish_lag": 0,
+    "underlyings_actionable_stale": 3,
+    "underlyings_actionable_stale_pct": 1.15,
     "underlyings_stale_by_reason": {
-      "issuer_publish_lag": 230,
-      "missing_metrics": 2
+      "missing_metrics": 1,
+      "quality_excluded": 2
     },
-    "fund_rows_on_latest_date": 35,
+    "fund_rows_on_latest_date": 563,
     "fund_quality_counts": {
-      "ok": 35
+      "income_overlay": 31,
+      "missing_prior_aum": 30,
+      "missing_underlying_return": 1,
+      "ok": 435,
+      "product_class:passive_low_delta": 64,
+      "stale_aum": 2
     },
-    "stale_aum_by_prior_kind": {},
+    "stale_aum_by_prior_kind": {
+      "anchor_lag": 2
+    },
     "top_stale_by_abs_net_moc": [
       {
-        "underlying": "QQQ",
-        "date": "2026-07-27",
-        "abs_net_moc_dollars": 667145518.37,
-        "reason": "issuer_publish_lag"
+        "underlying": "SATS",
+        "date": "2026-07-02",
+        "abs_net_moc_dollars": 1761529.21,
+        "reason": "quality_excluded"
       },
       {
-        "underlying": "SNDK",
-        "date": "2026-07-27",
-        "abs_net_moc_dollars": 581885471.38,
-        "reason": "issuer_publish_lag"
+        "underlying": "LCID",
+        "date": "2026-07-14",
+        "abs_net_moc_dollars": 1271757.33,
+        "reason": "missing_metrics"
       },
       {
-        "underlying": "MU",
-        "date": "2026-07-27",
-        "abs_net_moc_dollars": 420794761.87,
-        "reason": "issuer_publish_lag"
-      },
-      {
-        "underlying": "USO",
-        "date": "2026-07-27",
-        "abs_net_moc_dollars": 284428068.14,
-        "reason": "issuer_publish_lag"
-      },
-      {
-        "underlying": "GOOGL",
-        "date": "2026-07-27",
-        "abs_net_moc_dollars": 231149278.81,
-        "reason": "issuer_publish_lag"
+        "underlying": "TXN",
+        "date": "2026-07-23",
+        "abs_net_moc_dollars": 543954.31,
+        "reason": "quality_excluded"
       }
     ]
   },
   "metrics": {
     "latest_date": "2026-07-27",
-    "latest_ok": 518,
-    "latest_stale_ok": 177,
-    "latest_missing": 0,
+    "latest_ok": 514,
+    "latest_stale_ok": 253,
+    "latest_missing": 3,
     "latest_stale_by_kind": {
-      "market_backed_no_issuer_nav": 172,
-      "anchor_lag": 5
+      "market_backed_no_issuer_nav": 179,
+      "issuer_lag": 74
     },
-    "flow_blockers_prior_stale": 5,
+    "flow_blockers_prior_stale": 0,
     "prem_disc": {
-      "rows_with_close": 571,
-      "rows_with_nav_and_close": 389,
-      "rows_suppressed_asof_mismatch": 182,
-      "median_prem_disc_bps": -1.3468166666869188,
-      "lockstep_nav_close_count": 44,
-      "lockstep_nav_close_pct": 11.31,
+      "rows_with_close": 570,
+      "rows_with_nav_and_close": 292,
+      "rows_suppressed_asof_mismatch": 275,
+      "median_prem_disc_bps": -1.3109122302024816,
+      "lockstep_nav_close_count": 26,
+      "lockstep_nav_close_pct": 8.9,
       "rex_nav_vs_implied_div_bps_gt5": 0,
       "rex_nav_vs_implied_div_bps_gt50": 0,
       "rex_nav_vs_implied_div_bps_max": null,
       "by_provider": {
         "polygon": {
-          "rows": 18,
-          "median_prem_disc_bps": 0.0052945851993615005,
-          "lockstep_count": 12
+          "rows": 8,
+          "median_prem_disc_bps": 3.6033034378826506e-05,
+          "lockstep_count": 7
         },
         "tradr_axs": {
           "rows": 67,
-          "median_prem_disc_bps": -9.065570270780862,
-          "lockstep_count": 1
-        },
-        "granite_shares": {
-          "rows": 74,
-          "median_prem_disc_bps": -3.101658659702573,
-          "lockstep_count": 5
+          "median_prem_disc_bps": -1.0748290930072406,
+          "lockstep_count": 0
         },
         "direxion": {
           "rows": 32,
@@ -132,33 +122,33 @@
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 1.058536604361117,
+          "median_prem_disc_bps": -1.8708111343374831,
           "lockstep_count": 2
-        },
-        "merged": {
-          "rows": 45,
-          "median_prem_disc_bps": -6.906426571444937,
-          "lockstep_count": 6
         },
         "yieldmax": {
-          "rows": 28,
-          "median_prem_disc_bps": -9.663373278095342,
-          "lockstep_count": 2
+          "rows": 27,
+          "median_prem_disc_bps": -62.32660563038292,
+          "lockstep_count": 0
         },
         "defiance": {
           "rows": 64,
-          "median_prem_disc_bps": -0.000207097224396937,
-          "lockstep_count": 10
+          "median_prem_disc_bps": -0.00010553938180751356,
+          "lockstep_count": 8
+        },
+        "merged": {
+          "rows": 33,
+          "median_prem_disc_bps": -6.277416011333587,
+          "lockstep_count": 3
         },
         "yfinance": {
           "rows": 4,
-          "median_prem_disc_bps": 0.0,
-          "lockstep_count": 2
+          "median_prem_disc_bps": 6.1267060968455995,
+          "lockstep_count": 1
         },
         "proshares": {
           "rows": 31,
-          "median_prem_disc_bps": -1.323724316301866,
-          "lockstep_count": 2
+          "median_prem_disc_bps": -2.423257673942163,
+          "lockstep_count": 3
         },
         "fof_child_synthetic": {
           "rows": 2,
@@ -170,11 +160,23 @@
   },
   "metrics_staleness": {
     "global_max": "2026-07-28",
-    "universe_stale": 0,
-    "severe_tail_count": 0,
-    "worst": [],
-    "stale_tickers_sample": [],
-    "build_time": "2026-07-28T17:35:12.787254+00:00"
+    "universe_stale": 1,
+    "severe_tail_count": 1,
+    "worst": [
+      {
+        "ticker": "LCDL",
+        "last_date": "2026-07-16",
+        "days_behind": 12
+      }
+    ],
+    "stale_tickers_sample": [
+      {
+        "ticker": "LCDL",
+        "last_date": "2026-07-16",
+        "days_behind": 12
+      }
+    ],
+    "build_time": "2026-07-28T13:11:05.546588+00:00"
   },
   "violations": [],
   "ok": true

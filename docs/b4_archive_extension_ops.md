@@ -75,16 +75,31 @@ B4 Pairs book equity / Production CAGR must remain on the plan path only, starti
 
 ## Plan-ledger anomalies (ls-algo re-export follow-up)
 
-Dashboard **does not** rewrite production plan ledgers. Pair Report shows a red banner when plan-path sanity fails. As of the Jul 2026 fleet audit:
+Dashboard **does not** rewrite production plan ledgers. Pair Report shows a red banner when plan-path sanity fails. As of the Jul 2026 fleet audit (local scan 2026-07-28):
 
 | ETF | Plan path | Ops action |
 |---|---|---|
-| **CONI** | equity wipe (2026-06-03+) + \|ret\|≈455% on 2026-06-05 | Re-export from ls-algo after price/split repair |
+| **CONI** | equity wipe (2026-06-03+) + \|ret\|≈161% | Re-export from ls-algo after price/split repair |
+| **DRIP** | equity wipe (2026-06-18) + \|ret\|≈483% | Re-export after panel repair |
 | **LITZ** | \|ret\|≈105% on 2026-07-09 | Re-export after panel repair |
-| **RKLZ** | \|ret\|≈207% on 2026-06-11 | Re-export after panel repair |
-| SNDQ | WARN \|ret\|≈54% | Monitor |
+| **MSTZ** | \|ret\|≈431% on 2026-06-29 | Re-export after panel repair |
+| **SMST** | equity wipe (2026-06-30) + \|ret\|≈506% | Re-export after panel repair |
+| **SOXS** | equity wipe (2026-06-18) + \|ret\|≈298% | Re-export after panel repair |
+| **TECS** | equity wipe (2026-06-18) + \|ret\|≈367% | Re-export after panel repair |
+| **TZA** | equity wipe (2026-06-18) + \|ret\|≈458% | Re-export after panel repair |
+| RKLZ | cleared on research nest after panel sanitize | Monitor plan path after re-export |
+| SNDQ / BMNZ / IONZ | WARN \|ret\|≈50–73% | Monitor |
 
-Inception research for those names can still be sane on the chart tab after local panel sanitize + rebuild.
+Inception research for those names can still be sane on the chart tab after local panel sanitize + rebuild (`scripts/build_b4_inception_research.py --etfs …`).
+
+Re-export + import:
+
+```bash
+# ls-algo
+python scripts/export_b4_dashboard.py --run-production --run-date YYYY-MM-DD --start 2026-02-27
+# etf-dashboard
+python scripts/build_bucket4_backtest.py --mode production
+```
 
 ## Layer A parity (ops)
 

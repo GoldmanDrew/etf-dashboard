@@ -359,9 +359,10 @@ _FLOW_SESSION_MIN_COVERAGE = float(os.environ.get("LETF_FLOW_SESSION_MIN_COVERAG
 def _choose_flow_session_date(metrics: pd.DataFrame) -> date | None:
     """Pick the metrics session used for ``extend_metrics_session_coverage``.
 
-    Prefer the panel max date when it already covers a meaningful share of
+    Prefer the newest panel date that already covers a meaningful share of
     tickers; otherwise fall back to the densest recent session so a partial
-    issuer heal cannot advance the flow "global latest" alone.
+    issuer heal (e.g. 7 Defiance rows on a new max date) cannot advance the
+    flow "global latest" alone.
     """
     if metrics.empty or "date" not in metrics.columns or "ticker" not in metrics.columns:
         return None
@@ -377,22 +378,33 @@ def _choose_flow_session_date(metrics: pd.DataFrame) -> date | None:
     by_date = work.groupby(work["date"].dt.normalize())["ticker"].nunique().sort_index()
     if by_date.empty:
         return None
-    max_ts = by_date.index.max()
-    max_n = int(by_date.loc[max_ts])
-    if (max_n / n_tickers) >= _FLOW_SESSION_MIN_COVERAGE:
-        return pd.Timestamp(max_ts).date()
-    # Densest among the last ~10 calendar sessions present in the panel.
+    # Newest → oldest: first date meeting the coverage floor.
+    for ts, n in by_date.iloc[::-1].items():
+        if (int(n) / n_tickers) >= _FLOW_SESSION_MIN_COVERAGE:
+            chosen = pd.Timestamp(ts).date()
+            max_ts = by_date.index.max()
+            if pd.Timestamp(ts) < pd.Timestamp(max_ts):
+                LOGGER.warning(
+                    "Flow session date: panel max %s covers only %d/%d tickers (<%.0f%%); "
+                    "using newest well-covered session %s (%d tickers)",
+                    pd.Timestamp(max_ts).date(),
+                    int(by_date.loc[max_ts]),
+                    n_tickers,
+                    100.0 * _FLOW_SESSION_MIN_COVERAGE,
+                    chosen,
+                    int(n),
+                )
+            return chosen
+    # Nothing meets the floor — densest among the last ~10 sessions.
     recent = by_date.tail(10)
     dense_ts = recent.idxmax()
     LOGGER.warning(
-        "Flow session date: panel max %s covers only %d/%d tickers (<%.0f%%); "
-        "using densest recent session %s (%d tickers) for extend",
-        pd.Timestamp(max_ts).date(),
-        max_n,
-        n_tickers,
+        "Flow session date: no session meets %.0f%% coverage; "
+        "using densest recent session %s (%d/%d tickers)",
         100.0 * _FLOW_SESSION_MIN_COVERAGE,
         pd.Timestamp(dense_ts).date(),
         int(recent.loc[dense_ts]),
+        n_tickers,
     )
     return pd.Timestamp(dense_ts).date()
 
@@ -503,15 +515,55 @@ def _aggregate_stale_reason(
     return "session_lag"
 
 
+_UNIVERSE_EXCLUSION_FLAGS = frozenset({
+    "excluded",
+    "income_overlay",
+    "non_leveraged",
+    "inverse_positive_leverage",
+    "",
+    "nan",
+    "none",
+})
+
+
+def _active_universe_underlyings(fund_flows: pd.DataFrame) -> set[str]:
+    """Underlyings that still have ≥1 currently-included fund in the screener universe.
+
+    Historical metrics rows for off-screener ETFs (LCDL→LCID, SATG→SATS) must not keep
+    those underlyings in the actionable-stale chip after the fund drops out of
+    ``etf_screened_today.csv``.
+    """
+    if fund_flows.empty or "ticker" not in fund_flows.columns or "quality_flag" not in fund_flows.columns:
+        return set()
+    by_ticker = fund_flows.groupby(fund_flows["ticker"].astype(str).str.upper())["quality_flag"].agg(
+        lambda s: str(s.dropna().iloc[-1]).strip().lower() if len(s.dropna()) else ""
+    )
+    active_tickers: set[str] = set()
+    for t, flag in by_ticker.items():
+        f = str(flag)
+        if f in _UNIVERSE_EXCLUSION_FLAGS or f.startswith("product_class:") or f.startswith("universe_"):
+            continue
+        active_tickers.add(str(t).upper())
+    if not active_tickers:
+        return set()
+    und = fund_flows[fund_flows["ticker"].astype(str).str.upper().isin(active_tickers)]["underlying"]
+    return {str(u).upper() for u in und.dropna().astype(str) if u}
+
+
 def _flow_stale_summary(
     by_underlying: dict[str, Any],
     *,
     global_latest_date: str,
     fund_flows: pd.DataFrame,
 ) -> dict[str, Any]:
+    active_und = _active_universe_underlyings(fund_flows)
     counts: dict[str, int] = {}
-    for meta in by_underlying.values():
+    orphan_off_universe = 0
+    for und, meta in by_underlying.items():
         if meta.get("is_latest_global") is not False:
+            continue
+        if active_und and str(und).upper() not in active_und:
+            orphan_off_universe += 1
             continue
         reason = str(meta.get("aggregate_stale_reason") or "unknown")
         counts[reason] = counts.get(reason, 0) + 1
@@ -524,6 +576,7 @@ def _flow_stale_summary(
             + counts.get("missing_metrics", 0)
             + counts.get("quality_excluded", 0)
         ),
+        "underlyings_orphan_off_universe": int(orphan_off_universe),
     }
 
 
@@ -1229,9 +1282,13 @@ def write_outputs(
                 .sort_values("net_moc_dollars", key=lambda s: s.abs(), ascending=False)
             )
             global_day = fund_flows[fund_flows["date"].astype(str) == str(global_latest_date)]
+            active_und = _active_universe_underlyings(fund_flows)
             by_underlying: dict[str, Any] = {}
             for _, row in latest_rows.iterrows():
                 und = str(row["underlying"])
+                if active_und and und.upper() not in active_und:
+                    # Drop underlyings whose LETFs are no longer on the screener.
+                    continue
                 row_date = str(row.get("date") or "")
                 session_lag = _busday_gap(row_date, global_latest_date) or 0
                 und_day = global_day[global_day["underlying"].astype(str) == und]
@@ -1330,6 +1387,18 @@ def build_all(
     metrics = load_metrics(metrics_parquet, metrics_csv)
     session_date = _choose_flow_session_date(metrics)
     if session_date is not None:
+        # Drop thin tip sessions beyond the chosen as-of so a 7-ticker issuer heal
+        # cannot become flow global_latest (actionable-stale chip blow-up).
+        md = pd.to_datetime(metrics["date"], errors="coerce")
+        keep = md.dt.date <= session_date
+        n_drop = int((~keep).sum())
+        if n_drop:
+            LOGGER.info(
+                "Flow metrics tip clipped to %s (%d row(s) beyond session dropped)",
+                session_date,
+                n_drop,
+            )
+            metrics = metrics.loc[keep].copy()
         metrics = extend_metrics_session_coverage(
             metrics,
             session_date=session_date,

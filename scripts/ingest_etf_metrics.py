@@ -284,6 +284,96 @@ def fill_missing_shares_outstanding_from_aum_nav(df: pd.DataFrame) -> tuple[pd.D
     return out, n
 
 
+def repair_partial_fundamentals_carry_forward(
+    df: pd.DataFrame,
+    *,
+    max_gap_bdays: int = 15,
+) -> tuple[pd.DataFrame, int]:
+    """Carry last ok shares onto NAV-only partials and rebuild AUM = NAV × shares.
+
+    Issuer feeds often drop AUM/shares for several sessions while NAV (or a market
+    proxy) still prints — e.g. TXNU after Tradr Filepoint stopped listing the fund.
+    Without this, LETF flow marks the pair ``stale_aum`` / ``quality_excluded`` even
+    though fund size is unchanged within a short gap.
+    """
+    if df.empty or max_gap_bdays <= 0:
+        return df, 0
+    need_cols = {"ticker", "date", "nav", "aum", "shares_outstanding"}
+    if not need_cols.issubset(set(df.columns)):
+        return df, 0
+
+    out = df.sort_values(["ticker", "date"]).copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    n_repaired = 0
+
+    def _group(g: pd.DataFrame) -> pd.DataFrame:
+        nonlocal n_repaired
+        last_ok: pd.Series | None = None
+        rows: list[dict[str, object]] = []
+        for _, row in g.iterrows():
+            row = row.copy()
+            nav = pd.to_numeric(row.get("nav"), errors="coerce")
+            aum = pd.to_numeric(row.get("aum"), errors="coerce")
+            shares = pd.to_numeric(row.get("shares_outstanding"), errors="coerce")
+            has_ok = (
+                pd.notna(nav)
+                and float(nav) > 0
+                and pd.notna(aum)
+                and float(aum) > 0
+                and pd.notna(shares)
+                and float(shares) > 0
+            )
+            needs = (
+                pd.notna(nav)
+                and float(nav) > 0
+                and (pd.isna(aum) or float(aum) <= 0 or pd.isna(shares) or float(shares) <= 0)
+            )
+            if needs and last_ok is not None:
+                gap = _metrics_busday_gap(last_ok["date"], row["date"])
+                if gap is not None and 0 < gap <= max_gap_bdays:
+                    sh = pd.to_numeric(last_ok.get("shares_outstanding"), errors="coerce")
+                    if pd.notna(sh) and float(sh) > 0:
+                        if pd.isna(shares) or float(shares) <= 0:
+                            row["shares_outstanding"] = float(sh)
+                            shares = float(sh)
+                        if pd.isna(aum) or float(aum) <= 0:
+                            row["aum"] = float(nav) * float(shares)
+                        # Usable size restored — don't let orphan anchor_lag block flow.
+                        if "stale" in row.index:
+                            row["stale"] = False
+                        if "stale_kind" in row.index:
+                            kind = str(row.get("stale_kind") or "").strip().lower()
+                            if kind in {"anchor_lag", "nan", "none", ""}:
+                                row["stale_kind"] = None
+                        if "stale_age_bdays" in row.index:
+                            row["stale_age_bdays"] = 0
+                        n_repaired += 1
+            rows.append(row.to_dict())
+            nav2 = pd.to_numeric(row.get("nav"), errors="coerce")
+            aum2 = pd.to_numeric(row.get("aum"), errors="coerce")
+            sh2 = pd.to_numeric(row.get("shares_outstanding"), errors="coerce")
+            if (
+                pd.notna(nav2)
+                and float(nav2) > 0
+                and pd.notna(aum2)
+                and float(aum2) > 0
+                and pd.notna(sh2)
+                and float(sh2) > 0
+            ):
+                last_ok = pd.Series(row)
+            elif has_ok:
+                last_ok = pd.Series(row)
+        return pd.DataFrame(rows)
+
+    pieces = [_group(g) for _, g in out.groupby("ticker", sort=False)]
+    if not pieces:
+        return df, 0
+    merged = pd.concat(pieces, ignore_index=True)
+    if n_repaired:
+        merged = enforce_status_consistency(merged)
+    return merged, n_repaired
+
+
 def repair_nav_only_partial_aum(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     """Fill AUM/shares on partial rows that only have NAV using Yahoo fallback."""
     if df.empty:
@@ -3865,6 +3955,12 @@ def main() -> None:
     merged, n_adj_tail = backfill_etf_adj_close_from_close_gaps(merged)
     if n_adj_tail:
         LOGGER.info("Post-Polygon etf_adj_close from close on %d row(s)", n_adj_tail)
+    merged, n_fund_cf = repair_partial_fundamentals_carry_forward(merged)
+    if n_fund_cf:
+        LOGGER.info(
+            "Carried fund size onto %d NAV-only partial row(s) from last ok shares",
+            n_fund_cf,
+        )
     merged, n_nav_partial = repair_nav_only_partial_aum(merged)
     if n_nav_partial:
         LOGGER.info("Repaired nav-only partial AUM on %d row(s) via Yahoo fallback", n_nav_partial)

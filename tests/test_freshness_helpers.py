@@ -29,6 +29,7 @@ from ingest_etf_metrics import (  # noqa: E402
     promote_carry_forward_rows_with_market,
     prune_expired_carry_forward_rows,
     repair_nav_only_partial_aum,
+    repair_partial_fundamentals_carry_forward,
     stamp_metric_asof_metadata,
 )
 from etf_providers import STALE_KIND_ISSUER_LAG  # noqa: E402
@@ -391,6 +392,46 @@ def test_prune_expired_carry_forward_rows():
     assert n == 1
     assert out.iloc[0]["status"] == "missing"
     assert pd.isna(out.iloc[0]["nav"])
+
+
+def test_repair_partial_fundamentals_carry_forward():
+    df = pd.DataFrame([
+        {
+            "date": pd.Timestamp("2026-07-07"),
+            "ticker": "TXNU",
+            "nav": 50.0,
+            "aum": 12_500_000.0,
+            "shares_outstanding": 250_000.0,
+            "status": "ok",
+            "stale": False,
+            "stale_age_bdays": 0,
+            "stale_kind": None,
+            "source_provider": "polygon",
+            "source_url": "x",
+            "ingested_at_utc": pd.Timestamp("2026-07-07T12:00:00Z"),
+        },
+        {
+            "date": pd.Timestamp("2026-07-17"),
+            "ticker": "TXNU",
+            "nav": 46.0,
+            "aum": None,
+            "shares_outstanding": None,
+            "status": "partial",
+            "stale": True,
+            "stale_age_bdays": 1,
+            "stale_kind": "anchor_lag",
+            "source_provider": "merged",
+            "source_url": "x",
+            "ingested_at_utc": pd.Timestamp("2026-07-17T12:00:00Z"),
+        },
+    ])
+    out, n = repair_partial_fundamentals_carry_forward(df)
+    assert n == 1
+    row = out.iloc[1]
+    assert float(row["shares_outstanding"]) == 250_000.0
+    assert float(row["aum"]) == pytest.approx(46.0 * 250_000.0)
+    assert row["status"] == "ok"
+    assert (row.get("stale_kind") is None) or (str(row.get("stale_kind")) in {"", "nan", "None"})
 
 
 def test_repair_nav_only_partial_aum(monkeypatch):

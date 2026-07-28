@@ -258,6 +258,19 @@ def test_choose_flow_session_date_skips_thin_panel_max():
     assert chosen == date(2026, 7, 17)
 
 
+def test_choose_flow_session_date_prefers_newest_well_covered():
+    rows = []
+    for i in range(20):
+        rows.append({"date": pd.Timestamp("2026-07-17"), "ticker": f"T{i:02d}"})
+    for i in range(18):
+        rows.append({"date": pd.Timestamp("2026-07-21"), "ticker": f"T{i:02d}"})
+    for i in range(3):
+        rows.append({"date": pd.Timestamp("2026-07-22"), "ticker": f"D{i}"})
+    metrics = pd.DataFrame(rows)
+    chosen = flows._choose_flow_session_date(metrics)
+    assert chosen == date(2026, 7, 21)
+
+
 def test_session_extend_enables_flow_on_global_session():
     from ingest_etf_metrics import extend_metrics_session_coverage
 
