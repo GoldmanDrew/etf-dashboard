@@ -680,6 +680,137 @@ def repair_close_price_split_basis_mismatch(
     return out, n_rep
 
 
+def repair_nav_lagging_split_basis(
+    df: pd.DataFrame,
+    *,
+    corporate_actions_path: Path | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """Scale issuer NAV (and shares) when market close already reflects a reverse split.
+
+    Opposite of :func:`repair_close_price_split_basis_mismatch`: Yahoo/Polygon close
+    prints the post-consolidation dollar level a session or two *before* the issuer
+    NAV CSV catches up (NBIZ 2026-06-01/02 ahead of the 1-for-10 on 2026-06-03).
+    Without this, ``close/nav − 1`` looks like an 800%+ premium and prem/disc is
+    gated ``split_basis_mismatch``.
+
+    Detection: ``close/nav`` near a corp-actions price mult (±2 calendar days of an
+    execution date), while prior-day ``close/nav`` was sane. Scales ``nav *= R`` and
+    ``shares /= R`` when shares still look pre-split (TNA conserved). Idempotent
+    once NAV already sits on the close basis.
+    """
+    if df.empty:
+        return df, 0
+    need = {"date", "ticker", "nav", "close_price"}
+    if not need.issubset(df.columns):
+        return df, 0
+
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+
+    # Wider than the default ±1d close-lag hints: market often prints post-split
+    # closes 1–2 sessions before issuer NAV (NBIZ 2026-06-01 ahead of 06-03).
+    hints = _load_split_price_mult_hints_json(corporate_actions_path)
+    wide_hints: dict[str, dict[date, float]] = {}
+    for ticker, hmap in hints.items():
+        wide: dict[date, float] = dict(hmap)
+        for d0, mult in list(hmap.items()):
+            if float(mult) <= 1.0 + 1e-9:
+                continue
+            for delta in (-2, -1, 0, 1):
+                wide.setdefault(d0 + timedelta(days=delta), float(mult))
+        wide_hints[ticker] = wide
+    n_rep = 0
+
+    for ticker in out["ticker"].unique():
+        hmap = wide_hints.get(str(ticker).upper()) or {}
+        if not hmap:
+            continue
+        m = out["ticker"] == ticker
+        g = out.loc[m].sort_values("date")
+        if len(g) < 2:
+            continue
+        for ix, row in g.iterrows():
+            d_curr = row["date"]
+            if d_curr is None or (isinstance(d_curr, float) and math.isnan(d_curr)):
+                continue
+            hint = hmap.get(d_curr)
+            if hint is None:
+                continue
+            r = float(hint)
+            if r <= 1.0 + 1e-9:
+                # Forward splits are out of scope for "NAV lagging reverse split".
+                continue
+            # Do not rewrite carried/market-backed placeholders — those are not issuer NAVs.
+            kind = str(row.get("stale_kind") or "").strip().lower()
+            src = str(row.get("source_provider") or "").strip().lower()
+            if kind in {"market_backed_no_issuer_nav", "carry_forward"} or src in {
+                "market_backed",
+                "carry_forward",
+            }:
+                continue
+            nav_c = float(pd.to_numeric(row.get("nav"), errors="coerce") or float("nan"))
+            close_c = float(pd.to_numeric(row.get("close_price"), errors="coerce") or float("nan"))
+            if not (nav_c > 0 and close_c > 0):
+                continue
+            # Already aligned.
+            if abs(close_c / nav_c - 1.0) <= PREM_DISC_MAX_ABS_RATIO:
+                continue
+            # close ≈ nav * R (market on post-split dollars, issuer still pre-split).
+            if abs(close_c / (nav_c * r) - 1.0) > 0.15:
+                continue
+            # Prior session should have been on a sane prem/disc (pre-split lockstep
+            # or already-repaired post-split). Close jump ~R is required for the
+            # *first* lag day; continuation days keep a pre-split NAV while close
+            # is already post-split (NBIZ 2026-06-02).
+            prev_mask = (out["ticker"] == ticker) & (out["date"] < d_curr)
+            prev_rows = out.loc[prev_mask].sort_values("date")
+            if prev_rows.empty:
+                continue
+            prev = prev_rows.iloc[-1]
+            nav_p = float(pd.to_numeric(prev.get("nav"), errors="coerce") or float("nan"))
+            close_p = float(pd.to_numeric(prev.get("close_price"), errors="coerce") or float("nan"))
+            if not (nav_p > 0 and close_p > 0):
+                continue
+            if abs(close_p / nav_p - 1.0) > 0.20:
+                continue
+            first_lag_day = (
+                abs(close_c / close_p - r) / r <= 0.35
+                and abs(nav_c / nav_p - 1.0) <= 0.30
+            )
+            continuation = abs(nav_c * r / nav_p - 1.0) <= 0.25
+            if not (first_lag_day or continuation):
+                continue
+
+            new_nav = float(nav_c * r)
+            out.loc[ix, "nav"] = new_nav
+            sh_c = float(pd.to_numeric(row.get("shares_outstanding"), errors="coerce") or float("nan"))
+            aum_c = float(pd.to_numeric(row.get("aum"), errors="coerce") or float("nan"))
+            if sh_c > 0 and math.isfinite(sh_c):
+                # Shares still on pre-split count when TNA ≈ nav_pre * sh_pre.
+                if aum_c > 0 and abs(aum_c / (nav_c * sh_c) - 1.0) <= 0.12:
+                    out.loc[ix, "shares_outstanding"] = float(sh_c / r)
+                elif aum_c > 0 and abs(aum_c / (new_nav * sh_c) - 1.0) <= 0.12:
+                    # Shares already consolidated; leave them.
+                    pass
+                else:
+                    # Prefer conserving AUM: shares = aum / new_nav.
+                    if aum_c > 0:
+                        out.loc[ix, "shares_outstanding"] = float(aum_c / new_nav)
+            n_rep += 1
+            LOGGER.info(
+                "repair_nav_lagging_split_basis: %s %s ×%.6g stale_nav %.6g -> %.6g (close=%.6g)",
+                ticker,
+                d_curr,
+                r,
+                nav_c,
+                new_nav,
+                close_c,
+            )
+
+    return out, n_rep
+
+
 def enforce_status_consistency(df: pd.DataFrame) -> pd.DataFrame:
     """Reconcile stored status with actual field presence. Preserves 'partial' rows."""
     out = df.copy()
@@ -3694,6 +3825,9 @@ def main() -> None:
     merged, n_close_split = repair_close_price_split_basis_mismatch(merged)
     if n_close_split:
         LOGGER.info("Repaired split-basis close_price on %d row(s)", n_close_split)
+    merged, n_nav_split = repair_nav_lagging_split_basis(merged)
+    if n_nav_split:
+        LOGGER.info("Repaired lagging-split NAV on %d row(s)", n_nav_split)
     # Must run on full merged history: ``incoming`` is usually one trading day,
     # so an earlier backfill never saw legacy null rows in the parquet store.
     merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
