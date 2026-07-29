@@ -571,7 +571,7 @@ Every user-facing JSON under `data/` has a single producer workflow, a primary c
 | File | Producer | Consumer | Refresh cadence |
 |---|---|---|---|
 | `dashboard_data.json` | `build_data.py` | `index.html` (always loaded) | daily full build + borrow tick ~30 min |
-| `vol_shape_history.json` | `build_data.py` (`vol_shape_metrics.py`) | Chart page vol-shape history plots (prefetched); falls back to client recompute from `etf_metrics_daily` | full `build_data` after metrics ingest |
+| `vol_shape_history.json` (+ deploy `.json.gz`) | `build_data.py` (`vol_shape_metrics.py`); deploy gzips for Pages | Chart page vol-shape history plots (prefetched); falls back to client recompute from `etf_metrics_daily` | full `build_data` after metrics ingest |
 | `etf_screened_today.csv` | `ls-algo/daily_screener.py` | `build_data.py` | daily (cached copy of upstream) |
 | `borrow_history.json` | `build_data.py` (walks ls-algo git history) | `ChartPage`, `ls-algo` net-edge bootstrap | daily |
 | `borrow_spike_risk.json` | `build_data.py` (spike model) | `ChartPage`, `BorrowMonitor` | daily |
@@ -590,7 +590,7 @@ Every user-facing JSON under `data/` has a single producer workflow, a primary c
 | `event_calendar_inferred.json` | `event_vol_decomposition.py` (mystery scanner) | combined calendar merge | each VRP refresh |
 | `event_calendar_combined.json` | `event_vol_decomposition.py` | `vrp_live.json` builder, `ls-algo/decay_distribution.py` | each VRP refresh |
 | `macro_event_calendar.json` | manual (FOMC/CPI dates) | combined calendar merge | manual |
-| `etf_metrics_daily.{parquet,csv,json}` | `ingest_etf_metrics.py` (+ `repair_metrics_decay_coverage.py`) | Stats tab; Decay / realized pair gross (joint non-CF rows) | **`nightly.yml`** Tue–Sat 6 AM ET |
+| `etf_metrics_daily.{parquet,csv}` + deploy `etf_metrics_daily.json.gz` | `ingest_etf_metrics.py` (+ `repair_metrics_decay_coverage.py`); deploy gzips via `export_etf_metrics_daily_json.py` | Stats / Decay / Backtest / Drip (`index.html` prefers `.json.gz`) | **`nightly.yml`** Tue–Sat 6 AM ET |
 | `etf_metrics_latest.json` | `ingest_etf_metrics.py` | Stats tab (snapshot panel) | **`nightly.yml`** |
 | `metrics_decay_coverage_report.json` | `audit_metrics_decay_coverage.py` | CI Decay as-of gate; repair targeting | **`nightly.yml`** after metrics repair |
 | `metrics_decay_repair_report.json` | `repair_metrics_decay_coverage.py` | Ops audit of CF→market_backed rewrites | **`nightly.yml`** |
@@ -930,6 +930,10 @@ Five workflows + shared actions (`commit-data`, `deploy-pages`):
 
 **Deploy path:** Inline `deploy-pages` action after successful commits in `market-hours`, `nightly`, `corporate-actions`, and `build-and-deploy`. No deploy-on-every-`data/**` push.
 
+**Cloudflare Pages file budget:** individual uploaded files must stay under ~25 MiB (deploy uses a 20 MB safety margin via `find -size -20M`). Plain `etf_metrics_daily.json` (~164 MB) is **not** shipped; deploy materializes **`data/etf_metrics_daily.json.gz`** (and **`vol_shape_history.json.gz`**) via `scripts/export_etf_metrics_daily_json.py --skip-plain-json`. The SPA fetches `.json.gz` first (`DecompressionStream`) and falls back to plain JSON for local servers. `scripts/audit_pages_artifact_budget.py` fail-closes the deploy if required gzip artifacts are missing or over budget.
+
+**Bucket 4 research nests:** production import (`scripts/import_bucket4_production.py`) merge-preserves `cash_residual_path` / `inception_research` / `inception_research_stable` (and hydrates from standalone dirs). Nightly runs `audit_b4_inception_paths.py --fail-on-missing-nests` fail-closed so Optimized cannot go dark after a plan-ledger refresh.
+
 ### Required repo secrets
 
 | Secret | Used by |
@@ -1253,7 +1257,7 @@ Split-aware TR must stay in sync across **`scripts/split_adjustments.py`**, **`a
 4. **`Gross (realized)` is always shown if available**, regardless of `product_class`.
 5. **Sign convention is short-favorable positive throughout.** A higher `net_edge_p50` is better for the short side. Don't flip signs in display logic.
 6. **The CSV schema is the contract.** Both `build_data.py` and `backend/main.py` must mirror any column you read in `index.html`.
-7. **The dashboard is fail-soft, except for authoritative product contracts.** A flaky general data build must not blank the site, and the restore-before-deploy path remains. Bucket 4 production generation is deliberately fail-closed: never publish or commit a locally simulated fallback when the ls-algo export is missing, dirty, tampered, or unreconciled.
+7. **The dashboard is fail-soft, except for authoritative product contracts.** A flaky general data build must not blank the site, and the restore-before-deploy path remains. Bucket 4 production generation is deliberately fail-closed: never publish or commit a locally simulated fallback when the ls-algo export is missing, dirty, tampered, or unreconciled. Production import must **merge-preserve** Optimized research nests (`cash_residual_path` / `inception_research` / `inception_research_stable`). Cloudflare Pages must ship `etf_metrics_daily.json.gz` + `vol_shape_history.json.gz` under the 20 MB artifact budget (`audit_pages_artifact_budget.py`).
 8. **`borrow_history.json` is reconstructed from ls-algo's git history.** Don't reset that history.
 
 ---

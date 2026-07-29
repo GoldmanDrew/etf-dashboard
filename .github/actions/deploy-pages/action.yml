@@ -23,9 +23,13 @@ runs:
         set -euo pipefail
         pip install -q pyarrow pandas numpy
         if [ -f data/etf_metrics_daily.parquet ]; then
-          python scripts/export_etf_metrics_daily_json.py
+          # Ship gzip only — plain JSON (~164 MB) exceeds Cloudflare's ~25 MiB file limit.
+          python scripts/export_etf_metrics_daily_json.py --skip-plain-json
         else
           echo "No etf_metrics_daily.parquet; skipping JSON materialization"
+        fi
+        if [ -f data/vol_shape_history.json ] && [ ! -f data/vol_shape_history.json.gz ]; then
+          python -c "import sys; from pathlib import Path; sys.path.insert(0,'scripts'); from etf_metrics_format import gzip_json_file; p=Path('data/vol_shape_history.json'); o=gzip_json_file(p); print(f'Wrote {o} ({o.stat().st_size/(1024*1024):.1f} MB)')"
         fi
 
     - name: Build site artifact
@@ -45,6 +49,12 @@ runs:
               cp "$f" "_site/data/$rel"
             done
         fi
+
+    - name: Audit Pages artifact budget
+      shell: bash
+      run: |
+        set -euo pipefail
+        python scripts/audit_pages_artifact_budget.py --site _site
 
     - name: Deploy to Cloudflare Pages
       id: deploy_pages

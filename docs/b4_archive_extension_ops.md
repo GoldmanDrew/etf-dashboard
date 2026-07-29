@@ -46,12 +46,15 @@ python scripts/export_b4_dashboard.py --run-production --start 2026-02-27
 python scripts/build_bucket4_backtest.py --mode production
 ```
 
+**Invariant:** production import **merge-preserves** `cash_residual_path`, `inception_research`, and `inception_research_stable` on existing pair shards (and hydrates from standalone `data/bucket4_*` dirs when the nest is missing). It must never blank Optimized by overwriting research nests. CI: `python scripts/audit_b4_inception_paths.py --fail-on-missing-nests` (fail-closed on nightly).
+
 7. Refresh pair inception research (does not change book):
 
 ```bash
 python scripts/build_b4_inception_research.py --out-dir data/bucket4_inception_research
 # Also nests inception_research_stable (deadband+slew) by default (--with-stable).
 python scripts/audit_b4_inception_paths.py --fail-on-inception-fail
+python scripts/audit_b4_inception_paths.py --fail-on-missing-nests
 ```
 
 8. Refresh cash-residual Optimized paths (does not change book):
@@ -63,7 +66,7 @@ python scripts/build_b4_cash_residual_path.py
 # Also runs automatically at the end of build_b4_inception_research.py (--with-cash-residual, default on).
 ```
 
-If Optimized shows “Cash-residual path not nested yet”, the shard has inception nests but no `cash_residual_path` — rebuild that ETF (or the fleet). Without the nest the UI correctly falls back to unit-equity Stabilized / Current h.
+If Optimized shows a missing path after a production import, first confirm the nest was preserved (`cash_residual_path` on the pair shard). If standalone research exists under `data/bucket4_cash_residual_path/{ETF}.json` but the nest is empty, re-nest with the rebuild command above (or re-run import after the preserve fix). The SPA also falls back to standalone URLs client-side as defense-in-depth. Without any nest the UI correctly falls back to unit-equity Stabilized / Current h.
 
 Panel sanitize (`scripts/bucket4/bucket4_price_loading.py::sanitize_panel_vs_session_close`) replaces ETF `a_px` when day \|ret\| > 100% **or** early/late `panel/close` median steps >25%, preferring `etf_adj_close` when it removes reverse-split cliffs (APLZ/BEZ/NBIZ) else session `close_price` (QBTZ fabricated scale).
 

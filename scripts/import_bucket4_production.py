@@ -18,6 +18,36 @@ OUT_PAIR_DIR = REPO / "data" / "bucket4_pairs"
 CONTRACT_SCHEMA = "bucket4_production_replay.v1"
 DASHBOARD_SCHEMA = "bucket4_backtest.v4"
 
+# Dashboard research nests — never drop these when overwriting plan ledgers from ls-algo.
+RESEARCH_NEST_KEYS = (
+    "cash_residual_path",
+    "inception_research",
+    "inception_research_stable",
+)
+STANDALONE_NEST_DIRS = {
+    "cash_residual_path": REPO / "data" / "bucket4_cash_residual_path",
+    "inception_research": REPO / "data" / "bucket4_inception_research",
+    "inception_research_stable": REPO / "data" / "bucket4_inception_research_stable",
+}
+# Keys copied from standalone research JSON onto the pair nest (matches nest writers).
+STANDALONE_NEST_COPY_KEYS = (
+    "schema",
+    "etf",
+    "underlying",
+    "authoritative",
+    "history_basis",
+    "disclaimer",
+    "daily",
+    "summary",
+    "rebalance_log",
+    "notional_basis_usd",
+    "ledger_mode",
+    "etf_inception_date",
+    "research_parameters",
+    "policy",
+    "telemetry",
+)
+
 
 def _finite(value: Any, default: float = 0.0) -> float:
     try:
@@ -38,6 +68,76 @@ def _sha256_file(path: Path) -> str:
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+
+
+def _load_json_object(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _nest_block_from_standalone(etf: str, nest_key: str) -> dict[str, Any] | None:
+    base = STANDALONE_NEST_DIRS.get(nest_key)
+    if base is None:
+        return None
+    payload = _load_json_object(base / f"{etf}.json")
+    if not payload:
+        return None
+    daily = payload.get("daily")
+    if not isinstance(daily, dict) or not daily.get("dates"):
+        return None
+    nest = {k: payload[k] for k in STANDALONE_NEST_COPY_KEYS if k in payload and payload[k] is not None}
+    nest.setdefault("authoritative", False)
+    nest.setdefault("history_basis", nest_key)
+    return nest
+
+
+def _stamp_inception_research_non_authoritative(shard: dict[str, Any]) -> None:
+    inception_research = shard.get("inception_research")
+    if not isinstance(inception_research, Mapping):
+        return
+    ir = dict(inception_research)
+    ir["authoritative"] = False
+    ir.setdefault(
+        "disclaimer",
+        "Research path from ETF/underlying overlap. Not production-policy replay. Not used for book PnL.",
+    )
+    ir.setdefault("history_basis", "inception_research")
+    shard["inception_research"] = ir
+
+
+def preserve_research_nests(etf: str, shard: dict[str, Any], *, pairs_dir: Path = OUT_PAIR_DIR) -> list[str]:
+    """Copy dashboard research nests onto a freshly imported production shard.
+
+    Prefer an existing pair-shard nest; otherwise hydrate from standalone research
+    JSON under ``data/bucket4_*``. Returns the list of nest keys restored.
+    """
+    etf = str(etf or "").upper()
+    restored: list[str] = []
+    existing = _load_json_object(pairs_dir / f"{etf}.json") or {}
+    for key in RESEARCH_NEST_KEYS:
+        incoming = shard.get(key)
+        if isinstance(incoming, Mapping) and isinstance(incoming.get("daily"), dict) and incoming["daily"].get("dates"):
+            continue  # export already carried a usable nest
+        prior = existing.get(key) if isinstance(existing.get(key), Mapping) else None
+        if isinstance(prior, Mapping) and isinstance(prior.get("daily"), dict) and prior["daily"].get("dates"):
+            shard[key] = dict(prior)
+            restored.append(key)
+            continue
+        hydrated = _nest_block_from_standalone(etf, key)
+        if hydrated is not None:
+            shard[key] = hydrated
+            restored.append(key)
+    _stamp_inception_research_non_authoritative(shard)
+    for key in ("cash_residual_path", "inception_research_stable"):
+        block = shard.get(key)
+        if isinstance(block, dict):
+            block["authoritative"] = False
+    return restored
 
 
 def find_production_export(explicit: str | Path | None = None) -> Path | None:
@@ -431,6 +531,9 @@ def import_contract(
             if existing.name not in keep:
                 existing.unlink()
     for etf, shard in pair_shards.items():
+        restored = preserve_research_nests(etf, shard)
+        if restored:
+            print(f"preserved research nests for {etf}: {', '.join(restored)}")
         _write_json(OUT_PAIR_DIR / f"{etf}.json", shard)
     _write_json(OUT_JSON, payload)
     state = {

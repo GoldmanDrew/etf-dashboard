@@ -1845,7 +1845,7 @@
 <script src="assets/trade_lab_spots.js?v=tl-spots-v1"></script>
 <script src="assets/trade_lab.js?v=tl-v4"></script>
 <script src="assets/pair_backtest.js?v=pb-v10"></script>
-<script src="assets/bucket4_backtest.js?v=b4-opt1"></script>
+<script src="assets/bucket4_backtest.js?v=b4-opt2"></script>
 <link rel="stylesheet" href="assets/bucket5_product.css?v=b5p-v5">
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.7/dist/lightweight-charts.standalone.production.js"></script>
 <script src="assets/bucket5_product.js?v=b5p-v5"></script>
@@ -1875,9 +1875,59 @@ async function fetchJsonSafe(url, { cache = 'no-store' } = {}) {
   try {
     const res = await fetch(url, { cache });
     if (!res.ok) return { data: null, error: `HTTP ${res.status}` };
-    return { data: JSON.parse(await res.text()), error: null };
+    const text = await res.text();
+    if (looksLikeHtmlDocument(text)) {
+      return { data: null, error: `HTML instead of JSON from ${url} (missing deploy artifact?)` };
+    }
+    return { data: JSON.parse(text), error: null };
   } catch (e) {
     return { data: null, error: e?.message || 'JSON parse failed' };
+  }
+}
+function looksLikeHtmlDocument(text) {
+  const s = String(text || '').trimStart().slice(0, 32).toLowerCase();
+  return s.startsWith('<!doctype') || s.startsWith('<html');
+}
+/** Fetch gzipped JSON (Cloudflare Pages ≤20 MB gate) with plain-JSON fallback for local servers. */
+async function fetchJsonPreferGzip(plainUrl, { cache = 'no-store' } = {}) {
+  const gzUrl = `${plainUrl}.gz`;
+  const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
+  const tryGz = async () => {
+    if (typeof DecompressionStream !== 'function') {
+      throw new Error('DecompressionStream unavailable');
+    }
+    const res = await fetch(`${gzUrl}${cacheBust}`, { cache });
+    if (!res.ok) throw new Error(`gzip HTTP ${res.status}`);
+    const ds = new DecompressionStream('gzip');
+    const stream = res.body && res.body.pipeThrough ? res.body.pipeThrough(ds) : null;
+    if (!stream) throw new Error('gzip body stream unavailable');
+    const text = await new Response(stream).text();
+    if (looksLikeHtmlDocument(text)) {
+      throw new Error(`HTML instead of gzip JSON from ${gzUrl}`);
+    }
+    return JSON.parse(text);
+  };
+  const tryPlain = async () => {
+    const res = await fetch(`${plainUrl}${cacheBust}`, { cache });
+    if (!res.ok) throw new Error(`plain HTTP ${res.status}`);
+    const text = await res.text();
+    if (looksLikeHtmlDocument(text)) {
+      throw new Error(
+        `HTML instead of JSON from ${plainUrl} — deploy must ship ${gzUrl} under the Pages 20MB budget`,
+      );
+    }
+    return JSON.parse(text);
+  };
+  try {
+    return await tryGz();
+  } catch (gzErr) {
+    try {
+      return await tryPlain();
+    } catch (plainErr) {
+      const g = gzErr?.message || String(gzErr);
+      const p = plainErr?.message || String(plainErr);
+      throw new Error(`${plainUrl} unavailable (gzip: ${g}; plain: ${p})`);
+    }
   }
 }
 const INTRADAY_SPOT_URL = "data/underlying_intraday_spot.json";
@@ -3105,10 +3155,7 @@ function volShapeHistoryFromMetricsRows(rawRows, window = VOL_SHAPE_PRIMARY_WIND
 
 async function loadVolShapeHistoryCache() {
   if (VOL_SHAPE_HISTORY_CACHE?.symbols) return VOL_SHAPE_HISTORY_CACHE;
-  const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
-  const res = await fetch(`${VOL_SHAPE_HISTORY_URL}${cacheBust}`, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`vol shape history HTTP ${res.status}`);
-  const payload = await res.json();
+  const payload = await fetchJsonPreferGzip(VOL_SHAPE_HISTORY_URL);
   const symbols = payload?.symbols && typeof payload.symbols === 'object' ? payload.symbols : {};
   VOL_SHAPE_HISTORY_CACHE = {
     symbols,
@@ -3549,10 +3596,7 @@ function volShapeTooltip(r, opts = {}) {
 
 async function loadEtfMetricsCache() {
   if (ETF_METRICS_CACHE?.bySymbol) return ETF_METRICS_CACHE;
-  const cacheBust = `?t=${Math.floor(Date.now() / 60000)}`;
-  const res = await fetch(`${ETF_METRICS_DAILY_URL}${cacheBust}`, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`etf metrics HTTP ${res.status}`);
-  const payload = await res.json();
+  const payload = await fetchJsonPreferGzip(ETF_METRICS_DAILY_URL);
   const rows = (Array.isArray(payload?.rows) ? payload.rows : [])
     .filter((row) => isNyseSessionDateString(row?.date) && !isIssuerEarlyMetricsRow(row));
   const bySymbol = {};
@@ -12448,7 +12492,13 @@ function ChartPage({ record, onBack, chartVolLookbackRange, setChartVolLookbackR
           {b4PairShard && !hasSaneInception && (
             <div className="error-banner">
               Optimized path unavailable{inceptionPathAudit.issues?.length ? `: ${inceptionPathAudit.issues.join('; ')}` : ''}.
-              {!hasCashResidualPath ? <> Rebuild with <code>python scripts/build_b4_cash_residual_path.py --etfs {etfSym}</code>.</> : null}
+              {!hasCashResidualPath ? (
+                <>
+                  {' '}If standalone research exists, re-nest with{' '}
+                  <code>python scripts/build_b4_cash_residual_path.py --etfs {etfSym}</code>
+                  {' '}(production import preserves nests; a wipe usually means the nest was never rebuilt after import).
+                </>
+              ) : null}
             </div>
           )}
           {b4PairShard && !hasCashResidualPath && (hasStableOptimized || inceptionResearchCurrent) && (

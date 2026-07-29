@@ -110,8 +110,9 @@
       const res = await fetch(`${url}${sep}t=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`bucket4 pair ${sym} HTTP ${res.status}`);
       const data = JSON.parse(await res.text());
-      _pairShardCache.set(sym, data);
-      return data;
+      const merged = await hydrateResearchNestsFromStandalone(sym, data);
+      _pairShardCache.set(sym, merged);
+      return merged;
     })();
     _pairShardPromises.set(sym, promise);
     try {
@@ -120,6 +121,42 @@
       _pairShardPromises.delete(sym);
       throw e;
     }
+  }
+
+  function nestHasDaily(block) {
+    return Boolean(
+      block
+      && typeof block === 'object'
+      && Array.isArray(block.daily?.dates)
+      && block.daily.dates.length >= 2,
+    );
+  }
+
+  /** Defense-in-depth: if production import wiped nests, pull standalone research JSON. */
+  async function hydrateResearchNestsFromStandalone(sym, shard) {
+    if (!shard || typeof shard !== 'object') return shard;
+    const out = { ...shard };
+    const specs = [
+      { key: 'cash_residual_path', url: `data/bucket4_cash_residual_path/${encodeURIComponent(sym)}.json` },
+      { key: 'inception_research', url: `data/bucket4_inception_research/${encodeURIComponent(sym)}.json` },
+      { key: 'inception_research_stable', url: `data/bucket4_inception_research_stable/${encodeURIComponent(sym)}.json` },
+    ];
+    await Promise.all(specs.map(async ({ key, url }) => {
+      if (nestHasDaily(out[key])) return;
+      try {
+        const sep = url.includes('?') ? '&' : '?';
+        const res = await fetch(`${url}${sep}t=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const payload = JSON.parse(await res.text());
+        if (!nestHasDaily(payload)) return;
+        const nest = { ...payload, authoritative: false };
+        nest.history_basis = nest.history_basis || key;
+        out[key] = nest;
+      } catch (_e) {
+        /* standalone optional */
+      }
+    }));
+    return out;
   }
 
   function sliceEquityWindow(artifact, startDate, endDate) {

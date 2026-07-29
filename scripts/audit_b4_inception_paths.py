@@ -16,6 +16,24 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PAIRS_DIR = REPO / "data" / "bucket4_pairs"
 BOOK = REPO / "data" / "bucket4_backtest.json"
+STANDALONE_DIRS = {
+    "cash_residual_path": REPO / "data" / "bucket4_cash_residual_path",
+    "inception_research": REPO / "data" / "bucket4_inception_research",
+    "inception_research_stable": REPO / "data" / "bucket4_inception_research_stable",
+}
+NEST_KEYS = tuple(STANDALONE_DIRS.keys())
+
+
+def _standalone_exists(etf: str, nest_key: str) -> bool:
+    path = STANDALONE_DIRS[nest_key] / f"{etf}.json"
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    daily = payload.get("daily") if isinstance(payload, dict) else None
+    return isinstance(daily, dict) and bool(daily.get("dates"))
 
 
 def _book_etfs() -> list[str]:
@@ -146,6 +164,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Exit 1 if any production plan ledger fails hard gates",
     )
+    ap.add_argument(
+        "--fail-on-missing-nests",
+        action="store_true",
+        help=(
+            "Exit 1 when a production-book (or standalone-backed) pair is missing "
+            "cash_residual_path / inception_research / inception_research_stable nests"
+        ),
+    )
     args = ap.parse_args(argv)
 
     rows = []
@@ -158,6 +184,33 @@ def main(argv: list[str] | None = None) -> int:
         plan = audit_daily(shard.get("daily") or {})
         ir = shard.get("inception_research") or {}
         irs = shard.get("inception_research_stable") or {}
+        cr = shard.get("cash_residual_path") or {}
+        # Require full nest set when the pair is in the production book and standalone
+        # research exists; otherwise flag only keys that have a standalone orphan.
+        require_nests = bool(shard.get("in_production_book")) and any(
+            _standalone_exists(etf, k) for k in NEST_KEYS
+        )
+        if require_nests:
+            missing_nests = [
+                key
+                for key in NEST_KEYS
+                if not (
+                    isinstance(shard.get(key), dict)
+                    and isinstance((shard.get(key) or {}).get("daily"), dict)
+                    and (shard.get(key) or {}).get("daily", {}).get("dates")
+                )
+            ]
+        else:
+            missing_nests = [
+                key
+                for key in NEST_KEYS
+                if _standalone_exists(etf, key)
+                and not (
+                    isinstance(shard.get(key), dict)
+                    and isinstance((shard.get(key) or {}).get("daily"), dict)
+                    and (shard.get(key) or {}).get("daily", {}).get("dates")
+                )
+            ]
         if ir:
             inception = audit_daily(ir.get("daily") or {})
             inception["final_equity"] = (ir.get("summary") or {}).get("final_equity")
@@ -175,6 +228,13 @@ def main(argv: list[str] | None = None) -> int:
                 "plan": plan,
                 "inception": inception,
                 "stable_nested": bool(irs),
+                "cash_residual_nested": bool(
+                    isinstance(cr, dict)
+                    and isinstance(cr.get("daily"), dict)
+                    and cr.get("daily", {}).get("dates")
+                ),
+                "missing_nests": missing_nests,
+                "in_production_book": bool(shard.get("in_production_book")),
             }
         )
         p_st = "FAIL" if plan.get("fail") else ("WARN" if plan.get("warn") else "OK")
@@ -186,14 +246,16 @@ def main(argv: list[str] | None = None) -> int:
             i_st = "WARN"
         else:
             i_st = "OK"
+        nest_note = f" missing_nests={missing_nests}" if missing_nests else ""
         print(
             f"{etf}: plan={p_st} inception={i_st} "
             f"plan_issues={plan.get('issues') or ['ok']} "
             f"inc_issues={inception.get('issues') or inception.get('error') or ['ok']}"
+            f"{nest_note}"
         )
 
     report = {
-        "schema": "b4_inception_path_audit.v1",
+        "schema": "b4_inception_path_audit.v2",
         "n_pairs": len(rows),
         "pairs": rows,
         "inception_fail": [r["etf"] for r in rows if (r.get("inception") or {}).get("fail")],
@@ -209,6 +271,11 @@ def main(argv: list[str] | None = None) -> int:
             if (r.get("inception") or {}).get("error") != "no_inception"
             and not r.get("stable_nested")
         ],
+        "missing_nests": [
+            {"etf": r["etf"], "missing": r.get("missing_nests")}
+            for r in rows
+            if r.get("missing_nests")
+        ],
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
@@ -218,10 +285,13 @@ def main(argv: list[str] | None = None) -> int:
         "inception_fail": report["inception_fail"],
         "plan_fail": report["plan_fail"],
         "inception_missing": report["inception_missing"],
+        "missing_nests": report["missing_nests"],
     }))
     if args.fail_on_inception_fail and report["inception_fail"]:
         return 1
     if args.fail_on_plan_fail and report["plan_fail"]:
+        return 1
+    if args.fail_on_missing_nests and report["missing_nests"]:
         return 1
     return 0
 

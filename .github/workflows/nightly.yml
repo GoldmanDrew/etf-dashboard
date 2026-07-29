@@ -370,6 +370,10 @@ jobs:
         continue-on-error: true
         run: python -m pytest tests/test_b4_layer_a_parity.py -q
 
+      - name: Bucket 4 research nest audit (fail-closed)
+        if: steps.build_data.outcome == 'success'
+        run: python scripts/audit_b4_inception_paths.py --fail-on-missing-nests
+
       - name: Bucket 4 inception path audit (soft)
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
