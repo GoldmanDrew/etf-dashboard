@@ -1,10 +1,14 @@
-name: Deploy GitHub Pages
-description: Build _site from index.html + data/ + assets/ and publish to GitHub Pages
+name: Deploy Cloudflare Pages
+description: Build _site from index.html + data/ + assets/ and publish to Cloudflare Pages
 inputs:
   fail-soft:
-    description: When true, do not fail the job if both deploy attempts fail
+    description: When true, do not fail the job if deploy fails
     required: false
     default: "false"
+  project-name:
+    description: Cloudflare Pages project name
+    required: false
+    default: etf-dashboard
 runs:
   using: composite
   steps:
@@ -24,57 +28,38 @@ runs:
           echo "No etf_metrics_daily.parquet; skipping JSON materialization"
         fi
 
-    - name: Setup Pages
-      uses: actions/configure-pages@v5
-
     - name: Build site artifact
       shell: bash
       run: |
         set -euo pipefail
-        mkdir -p _site
+        rm -rf _site
+        mkdir -p _site/data
         cp index.html _site/
-        cp -r data _site/
         [ -d assets ] && cp -r assets _site/ || true
+        # Pages rejects files > 25 MiB; keep a safety margin.
+        if [ -d data ]; then
+          find data -type f ! -name '*.parquet' ! -name '*.arrow' -size -20M -print0 |
+            while IFS= read -r -d '' f; do
+              rel="${f#data/}"
+              mkdir -p "_site/data/$(dirname "$rel")"
+              cp "$f" "_site/data/$rel"
+            done
+        fi
 
-    - name: Upload artifact
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: _site
-
-    - name: Wait for Pages deploy slot
-      shell: bash
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-        MAX_WAIT_SEC: "1200"
-      run: bash scripts/wait_for_pages_deploy_idle.sh
-
-    - name: Deploy to GitHub Pages
+    - name: Deploy to Cloudflare Pages
       id: deploy_pages
-      continue-on-error: true
-      uses: actions/deploy-pages@v4
-
-    - name: Retry Pages deploy after idle wait
-      if: steps.deploy_pages.outcome == 'failure'
       shell: bash
+      continue-on-error: ${{ inputs.fail-soft == 'true' }}
       env:
-        GITHUB_TOKEN: ${{ github.token }}
-        MAX_WAIT_SEC: "600"
-      run: bash scripts/wait_for_pages_deploy_idle.sh
-
-    - name: Deploy to GitHub Pages (retry)
-      id: deploy_pages_retry
-      if: steps.deploy_pages.outcome == 'failure'
-      continue-on-error: true
-      uses: actions/deploy-pages@v4
-
-    - name: Verify Pages deploy
-      if: inputs.fail-soft != 'true'
-      shell: bash
+        PROJECT_NAME: ${{ inputs.project-name }}
       run: |
         set -euo pipefail
-        if [ "${{ steps.deploy_pages.outcome }}" = "success" ] || [ "${{ steps.deploy_pages_retry.outcome }}" = "success" ]; then
-          echo "Pages deploy succeeded."
-          exit 0
+        if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+          echo "::error::Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID (pass via env on the action step)"
+          exit 1
         fi
-        echo "::error::Pages deploy failed after initial attempt and retry."
-        exit 1
+        npx --yes wrangler@4 pages deploy _site \
+          --project-name="$PROJECT_NAME" \
+          --branch=main \
+          --commit-dirty=true
+        echo "Deployed Cloudflare Pages project $PROJECT_NAME" >> "$GITHUB_STEP_SUMMARY"
