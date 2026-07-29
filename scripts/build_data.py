@@ -1202,14 +1202,22 @@ def _symbol_cache_age_seconds(payload: dict | None) -> int:
         return 10**9
 
 
-def _sleeve_chain_refresh_priority(sym: str, prior_symbols: dict) -> tuple[int, str]:
-    """Sort sleeves with empty/missing chains ahead of populated ones."""
+def _sleeve_chain_refresh_priority(sym: str, prior_symbols: dict) -> tuple[int, int, str]:
+    """Sort sleeves with empty/missing chains ahead of populated ones.
+
+    Tier 0 = absent from cache / empty ``options`` (missing-chain recovery).
+    Tier 1 = populated chain (oldest first so spotty sleeves re-fetch sooner).
+    """
     payload = prior_symbols.get(sym) if isinstance(prior_symbols, dict) else None
     if not isinstance(payload, dict):
-        return (0, sym)
+        return (0, 0, sym)
     opts = payload.get("options")
     n_opts = len(opts) if isinstance(opts, list) else 0
-    return (0 if n_opts <= 0 else 1, sym)
+    if n_opts <= 0:
+        return (0, 0, sym)
+    # Negate age so older populated sleeves sort before fresher ones within tier 1.
+    age = _symbol_cache_age_seconds(payload)
+    return (1, -age, sym)
 
 
 def _order_yieldboost_refresh_symbols(
@@ -1217,7 +1225,12 @@ def _order_yieldboost_refresh_symbols(
     yb_sleeves: list[str],
     prior_symbols: dict,
 ) -> list[str]:
-    """Order YB refresh: stale underlyings first (oldest cache), then sleeves."""
+    """Order YB refresh: missing-chain sleeves first, then underlyings, then populated sleeves.
+
+    Empty sleeve chains (CWY→CRWV etc.) must beat underlyings in the Tradier
+    budget queue — underlyings first starved second-half sleeves when the
+    chain request cap was tight.
+    """
     und = sorted(
         {norm_sym(s) for s in (underlying_refresh or []) if str(s).strip()},
         key=lambda s: _symbol_cache_age_seconds(
@@ -1225,13 +1238,18 @@ def _order_yieldboost_refresh_symbols(
         ),
         reverse=True,
     )
-    sleeves = sorted(
-        {norm_sym(s) for s in (yb_sleeves or []) if str(s).strip()},
+    sleeve_set = {norm_sym(s) for s in (yb_sleeves or []) if str(s).strip()}
+    missing_sleeves = sorted(
+        (s for s in sleeve_set if _sleeve_chain_refresh_priority(s, prior_symbols)[0] == 0),
+        key=lambda s: _sleeve_chain_refresh_priority(s, prior_symbols),
+    )
+    populated_sleeves = sorted(
+        (s for s in sleeve_set if _sleeve_chain_refresh_priority(s, prior_symbols)[0] != 0),
         key=lambda s: _sleeve_chain_refresh_priority(s, prior_symbols),
     )
     ordered: list[str] = []
     seen: set[str] = set()
-    for sym in und + sleeves:
+    for sym in missing_sleeves + und + populated_sleeves:
         if sym and sym not in seen:
             seen.add(sym)
             ordered.append(sym)
@@ -4231,6 +4249,115 @@ def rebuild_borrow_stats_from_history() -> None:
         print(f"  Note: borrow_history meta.error={hist_meta.get('error')}")
 
 
+def _latest_metrics_close_by_symbol() -> dict[str, float]:
+    """Latest issuer/Yahoo close from metrics parquet or CSV (for options spot gates)."""
+    out: dict[str, float] = {}
+    frame: pd.DataFrame | None = None
+    if ETF_METRICS_PARQUET_FILE.exists():
+        try:
+            frame = pd.read_parquet(
+                ETF_METRICS_PARQUET_FILE, columns=["ticker", "date", "close_price"]
+            )
+        except Exception:
+            try:
+                frame = pd.read_parquet(ETF_METRICS_PARQUET_FILE)
+            except Exception:
+                frame = None
+    if frame is None and ETF_METRICS_DAILY_FILE.exists():
+        try:
+            frame = pd.read_csv(ETF_METRICS_DAILY_FILE, low_memory=False)
+        except Exception:
+            frame = None
+    if frame is None or frame.empty:
+        return out
+    cols = {str(c).lower(): c for c in frame.columns}
+    tcol = cols.get("ticker")
+    dcol = cols.get("date")
+    ccol = cols.get("close_price")
+    if not tcol or not ccol:
+        return out
+    use_cols = [tcol, ccol] + ([dcol] if dcol else [])
+    df = frame[use_cols].copy()
+    df["_sym"] = df[tcol].map(norm_sym)
+    df["_close"] = pd.to_numeric(df[ccol], errors="coerce")
+    df = df[df["_sym"].astype(bool) & df["_close"].notna() & (df["_close"] > 0)]
+    if dcol:
+        df["_date"] = pd.to_datetime(df[dcol], errors="coerce")
+        df = df.sort_values("_date")
+    for sym, g in df.groupby("_sym", sort=False):
+        close = float(g.iloc[-1]["_close"])
+        if np.isfinite(close) and close > 0:
+            out[str(sym)] = close
+    return out
+
+
+def reconcile_options_cache_spots_vs_metrics(
+    options_cache: dict,
+    *,
+    max_rel_err: float = 0.25,
+    force_symbols: set[str] | None = None,
+) -> dict:
+    """Replace absurd/stale options spots with latest metrics close when far off."""
+    if not isinstance(options_cache, dict):
+        return options_cache
+    symbols = options_cache.get("symbols")
+    if not isinstance(symbols, dict) or not symbols:
+        return options_cache
+    closes = _latest_metrics_close_by_symbol()
+    if not closes:
+        return options_cache
+    force = {norm_sym(s) for s in (force_symbols or set()) if norm_sym(s)}
+    fixed = 0
+    for raw_sym, entry in list(symbols.items()):
+        if not isinstance(entry, dict):
+            continue
+        sym = norm_sym(raw_sym)
+        close = closes.get(sym)
+        if close is None or not np.isfinite(close) or close <= 0:
+            continue
+        spot = entry.get("spot")
+        try:
+            spot_f = float(spot) if spot is not None else float("nan")
+        except (TypeError, ValueError):
+            spot_f = float("nan")
+        stale = bool(entry.get("stale"))
+        rel = (
+            abs(spot_f / close - 1.0)
+            if np.isfinite(spot_f) and spot_f > 0
+            else float("inf")
+        )
+        need = (
+            sym in force
+            or not np.isfinite(spot_f)
+            or spot_f <= 0
+            or stale
+            or rel > float(max_rel_err)
+        )
+        if not need:
+            continue
+        entry["spot"] = round(float(close), 6)
+        entry["spot_source"] = "metrics_close_reconcile"
+        entry["spot_reconciled_from"] = (
+            round(float(spot_f), 6) if np.isfinite(spot_f) else None
+        )
+        entry["spot_reconciled_close"] = round(float(close), 6)
+        entry["stale"] = False
+        entry["updated_at"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+        symbols[raw_sym] = entry
+        fixed += 1
+    if fixed:
+        options_cache["symbols"] = symbols
+        options_cache["spot_reconcile_count"] = int(fixed)
+        options_cache["spot_reconcile_at"] = (
+            dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+        )
+        print(
+            f"  [OK] Reconciled {fixed} options spots vs metrics close "
+            f"(|err|>{max_rel_err:.0%} or stale)"
+        )
+    return options_cache
+
+
 def refresh_options_only() -> None:
     """Refresh options/spot cache used by Trade Lab."""
     if not OUTPUT_FILE.exists():
@@ -4248,6 +4375,9 @@ def refresh_options_only() -> None:
     options_cache = build_polygon_options_cache(symbols_for_options)
     if OPTIONS_INCLUDE_YIELDBOOST:
         options_cache = refresh_yieldboost_options_targeted_slice(options_cache)
+    options_cache = reconcile_options_cache_spots_vs_metrics(
+        options_cache, force_symbols={"NBIZ"}
+    )
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(options_cache, f, indent=None, separators=(",", ":"))
@@ -4419,6 +4549,9 @@ def refresh_yieldboost_vrp_only() -> None:
             refresh_list,
             yieldboost_targeted=True,
             prior_cache=prior_cache,
+        )
+        options_cache = reconcile_options_cache_spots_vs_metrics(
+            options_cache, force_symbols={"NBIZ"}
         )
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
@@ -5698,6 +5831,9 @@ def build():
     options_cache = build_polygon_options_cache(symbols_for_options)
     if OPTIONS_INCLUDE_YIELDBOOST:
         options_cache = refresh_yieldboost_options_targeted_slice(options_cache)
+    options_cache = reconcile_options_cache_spots_vs_metrics(
+        options_cache, force_symbols={"NBIZ"}
+    )
     with open(OPTIONS_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(options_cache, f, indent=None, separators=(",", ":"))
     vrp_meta = refresh_yieldboost_vrp_files(options_cache, realized_vol_map=realized_vol_map)
