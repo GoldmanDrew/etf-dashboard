@@ -1,134 +1,143 @@
 {
-  "build_time": "2026-08-05T13:25:09.116490Z",
+  "build_time": "2026-08-05T17:37:44.811402Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-08-04T22:01:25.040076Z",
+    "build_time": "2026-08-05T17:04:00.025775Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
-    "yieldboost_underlyings_refreshed_count": 12,
-    "yieldboost_underlyings_prefetched_count": 12,
-    "yieldboost_underlyings_skipped_fresh_count": 18,
+    "yieldboost_underlyings_refreshed_count": 30,
+    "yieldboost_underlyings_prefetched_count": 30,
+    "yieldboost_underlyings_skipped_fresh_count": 0,
     "yieldboost_refresh_order_head": [
+      "CONL",
       "CRWV",
-      "HOOD",
-      "AMD",
-      "IBIT",
-      "HIMS",
-      "MARA",
-      "COIN",
-      "IONQ"
+      "NVDL",
+      "QBTX",
+      "ROBN",
+      "SOXL",
+      "TSLR",
+      "TLT"
     ],
     "monitored_symbols_count": 320,
-    "freshness_enforced_count": 43,
+    "freshness_enforced_count": 61,
     "cached_monitored_count": 320,
     "missing_monitored_symbols": [],
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
-    "oldest_symbol": "AMD",
-    "oldest_symbol_age_minutes": 923,
-    "oldest_enforced_symbol": "AMD",
-    "oldest_enforced_symbol_age_minutes": 923
+    "oldest_symbol": "AMDL",
+    "oldest_symbol_age_minutes": 39,
+    "oldest_enforced_symbol": "AMDL",
+    "oldest_enforced_symbol_age_minutes": 39
   },
   "vrp": {
-    "worst_underlying_symbol": "XBI",
-    "worst_underlying_options_age_minutes": 987,
-    "underlying_options_as_of_min": "2026-08-04T20:57:31.907041Z",
-    "iv_coverage_front_pct": 0.9677
+    "worst_underlying_symbol": "AMD",
+    "worst_underlying_options_age_minutes": 33,
+    "underlying_options_as_of_min": "2026-08-05T17:04:00.025775Z",
+    "iv_coverage_front_pct": 0.9355
   },
   "flow": {
-    "latest_date": "2026-08-04",
-    "build_time": "2026-08-05T13:25:04.639092Z",
-    "underlyings_total": 265,
-    "underlyings_stale": 0,
-    "underlyings_stale_pct": 0.0,
+    "latest_date": "2026-07-28",
+    "build_time": "2026-08-05T17:37:39.598878Z",
+    "underlyings_total": 260,
+    "underlyings_stale": 1,
+    "underlyings_stale_pct": 0.38,
     "underlyings_issuer_publish_lag": 0,
-    "underlyings_actionable_stale": 0,
-    "underlyings_actionable_stale_pct": 0.0,
-    "underlyings_stale_by_reason": {},
-    "fund_rows_on_latest_date": 566,
+    "underlyings_actionable_stale": 1,
+    "underlyings_actionable_stale_pct": 0.38,
+    "underlyings_stale_by_reason": {
+      "missing_metrics": 1
+    },
+    "fund_rows_on_latest_date": 565,
     "fund_quality_counts": {
       "income_overlay": 31,
       "missing_leverage": 2,
-      "missing_prior_aum": 16,
-      "ok": 453,
+      "missing_prior_aum": 32,
+      "ok": 436,
       "product_class:passive_low_delta": 64
     },
     "stale_aum_by_prior_kind": {},
-    "top_stale_by_abs_net_moc": []
+    "top_stale_by_abs_net_moc": [
+      {
+        "underlying": "CAMT",
+        "date": "2026-07-23",
+        "abs_net_moc_dollars": 2534.21,
+        "reason": "missing_metrics"
+      }
+    ]
   },
   "metrics": {
-    "latest_date": "2026-08-04",
-    "latest_ok": 554,
-    "latest_stale_ok": 218,
-    "latest_missing": 0,
+    "latest_date": "2026-07-28",
+    "latest_ok": 538,
+    "latest_stale_ok": 207,
+    "latest_missing": 1,
     "latest_stale_by_kind": {
-      "market_backed_no_issuer_nav": 183,
+      "market_backed_no_issuer_nav": 169,
       "issuer_lag": 34,
-      "anchor_lag": 1
+      "anchor_lag": 4
     },
-    "flow_blockers_prior_stale": 1,
+    "flow_blockers_prior_stale": 4,
     "prem_disc": {
       "rows_with_close": 572,
-      "rows_with_nav_and_close": 343,
-      "rows_suppressed_asof_mismatch": 229,
-      "median_prem_disc_bps": 0.0,
-      "lockstep_nav_close_count": 24,
-      "lockstep_nav_close_pct": 7.0,
+      "rows_with_nav_and_close": 350,
+      "rows_suppressed_asof_mismatch": 221,
+      "median_prem_disc_bps": -1.7465643818559227,
+      "lockstep_nav_close_count": 28,
+      "lockstep_nav_close_pct": 8.0,
       "rex_nav_vs_implied_div_bps_gt5": 0,
       "rex_nav_vs_implied_div_bps_gt50": 0,
       "rex_nav_vs_implied_div_bps_max": null,
       "by_provider": {
+        "polygon": {
+          "rows": 6,
+          "median_prem_disc_bps": 0.0746493587542298,
+          "lockstep_count": 6
+        },
         "tradr_axs": {
           "rows": 68,
-          "median_prem_disc_bps": 5.525150775086619,
-          "lockstep_count": 0
+          "median_prem_disc_bps": -2.8083583832550083,
+          "lockstep_count": 1
         },
         "granite_shares": {
           "rows": 74,
-          "median_prem_disc_bps": 1.482981169532454,
-          "lockstep_count": 1
-        },
-        "polygon": {
-          "rows": 8,
-          "median_prem_disc_bps": -0.4060769779537924,
-          "lockstep_count": 5
+          "median_prem_disc_bps": -2.673089578890374,
+          "lockstep_count": 6
         },
         "direxion": {
-          "rows": 32,
-          "median_prem_disc_bps": 26.204454210018547,
+          "rows": 33,
+          "median_prem_disc_bps": -11.694723387844338,
           "lockstep_count": 0
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": -1.8529983871153155,
-          "lockstep_count": 1
+          "median_prem_disc_bps": 5.339796264482122,
+          "lockstep_count": 0
         },
         "yieldmax": {
           "rows": 28,
-          "median_prem_disc_bps": 7.893629833155576,
-          "lockstep_count": 2
+          "median_prem_disc_bps": 0.371281782534098,
+          "lockstep_count": 3
         },
         "defiance": {
           "rows": 64,
-          "median_prem_disc_bps": -2.286280712221483,
-          "lockstep_count": 9
+          "median_prem_disc_bps": -8.098544507889486,
+          "lockstep_count": 5
         },
         "merged": {
-          "rows": 9,
-          "median_prem_disc_bps": 0.0,
+          "rows": 15,
+          "median_prem_disc_bps": 9.662592005734433,
           "lockstep_count": 2
         },
         "yfinance": {
-          "rows": 3,
+          "rows": 5,
           "median_prem_disc_bps": 0.0,
-          "lockstep_count": 2
+          "lockstep_count": 3
         },
         "proshares": {
           "rows": 31,
-          "median_prem_disc_bps": -4.464740463829082,
+          "median_prem_disc_bps": -8.406697882064508,
           "lockstep_count": 0
         },
         "fof_child_synthetic": {
