@@ -110,6 +110,86 @@ def find_fabricated_adj_cliffs(
     return cliffs
 
 
+SHIFTED_ADJ_MIN_OBS = 10
+SHIFTED_ADJ_LAGGED_CORR_MIN = 0.90
+SHIFTED_ADJ_ALIGNED_CORR_MAX = 0.50
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    n = len(xs)
+    if n < 3 or n != len(ys):
+        return None
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0 or syy <= 0:
+        return None
+    return sxy / math.sqrt(sxx * syy)
+
+
+def detect_shifted_etf_adj_close(
+    rows: list[dict[str, Any]],
+    *,
+    min_obs: int = SHIFTED_ADJ_MIN_OBS,
+) -> dict[str, Any]:
+    """Detect ``etf_adj_close`` sampled one session away from ``close_price``.
+
+    A join-key mismatch between market columns leaves the adjusted series holding
+    the *next* session's close. Unlike a split cliff this has no large single-day
+    signature — it is a persistent low-amplitude decorrelation — so cliff
+    detectors cannot see it. The correlation of the two return series at lag 0
+    versus lag +1 separates it without needing an amplitude threshold: an aligned
+    pair correlates ~1.0 at lag 0, a shifted pair at lag +1.
+
+    Returns ``shifted`` plus both correlations and the affected date range.
+    """
+    pts: list[tuple[dt.date, float, float]] = []
+    for row in rows or []:
+        ds = str(row.get("date") or "")[:10]
+        if len(ds) != 10:
+            continue
+        try:
+            d0 = dt.date.fromisoformat(ds)
+            close = float(row.get("close_price") or 0)
+            adj = float(row.get("etf_adj_close") or 0)
+        except (ValueError, TypeError):
+            continue
+        if close > 0 and adj > 0:
+            pts.append((d0, close, adj))
+    pts.sort()
+    out: dict[str, Any] = {
+        "shifted": False,
+        "n_obs": max(0, len(pts) - 1),
+        "corr_aligned": None,
+        "corr_lagged": None,
+        "start_date": None,
+        "end_date": None,
+    }
+    if len(pts) < max(3, int(min_obs)):
+        return out
+    r_close: list[float] = []
+    r_adj: list[float] = []
+    for i in range(1, len(pts)):
+        r_close.append(math.log(pts[i][1] / pts[i - 1][1]))
+        r_adj.append(math.log(pts[i][2] / pts[i - 1][2]))
+    aligned = _pearson(r_adj, r_close)
+    # adj[t] holding close[t+1] makes today's adj return match tomorrow's close return.
+    lagged = _pearson(r_adj[:-1], r_close[1:]) if len(r_adj) > 3 else None
+    out["corr_aligned"] = round(aligned, 6) if aligned is not None else None
+    out["corr_lagged"] = round(lagged, 6) if lagged is not None else None
+    out["start_date"] = pts[0][0]
+    out["end_date"] = pts[-1][0]
+    if (
+        lagged is not None
+        and aligned is not None
+        and lagged > SHIFTED_ADJ_LAGGED_CORR_MIN
+        and aligned < SHIFTED_ADJ_ALIGNED_CORR_MAX
+    ):
+        out["shifted"] = True
+    return out
+
+
 UNDERLYING_CLIFF_MIN_LOG = math.log(1.8)
 UNDERLYING_CLIFF_EVENT_WINDOW_DAYS = 21
 UNDERLYING_CLIFF_MULT_REL_TOL = 0.25
@@ -765,6 +845,71 @@ def _match_known_split_jump(
     return best[1] if best else None
 
 
+# A basis jump only counts as a split when a declared event sits near it, otherwise
+# any declared ratio can "explain" an ordinary move elsewhere in the series.
+SPLIT_BASIS_JUMP_WINDOW_DAYS = 7
+# The ETF leg cannot use a date window: providers restate close basis weeks ahead of
+# the effective date (MTYY switched close basis 42 days early while NAV switched the
+# day before). It uses the leverage test below instead, which does not need dates.
+#
+# A basis jump is only a split if the companion leg cannot explain it at any listed
+# leverage. A -2x wrapper on a +22% underlying session legitimately moves ~-44%
+# (0.55 log), which collides with the split-sized jump floor; comparing the two legs
+# separates a restated basis (companion essentially flat, implied leverage in the
+# tens or hundreds) from an ordinary leveraged session.
+MIN_SPLIT_JUMP_IMPLIED_LEVERAGE = 5.0
+
+
+def _jump_explained_by_companion(jump_log: float, companion_log: float) -> bool:
+    """True when the companion leg's move accounts for the jump at plausible leverage."""
+    try:
+        j, c = abs(float(jump_log)), abs(float(companion_log))
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(j) and math.isfinite(c)) or c <= 0:
+        return False
+    return (j / c) < MIN_SPLIT_JUMP_IMPLIED_LEVERAGE
+
+
+def _split_event_matches_boundary(
+    split_events: list[tuple[dt.date, float]],
+    row_date: Any,
+    multiplier: float,
+    *,
+    max_window_days: int = SPLIT_BASIS_JUMP_WINDOW_DAYS,
+    rel_tol: float = 0.18,
+) -> bool:
+    """True when a declared split of this size sits within the window of ``row_date``."""
+    d0 = row_date if isinstance(row_date, dt.date) else None
+    if d0 is None:
+        ds = str(row_date or "")[:10]
+        if len(ds) != 10:
+            return False
+        try:
+            d0 = dt.date.fromisoformat(ds)
+        except ValueError:
+            return False
+    try:
+        m = float(multiplier)
+    except (TypeError, ValueError):
+        return False
+    if not (m > 0):
+        return False
+    for ev_date, ev_mult in split_events or []:
+        try:
+            em = float(ev_mult)
+        except (TypeError, ValueError):
+            continue
+        if em <= 0 or not isinstance(ev_date, dt.date):
+            continue
+        if abs((d0 - ev_date).days) > max_window_days:
+            continue
+        for trial in (em, 1.0 / em):
+            if abs(trial / m - 1.0) <= rel_tol:
+                return True
+    return False
+
+
 def _normalize_split_sized_basis_jumps(
     tr: list[dict[str, Any]],
     split_events: list[tuple[dt.date, float]],
@@ -811,7 +956,9 @@ def _normalize_split_sized_basis_jumps(
         lr_u = abs(math.log(u1 / u0))
         if abs(lr_e) >= min_etf_log_jump and lr_u < max_underlying_log_move:
             matched = _match_known_split_jump(math.exp(abs(lr_e)), multipliers)
-            if matched is not None:
+            if matched is not None and not _jump_explained_by_companion(
+                lr_e, math.log(u1 / u0)
+            ):
                 scale = scale / matched if lr_e > 0 else scale * matched
                 prev_adj = prev_raw * scale
                 mode_suffix[i] = f"|basis_jump_scaled({matched:g})"
@@ -865,7 +1012,9 @@ def _normalize_underlying_split_sized_basis_jumps(
         lr_e = abs(math.log(e1 / e0))
         if abs(lr_u) >= min_und_log_jump and lr_e < max_etf_log_move:
             matched = _match_known_split_jump(math.exp(abs(lr_u)), multipliers)
-            if matched is not None:
+            if matched is not None and _split_event_matches_boundary(
+                split_events, out[i + 1].get("date"), matched
+            ):
                 scale = scale / matched if lr_u > 0 else scale * matched
                 prev_adj = prev_raw * scale
                 mode_suffix[i] = f"|und_basis_jump_scaled({matched:g})"

@@ -30,6 +30,18 @@
   const MAX_PAIR_DRAG_GAP_DAYS = 5;
   const ORPHAN_LEG_LOG_THRESHOLD = 0.35;
   const ORPHAN_LEG_COMPANION_MAX = 0.15;
+  // Directional plausibility. The orphan test only fires when one leg is flat, so
+  // it misses the case where BOTH legs move but the ETF goes the wrong way versus
+  // β · underlying — economically impossible for a leveraged/inverse wrapper, so a
+  // hit means an unadjusted corporate action or a bad print, not tracking error.
+  const DIRECTION_MIN_UNDERLYING_LOG = 0.02;
+  const DIRECTION_MIN_GAP_LOG = 0.30;
+  // A violating day may only be dropped when the pair demonstrably tracks; on a
+  // pair that never tracked, dropping flagged days manufactures a confident wrong
+  // value rather than recovering a true one.
+  const PAIR_TRACK_MIN_R2 = 0.90;
+  const PAIR_TRACK_MAX_BETA_DEVIATION = 0.30;
+  const PAIR_TRACK_MIN_OBS = 30;
   // |log-drag| above this with near-perfect simple tracking ⇒ convexity_day flag.
   const CONVEXITY_DRAG_LOG_THRESHOLD = 0.35;
   const CONVEXITY_SIMPLE_TRACK_EPS = 0.02;
@@ -41,6 +53,63 @@
     if (Math.abs(rU) > ORPHAN_LEG_LOG_THRESHOLD && Math.abs(rL) < ORPHAN_LEG_COMPANION_MAX) return true;
     if (Math.abs(rL) > ORPHAN_LEG_LOG_THRESHOLD && Math.abs(rU) < ORPHAN_LEG_COMPANION_MAX) return true;
     return false;
+  }
+
+  function isDirectionViolation(beta, rU, rL) {
+    if (!Number.isFinite(beta) || !Number.isFinite(rU) || !Number.isFinite(rL)) return false;
+    if (beta === 0 || Math.abs(rU) < DIRECTION_MIN_UNDERLYING_LOG) return false;
+    const expected = beta * rU;
+    if (expected * rL >= 0) return false;
+    return Math.abs(rL - expected) > DIRECTION_MIN_GAP_LOG;
+  }
+
+  /**
+   * Empirical beta and R² of ETF log-returns on underlying log-returns.
+   * `logReturns` is a list of [rUnderlying, rEtf] pairs. A 2x/3x wrapper on its
+   * own index should sit near R² 1.0.
+   */
+  function computePairTrackQuality(logReturns, beta) {
+    const out = {
+      nObs: logReturns.length,
+      betaEmpirical: null,
+      r2: null,
+      tracksWell: false,
+      reason: null,
+    };
+    if (logReturns.length < PAIR_TRACK_MIN_OBS) {
+      out.reason = "insufficient_obs";
+      return out;
+    }
+    let sxx = 0;
+    let sxy = 0;
+    let ssTot = 0;
+    for (const [x, y] of logReturns) {
+      sxx += x * x;
+      sxy += x * y;
+      ssTot += y * y;
+    }
+    if (sxx <= 0) {
+      out.reason = "no_underlying_variance";
+      return out;
+    }
+    if (ssTot <= 0) {
+      out.reason = "no_etf_variance";
+      return out;
+    }
+    const bEmp = sxy / sxx;
+    let ssRes = 0;
+    for (const [x, y] of logReturns) ssRes += (y - bEmp * x) ** 2;
+    const r2 = 1 - ssRes / ssTot;
+    out.betaEmpirical = bEmp;
+    out.r2 = r2;
+    if (r2 < PAIR_TRACK_MIN_R2) out.reason = "low_r2";
+    else if (!Number.isFinite(beta) || Math.abs(bEmp - beta) > PAIR_TRACK_MAX_BETA_DEVIATION) {
+      out.reason = "beta_deviation";
+    } else {
+      out.tracksWell = true;
+      out.reason = "ok";
+    }
+    return out;
   }
 
   const PB = (typeof globalObj !== "undefined" && globalObj.PriceBasis)
@@ -198,7 +267,16 @@
    */
   function buildDailyLogDragSeriesWithMeta(rows, beta) {
     const b = toNum(beta);
-    const meta = { skippedGaps: [], convexityDays: [], pairDragBasis: PAIR_DRAG_BASIS };
+    const meta = {
+      skippedGaps: [],
+      convexityDays: [],
+      // Every directional violation seen, whether or not it was dropped.
+      directionViolations: [],
+      // The subset actually excluded from the series (well-tracking pairs only).
+      directionViolationsExcluded: [],
+      pairTrack: null,
+      pairDragBasis: PAIR_DRAG_BASIS,
+    };
     if (!Number.isFinite(b)) return { series: [], meta };
     const clean = (Array.isArray(rows) ? rows : [])
       .map((row) => {
@@ -210,6 +288,22 @@
       .filter((x) => x.date && x.etfPx > 0 && x.undPx > 0)
       .sort((a, b2) => a.date.localeCompare(b2.date));
     if (clean.length < 2) return { series: [], meta };
+
+    // First pass: does this pair track at all? Measured on the NON-violating days,
+    // because a single impossible print is itself a massive regression outlier and
+    // including it collapses the very statistic used to judge it. Only a tracking
+    // pair earns the right to have individual days dropped as bad prints.
+    const trackReturns = [];
+    for (let i = 1; i < clean.length; i += 1) {
+      const rUt = Math.log(clean[i].undPx / clean[i - 1].undPx);
+      const rLt = Math.log(clean[i].etfPx / clean[i - 1].etfPx);
+      if (!Number.isFinite(rUt) || !Number.isFinite(rLt)) continue;
+      if (isDirectionViolation(b, rUt, rLt)) continue;
+      trackReturns.push([rUt, rLt]);
+    }
+    const track = computePairTrackQuality(trackReturns, b);
+    meta.pairTrack = track;
+    const mayExclude = Boolean(track.tracksWell);
 
     const out = [];
     for (let i = 1; i < clean.length; i += 1) {
@@ -228,6 +322,28 @@
       const rL = Math.log(clean[i].etfPx / clean[i - 1].etfPx);
       if (!Number.isFinite(rU) || !Number.isFinite(rL)) continue;
       if (isOrphanLegJump(rU, rL)) continue;
+      if (isDirectionViolation(b, rU, rL)) {
+        const violation = {
+          date: clean[i].date,
+          beta: b,
+          rUnderlyingLog: rU,
+          rEtfLog: rL,
+          expectedEtfLog: b * rU,
+          gapLog: rL - b * rU,
+          dragLog: b * rU - rL,
+          excluded: mayExclude,
+          pairTrackReason: track.reason,
+        };
+        meta.directionViolations.push(violation);
+        if (mayExclude) {
+          // Tracking pair, impossible day -> a bad print or an unadjusted
+          // corporate action. Drop it.
+          meta.directionViolationsExcluded.push(violation);
+          continue;
+        }
+        // Untracked pair -> the day is not separable from the pair's own
+        // unreliability. Keep it and let the caller judge the metric.
+      }
       const drag = b * rU - rL;
       if (!Number.isFinite(drag)) continue;
       const convexity = isConvexityDay(b, rUSimple, rLSimple, drag);
@@ -408,6 +524,11 @@
     MAX_PAIR_DRAG_GAP_DAYS,
     CONVEXITY_DRAG_LOG_THRESHOLD,
     CONVEXITY_SIMPLE_TRACK_EPS,
+    DIRECTION_MIN_UNDERLYING_LOG,
+    DIRECTION_MIN_GAP_LOG,
+    PAIR_TRACK_MIN_R2,
+    PAIR_TRACK_MAX_BETA_DEVIATION,
+    PAIR_TRACK_MIN_OBS,
     PAIR_DRAG_BASIS,
     parseSplitEventsFromCorp,
     parseDecaySplitEvents,
@@ -416,6 +537,9 @@
     hasUsableMetricPrices,
     summarizeTrCoverage,
     isConvexityDay,
+    isOrphanLegJump,
+    isDirectionViolation,
+    computePairTrackQuality,
     buildDailyLogDragSeriesWithMeta,
     buildDailyLogDragSeries,
     computeHorizonPeriodReturns,

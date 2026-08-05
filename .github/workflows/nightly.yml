@@ -191,6 +191,17 @@ jobs:
       - name: Decay coverage gate (hard fail)
         run: python scripts/audit_metrics_decay_coverage.py --fail-on-tradeable-lag --report-out data/metrics_decay_coverage_report.json
 
+      - name: Audit pair-leg alignment (soft)
+        continue-on-error: true
+        run: python scripts/audit_pair_leg_alignment.py --report-out data/pair_leg_alignment_report.json
+
+      - name: Repair shifted etf_adj_close
+        continue-on-error: true
+        run: python scripts/repair_shifted_etf_adj_close.py --apply --report-out data/metrics_shifted_adj_repair_report.json
+
+      - name: Pair-leg alignment gate (hard fail)
+        run: python scripts/audit_pair_leg_alignment.py --fail-on-shifted --report-out data/pair_leg_alignment_report.json
+
       - name: Bootstrap Yahoo prices before first stored metrics row
         continue-on-error: true
         run: python scripts/bootstrap_metrics_yahoo_history.py --max-tickers 500

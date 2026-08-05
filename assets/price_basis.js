@@ -1008,6 +1008,22 @@
     return best;
   }
 
+  // The ETF leg cannot gate on a date window: providers restate close basis weeks
+  // ahead of the effective date (MTYY switched close basis 42 days early while NAV
+  // switched the day before). It uses the leverage test below, which needs no dates.
+  //
+  // A basis jump is only a split if the companion leg cannot explain it at any
+  // listed leverage. A -2x wrapper on a +22% underlying session legitimately moves
+  // ~-44% (0.55 log), which collides with the split-sized jump floor.
+  const MIN_SPLIT_JUMP_IMPLIED_LEVERAGE = 5;
+
+  function jumpExplainedByCompanion(jumpLog, companionLog) {
+    const j = Math.abs(toNum(jumpLog));
+    const c = Math.abs(toNum(companionLog));
+    if (!Number.isFinite(j) || !Number.isFinite(c) || !(c > 0)) return false;
+    return j / c < MIN_SPLIT_JUMP_IMPLIED_LEVERAGE;
+  }
+
   function splitEventMatchesBoundary(splitEvents, date, multiplier, maxWindowDays = 7) {
     const d = parseDate(date);
     const m = toNum(multiplier);
@@ -1082,7 +1098,10 @@
       const lrU = Math.abs(Math.log(u1 / u0));
       if (Math.abs(lrE) >= minEtfLogJump && lrU < maxUnderlyingLogMove) {
         const matched = matchKnownSplitJump(Math.exp(Math.abs(lrE)), multipliers);
-        if (matched != null) {
+        // A declared ratio may only explain a jump the underlying cannot account for
+        // on its own; otherwise a split in the history rewrites an ordinary
+        // leveraged session.
+        if (matched != null && !jumpExplainedByCompanion(lrE, Math.log(u1 / u0))) {
           scale = lrE > 0 ? scale / matched : scale * matched;
           prevAdj = prevRaw * scale;
           suffix[i] = `|basis_jump_scaled(${matched})`;

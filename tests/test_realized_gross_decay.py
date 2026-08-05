@@ -17,6 +17,7 @@ from realized_gross_decay import (  # noqa: E402
     PAIR_DRAG_BASIS,
     PARTIAL_MIN_OBS,
     REALIZED_PAIR_GROSS_20D_HORIZON,
+    _is_direction_violation,
     annualize_period_log_drag,
     best_estimate_gross_from_realized_pair_fields,
     build_daily_log_drag_series,
@@ -24,6 +25,7 @@ from realized_gross_decay import (  # noqa: E402
     collapse_partial_horizons,
     compute_gross_decay_annual,
     compute_horizon_period_returns,
+    compute_pair_track_quality,
     compute_realized_pair_gross_20d,
     latest_contiguous_metrics_segment,
     load_realized_pair_gross_20d_from_metrics,
@@ -342,3 +344,107 @@ def test_compute_gross_decay_aplx_fixture():
     )
     assert result is not None
     assert result["n_obs"] >= 35
+
+
+def test_direction_violation_detects_wrong_way_letf_day():
+    # +2x LETF should rise when the underlying rises; a large opposite move is impossible.
+    assert _is_direction_violation(2.0, 0.10, -0.40) is True
+    # Same-direction move is fine even when large.
+    assert _is_direction_violation(2.0, 0.10, 0.20) is False
+    # Small underlying moves never trip the filter (noise).
+    assert _is_direction_violation(2.0, 0.005, -0.40) is False
+    # Inverse: underlying up ⇒ ETF should fall.
+    assert _is_direction_violation(-2.0, 0.10, 0.40) is True
+    assert _is_direction_violation(-2.0, 0.10, -0.20) is False
+
+
+def test_well_tracked_pair_excludes_direction_violation_day():
+    """A single impossible print on a tracking LETF is dropped, not published."""
+    tr = []
+    etf, und = 100.0, 50.0
+    base = dt.date(2024, 1, 2)
+    for i in range(40):
+        tr.append({"date": (base + dt.timedelta(days=i)).isoformat(), "tr_etf_px": etf, "tr_und_px": und})
+        # Quiet 2x tracking days.
+        und *= 1.002
+        etf *= 1.004
+    # Inject one impossible day that is NOT an orphan-leg cliff: both legs move,
+    # but the ETF goes the wrong way by more than DIRECTION_MIN_GAP_LOG.
+    bad_day = base + dt.timedelta(days=40)
+    und_bad = und * math.exp(0.12)
+    etf_bad = etf * math.exp(-0.25)
+    tr.append({"date": bad_day.isoformat(), "tr_etf_px": etf_bad, "tr_und_px": und_bad})
+    und, etf = und_bad, etf_bad
+    for i in range(5):
+        und *= 1.001
+        etf *= 1.002
+        tr.append(
+            {
+                "date": (bad_day + dt.timedelta(days=i + 1)).isoformat(),
+                "tr_etf_px": etf,
+                "tr_und_px": und,
+            }
+        )
+
+    result = build_daily_log_drag_series_with_meta(tr, 2.0)
+    meta = result["meta"]
+    assert meta["pair_track"]["tracks_well"] is True
+    assert any(v["date"] == bad_day.isoformat() for v in meta["direction_violations"])
+    assert any(v["date"] == bad_day.isoformat() for v in meta["direction_violations_excluded"])
+    assert bad_day.isoformat() not in {d["date"] for d in result["series"]}
+
+
+def test_untracked_pair_with_violation_suppresses_20d():
+    """Noise pair + impossible day → suppress rather than publish a number."""
+    rows = []
+    etf, und = 100.0, 50.0
+    base = dt.date(2024, 1, 2)
+    for i in range(25):
+        # Uncorrelated legs so R² collapses.
+        und *= 1.01 if i % 2 == 0 else 0.99
+        etf *= 0.995 if i % 3 == 0 else 1.01
+        rows.append(
+            {
+                "date": (base + dt.timedelta(days=i)).isoformat(),
+                "close_price": etf,
+                "etf_adj_close": etf,
+                "underlying_adj_close": und,
+            }
+        )
+    # Force one clear direction violation that is not an orphan-leg cliff.
+    und *= math.exp(0.12)
+    etf *= math.exp(-0.25)
+    rows.append(
+        {
+            "date": (base + dt.timedelta(days=25)).isoformat(),
+            "close_price": etf,
+            "etf_adj_close": etf,
+            "underlying_adj_close": und,
+        }
+    )
+    for i in range(5):
+        und *= 1.0
+        etf *= 1.0
+        rows.append(
+            {
+                "date": (base + dt.timedelta(days=26 + i)).isoformat(),
+                "close_price": etf,
+                "etf_adj_close": etf,
+                "underlying_adj_close": und,
+            }
+        )
+    out = compute_realized_pair_gross_20d(rows, 2.0, [])
+    assert out is not None
+    assert out.get("pair_untracked") is True
+    assert out.get("suppressed") is True
+
+
+def test_pair_track_quality_requires_r2_and_beta():
+    good = [(0.01, 0.02), (0.02, 0.04), (-0.01, -0.02)] * 15
+    track = compute_pair_track_quality(good, 2.0)
+    assert track["tracks_well"] is True
+    assert track["r2"] >= 0.90
+
+    noise = [(0.01, -0.02), (-0.02, 0.03), (0.015, 0.001)] * 15
+    bad = compute_pair_track_quality(noise, 2.0)
+    assert bad["tracks_well"] is False

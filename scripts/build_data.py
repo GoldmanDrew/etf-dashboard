@@ -3971,6 +3971,36 @@ def _normalize_borrow_fields(rec: dict) -> None:
         )
 
 
+# Bookkeeping keys from compute_realized_pair_gross_20d that stay out of the row.
+_RP20_INTERNAL_KEYS = (
+    "n_days",
+    "suppressed",
+    "underlying_split_suspect",
+    "pair_untracked",
+    "pair_suppress_reason",
+)
+# Provenance kept on a withheld row so the UI can say why the cell is empty.
+_RP20_UNTRACKED_PROVENANCE_KEYS = (
+    "pair_track_r2",
+    "pair_beta_empirical",
+    "pair_track_reason",
+    "pair_tracks_well",
+    "realized_pair_excluded_days",
+    "realized_pair_excluded_dates",
+)
+
+
+def _apply_pair_untracked_provenance(rec: dict, rp20: dict) -> None:
+    """Mark a row whose 20d realized pair figure was withheld as untrustworthy."""
+    rec["realized_pair_gross_20d_untracked"] = True
+    reason = rp20.get("pair_suppress_reason") or rp20.get("pair_track_reason")
+    if reason:
+        rec["realized_pair_gross_20d_suppress_reason"] = str(reason)
+    for key in _RP20_UNTRACKED_PROVENANCE_KEYS:
+        if rp20.get(key) is not None:
+            rec[key] = rp20[key]
+
+
 def _apply_metrics_gross_estimate(
     rec: dict,
     gd: dict | None,
@@ -4641,11 +4671,13 @@ def repair_published_quality_fields() -> None:
                 rec.pop(key, None)
         if rp20 and not rp20.get("suppressed"):
             for key, value in rp20.items():
-                if key not in ("n_days", "suppressed", "underlying_split_suspect") and value is not None:
+                if key not in _RP20_INTERNAL_KEYS and value is not None:
                     rec[key] = value
             # Second chance: if gross still missing after metrics apply, annualize 20d.
             if rec.get("gross_decay_annual") is None:
                 _apply_metrics_gross_estimate(rec, None, rp20=rp20)
+        elif rp20 and rp20.get("pair_untracked"):
+            _apply_pair_untracked_provenance(rec, rp20)
         elif rp20 and rp20.get("underlying_split_suspect"):
             rec["realized_pair_gross_20d_split_suspect"] = True
 
@@ -4679,6 +4711,7 @@ def repair_published_quality_fields() -> None:
             "gross_decay_annual": _gross_decay_stats_status(rec, delta_obs),
             "realized_pair_gross_20d": (
                 "valid" if rec.get("realized_pair_gross_20d") is not None
+                else "suppressed_quality" if rec.get("realized_pair_gross_20d_untracked")
                 else "insufficient_history" if rec.get("realized_pair_gross_partial") is not None
                 else "suppressed_quality" if rec.get("realized_pair_gross_20d_split_suspect")
                 else "insufficient_history"
@@ -5290,10 +5323,12 @@ def build():
         )
         if _rp20 and not _rp20.get("suppressed"):
             for _k, _v in _rp20.items():
-                if _k not in ("n_days", "suppressed", "underlying_split_suspect") and _v is not None:
+                if _k not in _RP20_INTERNAL_KEYS and _v is not None:
                     rec[_k] = _v
             if rec.get("gross_decay_annual") is None:
                 _apply_metrics_gross_estimate(rec, None, rp20=_rp20)
+        elif _rp20 and _rp20.get("pair_untracked"):
+            _apply_pair_untracked_provenance(rec, _rp20)
         elif _rp20 and _rp20.get("underlying_split_suspect"):
             rec["realized_pair_gross_20d_split_suspect"] = True
         # Every displayed realized value needs explicit provenance.  When the
@@ -5320,6 +5355,8 @@ def build():
         gross_status = _gross_decay_stats_status(rec, delta_obs_for_status)
         if rec.get("realized_pair_gross_20d") is not None:
             realized_20d_status = "valid"
+        elif rec.get("realized_pair_gross_20d_untracked"):
+            realized_20d_status = "suppressed_quality"
         elif rec.get("realized_pair_gross_partial") is not None:
             realized_20d_status = "insufficient_history"
         elif rec.get("realized_pair_gross_20d_split_suspect"):

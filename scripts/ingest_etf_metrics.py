@@ -2618,7 +2618,14 @@ def repair_close_price_vs_issuer_session(
     *,
     lookback_calendar_days: int | None = None,
 ) -> tuple[pd.DataFrame, int]:
-    """Re-fetch Yahoo close / underlying for tail rows where ``#as_of`` predates ``date``."""
+    """Re-fetch Yahoo close / adj close / underlying for tail rows where ``#as_of`` predates ``date``.
+
+    All three market columns must resolve on the *same* session key. Re-pointing
+    ``close_price`` and ``underlying_adj_close`` to ``_jd`` while leaving
+    ``etf_adj_close`` on the stamped row date desynchronises the ETF leg from the
+    underlying leg by one session, which turns pair drag into
+    ``beta * r_und[t] - r_etf[t+1]`` and silently corrupts realized decay.
+    """
     if df.empty:
         return df, 0
     if os.getenv("ETF_METRICS_DISABLE_SESSION_CLOSE_REPAIR", "").lower() in ("1", "true", "yes"):
@@ -2646,17 +2653,46 @@ def repair_close_price_vs_issuer_session(
     close_df = close_df.copy()
     close_df["date"] = pd.to_datetime(close_df["date"], errors="coerce").dt.date
     close_df["ticker"] = close_df["ticker"].astype(str).str.upper()
+    close_df = close_df.drop_duplicates(subset=["date", "ticker"], keep="last")
     sub = tail.loc[idx].copy()
     sub["_jd"] = jd.loc[idx].values
+
+    def _repoint(column: str, values: pd.Series) -> None:
+        """Write re-pointed values at ``idx``, leaving cells without a hit untouched.
+
+        An unconditional write blanks the column whenever the session fetch
+        misses, which is worse than the lag it is trying to repair.
+        """
+        if column not in work.columns:
+            return
+        fetched = pd.to_numeric(pd.Series(values).reset_index(drop=True), errors="coerce")
+        current = pd.to_numeric(work.loc[idx, column], errors="coerce").reset_index(drop=True)
+        work.loc[idx, column] = fetched.combine_first(current).values
+
     hit = sub.merge(
         close_df.rename(columns={"close_price": "_rc", "shares_traded": "_rv"}),
         left_on=["ticker", "_jd"],
         right_on=["ticker", "date"],
         how="left",
     )
-    work.loc[idx, "close_price"] = pd.to_numeric(hit["_rc"], errors="coerce").values
-    if "shares_traded" in work.columns and "_rv" in hit.columns:
-        work.loc[idx, "shares_traded"] = pd.to_numeric(hit["_rv"], errors="coerce").values
+    _repoint("close_price", hit["_rc"])
+    if "_rv" in hit.columns:
+        _repoint("shares_traded", hit["_rv"])
+
+    # The ETF adjusted close has to move with close_price or the pair legs desync.
+    adj_df = fetch_etf_adj_close_batch(tickers, d_min, d_max)
+    if not adj_df.empty:
+        adj_df = adj_df.copy()
+        adj_df["date"] = pd.to_datetime(adj_df["date"], errors="coerce").dt.date
+        adj_df["ticker"] = adj_df["ticker"].astype(str).str.upper()
+        adj_df = adj_df.drop_duplicates(subset=["date", "ticker"], keep="last")
+        hit_a = sub.merge(
+            adj_df.rename(columns={"etf_adj_close": "_ra", "date": "_adate"}),
+            left_on=["ticker", "_jd"],
+            right_on=["ticker", "_adate"],
+            how="left",
+        )
+        _repoint("etf_adj_close", hit_a["_ra"])
 
     und_syms: set[str] = set()
     for sym in tickers:
@@ -2669,6 +2705,7 @@ def repair_close_price_vs_issuer_session(
             und_df = und_df.copy()
             und_df["date"] = pd.to_datetime(und_df["date"], errors="coerce").dt.date
             und_df["ticker"] = und_df["ticker"].astype(str).str.upper()
+            und_df = und_df.drop_duplicates(subset=["date", "ticker"], keep="last")
             sub_u = sub.copy()
             sub_u["_und"] = sub_u["ticker"].astype(str).str.upper().map(
                 lambda s: _normalize_symbol(str(etf_to_underlying.get(s, "") or "").strip()) or None
@@ -2679,7 +2716,7 @@ def repair_close_price_vs_issuer_session(
                 right_on=["_und", "_udate"],
                 how="left",
             )
-            work.loc[idx, "underlying_adj_close"] = pd.to_numeric(hit_u["_ua"], errors="coerce").values
+            _repoint("underlying_adj_close", hit_u["_ua"])
 
     return work, int(mis.sum())
 

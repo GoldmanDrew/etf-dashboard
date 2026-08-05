@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "build_time": "2026-07-24T14:21:16.116533Z",
-  "asof_date": "2026-07-24",
+  "build_time": "2026-08-05T16:22:25.977670Z",
+  "asof_date": "2026-08-05",
   "source_seed": "ipo_float_unlock_seed.json",
   "underlying_count": 2,
   "underlyings": [
@@ -18,17 +18,17 @@
       "unlock_status": "active_unlock",
       "data_grade": "B",
       "is_ipo_float_unlock": true,
-      "days_to_next_ipo_unlock": 13,
+      "days_to_next_ipo_unlock": 1,
       "next_ipo_unlock_date": "2026-08-06",
       "next_ipo_unlock_shares": 911500000.0,
       "next_ipo_unlock_tranche_id": "spcx_t1_20pct",
-      "pending_resolution_count": 1,
+      "pending_resolution_count": 0,
       "cumulative_shares_eligible_by_horizon": {
-        "7d": 0.0,
-        "30d": 1230500000.0,
-        "90d": 2187500000.0,
-        "180d": 2506500000.0,
-        "365d": 2506500000.0
+        "7d": 2187500000.0,
+        "30d": 2506500000.0,
+        "90d": 3782500000.0,
+        "180d": 3782500000.0,
+        "365d": 3782500000.0
       },
       "tranches": [
         {
@@ -136,7 +136,7 @@
         },
         {
           "tranche_id": "spcx_post_q3",
-          "unlock_date": null,
+          "unlock_date": "2026-08-06",
           "unlock_rule": "earnings_plus_nd",
           "earnings_quarter": "2026Q3",
           "trading_days_after_earnings": 2,
@@ -147,7 +147,7 @@
           "confirmation": "projected",
           "schedule_id": "standard_180",
           "citation": "Post-Q3 earnings tranche (~28% eligible) \u2014 date TBD",
-          "resolution_note": "awaiting_earnings_date"
+          "resolution_note": "earnings_plus_nd"
         },
         {
           "tranche_id": "spcx_d180_residual",
@@ -203,19 +203,19 @@
       "source_filing": "https://www.sec.gov/Archives/edgar/data/2021728/000162828026035214/cerebras-424b4.htm",
       "float_now_estimate": 62700000.0,
       "unlock_status": "active_unlock",
-      "data_grade": "B",
+      "data_grade": "C",
       "is_ipo_float_unlock": true,
-      "days_to_next_ipo_unlock": 26,
-      "next_ipo_unlock_date": "2026-08-19",
-      "next_ipo_unlock_shares": 14600000.0,
-      "next_ipo_unlock_tranche_id": "cbrs_aug19",
-      "pending_resolution_count": 1,
+      "days_to_next_ipo_unlock": 9,
+      "next_ipo_unlock_date": "2026-08-14",
+      "next_ipo_unlock_shares": 36400000.0,
+      "next_ipo_unlock_tranche_id": "cbrs_post_q2",
+      "pending_resolution_count": 0,
       "cumulative_shares_eligible_by_horizon": {
         "7d": 0.0,
-        "30d": 14600000.0,
-        "90d": 82600000.0,
-        "180d": 102000000.0,
-        "365d": 102000000.0
+        "30d": 65600000.0,
+        "90d": 138400000.0,
+        "180d": 138400000.0,
+        "365d": 138400000.0
       },
       "tranches": [
         {
@@ -259,7 +259,7 @@
         },
         {
           "tranche_id": "cbrs_post_q2",
-          "unlock_date": null,
+          "unlock_date": "2026-08-14",
           "unlock_rule": "earnings_plus_nd",
           "earnings_quarter": "2026Q2",
           "trading_days_after_earnings": 2,
@@ -269,7 +269,7 @@
           "confirmation": "projected",
           "schedule_id": "standard_180",
           "citation": "424B4 \u2014 up to ~36.4M on 2nd trading day after Q2 earnings",
-          "resolution_note": "awaiting_earnings_date"
+          "resolution_note": "earnings_plus_nd"
         },
         {
           "tranche_id": "cbrs_aug19",
@@ -345,7 +345,7 @@
         },
         {
           "tranche_id": "cbrs_final_remainder",
-          "unlock_date": "2026-11-09",
+          "unlock_date": "2026-08-14",
           "unlock_rule": "earlier_of_earnings_or_fixed",
           "earnings_quarter": "2026Q3",
           "trading_days_after_earnings": 2,
@@ -356,7 +356,7 @@
           "confirmation": "confirmed",
           "schedule_id": "standard_180",
           "citation": "424B4 \u2014 earlier of post-Q3+2d or 180 days (Nov 9 2026); remainder share count TBD",
-          "resolution_note": "fixed_outside_only"
+          "resolution_note": "earlier_of_earnings_or_fixed"
         }
       ],
       "future_standard_tranche_ids": [

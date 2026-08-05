@@ -184,8 +184,12 @@ Period Gross on the Decay tab / `realized_pair_gross_20d` is `expm1(Σ daily_dra
 
 **Log convexity:** on a huge day with near-perfect simple leverage tracking (`R_etf ≈ β · R_u`), log-drag is still nonzero. Those days are flagged `convexity_day` for disclosure — they are **not** zeroed (zeroing would break the endpoint identity).
 
-- Lives in `gross_decay_annual` (CSV / metrics) → `Gross (realized)` column on the main table.
-- This is **always** shown if available. It is the only number we ship for `passive_low_delta` and `other_structured` rows where the model-based expected decay is meaningless.
+**Direction violations + pair-track gate:** an economically impossible day (ETF moved the wrong way vs `β · r_u` by more than `DIRECTION_MIN_GAP_LOG` on a meaningful underlying move) is dropped from the daily series **only when** the pair tracks well (`R² ≥ 0.90` and empirical β within 0.30 of the stated β, measured on non-violating days). Untracked pairs with a violation in the 20d window have `realized_pair_gross_20d` withheld (`pair_untracked` / `suppressed_quality`) rather than publishing a number we cannot stand behind. Client and server must stay in lockstep.
+
+**Pair-leg alignment invariant:** `close_price`, `etf_adj_close`, and `underlying_adj_close` on a metrics row must refer to the **same session**. A one-session shift of `etf_adj_close` produces `β · r_und[t] − r_etf[t+1]` noise with a large negative bias and is the primary cause of confident wrong (often largely negative) Realized decay. Detect with lagged-vs-contemporaneous return correlation (`price_basis.detect_shifted_etf_adj_close`); heal with `scripts/repair_shifted_etf_adj_close.py --apply`; gate with `scripts/audit_pair_leg_alignment.py --fail-on-shifted` in `nightly.yml`.
+
+- Lives in `gross_decay_annual` (CSV / metrics) → `Gross (realized)` column on the main table; `realized_pair_gross_20d` → main-grid **Realized decay**.
+- Gross (realized) is **always** shown if available. Realized decay 20d may be withheld when untracked.
 - Client (`assets/realized_decay.js`) and server (`scripts/realized_gross_decay.py`) must stay in lockstep; golden fixtures in `tests/fixtures/decay_golden.json`.
 
 ### 4.2 Simple Itô identity (legacy fallback)
@@ -594,6 +598,8 @@ Every user-facing JSON under `data/` has a single producer workflow, a primary c
 | `etf_metrics_latest.json` | `ingest_etf_metrics.py` | Stats tab (snapshot panel) | **`nightly.yml`** |
 | `metrics_decay_coverage_report.json` | `audit_metrics_decay_coverage.py` | CI Decay as-of gate; repair targeting | **`nightly.yml`** after metrics repair |
 | `metrics_decay_repair_report.json` | `repair_metrics_decay_coverage.py` | Ops audit of CF→market_backed rewrites | **`nightly.yml`** |
+| `pair_leg_alignment_report.json` | `audit_pair_leg_alignment.py` | CI hard gate: residual shifted `etf_adj_close` | **`nightly.yml`** after shifted-adj repair |
+| `metrics_shifted_adj_repair_report.json` | `repair_shifted_etf_adj_close.py` | Ops audit of join-key asymmetry heals | **`nightly.yml`** |
 | `ci_state.json` | `scripts/ci_tick.py` | staleness gates for `market-hours.yml` | each market tick |
 | `etf_distributions.json` | `ingest_distributions.py` | Stats tab Total-Return NAV line | daily 5 AM ET |
 | `corporate_actions.json` | `ingest_corporate_actions.py` | News tab pinned events | every 6 h |
@@ -1221,11 +1227,25 @@ Split-aware TR must stay in sync across **`scripts/split_adjustments.py`**, **`a
 - **Issuer confirmation** (`shares_outstanding`, NAV step) is a fallback when price bars do not span the split session.
 - **Regression gate:** `scripts/audit_split_tr_quality.py` (nightly, `continue-on-error`) flags `maxAbsLogReturn > 35%` within ±7 days of corp splits and `splitMode=continuous` when adj≡close.
 
+### 13.15 Pair-leg alignment (shifted `etf_adj_close`)
+
+When `repair_close_price_vs_issuer_session` re-points `close_price` / `underlying_adj_close` onto an earlier issuer valuation session but leaves `etf_adj_close` on the join date, the adjusted series holds the *next* session's close. Pair drag then evaluates mismatched legs and Realized decay goes largely negative on falling ETFs (NBIG/SMCZ/ACLZ-class symptoms).
+
+**Prevent:** ingest must move `etf_adj_close` with `close_price` (same session key; never blank a finite close with NaN).
+**Detect:** `price_basis.detect_shifted_etf_adj_close` (lag-0 vs lag+1 return correlation) + roughness scan in `repair_shifted_etf_adj_close.py`.
+**Heal:** `python scripts/repair_shifted_etf_adj_close.py --apply` (nulls shifted cells, re-fetches Yahoo/Polygon, backfills from close).
+**Gate:** `audit_pair_leg_alignment.py --fail-on-shifted` after the repair step in `nightly.yml`.
+**After heal:** run a full `scripts/build_data.py` so `realized_pair_gross_20d` is recomputed from the healed store. Annual `gross_decay_annual` from the upstream screener may still reflect the bad window until the next `ls-algo` `daily_screener.py` run — re-run / wait for that cron if Gross (realiz.) still looks wrong after the dashboard rebuild.
+
+Split-basis jumps on the ETF leg are gated by companion-leg leverage (`MIN_SPLIT_JUMP_IMPLIED_LEVERAGE`), not a date window — providers can restate close basis weeks before the declared effective date (MTYY).
+
 ---
 
 ## 14. Recent changes & invariants you must preserve
 
 (In rough chronological order, most recent first.)
+
+- **Aug 2026 — Pair-leg alignment + direction-violation gate for Realized decay.** Join-key asymmetry that left `etf_adj_close` one session ahead of `close_price` was publishing confident wrong (often largely negative) 20d Realized decay. Ingest now re-points `etf_adj_close` with close; `repair_shifted_etf_adj_close.py` heals the store; `audit_pair_leg_alignment.py --fail-on-shifted` hard-gates nightly. Daily drag also drops economically impossible wrong-way days on well-tracked pairs and withholds 20d when an untracked pair still shows a violation. Split-basis jump matching on the ETF leg uses implied-leverage vs the companion, not a date window. See §4.1 / §13.15.
 
 - **Jul 2026 — Defiance issuer routing (POEL + leveraged cohort).** `DefianceProvider` no longer gates solely on product hrefs from `/etfs/` (that listing drifted to ~11 thematic funds while leveraged names appear as `/etf-insights/{ticker}`). Membership is now `KNOWN_TICKERS` ∪ catalog (insights links included); real funds `mpl`/`mst`/`qsu` were removed from the slug blocklist; Defiance joins `SKIP_SESSION_DATE_ANCHOR_PROVIDERS` and parses Fund Details `Data as of`. Granite `KNOWN_TICKERS` no longer claims Defiance collisions (`QSU`, `ASTN`, `AVXX`, `NVOX`, `OSCX`, `STSM`). Ops: `scripts/audit_defiance_issuer_routing.py`, `scripts/heal_defiance_issuer_nav.py`. Follow-up: `prior_stale_aum_blocks_flow` treats `market_backed_no_issuer_nav` like carry-forward (within stale budget), and flow session-extend prefers a dense panel date so a thin issuer heal cannot alone advance global latest / trip the 25% actionable-stale freshness gate.
 
@@ -1255,6 +1275,7 @@ Split-aware TR must stay in sync across **`scripts/split_adjustments.py`**, **`a
 2. **`expected_decay_available = false` ⇒ `Exp. edge (fwd)` cell renders `—`.** No fallback. No hidden tooltip with a number. The realized gross drag is the only honest signal.
 3. **YieldBOOST headline Exp. edge (fwd) = put-spread structural gross** (`expected_pair_pnl_p50_annual` mirrored from screener `expected_gross_decay_p50`). Weekly compound MC (`expected_pair_pnl_weekly_mc_*`) is diagnostic-only. Do not revert YB headline to HARQ-Log vol-drag.
 4. **`Gross (realized)` is always shown if available**, regardless of `product_class`.
+4a. **`close_price` / `etf_adj_close` / `underlying_adj_close` share one session key.** A shifted adj series must never ship; Realized decay 20d may be withheld (`pair_untracked`) rather than published wrong.
 5. **Sign convention is short-favorable positive throughout.** A higher `net_edge_p50` is better for the short side. Don't flip signs in display logic.
 6. **The CSV schema is the contract.** Both `build_data.py` and `backend/main.py` must mirror any column you read in `index.html`.
 7. **The dashboard is fail-soft, except for authoritative product contracts.** A flaky general data build must not blank the site, and the restore-before-deploy path remains. Bucket 4 production generation is deliberately fail-closed: never publish or commit a locally simulated fallback when the ls-algo export is missing, dirty, tampered, or unreconciled. Production import must **merge-preserve** Optimized research nests (`cash_residual_path` / `inception_research` / `inception_research_stable`). Cloudflare Pages must ship `etf_metrics_daily.json.gz` + `vol_shape_history.json.gz` under the 20 MB artifact budget (`audit_pages_artifact_budget.py`).

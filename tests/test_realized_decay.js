@@ -19,6 +19,8 @@ const {
   cumSplitFactor,
   filterSplitsNeedingCloseBasisFix,
   summarizeTrCoverage,
+  isDirectionViolation,
+  computePairTrackQuality,
   PAIR_DRAG_BASIS,
   MAX_PAIR_DRAG_GAP_DAYS,
 } = RD;
@@ -311,4 +313,50 @@ test("summarizeTrCoverage reports split mode and joint days", () => {
   assert.equal(cov.trJointDays, 2);
   assert.equal(cov.splitMode, "discrete_split");
   assert.ok(cov.primaryEtfBasis.includes("yahoo") || cov.primaryEtfBasis === "split_adjusted");
+});
+
+test("direction violation detects wrong-way LETF day", () => {
+  assert.equal(isDirectionViolation(2.0, 0.10, -0.40), true);
+  assert.equal(isDirectionViolation(2.0, 0.10, 0.20), false);
+  assert.equal(isDirectionViolation(2.0, 0.005, -0.40), false);
+  assert.equal(isDirectionViolation(-2.0, 0.10, 0.40), true);
+});
+
+test("well-tracked pair excludes direction-violation day from drag", () => {
+  const tr = [];
+  let etf = 100;
+  let und = 50;
+  const t0 = Date.parse("2024-01-02T12:00:00Z");
+  for (let i = 0; i < 40; i += 1) {
+    const ds = new Date(t0 + i * 86400000).toISOString().slice(0, 10);
+    tr.push({ date: ds, trEtfPx: etf, trUndPx: und });
+    und *= 1.002;
+    etf *= 1.004;
+  }
+  const badDate = new Date(t0 + 40 * 86400000).toISOString().slice(0, 10);
+  und *= Math.exp(0.12);
+  etf *= Math.exp(-0.25);
+  tr.push({ date: badDate, trEtfPx: etf, trUndPx: und });
+  for (let i = 1; i <= 5; i += 1) {
+    und *= 1.001;
+    etf *= 1.002;
+    tr.push({
+      date: new Date(t0 + (40 + i) * 86400000).toISOString().slice(0, 10),
+      trEtfPx: etf,
+      trUndPx: und,
+    });
+  }
+  const { series, meta } = buildDailyLogDragSeriesWithMeta(tr, 2.0);
+  assert.equal(meta.pairTrack.tracksWell, true);
+  assert.ok(meta.directionViolations.some((v) => v.date === badDate));
+  assert.ok(meta.directionViolationsExcluded.some((v) => v.date === badDate));
+  assert.equal(series.some((d) => d.date === badDate), false);
+});
+
+test("pair track quality requires R2 and beta agreement", () => {
+  const good = [];
+  for (let i = 0; i < 40; i += 1) good.push([0.01, 0.02]);
+  const track = computePairTrackQuality(good, 2.0);
+  assert.equal(track.tracksWell, true);
+  assert.ok(track.r2 >= 0.9);
 });
