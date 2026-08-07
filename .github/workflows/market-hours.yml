@@ -32,6 +32,7 @@ jobs:
     outputs:
       deploy: ${{ steps.commit.outputs.changed == '1' }}
     env:
+      NAV_FORECAST_APPLY_DISTRIBUTION: "1"
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
       TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.LS_ALGO_TOKEN || secrets.GITHUB_TOKEN }}

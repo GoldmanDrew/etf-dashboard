@@ -611,3 +611,86 @@ def test_dispatcher_prefers_v2_for_yieldboost():
     ]
     picked = fn.select_default_model(rows, "income_yieldboost", True)
     assert picked == "yieldboost_putspread_v2"
+
+
+# ---------------------------------------------------------------------------
+# Distributions: list-shaped file + weekly inference (both were dead)
+# ---------------------------------------------------------------------------
+
+def _weekly_events(last="2026-07-31", amounts=(0.102, 0.100, 0.101, 0.094)):
+    from datetime import date as _date, timedelta as _td
+    d = _date.fromisoformat(last)
+    evs = []
+    for i, amt in enumerate(reversed(amounts)):
+        evs.append({"ex_date": (d - _td(days=7 * i)).isoformat(), "amount": amt})
+    return list(reversed(evs))
+
+
+def test_distribution_loader_reads_bare_list_shape(tmp_path, monkeypatch):
+    """The production file's by_symbol values are bare LISTS; the loader only
+    handled dict shapes, so the ex-date adjustment never fired even when the
+    env gate was on."""
+    import json as _json
+    p = tmp_path / "dist.json"
+    p.write_text(_json.dumps({"by_symbol": {"AZYY": _weekly_events()}}), encoding="utf-8")
+    monkeypatch.setattr(fn, "DISTRIBUTIONS_PATH_ENV", str(p))
+    out = fn._load_distributions_for_today("2026-07-31")
+    assert out == {"AZYY": 0.094}, "recorded event on its ex-date"
+
+
+def test_weekly_inference_predicts_the_unrecorded_ex_date(tmp_path, monkeypatch):
+    """The file is history-only — today's event appears only after it happened.
+    A stable weekly cadence one step past the last record infers the median."""
+    import json as _json
+    p = tmp_path / "dist.json"
+    p.write_text(_json.dumps({"by_symbol": {"AZYY": _weekly_events()}}), encoding="utf-8")
+    monkeypatch.setattr(fn, "DISTRIBUTIONS_PATH_ENV", str(p))
+    out = fn._load_distributions_for_today("2026-08-07")   # last + 7d
+    assert out == {"AZYY": 0.1005}, "median of trailing four amounts"
+    assert fn._load_distributions_for_today("2026-08-05") == {}, "off-cadence day: nothing"
+    assert fn._load_distributions_for_today("2026-08-21") == {}, "two steps out: nothing"
+
+
+def test_weekly_inference_refuses_irregular_cadence():
+    from datetime import date as _date
+    evs = _weekly_events()
+    evs[1]["ex_date"] = "2026-07-05"   # breaks the 7d rhythm
+    assert fn._infer_weekly_ex_amount(evs, _date(2026, 8, 7)) is None
+
+
+# ---------------------------------------------------------------------------
+# T-bill accretion
+# ---------------------------------------------------------------------------
+
+def _tbill_leg(price=0.9922, face=800_000.0, as_of="2026-08-01",
+               name="US TBill 10/22/2026"):
+    return {"security_type": "TREASURY", "security_name": name,
+            "price": price, "shares": face, "market_value": face * price,
+            "as_of_date": as_of}
+
+
+def test_tbill_accretes_linearly_toward_par():
+    ts = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)   # 6 days after as_of
+    delta = fn._tbill_accrual_delta(_tbill_leg(), ts)
+    days_to_mat = (datetime(2026, 10, 22).date() - datetime(2026, 8, 1).date()).days
+    expect = 800_000.0 * (1.0 - 0.9922) * (6 / days_to_mat)
+    assert abs(delta - expect) < 1e-6
+    assert delta > 0
+
+
+def test_tbill_same_day_and_garbage_are_zero_or_none():
+    ts = datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc)
+    assert fn._tbill_accrual_delta(_tbill_leg(), ts) == 0.0
+    assert fn._tbill_accrual_delta(_tbill_leg(name="US Dollars"), ts) is None
+    assert fn._tbill_accrual_delta(_tbill_leg(price=1.2), ts) is None
+
+
+def test_mark_holdings_counts_tbill_accrual_in_delta():
+    ts = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
+    marked = fn.mark_holdings(
+        [_tbill_leg()], fallback_underlying="AMZN",
+        options_cache={"symbols": {}}, price_options=True,
+        model_options=True, ts_utc=ts,
+    )
+    assert marked["delta_mv"] > 0
+    assert marked["legs_priced"] == 1

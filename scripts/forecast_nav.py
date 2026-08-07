@@ -54,7 +54,7 @@ import math
 import os
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timezone
+from datetime import UTC, date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -338,22 +338,80 @@ def _load_distributions_for_today(today_iso: str) -> dict[str, float]:
     by_sym = payload.get("by_symbol") or payload.get("symbols") or payload
     if not isinstance(by_sym, dict):
         return {}
+    try:
+        today_d = datetime.strptime(today_iso, "%Y-%m-%d").date()
+    except ValueError:
+        return {}
     for sym, entry in by_sym.items():
-        events = entry.get("events") if isinstance(entry, dict) else None
-        if not isinstance(events, list):
-            # Some shapes ship a single ``next_ex_date`` + ``amount``.
-            ex_date = (entry or {}).get("next_ex_date") if isinstance(entry, dict) else None
-            amt = (entry or {}).get("next_amount") if isinstance(entry, dict) else None
-            if ex_date == today_iso and _isfin(amt):
-                out[str(sym).upper()] = float(amt)
+        # Production shape: a bare LIST of {ex_date, amount}. The dict shapes
+        # below are legacy — the list case was silently skipped for as long as
+        # this feature existed, so the ex-date adjustment NEVER fired even
+        # when enabled.
+        if isinstance(entry, list):
+            events = [e for e in entry if isinstance(e, dict)]
+        elif isinstance(entry, dict) and isinstance(entry.get("events"), list):
+            events = [e for e in entry["events"] if isinstance(e, dict)]
+        elif isinstance(entry, dict):
+            if str(entry.get("next_ex_date")) == today_iso and _isfin(entry.get("next_amount")):
+                out[str(sym).upper()] = float(entry["next_amount"])
             continue
-        for evt in events:
-            if not isinstance(evt, dict):
-                continue
-            if str(evt.get("ex_date")) == today_iso and _isfin(evt.get("amount")):
-                out[str(sym).upper()] = float(evt["amount"])
-                break
+        else:
+            continue
+        hit = next(
+            (e for e in events
+             if str(e.get("ex_date")) == today_iso and _isfin(e.get("amount"))),
+            None,
+        )
+        if hit is not None:
+            out[str(sym).upper()] = float(hit["amount"])
+            continue
+        inferred = _infer_weekly_ex_amount(events, today_d)
+        if inferred is not None:
+            out[str(sym).upper()] = inferred
     return out
+
+
+def _infer_weekly_ex_amount(events: list[dict], today_d: date) -> float | None:
+    """Predict today's distribution for a stable weekly distributor.
+
+    The distributions file is HISTORY — an ex-date appears only after it has
+    happened, so day-of adjustment can never see today's event in the file.
+    For the weekly YieldBoost names that gap is ~65-150bp of NAV every single
+    week, larger than the whole nav-pegged limit band. Infer instead, under
+    strict conditions (fail closed):
+
+      * >= 4 recorded events, and the last 4 inter-event gaps each 6..8 days
+        (a weekly cadence with holiday slack);
+      * today is exactly one cadence step (6..8 days) after the last ex-date;
+      * amount = median of the last 4 amounts (weekly payouts drift slowly:
+        AZYY's trailing four span 0.094..0.102).
+
+    A fund that skips a week costs us one phantom adjustment (~median
+    amount); a weekly fund we refuse to infer costs the same in the other
+    direction every week. The cadence test makes the first failure mode the
+    rare one.
+    """
+    dated: list[tuple[date, float]] = []
+    for e in events:
+        amt = _f(e.get("amount"))
+        try:
+            d = datetime.strptime(str(e.get("ex_date")), "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        if amt is not None and amt > 0:
+            dated.append((d, amt))
+    if len(dated) < 4:
+        return None
+    dated.sort()
+    tail = dated[-4:]
+    gaps = [(tail[i + 1][0] - tail[i][0]).days for i in range(3)]
+    if any(g < 6 or g > 8 for g in gaps):
+        return None
+    last_ex = tail[-1][0]
+    if not (6 <= (today_d - last_ex).days <= 8):
+        return None
+    amounts = sorted(a for _, a in tail)
+    return 0.5 * (amounts[1] + amounts[2])
 
 
 def _adjust_anchor_for_ex_distribution(
@@ -628,6 +686,39 @@ def _equity_spot(
     return None, None
 
 
+_TBILL_MATURITY_RE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})")
+
+
+def _tbill_accrual_delta(leg: dict, ts_utc: datetime | None) -> float | None:
+    """MV accretion since the holdings as-of for a discount T-bill leg.
+
+    ``shares`` is face, ``price`` is per $1 face (< 1 for a bill), and the
+    security name carries the maturity ("US TBill 10/22/2026"). Accrete
+    linearly to par from the leg's own as_of_date; same-day marks return 0.
+    """
+    if ts_utc is None:
+        return None
+    price = _f(leg.get("price"))
+    face = _f(leg.get("shares"))
+    if price is None or face is None or not (0.0 < price < 1.0) or face <= 0:
+        return None
+    m = _TBILL_MATURITY_RE.search(str(leg.get("security_name") or ""))
+    if not m:
+        return None
+    try:
+        maturity = date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+        as_of = datetime.strptime(str(leg.get("as_of_date")), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    days_to_mat = (maturity - as_of).days
+    if days_to_mat <= 0:
+        return None
+    elapsed = min((ts_utc.date() - as_of).days, days_to_mat)
+    if elapsed <= 0:
+        return 0.0
+    return face * (1.0 - price) * (elapsed / days_to_mat)
+
+
 def mark_holdings(
     legs: list[dict],
     *,
@@ -703,9 +794,14 @@ def mark_holdings(
             else:
                 skipped.append(f"equity:{leg.get('position_ticker') or fallback_underlying}")
         elif sec_type in CASH_LIKE_TYPES:
-            # Carry forward: delta_mv += 0. Counts as "priced" because we
-            # explicitly know its delta is zero (modulo rate accruals, which
-            # we ignore at the trading-day horizon).
+            # Carry forward, except TREASURY bills accrete toward par: on the
+            # weekly YieldBoost names T-bills are ~50% of NAV, so ignoring the
+            # accrual costs ~0.8bp/day of systematic low bias — small daily,
+            # but it compounds into the band over a week. Linear accretion
+            # (1 - price)/days_to_maturity per $1 face is exact enough at
+            # bill horizons. Anything unparseable carries forward at zero.
+            if sec_type == "TREASURY":
+                leg_delta = _tbill_accrual_delta(leg, ts_utc) or 0.0
             priced = True
         elif sec_type in OPTION_TYPES:
             option_legs_total += 1
