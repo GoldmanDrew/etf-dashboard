@@ -189,6 +189,57 @@ def repair(
     if use_polygon and n_nulled:
         work, _n_poly = backfill_close_prices_polygon_gaps(work)
     work, n_from_close = backfill_etf_adj_close_from_close_gaps(work)
+
+    # Basis realignment for sessions the vendor cannot fix. The Yahoo refetch
+    # above re-downloads the SAME series that produced the shift, so a session
+    # whose misalignment originates at the vendor (TSYY 2026-05-04/05-27:
+    # distribution stepped one session early in Yahoo's adjusted series) comes
+    # back byte-identical, stays flagged, and fails the nightly's hard gate
+    # forever — which froze the whole metrics panel for 9 days (2026-07-29..
+    # 08-07). The detector's model is that ``adj[i]`` sits on ``close[i+1]``'s
+    # basis; the faithful inverse is to rebuild the cell on its OWN close basis
+    # using the nearest unflagged neighbour's adj/close ratio:
+    #     adj[i] := close[i] * (adj[j] / close[j]),  j = nearest clean session.
+    # If a distribution ex-date falls between i and j the ratio is off by that
+    # one distribution factor — bounded, visible to the rescan, and strictly
+    # better than a cell known to be on the wrong session entirely.
+    n_realigned = 0
+    residual_pre = scan(work, since=since)
+    if residual_pre:
+        for ticker, days in residual_pre.items():
+            tmask = work["ticker"] == ticker
+            grp = work[tmask].sort_values("date")
+            closes = pd.to_numeric(grp["close_price"], errors="coerce")
+            adjs = pd.to_numeric(grp["etf_adj_close"], errors="coerce")
+            dates_list = list(grp["date"])
+            flagged = set(days)
+            for d in days:
+                if d not in dates_list:
+                    continue
+                i = dates_list.index(d)
+                # Nearest clean neighbour with a usable ratio, next-first (the
+                # shift direction is "sampled ahead", so i+1 is on the basis
+                # the detector matched).
+                ratio = None
+                for j in list(range(i + 1, len(dates_list))) + list(range(i - 1, -1, -1)):
+                    if dates_list[j] in flagged:
+                        continue
+                    c_j, a_j = closes.iloc[j], adjs.iloc[j]
+                    if pd.notna(c_j) and pd.notna(a_j) and c_j > 0 and a_j > 0:
+                        ratio = float(a_j) / float(c_j)
+                        break
+                c_i = closes.iloc[i]
+                if ratio is None or pd.isna(c_i) or c_i <= 0:
+                    continue
+                idx = grp.index[i]
+                work.at[idx, "etf_adj_close"] = float(c_i) * ratio
+                n_realigned += 1
+                LOGGER.info(
+                    "realigned %s %s: etf_adj_close rebuilt on own close basis "
+                    "(ratio %.6f from nearest clean session)",
+                    ticker, d, ratio,
+                )
+
     work = stamp_metric_asof_metadata(work)
 
     residual = scan(work, since=since)
@@ -200,6 +251,7 @@ def repair(
         "cells_nulled": n_nulled,
         "cells_refetched_yahoo": max(0, n_refetched),
         "cells_filled_from_close": int(n_from_close),
+        "cells_realigned_own_basis": int(n_realigned),
         "tickers_residual": len(residual),
         "detected": {t: [d.isoformat() for d in days] for t, days in sorted(hits.items())},
         "residual": {t: [d.isoformat() for d in days] for t, days in sorted(residual.items())},
