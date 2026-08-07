@@ -299,7 +299,7 @@ def test_build_forecasts_yieldboost_routes_to_yb_when_options_priced():
     assert yb.confidence in ("high", "medium")
     assert yb.option_legs_priced == 1
     assert 11.85 < yb.nav_hat < 11.95
-    assert default == "yieldboost_putspread_v1"
+    assert default == "yieldboost_putspread_v2"  # v2 outranks v1 since 2026-08-07
 
 
 def test_build_forecasts_falls_through_to_v2_when_holdings_missing():
@@ -488,3 +488,126 @@ def test_build_forecasts_stale_underlying_same_day_prefers_anchor_und():
     assert abs(float(v1.und_spot_t) - 8.01) < 1e-6
     assert v1.nav_hat is not None
     assert 33.0 < v1.nav_hat < 34.0
+
+
+# ---------------------------------------------------------------------------
+# yieldboost_putspread_v2: BS marks for FLEX legs no vendor chain quotes
+# ---------------------------------------------------------------------------
+
+def _flex_cache(spot=28.0, iv_lo=0.60, iv_hi=0.80):
+    """Listed monthly chain (integer strikes) around a FLEX target."""
+    return {
+        "symbols": {
+            "AMZZ": {
+                "spot": spot,
+                "options": [
+                    {"expiration_date": "2026-08-21", "contract_type": "put",
+                     "strike_price": 34.0, "iv": iv_lo, "mid": 6.0},
+                    {"expiration_date": "2026-08-21", "contract_type": "put",
+                     "strike_price": 36.0, "iv": iv_hi, "mid": 8.0},
+                ],
+            }
+        }
+    }
+
+
+_NOW = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
+
+
+def test_model_option_mark_interpolates_iv_between_listed_strikes():
+    parsed = fn.parse_occ("AMZZ260812P00035000")   # K=35, halfway 34..36
+    mid, meta = fn.model_option_mark(parsed, _flex_cache(), now_utc=_NOW)
+    assert mid is not None and mid > 0
+    assert meta["model"] == "bs_iv_interp"
+    assert abs(meta["iv"] - 0.70) < 1e-9, "linear midpoint of 0.60/0.80"
+
+
+def test_model_option_mark_clamps_iv_outside_the_grid():
+    parsed = fn.parse_occ("AMZZ260812P00040000")   # K=40 above the 34..36 grid
+    mid, meta = fn.model_option_mark(parsed, _flex_cache(), now_utc=_NOW)
+    assert mid is not None
+    assert abs(meta["iv"] - 0.80) < 1e-9, "edge clamp, no skew extrapolation"
+
+
+def test_model_option_mark_expired_leg_is_intrinsic():
+    parsed = fn.parse_occ("AMZZ260807P00036000")   # expires 'today'
+    mid, meta = fn.model_option_mark(parsed, _flex_cache(spot=28.0), now_utc=_NOW)
+    assert mid is not None
+    assert abs(mid - 8.0) < 1e-6, "T=0 put = max(K - S, 0)"
+
+
+def test_model_option_mark_fails_closed_without_surface():
+    cache = {"symbols": {"AMZZ": {"spot": 28.0, "options": []}}}
+    parsed = fn.parse_occ("AMZZ260812P00035000")
+    mid, meta = fn.model_option_mark(parsed, cache, now_utc=_NOW)
+    assert mid is None and meta["reason"] == "no listed IV surface"
+
+
+def _flex_leg(occ="AMZZ260812P00035000", shares=100.0, mv=50_000.0):
+    return {"security_type": "OPTION_PUT", "position_ticker": occ,
+            "shares": shares, "market_value": mv, "price": None}
+
+
+def test_mark_holdings_models_flex_leg_only_when_asked():
+    """v1 (model_options=False) must keep its exact old behaviour."""
+    legs = [_flex_leg()]
+    v1 = fn.mark_holdings(legs, fallback_underlying="AMZN",
+                          options_cache=_flex_cache(), price_options=True)
+    assert v1["option_legs_priced"] == 0
+    assert any(s.startswith("opt-no-quote") for s in v1["skipped"])
+    v2 = fn.mark_holdings(legs, fallback_underlying="AMZN",
+                          options_cache=_flex_cache(), price_options=True,
+                          model_options=True, ts_utc=_NOW)
+    assert v2["option_legs_priced"] == 1
+    assert v2["option_legs_modeled"] == 1
+    assert v2["skipped"] == []
+
+
+def _yb_inputs(anchor_date="2026-08-06"):
+    return {
+        "symbol": "AZYY",
+        "product_class": "income_yieldboost",
+        "shares_outstanding": 200_000.0,
+        "nav_anchor": 14.40,
+        "nav_anchor_date": anchor_date,
+        "und_symbol": "AMZN",
+        "und_anchor": None,
+        "und_spot_t": None,
+        "und_spot_age_sec": None,
+        "delta": 0.4,
+        "etf_last": 14.43,
+        "etf_last_ts": "test",
+        "distribution_applied": 0.0,
+    }
+
+
+def test_v2_confidence_caps_at_medium_when_a_leg_is_modeled():
+    rec = fn.build_yieldboost_putspread_v2(
+        _yb_inputs(), "2026-08-07T18:00:00Z", 4e-5, [_flex_leg()],
+        _flex_cache(), ts_utc=_NOW,
+    )
+    assert rec.nav_hat is not None
+    assert rec.confidence == "medium"
+    assert "BS-modeled" in rec.notes
+
+
+def test_stale_anchor_degrades_then_refuses_but_always_emits():
+    fresh = fn.build_yieldboost_putspread_v2(
+        _yb_inputs("2026-08-06"), "ts", 4e-5, [_flex_leg()], _flex_cache(), ts_utc=_NOW)
+    assert fresh.confidence == "medium"          # modeled leg, fresh anchor
+    old = fn.build_yieldboost_putspread_v2(
+        _yb_inputs("2026-07-28"), "ts", 4e-5, [_flex_leg()], _flex_cache(), ts_utc=_NOW)
+    assert old.confidence == "na", "8 bdays stale -> refused"
+    assert old.nav_hat is not None, "row still emitted with its level for diagnostics"
+    assert "bdays old" in old.notes
+
+
+def test_dispatcher_prefers_v2_for_yieldboost():
+    rows = [
+        fn.build_yieldboost_putspread_v1(
+            _yb_inputs(), "ts", 4e-5, [_flex_leg()], _flex_cache(), ts_utc=_NOW),
+        fn.build_yieldboost_putspread_v2(
+            _yb_inputs(), "ts", 4e-5, [_flex_leg()], _flex_cache(), ts_utc=_NOW),
+    ]
+    picked = fn.select_default_model(rows, "income_yieldboost", True)
+    assert picked == "yieldboost_putspread_v2"

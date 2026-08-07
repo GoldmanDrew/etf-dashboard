@@ -97,6 +97,25 @@ CLASS_NA_FOR_BETA_MODELS = CLASS_INCOME | {"other_structured"}
 
 SPOT_FRESH_SECONDS = 30 * 60  # 30 minutes
 
+#: Anchor-age policy for the holdings models. Issuer NAV normally lags one
+#: business day; past FULL the level is degraded (confidence capped at
+#: "medium"), past NA it is refused outright — but the row is still emitted so
+#: coverage gaps are visible instead of the symbol silently vanishing from
+#: by_symbol (which is how the 2026-07/08 GraniteShares staleness hid).
+ANCHOR_MAX_AGE_BDAYS_FULL = 2
+ANCHOR_MAX_AGE_BDAYS_NA = 7
+
+
+def _anchor_age_bdays(anchor_date: object, ts_utc: datetime) -> int | None:
+    try:
+        d = datetime.strptime(str(anchor_date), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    try:
+        return int(nyse_busday_count(d, ts_utc.date()))
+    except Exception:
+        return max(0, (ts_utc.date() - d).days)
+
 # Sanity envelope: a model NAV more than 2x or less than 0.5x the anchor NAV
 # is almost certainly a bug (bad spot, malformed holdings row, etc.). The
 # dispatcher refuses to route to such candidates.
@@ -439,6 +458,108 @@ def parse_occ(position_ticker: str | None) -> dict | None:
     }
 
 
+def model_option_mark(
+    parsed: dict,
+    options_cache: dict,
+    *,
+    now_utc: datetime,
+) -> tuple[float | None, dict]:
+    """Black-Scholes mark for a held contract absent from every vendor chain.
+
+    The YieldBoost weeklies hold FLEX puts — penny strikes (AMZZ 34.92) on
+    weekly expiries — which are structurally unquotable: no listed chain will
+    ever carry them, so ``lookup_option_mark`` misses by design, v1 carried
+    the legs at their anchor mark, and the model was blind to exactly the
+    sleeve that drives these funds' NAV.
+
+    Price it instead from what IS observable:
+      * S — the wrapper's spot from the options_cache symbols entry (the
+        listed chain refresh stamps it);
+      * sigma — implied vol interpolated from the wrapper's LISTED chain
+        (same contract type only): nearest expiry, then linear across the
+        two strikes bracketing K (clamped to the edge outside the grid).
+        Put spreads carry mostly-offsetting vega across their two legs, so
+        surface error largely cancels at the spread level;
+      * T — calendar days to expiry / 365 (T<=0 collapses to intrinsic
+        inside ``bs_put_price``, which is what an expiring 4 PM leg is);
+      * r — bs_put_price's default, q = 0 (LETF wrappers distribute nothing).
+
+    Calls (none held today) price via put-call parity so the surface source
+    stays identical.
+    """
+    root = parsed.get("root")
+    strike = _f(parsed.get("strike"))
+    if not root or strike is None or strike <= 0:
+        return None, {"matched": False, "model": None, "reason": "bad parse"}
+    sym_entry = (options_cache.get("symbols") or {}).get(root)
+    if not sym_entry:
+        return None, {"matched": False, "model": None, "reason": "underlying not in options_cache"}
+    spot = _f(sym_entry.get("spot"))
+    if spot is None or spot <= 0:
+        return None, {"matched": False, "model": None, "reason": "no spot for underlying"}
+    try:
+        expiry_d = datetime.strptime(str(parsed.get("expiry")), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None, {"matched": False, "model": None, "reason": "bad expiry"}
+    t_years = max(0.0, (expiry_d - now_utc.date()).days) / 365.0
+
+    target_type = str(parsed.get("type") or "put").lower()
+    candidates = []
+    for c in sym_entry.get("options") or []:
+        if str(c.get("contract_type", "")).lower() != target_type:
+            continue
+        iv = _f(c.get("iv"))
+        k = _f(c.get("strike_price"))
+        if iv is None or iv <= 0 or k is None or k <= 0:
+            continue
+        try:
+            exp_c = datetime.strptime(str(c.get("expiration_date")), "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        candidates.append((abs((exp_c - expiry_d).days), k, iv))
+    if not candidates:
+        return None, {"matched": False, "model": None, "reason": "no listed IV surface"}
+
+    nearest_gap = min(c[0] for c in candidates)
+    ring = sorted((k, iv) for gap, k, iv in candidates if gap == nearest_gap)
+    below = [(k, iv) for k, iv in ring if k <= strike]
+    above = [(k, iv) for k, iv in ring if k >= strike]
+    if below and above:
+        k_lo, iv_lo = below[-1]
+        k_hi, iv_hi = above[0]
+        sigma = iv_lo if k_hi == k_lo else (
+            iv_lo + (iv_hi - iv_lo) * (strike - k_lo) / (k_hi - k_lo)
+        )
+    else:
+        # Outside the listed grid: clamp to the nearest edge rather than
+        # extrapolating a skew we cannot see.
+        edge = below[-1] if below else above[0]
+        sigma = edge[1]
+
+    try:
+        from letf_options_models import bs_put_price
+    except ImportError:  # pragma: no cover - scripts/ always importable in prod
+        return None, {"matched": False, "model": None, "reason": "no BS pricer"}
+    put_px = bs_put_price(spot, strike, t_years, sigma)
+    if target_type == "put":
+        mid = put_px
+    else:
+        # Parity with q=0 and bs_put_price's default r.
+        r = 0.043
+        mid = put_px + spot - strike * math.exp(-r * t_years)
+    if not math.isfinite(mid) or mid < 0:
+        return None, {"matched": False, "model": None, "reason": "model price not finite"}
+    return float(mid), {
+        "matched": False,
+        "model": "bs_iv_interp",
+        "iv": float(sigma),
+        "spot": float(spot),
+        "t_years": round(t_years, 5),
+        "iv_ring_n": len(ring),
+        "iv_expiry_gap_days": int(nearest_gap),
+    }
+
+
 def lookup_option_mark(
     parsed: dict,
     options_cache: dict,
@@ -513,6 +634,8 @@ def mark_holdings(
     fallback_underlying: str | None,
     options_cache: dict,
     price_options: bool,
+    model_options: bool = False,
+    ts_utc: datetime | None = None,
 ) -> dict:
     """Compute the **change** in MV per leg vs the anchor (level differencing).
 
@@ -552,6 +675,7 @@ def mark_holdings(
     equity_legs_total = 0
     option_legs_priced = 0
     option_legs_total = 0
+    option_legs_modeled = 0
     skipped: list[str] = []
 
     for leg in legs:
@@ -589,10 +713,21 @@ def mark_holdings(
                 parsed = parse_occ(leg.get("position_ticker"))
                 if parsed is not None:
                     mid_now, _meta = lookup_option_mark(parsed, options_cache)
+                    modeled = False
+                    if mid_now is None and model_options and ts_utc is not None:
+                        # FLEX legs (penny strikes, weekly expiries) never match
+                        # a listed chain; price them off the listed IV surface
+                        # instead of carrying the anchor mark blind.
+                        mid_now, _meta = model_option_mark(
+                            parsed, options_cache, now_utc=ts_utc,
+                        )
+                        modeled = mid_now is not None
                     mid_anchor = mv_anchor / (shares * OPTION_MULTIPLIER)
                     if mid_now is not None and math.isfinite(mid_anchor):
                         leg_delta = shares * (mid_now - mid_anchor) * OPTION_MULTIPLIER
                         option_legs_priced += 1
+                        if modeled:
+                            option_legs_modeled += 1
                         priced = True
                     else:
                         skipped.append(f"opt-no-quote:{leg.get('position_ticker')}")
@@ -617,6 +752,7 @@ def mark_holdings(
         "equity_legs_total": equity_legs_total,
         "option_legs_priced": option_legs_priced,
         "option_legs_total": option_legs_total,
+        "option_legs_modeled": option_legs_modeled,
         "skipped": skipped[:10],
     }
 
@@ -977,6 +1113,7 @@ def _build_holdings_model(
     inputs: dict, ts_iso: str, ter_daily: float,
     holdings_legs: list[dict] | None, options_cache: dict,
     *, model_tag: str, price_options: bool, ts_utc: datetime,
+    model_options: bool = False,
 ) -> ForecastRecord:
     notes: list[str] = []
     confidence = "high"
@@ -1000,6 +1137,8 @@ def _build_holdings_model(
             fallback_underlying=inputs["und_symbol"],
             options_cache=options_cache,
             price_options=price_options,
+            model_options=model_options,
+            ts_utc=ts_utc,
         )
         eq_total = marked["equity_legs_total"]
         eq_priced = marked["equity_legs_priced"]
@@ -1033,6 +1172,25 @@ def _build_holdings_model(
                 if price_options and opt_total > 0 and opt_priced / max(1, opt_total) < 0.5:
                     confidence = "medium"
                     notes.append(f"option legs priced {opt_priced}/{opt_total}")
+                n_modeled = int(marked.get("option_legs_modeled") or 0)
+                if n_modeled > 0 and confidence == "high":
+                    # A BS-modeled FLEX leg is a real mark but not a market one;
+                    # never claim quote-grade confidence for it. The bands
+                    # config doubles limit bands on "medium", which is the
+                    # correct posture for model-marked legs.
+                    confidence = "medium"
+                    notes.append(f"{n_modeled} option leg(s) BS-modeled (FLEX)")
+                # Anchor-age gate (degraded confidence, not a silent drop).
+                # A 10-day-old issuer NAV was flowing through at full
+                # confidence during the 2026-07/08 metrics freeze; the level
+                # error compounds with every session the anchor lags.
+                age_bd = _anchor_age_bdays(inputs.get("nav_anchor_date"), ts_utc)
+                if age_bd is not None and age_bd > ANCHOR_MAX_AGE_BDAYS_NA:
+                    confidence = "na"
+                    notes.append(f"anchor {age_bd} bdays old (> {ANCHOR_MAX_AGE_BDAYS_NA})")
+                elif age_bd is not None and age_bd > ANCHOR_MAX_AGE_BDAYS_FULL and confidence == "high":
+                    confidence = "medium"
+                    notes.append(f"anchor {age_bd} bdays old")
                 if nav_hat is not None and nav_hat <= 0:
                     confidence = "na"
                     notes.append("non-positive nav_hat")
@@ -1044,6 +1202,7 @@ def _build_holdings_model(
                 "equity_legs_total": marked["equity_legs_total"],
                 "option_legs_priced": marked["option_legs_priced"],
                 "option_legs_total": marked["option_legs_total"],
+                "option_legs_modeled": marked.get("option_legs_modeled", 0),
                 "mv_total_now": (
                     nav_anchor * shares + marked["delta_mv"]
                     if nav_hat is not None else None
@@ -1080,6 +1239,28 @@ def build_yieldboost_putspread_v1(
     )
 
 
+def build_yieldboost_putspread_v2(
+    inputs: dict, ts_iso: str, ter_daily: float,
+    holdings_legs: list[dict] | None, options_cache: dict,
+    *, ts_utc: datetime,
+) -> ForecastRecord:
+    """v1 + BS marks for the FLEX legs no vendor chain can quote.
+
+    v1 priced 1/6 of NVYY's option legs (the rest are penny-strike weekly
+    FLEX contracts, absent from every listed chain by design) and carried the
+    others at their anchor mark — blind to exactly the sleeve that drives a
+    YieldBoost fund's NAV. v2 prices those legs with Black-Scholes off the
+    wrapper's live spot and an IV interpolated from its LISTED chain (which
+    the options cache ships with per-contract iv). Confidence caps at
+    "medium" whenever a modeled mark is in the sum.
+    """
+    return _build_holdings_model(
+        inputs, ts_iso, ter_daily, holdings_legs, options_cache,
+        model_tag="yieldboost_putspread_v2", price_options=True, ts_utc=ts_utc,
+        model_options=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -1089,7 +1270,7 @@ def select_default_model(
 ) -> str | None:
     """Return the model tag we want to surface in `_latest.json[by_symbol]`."""
     if is_yieldboost or product_class in CLASS_INCOME:
-        order = ["yieldboost_putspread_v1", "delta_v3_swap_mark", "delta_v2_ito", "delta_v1"]
+        order = ["yieldboost_putspread_v2", "yieldboost_putspread_v1", "delta_v3_swap_mark", "delta_v2_ito", "delta_v1"]
     else:
         order = ["delta_v3_swap_mark", "delta_v2_ito", "delta_v1"]
 
@@ -1142,6 +1323,7 @@ def build_forecasts_for_symbol(
     rows.append(build_v2_ito(inputs, ts_iso, ter_daily, ts_utc))
     rows.append(build_v3_swap_mark(inputs, ts_iso, ter_daily, holdings_legs, options_cache, ts_utc=ts_utc))
     rows.append(build_yieldboost_putspread_v1(inputs, ts_iso, ter_daily, holdings_legs, options_cache, ts_utc=ts_utc))
+    rows.append(build_yieldboost_putspread_v2(inputs, ts_iso, ter_daily, holdings_legs, options_cache, ts_utc=ts_utc))
 
     if extra_notes:
         for r in rows:
@@ -1254,7 +1436,7 @@ def main() -> None:
 
     payload = {
         "build_time": ts.isoformat().replace("+00:00", "Z"),
-        "models_run": ["delta_v1", "delta_v2_ito", "delta_v3_swap_mark", "yieldboost_putspread_v1"],
+        "models_run": ["delta_v1", "delta_v2_ito", "delta_v3_swap_mark", "yieldboost_putspread_v1", "yieldboost_putspread_v2"],
         "default_models_count": default_model_count,
         "confidence_count": confidence_count,
         "anchor_date": anchors.get("as_of_date"),
