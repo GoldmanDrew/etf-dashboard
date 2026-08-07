@@ -153,6 +153,50 @@ def _append_jsonl(path: Path, records: list[dict]) -> None:
             f.write("\n")
 
 
+def _write_day_snapshot(path: Path, records: list[dict]) -> None:
+    """Merge ``records`` into the day file, keeping the latest row per
+    ``(symbol, model)``.
+
+    A raw append was fine when the runner was long-lived, but the snapshot now
+    has to be COMMITTED every tick to survive ephemeral Actions runners (it was
+    written and discarded with the runner from 2026-05-22 to 2026-08-07, which
+    silently starved score_nav_forecasts — zero realized rows, _metrics_daily
+    frozen). ~26 ticks/day of raw appends over ~1,300 (symbol, model) rows is
+    a multi-MB daily file in git; the scorer only ever reads the last row per
+    key (collapse_last_per_symbol_model), so collapse at write time instead —
+    the file stays ~one tick in size no matter how many ticks land in it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    merged: dict[tuple[str, str], dict] = {}
+    if path.is_file():
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                key = (str(row.get("symbol") or "").upper(), str(row.get("model") or ""))
+                cur = merged.get(key)
+                if cur is None or str(cur.get("ts") or "") <= str(row.get("ts") or ""):
+                    merged[key] = row
+        except OSError:
+            merged = {}
+    for r in records:
+        key = (str(r.get("symbol") or "").upper(), str(r.get("model") or ""))
+        cur = merged.get(key)
+        if cur is None or str(cur.get("ts") or "") <= str(r.get("ts") or ""):
+            merged[key] = r
+    tmp = path.with_suffix(".jsonl.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for key in sorted(merged):
+            f.write(json.dumps(merged[key], separators=(",", ":"), allow_nan=False, sort_keys=True))
+            f.write("\n")
+    tmp.replace(path)
+
+
 def _ter_daily_for(symbol: str) -> float:
     annual = TER_OVERRIDES.get(symbol.upper(), DEFAULT_TER_ANNUAL)
     return float(annual) / 252.0
@@ -1206,7 +1250,7 @@ def main() -> None:
         )
 
     if snapshot_rows:
-        _append_jsonl(snap_path, snapshot_rows)
+        _write_day_snapshot(snap_path, snapshot_rows)
 
     payload = {
         "build_time": ts.isoformat().replace("+00:00", "Z"),

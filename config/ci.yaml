@@ -44,6 +44,12 @@ commit_files:
     - data/letf_rebalance_flows_intraday_latest.json
   nav:
     - data/nav_forecasts/_latest.json
+    # The day's forecast snapshot MUST be committed or it dies with the
+    # ephemeral runner and score_nav_forecasts has nothing to grade —
+    # that starved all realized accuracy from 2026-05-22 to 2026-08-07.
+    # forecast_nav collapses the file per (symbol, model), so committing
+    # it every tick stays ~1 tick in size.
+    - data/nav_forecasts/snapshots
 
 options_env:
   POLYGON_OPTIONS_MAX_SYMBOLS: "100"

@@ -61,7 +61,7 @@ DEFAULT_CONFIG: dict = {
             "data/underlying_intraday_volume.json",
             "data/letf_rebalance_flows_intraday_latest.json",
         ],
-        "nav": ["data/nav_forecasts/_latest.json"],
+        "nav": ["data/nav_forecasts/_latest.json", "data/nav_forecasts/snapshots"],
     },
     "options_env": {},
     "yieldboost_env": {},

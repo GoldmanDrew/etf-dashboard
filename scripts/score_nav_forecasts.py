@@ -662,6 +662,34 @@ def _load_default_model_for_symbol(latest_path: Path) -> dict[str, str]:
     }
 
 
+#: Snapshot day-files older than this many days before the scoring target are
+#: deleted after grading. 14 leaves room for postmortems and holiday gaps while
+#: keeping the committed directory to ~a dozen ~1MB files.
+SNAPSHOT_KEEP_DAYS = 14
+
+
+def prune_old_snapshots(snapshot_dir: Path, target: date) -> int:
+    """Delete ``snapshots/YYYY-MM-DD.jsonl`` older than the retention window."""
+    if not snapshot_dir.exists():
+        return 0
+    cutoff = target - timedelta(days=SNAPSHOT_KEEP_DAYS)
+    n = 0
+    for p in sorted(snapshot_dir.glob("*.jsonl")):
+        if not _REALIZED_JSONL_NAME.match(p.name):
+            continue
+        try:
+            d = datetime.strptime(p.stem, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if d < cutoff:
+            try:
+                p.unlink()
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Score yesterday's NAV forecasts and refresh anchors.")
     parser.add_argument("--target-date", default=None,
@@ -692,6 +720,14 @@ def main() -> None:
     n_flat = flatten_nested_realized_jsonl(realized_dir)
     if n_flat:
         LOGGER.info("flattened %d misplaced realized/*.jsonl into %s", n_flat, realized_dir)
+
+    # Snapshots are committed every tick now (they died with the ephemeral
+    # runner from 2026-05-22 to 2026-08-07 and nothing could be scored), so
+    # bound the directory: grading only ever reads the target date's file, and
+    # anything older than the retention window is historical noise in git.
+    n_pruned = prune_old_snapshots(Path(args.snapshot_dir), target)
+    if n_pruned:
+        LOGGER.info("pruned %d snapshot day-file(s) older than %d days", n_pruned, SNAPSHOT_KEEP_DAYS)
 
     snap_path = Path(args.snapshot_dir) / f"{target.isoformat()}.jsonl"
     snap_rows = _read_jsonl(snap_path)
