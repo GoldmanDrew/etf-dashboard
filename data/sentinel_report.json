@@ -1,13 +1,13 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-10T16:02:52.816354Z",
+  "build_time": "2026-08-10T16:55:20.011533Z",
   "mode": "gate",
   "task": "nav",
   "verdict": "quarantine",
   "stats": {
-    "checked_files": 14,
+    "checked_files": 8,
     "block": 0,
-    "quarantine": 23,
+    "quarantine": 12,
     "warn": 0
   },
   "checked": [
@@ -17,200 +17,105 @@
     "data/underlying_intraday_spot.json",
     "data/underlying_intraday_volume.json",
     "data/letf_rebalance_flows_intraday_latest.json",
-    "data/options_cache.json",
-    "data/vrp_live.json",
-    "data/vrp_health.json",
-    "data/yieldboost_put_spreads_latest.json",
-    "data/yieldboost_options_target.json",
-    "data/event_calendar_known.json",
-    "data/event_calendar_inferred.json",
-    "data/event_calendar_combined.json"
+    "data/dashboard_data.json",
+    "data/borrow_history.json"
   ],
   "findings": [
     {
       "severity": "quarantine",
       "code": "stale_return_baseline",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "166/823 symbols (20.2%) carry a prior_close_date older than the previous session 2026-08-07 (worst AI 10d behind) \u2014 their return_d1_so_far is a multi-day return labelled as daily, corrupting displayed returns and intraday flow math",
-      "observed": 166,
+      "detail": "42/823 symbols (5.1%) carry a prior_close_date older than the previous session 2026-08-07 (worst AAPX 1d behind) \u2014 their return_d1_so_far is a multi-day return labelled as daily, corrupting displayed returns and intraday flow math",
+      "observed": 42,
       "threshold": 41
     },
     {
       "severity": "quarantine",
       "code": "stale_return_baseline",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "BTDL shows -28.9% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
-      "ticker": "BTDL",
-      "observed": -0.2893
-    },
-    {
-      "severity": "quarantine",
-      "code": "stale_return_baseline",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MRAL shows -20.3% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
-      "ticker": "MRAL",
-      "observed": -0.2029
-    },
-    {
-      "severity": "quarantine",
-      "code": "stale_return_baseline",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MSFO shows +21.9% 'daily' return measured against a prior_close from 10 session(s) before the last session \u2014 not a one-day move",
-      "ticker": "MSFO",
-      "observed": 0.2189
-    },
-    {
-      "severity": "quarantine",
-      "code": "stale_return_baseline",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "PLTY shows +37.2% 'daily' return measured against a prior_close from 10 session(s) before the last session \u2014 not a one-day move",
-      "ticker": "PLTY",
-      "observed": 0.3717
-    },
-    {
-      "severity": "quarantine",
-      "code": "stale_return_baseline",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "PTIR shows +29.5% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
-      "ticker": "PTIR",
-      "observed": 0.2952
-    },
-    {
-      "severity": "quarantine",
-      "code": "stale_return_baseline",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "PUL shows +20.1% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
-      "ticker": "PUL",
-      "observed": 0.2009
-    },
-    {
-      "severity": "quarantine",
-      "code": "stale_return_baseline",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "RBLY shows -23.5% 'daily' return measured against a prior_close from 10 session(s) before the last session \u2014 not a one-day move",
-      "ticker": "RBLY",
-      "observed": -0.235
-    },
-    {
-      "severity": "quarantine",
-      "code": "stale_return_baseline",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "RDWU shows +24.1% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
+      "detail": "RDWU shows +23.3% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
       "ticker": "RDWU",
-      "observed": 0.2415
+      "observed": 0.2329
     },
     {
       "severity": "quarantine",
       "code": "stale_return_baseline",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SMCL shows +20.7% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
-      "ticker": "SMCL",
-      "observed": 0.2065
-    },
-    {
-      "severity": "quarantine",
-      "code": "stale_return_baseline",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SNK shows -31.3% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
-      "ticker": "SNK",
-      "observed": -0.3133
-    },
-    {
-      "severity": "quarantine",
-      "code": "stale_return_baseline",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SPAL shows +29.6% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
-      "ticker": "SPAL",
-      "observed": 0.2963
-    },
-    {
-      "severity": "quarantine",
-      "code": "stale_return_baseline",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "TTD shows -26.7% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
+      "detail": "TTD shows -26.2% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
       "ticker": "TTD",
-      "observed": -0.2671
+      "observed": -0.2623
     },
     {
       "severity": "quarantine",
       "code": "stale_return_baseline",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "TTDU shows -50.9% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
+      "detail": "TTDU shows -50.0% 'daily' return measured against a prior_close from 1 session(s) before the last session \u2014 not a one-day move",
       "ticker": "TTDU",
-      "observed": -0.5089
+      "observed": -0.5001
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "CRDU intraday return +300.9% matches its declared 4x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "CRDU intraday return +271.7% matches its declared 4x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "CRDU",
-      "observed": 3.0086
+      "observed": 2.7169
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "GEVX intraday return +199.5% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "GEVX intraday return +197.2% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "GEVX",
-      "observed": 1.9954
+      "observed": 1.9724
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "KORU intraday return +1809.0% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "KORU intraday return +1878.6% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "KORU",
-      "observed": 18.09
+      "observed": 18.7862
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "LABX intraday return +469.2% matches its declared 6x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "LABX intraday return +488.8% matches its declared 6x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "LABX",
-      "observed": 4.6925
+      "observed": 4.8883
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MUU intraday return +1900.8% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "MUU intraday return +1876.3% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "MUU",
-      "observed": 19.0075
+      "observed": 18.7632
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "NEBX intraday return +202.1% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "NEBX intraday return +185.4% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "NEBX",
-      "observed": 2.0208
+      "observed": 1.854
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SNXX intraday return +741.7% matches its declared 8x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "SNXX intraday return +699.6% matches its declared 8x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "SNXX",
-      "observed": 7.4171
-    },
-    {
-      "severity": "quarantine",
-      "code": "return_outlier",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "VIAG moved -22.6% intraday (MAD z=7.3) with no declared split and no leverage corroboration \u2014 suspected bad quote",
-      "ticker": "VIAG",
-      "observed": -0.2262,
-      "threshold": 0.2
+      "observed": 6.9958
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "WDCX intraday return +214.9% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "WDCX intraday return +198.0% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "WDCX",
-      "observed": 2.149
+      "observed": 1.9802
     }
   ]
 }
