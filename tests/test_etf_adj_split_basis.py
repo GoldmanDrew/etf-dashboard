@@ -331,7 +331,8 @@ def test_etf_prior_close_uses_raw_close_not_adjusted(tmp_path: Path):
         ]
     ).to_parquet(parquet, index=False)
 
-    priors = refresh.load_etf_prior_closes_from_metrics(parquet, etf_tickers=["KORU", "AAOZ"])
+    priors = refresh.load_etf_prior_closes_from_metrics(
+        parquet, etf_tickers=["KORU", "AAOZ"], target_date=dt.date(2026, 8, 10))
     assert priors["KORU"]["prior_close"] == pytest.approx(16.84)
     assert priors["AAOZ"]["prior_close"] == pytest.approx(11.35)
 
@@ -360,5 +361,6 @@ def test_etf_prior_close_falls_back_to_adjusted_when_close_missing(tmp_path: Pat
              "etf_adj_close": 12.5, "underlying_adj_close": 100.0},
         ]
     ).to_parquet(parquet, index=False)
-    priors = refresh.load_etf_prior_closes_from_metrics(parquet, etf_tickers=["FOO"])
+    priors = refresh.load_etf_prior_closes_from_metrics(
+        parquet, etf_tickers=["FOO"], target_date=dt.date(2026, 8, 10))
     assert priors["FOO"]["prior_close"] == pytest.approx(12.5)

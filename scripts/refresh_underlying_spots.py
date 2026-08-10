@@ -23,6 +23,15 @@ live quote, so an adjusted close would turn every split/distribution adjustment
 into fake intraday return. Polygon ``prevDay`` is not used because the batch
 snapshot endpoint is not entitled on our plan.
 
+The prior-close row is pinned to **one specific session** -- the previous NYSE
+session -- never "the latest row available". Taking the latest row silently
+breaks ``return_d1_so_far`` in both directions: a ticker whose metrics row has
+not advanced yields a multi-day return wearing a daily label, and a ticker whose
+row *has* advanced to the current (still-open) session yields a return measured
+against today's own partial close, i.e. ~0. When a symbol has no row for the
+previous session, the baseline is marked ``prior_close_stale`` and
+``return_d1_so_far`` is left null rather than published as a misleading number.
+
 Usage::
 
     python scripts/refresh_underlying_spots.py
@@ -35,14 +44,18 @@ import json
 import logging
 import math
 import os
+import sys
 import time
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from market_calendar import previous_nyse_session
 
 LOGGER = logging.getLogger("underlying_spots")
 
@@ -131,14 +144,64 @@ def load_universe_all_symbols(path: Path = UNIVERSE_CSV) -> tuple[list[str], lis
     return all_symbols, underlyings, etf_tickers, ticker_to_und
 
 
+def prior_session_for(ref: date | datetime | None = None) -> date:
+    """The session whose close is the valid ``prior_close`` baseline.
+
+    ``previous_nyse_session`` walks strictly backwards, so this is the last
+    *completed* session on a trading day and the last session before the weekend
+    or holiday otherwise. The reference clock is UTC, matching
+    ``data_sentinel.check_spot_anomalies`` -- producer and detector must agree on
+    which session they expect, or the sentinel flags its own convention drift.
+    """
+    if ref is None:
+        ref = datetime.now(UTC)
+    if isinstance(ref, datetime):
+        ref = ref.date()
+    return previous_nyse_session(ref)
+
+
+def _pick_prior_rows(
+    df: pd.DataFrame,
+    key_col: str,
+    value_col: str,
+    target_date: date,
+) -> dict[str, dict[str, Any]]:
+    """Latest row per key at-or-before ``target_date``, flagged when it undershoots.
+
+    Rows *after* ``target_date`` are dropped outright: during RTH the metrics
+    panel already carries a row for the open session, and using it as the prior
+    close measures the symbol against itself.
+    """
+    df = df[df["date"].dt.date <= target_date]
+    if df.empty:
+        return {}
+    df = df.sort_values([key_col, "date"]).drop_duplicates([key_col], keep="last")
+    target_iso = target_date.isoformat()
+    out: dict[str, dict[str, Any]] = {}
+    for _, r in df.iterrows():
+        prior = _f(r[value_col])
+        if prior is None or prior <= 0:
+            continue
+        row_date = r["date"].date()
+        out[str(r[key_col])] = {
+            "prior_close": prior,
+            "prior_close_date": row_date.isoformat(),
+            "prior_close_stale": row_date != target_date,
+            "prior_close_expected_date": target_iso,
+        }
+    return out
+
+
 def load_prior_closes_from_metrics(
     path: Path = METRICS_PARQUET,
     *,
     ticker_to_und: dict[str, str] | None = None,
+    target_date: date | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Pull most-recent ``underlying_adj_close`` per underlying from the metrics panel."""
+    """Pull the previous session's ``underlying_adj_close`` per underlying."""
     if not path.exists() or not ticker_to_und:
         return {}
+    target_date = target_date or prior_session_for()
     try:
         df = pd.read_parquet(path, columns=["ticker", "date", "underlying_adj_close"])
     except Exception as exc:  # pragma: no cover - parquet engine fallback
@@ -161,24 +224,19 @@ def load_prior_closes_from_metrics(
     df = df.dropna(subset=["date"])
     if df.empty:
         return {}
-    df = df.sort_values(["underlying", "date"]).drop_duplicates(["underlying"], keep="last")
-    out: dict[str, dict[str, Any]] = {}
-    for _, r in df.iterrows():
-        out[str(r["underlying"])] = {
-            "prior_close": _f(r["underlying_adj_close"]),
-            "prior_close_date": r["date"].strftime("%Y-%m-%d") if pd.notna(r["date"]) else None,
-        }
-    return out
+    return _pick_prior_rows(df, "underlying", "underlying_adj_close", target_date)
 
 
 def load_etf_prior_closes_from_metrics(
     path: Path = METRICS_PARQUET,
     *,
     etf_tickers: list[str] | set[str] | None = None,
+    target_date: date | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Most-recent ETF close per fund ticker from the metrics panel."""
+    """Previous session's ETF close per fund ticker from the metrics panel."""
     if not path.exists() or not etf_tickers:
         return {}
+    target_date = target_date or prior_session_for()
     wanted = {_norm_sym(t) for t in etf_tickers if str(t).strip()}
     if not wanted:
         return {}
@@ -218,17 +276,7 @@ def load_etf_prior_closes_from_metrics(
     df = df.dropna(subset=["prior_close"])
     if df.empty:
         return {}
-    df = df.sort_values(["ticker", "date"]).drop_duplicates(["ticker"], keep="last")
-    out: dict[str, dict[str, Any]] = {}
-    for _, r in df.iterrows():
-        prior = _f(r["prior_close"])
-        if prior is None or prior <= 0:
-            continue
-        out[str(r["ticker"])] = {
-            "prior_close": prior,
-            "prior_close_date": r["date"].strftime("%Y-%m-%d") if pd.notna(r["date"]) else None,
-        }
-    return out
+    return _pick_prior_rows(df, "ticker", "prior_close", target_date)
 
 
 # ?? Source 3: options_cache.json ????????????????????????????????????????
@@ -491,6 +539,8 @@ def merge_sources(
         prior_meta = metrics_priors.get(sym, {})
         prior_close = prior_meta.get("prior_close")
         prior_date = prior_meta.get("prior_close_date")
+        prior_stale = bool(prior_meta.get("prior_close_stale"))
+        prior_expected = prior_meta.get("prior_close_expected_date")
 
         last: float | None = None
         as_of: str | None = None
@@ -511,13 +561,18 @@ def merge_sources(
 
         if last is None or last <= 0:
             continue
+        # A baseline that is not the previous session's close cannot produce a
+        # one-day return. Keep the value and its real date for diagnosis, but
+        # publish no return rather than a multi-day move labelled as daily.
         ret = None
-        if prior_close and prior_close > 0 and not stale:
+        if prior_close and prior_close > 0 and not stale and not prior_stale:
             ret = last / prior_close - 1.0
         out[sym] = {
             "last": last,
             "prior_close": prior_close,
             "prior_close_date": prior_date,
+            "prior_close_stale": prior_stale,
+            "prior_close_expected_date": prior_expected,
             "return_d1_so_far": ret,
             "volume_so_far": volume_so_far,
             "as_of": as_of,
@@ -530,6 +585,7 @@ def merge_sources(
 def _summarize_spot_rows(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
     counts = {k: 0 for k in SOURCE_KEYS}
     stale = 0
+    stale_prior = 0
     with_return = 0
     with_volume = 0
     for v in rows.values():
@@ -538,6 +594,8 @@ def _summarize_spot_rows(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
             counts[s] += 1
         if v.get("stale"):
             stale += 1
+        if v.get("prior_close_stale"):
+            stale_prior += 1
         if v.get("return_d1_so_far") is not None:
             with_return += 1
         if v.get("volume_so_far") is not None:
@@ -547,6 +605,7 @@ def _summarize_spot_rows(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "n_with_return": with_return,
         "n_with_volume": with_volume,
         "n_stale": stale,
+        "n_stale_prior_close": stale_prior,
         "sources": counts,
     }
 
@@ -557,6 +616,7 @@ def build_payload(
     *,
     all_symbols: list[str] | None = None,
     by_symbol: dict[str, dict[str, Any]] | None = None,
+    prior_session: date | None = None,
 ) -> dict[str, Any]:
     symbol_rows = by_symbol if by_symbol is not None else by_und
     symbol_universe = all_symbols if all_symbols is not None else underlyings
@@ -564,6 +624,8 @@ def build_payload(
     sym_summary = _summarize_spot_rows(symbol_rows)
     return {
         "build_time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "prior_close_session": (prior_session or prior_session_for()).isoformat(),
+        "n_stale_prior_close": sym_summary["n_stale_prior_close"],
         "n_underlyings_universe": len(underlyings),
         "n_underlyings_priced": und_summary["n_priced"],
         "n_symbols_universe": len(symbol_universe),
@@ -627,13 +689,22 @@ def main() -> int:
         len(etf_tickers),
     )
 
-    und_priors = load_prior_closes_from_metrics(args.metrics_parquet, ticker_to_und=ticker_to_und)
-    etf_priors = load_etf_prior_closes_from_metrics(args.metrics_parquet, etf_tickers=etf_tickers)
+    prior_session = prior_session_for()
+    und_priors = load_prior_closes_from_metrics(
+        args.metrics_parquet, ticker_to_und=ticker_to_und, target_date=prior_session,
+    )
+    etf_priors = load_etf_prior_closes_from_metrics(
+        args.metrics_parquet, etf_tickers=etf_tickers, target_date=prior_session,
+    )
     metrics_priors = {**und_priors, **etf_priors}
+    n_stale_priors = sum(1 for v in metrics_priors.values() if v.get("prior_close_stale"))
     LOGGER.info(
-        "Prior closes from metrics for %d underlyings + %d ETFs",
+        "Prior closes from metrics for %d underlyings + %d ETFs (session %s; "
+        "%d symbols have no row for it and will publish no return)",
         len(und_priors),
         len(etf_priors),
+        prior_session.isoformat(),
+        n_stale_priors,
     )
 
     options_spots = load_options_cache_spots(args.options_cache)
@@ -680,12 +751,31 @@ def main() -> int:
             yf_data = fetch_yfinance_fast_info(sample)
             for sym, row in yf_data.items():
                 last = row.get("last")
-                prior = row.get("prior_close") or metrics_priors.get(sym, {}).get("prior_close")
-                ret = (last / prior - 1.0) if last and prior and prior > 0 else None
+                prior_meta = metrics_priors.get(sym, {})
+                # yfinance ``previous_close`` *is* the prior session's close, so it
+                # both supersedes a stale metrics row and carries that session's
+                # date. Only when it is absent do we inherit the metrics baseline
+                # -- staleness flag included.
+                yf_prior = _f(row.get("prior_close"))
+                if yf_prior and yf_prior > 0:
+                    prior = yf_prior
+                    prior_date = prior_session.isoformat()
+                    prior_stale = False
+                else:
+                    prior = prior_meta.get("prior_close")
+                    prior_date = prior_meta.get("prior_close_date")
+                    prior_stale = bool(prior_meta.get("prior_close_stale"))
+                ret = (
+                    (last / prior - 1.0)
+                    if last and prior and prior > 0 and not prior_stale
+                    else None
+                )
                 spot_row = {
                     "last": last,
                     "prior_close": prior,
-                    "prior_close_date": metrics_priors.get(sym, {}).get("prior_close_date"),
+                    "prior_close_date": prior_date,
+                    "prior_close_stale": prior_stale,
+                    "prior_close_expected_date": prior_session.isoformat(),
                     "return_d1_so_far": ret,
                     "volume_so_far": row.get("volume_so_far"),
                     "as_of": row.get("as_of"),
@@ -701,10 +791,12 @@ def main() -> int:
         by_und,
         all_symbols=all_symbols,
         by_symbol=by_symbol,
+        prior_session=prior_session,
     )
     write_payload(args.output, payload)
     LOGGER.info(
-        "wrote %s underlying=%d/%d symbols=%d/%d sources=%s symbol_sources=%s with_return=%d with_volume=%d",
+        "wrote %s underlying=%d/%d symbols=%d/%d sources=%s symbol_sources=%s "
+        "with_return=%d with_volume=%d stale_prior_close=%d",
         args.output,
         payload["n_underlyings_priced"],
         payload["n_underlyings_universe"],
@@ -714,6 +806,7 @@ def main() -> int:
         payload["symbol_sources"],
         payload["n_with_return"],
         payload["n_with_volume"],
+        payload["n_stale_prior_close"],
     )
 
     min_with_return = int(args.min_with_return)

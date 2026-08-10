@@ -1,10 +1,12 @@
 """Tests for refresh_underlying_spots merge / fetch logic."""
 from __future__ import annotations
 
+import datetime as dt
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -76,6 +78,131 @@ def test_missing_prior_close_yields_no_return():
         metrics_priors={},
     )
     assert out["NVDA"]["return_d1_so_far"] is None
+
+
+# ---------------------------------------------------------------------------
+# prior_close baseline must be the previous session, not "the latest row"
+# (anti_patterns.md #15: stale baselines turn return_d1_so_far into a multi-day
+# return wearing a daily label; a too-fresh baseline measures a symbol against
+# its own open session and reads ~0).
+
+
+def _metrics_parquet(tmp_path: Path, rows: list[tuple[str, str, float, float]]) -> Path:
+    path = tmp_path / "etf_metrics_daily.parquet"
+    pd.DataFrame(
+        [
+            {"ticker": t, "date": d, "underlying_adj_close": uc,
+             "etf_adj_close": ec, "close_price": ec}
+            for t, d, uc, ec in rows
+        ]
+    ).to_parquet(path)
+    return path
+
+
+def test_prior_session_skips_weekends_and_holidays():
+    # Monday -> previous Friday; Saturday -> the Friday that just closed.
+    assert refresh.prior_session_for(dt.date(2026, 8, 10)) == dt.date(2026, 8, 7)
+    assert refresh.prior_session_for(dt.date(2026, 8, 8)) == dt.date(2026, 8, 7)
+    # Tue 2026-07-07 follows the observed Independence Day holiday (Fri 07-03).
+    assert refresh.prior_session_for(dt.date(2026, 7, 6)) == dt.date(2026, 7, 2)
+
+
+def test_prior_close_ignores_current_session_row(tmp_path: Path):
+    # The panel already carries a row for the open session (08-10). Using it
+    # would price AMDY against itself; the baseline must stay on 08-07.
+    path = _metrics_parquet(tmp_path, [
+        ("AMDY", "2026-08-06", 489.28, 46.04),
+        ("AMDY", "2026-08-07", 483.36, 45.61),
+        ("AMDY", "2026-08-10", 480.40, 45.38),
+    ])
+    target = dt.date(2026, 8, 7)
+
+    und = refresh.load_prior_closes_from_metrics(
+        path, ticker_to_und={"AMDY": "AMD"}, target_date=target)
+    assert und["AMD"]["prior_close"] == pytest.approx(483.36)
+    assert und["AMD"]["prior_close_date"] == "2026-08-07"
+    assert und["AMD"]["prior_close_stale"] is False
+
+    etf = refresh.load_etf_prior_closes_from_metrics(
+        path, etf_tickers=["AMDY"], target_date=target)
+    assert etf["AMDY"]["prior_close"] == pytest.approx(45.61)
+    assert etf["AMDY"]["prior_close_date"] == "2026-08-07"
+    assert etf["AMDY"]["prior_close_stale"] is False
+
+
+def test_prior_close_flags_symbols_whose_metrics_tail_stopped(tmp_path: Path):
+    # TTDU's panel ends 08-06; there is no 08-07 row to anchor a daily return.
+    path = _metrics_parquet(tmp_path, [
+        ("TTDU", "2026-07-27", 17.88, 2.57),
+        ("TTDU", "2026-08-06", 17.67, 2.46),
+    ])
+    target = dt.date(2026, 8, 7)
+
+    etf = refresh.load_etf_prior_closes_from_metrics(
+        path, etf_tickers=["TTDU"], target_date=target)
+    assert etf["TTDU"]["prior_close"] == pytest.approx(2.46)
+    assert etf["TTDU"]["prior_close_date"] == "2026-08-06"
+    assert etf["TTDU"]["prior_close_stale"] is True
+    assert etf["TTDU"]["prior_close_expected_date"] == "2026-08-07"
+
+
+def test_stale_prior_close_publishes_no_return():
+    # TTDU traded 1.2297 against an 08-06 close of 2.46 -> -50% "daily" return.
+    # The baseline is not the previous session, so no return may be published.
+    out = refresh.merge_sources(
+        ["TTDU"],
+        tradier={"TTDU": {"last": 1.2297, "as_of": None, "stale": False,
+                          "source": "tradier_spot"}},
+        polygon={},
+        options_cache={},
+        metrics_priors={"TTDU": {
+            "prior_close": 2.46,
+            "prior_close_date": "2026-08-06",
+            "prior_close_stale": True,
+            "prior_close_expected_date": "2026-08-07",
+        }},
+    )
+    row = out["TTDU"]
+    assert row["return_d1_so_far"] is None
+    # The offending baseline stays visible so the cause is diagnosable.
+    assert row["prior_close"] == pytest.approx(2.46)
+    assert row["prior_close_date"] == "2026-08-06"
+    assert row["prior_close_stale"] is True
+    assert row["prior_close_expected_date"] == "2026-08-07"
+
+
+def test_fresh_prior_close_still_publishes_return():
+    out = refresh.merge_sources(
+        ["AMDY"],
+        tradier={"AMDY": {"last": 45.01, "as_of": None, "stale": False,
+                          "source": "tradier_spot"}},
+        polygon={},
+        options_cache={},
+        metrics_priors={"AMDY": {
+            "prior_close": 45.61,
+            "prior_close_date": "2026-08-07",
+            "prior_close_stale": False,
+            "prior_close_expected_date": "2026-08-07",
+        }},
+    )
+    assert out["AMDY"]["return_d1_so_far"] == pytest.approx(45.01 / 45.61 - 1.0, rel=1e-9)
+
+
+def test_payload_reports_prior_close_session_and_stale_count():
+    by_symbol = {
+        "OK": {"source": "tradier_spot", "stale": False, "return_d1_so_far": 0.01,
+               "volume_so_far": None, "prior_close_stale": False},
+        "STALE": {"source": "tradier_spot", "stale": False, "return_d1_so_far": None,
+                  "volume_so_far": None, "prior_close_stale": True},
+    }
+    payload = refresh.build_payload(
+        ["OK"], {k: v for k, v in by_symbol.items() if k == "OK"},
+        all_symbols=["OK", "STALE"], by_symbol=by_symbol,
+        prior_session=dt.date(2026, 8, 7),
+    )
+    assert payload["prior_close_session"] == "2026-08-07"
+    assert payload["n_stale_prior_close"] == 1
+    assert payload["n_with_return"] == 1
 
 
 def test_polygon_sym_dot_conversion():
