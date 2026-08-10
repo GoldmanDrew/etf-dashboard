@@ -228,6 +228,70 @@ def test_market_event_breaker_suppresses_outliers():
     assert not [f for f in findings if f["code"] == "return_outlier"]
 
 
+def _ctx_empty():
+    return {"splits": {}, "metrics_close": {}, "metrics_date": {}, "delta": {},
+            "universe_count": None}
+
+
+def test_stale_return_baseline_detected_and_reclassifies_outlier():
+    # NOW is Wed 2026-08-05, so the expected prior session is Tue 2026-08-04.
+    # A symbol priced against 2026-07-28 is showing a multi-day return labelled
+    # daily: it must be named as such, not as a "suspected bad quote".
+    syms = _bulk_symbols()
+    for e in syms.values():
+        e["prior_close_date"] = "2026-08-04"
+    syms["MSFO"] = {"last": 13.0, "return_d1_so_far": 0.226,
+                    "prior_close_date": "2026-07-28"}
+    findings = ds.check_spot_anomalies(_spot_payload(syms), _ctx_empty(), _cfg(), now=NOW)
+    codes = {f["code"] for f in findings}
+    assert "return_outlier" not in codes
+    per_ticker = [f for f in findings if f.get("ticker") == "MSFO"]
+    assert len(per_ticker) == 1 and per_ticker[0]["code"] == "stale_return_baseline"
+    fleet = [f for f in findings if f["code"] == "stale_return_baseline" and not f.get("ticker")]
+    assert len(fleet) == 1 and "1/41" in fleet[0]["detail"]
+
+
+def test_stale_baseline_fleet_severity_scales_with_fraction():
+    cfg = _cfg()
+    # 1 of 41 (2.4%) is under the 5% fleet threshold -> WARN.
+    syms = _bulk_symbols()
+    for e in syms.values():
+        e["prior_close_date"] = "2026-08-04"
+    syms["ONE"] = {"last": 1.0, "return_d1_so_far": 0.01, "prior_close_date": "2026-07-28"}
+    fleet = [f for f in ds.check_spot_anomalies(_spot_payload(syms), _ctx_empty(), cfg, now=NOW)
+             if f["code"] == "stale_return_baseline" and not f.get("ticker")]
+    assert fleet[0]["severity"] == ds.WARN
+    # Half the fleet stale -> QUARANTINE.
+    syms2 = _bulk_symbols()
+    for i, (s, e) in enumerate(syms2.items()):
+        e["prior_close_date"] = "2026-07-28" if i % 2 else "2026-08-04"
+    fleet2 = [f for f in ds.check_spot_anomalies(_spot_payload(syms2), _ctx_empty(), cfg, now=NOW)
+              if f["code"] == "stale_return_baseline" and not f.get("ticker")]
+    assert fleet2[0]["severity"] == ds.QUARANTINE
+
+
+def test_correct_baseline_still_flags_genuine_outlier():
+    # Regression guard: the baseline check must not swallow real bad quotes.
+    syms = _bulk_symbols()
+    for e in syms.values():
+        e["prior_close_date"] = "2026-08-04"
+    syms["BAD"] = {"last": 5.0, "return_d1_so_far": 0.42, "prior_close_date": "2026-08-04"}
+    findings = ds.check_spot_anomalies(_spot_payload(syms), _ctx_empty(), _cfg(), now=NOW)
+    hits = [f for f in findings if f.get("ticker") == "BAD"]
+    assert len(hits) == 1 and hits[0]["code"] == "return_outlier"
+
+
+def test_baseline_check_skipped_on_non_session_file_date():
+    syms = _bulk_symbols()
+    for e in syms.values():
+        e["prior_close_date"] = "2026-07-28"
+    payload = _spot_payload(syms)
+    payload["build_time"] = "2026-08-08T17:55:00Z"  # Saturday
+    saturday = datetime(2026, 8, 8, 17, 55, tzinfo=UTC)
+    findings = ds.check_spot_anomalies(payload, _ctx_empty(), _cfg(), now=saturday)
+    assert not [f for f in findings if f["code"] == "stale_return_baseline"]
+
+
 def test_zombie_spot_quarantined():
     # NBIZ-class: spot $1.89 vs metrics close $34 with no declared split.
     ctx = {"splits": {}, "metrics_close": {"NBIZ": 34.0}, "metrics_date": {"NBIZ": "2026-08-04"},

@@ -61,10 +61,16 @@ jobs:
         run: |
           DESELECT=""
           while IFS= read -r line; do
+            line="${line%$'\r'}"          # tolerate CRLF (the file is edited on Windows)
             case "$line" in ''|\#*) continue ;; esac
             DESELECT="$DESELECT --deselect $line"
           done < tests/known_failures.txt
-          echo "Deselecting $(grep -cvE '^\s*(#|$)' tests/known_failures.txt) known failure(s)."
+          COUNT=$(printf '%s\n' "$DESELECT" | grep -o -- '--deselect' | wc -l)
+          echo "Deselecting $COUNT known failure(s) from tests/known_failures.txt."
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error title=known_failures::parsed 0 entries — the ledger is not being applied"
+            exit 1
+          fi
           python -m pytest tests/ -q $DESELECT
 
   sentinel-selfcheck:

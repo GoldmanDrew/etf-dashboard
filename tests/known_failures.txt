@@ -7,7 +7,10 @@
 #   * Every line needs a dated note on why it fails and what would fix it.
 #   * The list should shrink. `python -m pytest tests/` locally shows the truth.
 #
-# Baseline captured 2026-08-10: 13 failed, 880 passed on main.
+# Baseline captured 2026-08-10: 14 failed, 895 passed on a CLEAN main checkout.
+# Capture the baseline with a clean tree (`git stash` first). An uncommitted
+# local fix in the working copy will hide a failure that CI still sees — that is
+# how test_freshness_helpers below was missed on the first pass.
 
 # --- Bucket 4 / B4 research: assert on committed research artifacts that have
 # --- drifted from the frozen nests these tests pin. Fix = rebuild the nests or
@@ -28,6 +31,12 @@ tests/test_ingest_corporate_actions.py::test_issuer_press_granite_lineup_emits_d
 tests/test_ingest_event_calendar.py::test_build_known_calendar_nasdaq_only_confirmed
 tests/test_ingest_event_calendar.py::test_build_known_calendar_seed_fallback_when_nasdaq_misses
 tests/test_ingest_event_calendar.py::test_refresh_seed_from_nasdaq_updates_confirmed
+
+# --- YieldBOOST refresh ordering: fails on main as committed. There is an
+# --- uncommitted local fix in the working copy (scripts/ci_tick.py +
+# --- tests/test_freshness_helpers.py) that makes it pass — remove this line
+# --- when that lands.
+tests/test_freshness_helpers.py::test_order_yieldboost_refresh_puts_stale_underlyings_before_sleeves
 
 # --- IPO unlock staircase model expectations vs committed calendar.
 tests/test_ipo_unlock.py::test_cbrs_staircase_and_past_releases

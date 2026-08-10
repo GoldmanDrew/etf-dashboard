@@ -46,7 +46,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from market_calendar import is_nyse_session  # noqa: E402
+from market_calendar import is_nyse_session, previous_nyse_session  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "config" / "sentinel.json"
@@ -515,11 +515,53 @@ def check_spot_anomalies(payload: dict, ctx: dict, cfg: dict, *, now: datetime |
     for sym, (delta, und) in ctx["delta"].items():
         if und:
             funds_on.setdefault(und, []).append((sym, delta))
+    # return_d1_so_far is only a ONE-DAY return if prior_close came from the
+    # previous session. When prior_close_date lags (the metrics row for that
+    # ticker never advanced), the field is a multi-day return wearing a daily
+    # label — and judging it with a daily threshold diagnoses the symptom
+    # instead of the cause. Identify those first, exclude them from the outlier
+    # population so they cannot skew the median/MAD, and report the baseline.
+    stale_baseline: dict[str, int] = {}
+    if is_nyse_session(ref_date):
+        expected_prior = previous_nyse_session(ref_date)
+        for sym, ent in by_symbol.items():
+            pcd = (ent or {}).get("prior_close_date")
+            if not pcd:
+                continue
+            try:
+                d = date.fromisoformat(str(pcd)[:10])
+            except ValueError:
+                continue
+            if d < expected_prior:
+                stale_baseline[sym.upper()] = (expected_prior - d).days
+
     returns: dict[str, float] = {}
     for sym, ent in by_symbol.items():
         r = (ent or {}).get("return_d1_so_far")
-        if isinstance(r, (int, float)) and math.isfinite(r):
+        if isinstance(r, (int, float)) and math.isfinite(r) and sym.upper() not in stale_baseline:
             returns[sym.upper()] = float(r)
+
+    if stale_baseline:
+        total = len(by_symbol) or 1
+        frac = len(stale_baseline) / total
+        worst_sym, worst_lag = max(stale_baseline.items(), key=lambda kv: kv[1])
+        fleet_frac = float(ro.get("stale_baseline_fleet_frac", 0.05))
+        findings.append(finding(
+            QUARANTINE if frac > fleet_frac else WARN, "stale_return_baseline", rel,
+            f"{len(stale_baseline)}/{total} symbols ({frac:.1%}) carry a prior_close_date older "
+            f"than the previous session {expected_prior} (worst {worst_sym} {worst_lag}d behind) — "
+            "their return_d1_so_far is a multi-day return labelled as daily, corrupting displayed "
+            "returns and intraday flow math",
+            observed=len(stale_baseline), threshold=int(total * fleet_frac)))
+        # Gray out only the ones whose displayed number is materially wrong.
+        for sym, lag in sorted(stale_baseline.items()):
+            r = (by_symbol.get(sym) or {}).get("return_d1_so_far")
+            if isinstance(r, (int, float)) and math.isfinite(r) and abs(r) > abs_max:
+                findings.append(finding(
+                    QUARANTINE, "stale_return_baseline", rel,
+                    f"{sym} shows {r:+.1%} 'daily' return measured against a prior_close from "
+                    f"{lag} session(s) before the last session — not a one-day move",
+                    ticker=sym, observed=round(r, 4)))
 
     # Market-event circuit breaker: when a large slice of the fleet moves hard,
     # that is the market, not a data artifact — flagging would be noise.

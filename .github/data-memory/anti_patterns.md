@@ -123,7 +123,27 @@ walks every commit of the metrics JSON to refill them. **The git history IS the 
 store of last resort — no tool may rewrite/squash data-file history.** Quarantine is a
 side manifest for exactly this reason.
 
-## 15. Library upgrade breakage
+## 15. Stale `prior_close` baseline in the intraday spot feed *(found by the sentinel, 2026-08-10)*
+
+`data/underlying_intraday_spot.json` sources `prior_close` from the metrics store, but
+for tickers whose metrics row has not advanced, the baseline can be days behind the
+previous session — 166 of 824 symbols (20%), worst 10 sessions behind, on the day the
+sentinel first ran. `return_d1_so_far` is then a multi-day return wearing a daily label,
+which corrupts displayed intraday returns and the LETF rebalance-flow math that consumes
+them. A separate variant of the same field: after a declared forward split, `prior_close`
+stays on the pre-split basis (CRDU/GEVX/KORU/LABX/MUU/NEBX/SNXX/WDCX), producing
+"returns" of +200% to +1900% that match the split multiple exactly.
+
+- **Detection:** `data_sentinel.check_spot_anomalies` compares `prior_close_date` against
+  `previous_nyse_session(file trading date)` (`stale_return_baseline`), and matches the
+  observed ratio against declared split multiples (`split_basis_prior_close`).
+- **Lesson for detectors:** never judge a "daily return" field with a daily threshold
+  before confirming its baseline is actually the previous session. The first version of
+  this check flagged seven tickers as "suspected bad quote" — a true symptom with the
+  wrong cause, which would have sent someone hunting quote feeds instead of the
+  metrics join.
+
+## 16. Library upgrade breakage
 
 pandas 2.2 changed `groupby.apply` semantics → holdings CSV lost its key column → the
 whole YieldBOOST tick aborted before options refresh. Rule: one persist failure must not
