@@ -137,11 +137,31 @@ stays on the pre-split basis (CRDU/GEVX/KORU/LABX/MUU/NEBX/SNXX/WDCX), producing
 - **Detection:** `data_sentinel.check_spot_anomalies` compares `prior_close_date` against
   `previous_nyse_session(file trading date)` (`stale_return_baseline`), and matches the
   observed ratio against declared split multiples (`split_basis_prior_close`).
+- **Split-basis variant root-caused and healed 2026-08-10.** Two independent defects had
+  to line up. (a) `prior_close` read `etf_adj_close` in preference to raw `close_price`,
+  a basis mismatch against a raw live quote regardless of split health — it also
+  manufactured a fake +21.5% day for AAOZ (real: +0.5%) out of ordinary distribution
+  adjustment, 82 tickers affected. Fixed by reading raw close, adj only as fallback.
+  (b) `detect_adj_basis_switch_splits` proposed its `forward` remap for *every* declared
+  forward split, including those where the provider had already restated raw close, so
+  `normalize_adj_basis_switch_etf_adj_close` scaled the correctly back-adjusted
+  post-split rows by the split factor a second time and put the entire history on the
+  pre-split basis. Now gated on the close series actually being continuous through the
+  split. Persisted history repaired by `repair_pre_split_basis_etf_adj_close`
+  (`scripts/repair_etf_adj_split_basis.py`, also wired into the ingest).
 - **Lesson for detectors:** never judge a "daily return" field with a daily threshold
   before confirming its baseline is actually the previous session. The first version of
   this check flagged seven tickers as "suspected bad quote" — a true symptom with the
   wrong cause, which would have sent someone hunting quote feeds instead of the
   metrics join.
+- **Lesson — levels need their own invariant.** A uniform basis error is invisible to
+  every return-based detector: a constant factor cancels in `adj[t]/adj[t-1]`, so the
+  cliff and correlation scans stayed silent for weeks while `prior_close` was off by 20x.
+  The invariant that catches it is a *level* one: after the last close-jump-verified
+  split, `etf_adj_close` must equal raw `close_price` (a back-adjusted series is
+  normalized to the newest basis). Assert that, not just return smoothness. Corollary:
+  a field differenced against a live quote must be on the raw traded basis — pick the
+  column by basis, never by "the more processed one is better".
 
 ## 16. Library upgrade breakage
 

@@ -277,8 +277,25 @@
       const jump = splitCloseJumpRatio(points, ev.date);
       const closeContinuous = jump == null || Math.abs(jump - 1) <= 0.12;
       const trials = [];
-      if (declared < 1) trials.push({ mult: declared, variant: "forward" });
-      else {
+      if (declared < 1) {
+        // Mirror of split_adjustments.detect_adj_basis_switch_splits: a forward
+        // split whose raw close jumps by the split ratio is already restated by
+        // the provider, so the post-split rows are on the current basis and adj
+        // must equal close there. Only a close series continuous through the
+        // split hides an adj-only basis switch. A large same-session move can
+        // shrink the observed jump below the mechanical multiple (NEBX
+        // 2026-06-01), so also reject a same-direction partial jump.
+        const fwdClosePts = points.map((p) => ({ date: p.date, close: p.close ?? p[1] }));
+        let restated = closeJumpNearDate(fwdClosePts, declared, parseDate(ev.date), 7);
+        if (!restated) {
+          const partial = findPartialSplitJumpBoundary(fwdClosePts, declared, parseDate(ev.date), 7);
+          if (partial) {
+            const jumpP = splitCloseJumpRatio(points, partial);
+            restated = jumpP != null && isPlausiblePostSplitResidual(jumpP, declared);
+          }
+        }
+        if (closeContinuous && !restated) trials.push({ mult: declared, variant: "forward" });
+      } else {
         const closePts = points.map((p) => ({ date: p.date, close: p.close ?? p[1] }));
         const adjB = detectAdjBoundary(points, ev.date, declared, relTol) || parseDate(ev.date);
         const staggered = closeJumpNearDate(closePts, declared, adjB, 7);

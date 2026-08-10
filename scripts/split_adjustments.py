@@ -680,7 +680,32 @@ def detect_adj_basis_switch_splits(
         close_continuous = jump is None or abs(jump - 1.0) <= 0.12
         trials: list[tuple[float, str]] = []
         if dm < 1.0:
-            trials.append((dm, "forward"))
+            # A forward split whose raw close jumps by the split ratio is already
+            # restated by the provider: post-split rows sit on the current basis and
+            # adj must equal close there. Only a close series that stays continuous
+            # through the split hides an adj-only basis switch needing the post rows
+            # mapped onto ``close x mult``. Without this gate the correct
+            # back-adjusted series is scaled a second time and the whole history
+            # lands on the pre-split basis (CRDU/KORU/MUU 2026-07).
+            #
+            # Two ways the jump hides, both checked here: it can print a session or
+            # two before the declared date (mirroring the reverse branch's
+            # ``staggered`` test below), and a large same-session move can shrink it
+            # below the mechanical multiple (NEBX 2026-06-01: a 1-for-3 basis switch
+            # on a +29% levered day prints only 0.43x).
+            fwd_close_pts = [(d, c) for d, c, _ in points]
+            restated = _close_jump_near_date(fwd_close_pts, dm, eff, window_days=7)
+            if not restated:
+                partial = find_partial_split_jump_boundary(
+                    fwd_close_pts, dm, eff, window_days=7
+                )
+                if partial is not None:
+                    jump_p = split_close_jump_ratio(points, partial)
+                    restated = jump_p is not None and is_plausible_post_split_residual(
+                        jump_p, dm
+                    )
+            if close_continuous and not restated:
+                trials.append((dm, "forward"))
         else:
             close_pts = [(d, c) for d, c, _ in points]
             adj_b = detect_adj_boundary(points, eff, dm, rel_tol=rel_tol) or eff
