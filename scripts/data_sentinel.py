@@ -543,16 +543,33 @@ def check_spot_anomalies(payload: dict, ctx: dict, cfg: dict, *, now: datetime |
 
     if stale_baseline:
         total = len(by_symbol) or 1
-        frac = len(stale_baseline) / total
-        worst_sym, worst_lag = max(stale_baseline.items(), key=lambda kv: kv[1])
         fleet_frac = float(ro.get("stale_baseline_fleet_frac", 0.05))
-        findings.append(finding(
-            QUARANTINE if frac > fleet_frac else WARN, "stale_return_baseline", rel,
-            f"{len(stale_baseline)}/{total} symbols ({frac:.1%}) carry a prior_close_date older "
-            f"than the previous session {expected_prior} (worst {worst_sym} {worst_lag}d behind) — "
-            "their return_d1_so_far is a multi-day return labelled as daily, corrupting displayed "
-            "returns and intraday flow math",
-            observed=len(stale_baseline), threshold=int(total * fleet_frac)))
+        # A stale baseline only corrupts the artifact if a return was published
+        # against it. refresh_underlying_spots suppresses those returns, so the
+        # remainder is lost coverage (worth a WARN and a fix upstream in the
+        # metrics ingest) rather than bad data being served.
+        contaminated = {
+            s: lag for s, lag in stale_baseline.items()
+            if isinstance((by_symbol.get(s) or {}).get("return_d1_so_far"), (int, float))
+        }
+        frac = len(contaminated) / total
+        worst_sym, worst_lag = max(stale_baseline.items(), key=lambda kv: kv[1])
+        if contaminated:
+            findings.append(finding(
+                QUARANTINE if frac > fleet_frac else WARN, "stale_return_baseline", rel,
+                f"{len(contaminated)}/{total} symbols ({frac:.1%}) publish a return_d1_so_far "
+                f"against a prior_close_date older than the previous session {expected_prior} "
+                f"(worst {worst_sym} {worst_lag}d behind) — a multi-day return labelled as daily, "
+                "corrupting displayed returns and intraday flow math",
+                observed=len(contaminated), threshold=int(total * fleet_frac)))
+        suppressed = len(stale_baseline) - len(contaminated)
+        if suppressed:
+            findings.append(finding(
+                WARN, "stale_return_baseline_suppressed", rel,
+                f"{suppressed}/{total} symbols have no metrics row for the previous session "
+                f"{expected_prior} (worst {worst_sym} {worst_lag}d behind); their return was "
+                "correctly withheld, but the metrics tail for them is not advancing",
+                observed=suppressed))
         # Gray out only the ones whose displayed number is materially wrong.
         for sym, lag in sorted(stale_baseline.items()):
             r = (by_symbol.get(sym) or {}).get("return_d1_so_far")

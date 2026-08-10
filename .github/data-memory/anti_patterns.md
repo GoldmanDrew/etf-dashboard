@@ -137,6 +137,18 @@ stays on the pre-split basis (CRDU/GEVX/KORU/LABX/MUU/NEBX/SNXX/WDCX), producing
 - **Detection:** `data_sentinel.check_spot_anomalies` compares `prior_close_date` against
   `previous_nyse_session(file trading date)` (`stale_return_baseline`), and matches the
   observed ratio against declared split multiples (`split_basis_prior_close`).
+- **Fix (staleness variant):** `refresh_underlying_spots` no longer takes "the latest
+  metrics row" as the baseline — it pins the row to `previous_nyse_session` and publishes
+  no `return_d1_so_far` when a symbol has no row for that session (`prior_close_stale`).
+  Pinning also closed a *silent* second failure: during RTH the panel already carries a
+  row for the open session, so 532 of 824 symbols were being priced against their own
+  partial close and reading ~0 (NVDA showed −2.2% where the true move was −3.2%). The
+  sentinel now separates a *withheld* return (`stale_return_baseline_suppressed`, WARN —
+  the artifact is honest, the metrics tail is what's stalled) from one still published
+  against a stale baseline (`stale_return_baseline`, quarantine).
+- **Lesson for producers:** "most recent row available" is never the same statement as
+  "the row for the session I mean". A row selector with no session assertion fails in
+  both directions at once, and only the too-old direction is visible.
 - **Lesson for detectors:** never judge a "daily return" field with a daily threshold
   before confirming its baseline is actually the previous session. The first version of
   this check flagged seven tickers as "suspected bad quote" — a true symptom with the

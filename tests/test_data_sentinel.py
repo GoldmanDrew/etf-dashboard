@@ -270,6 +270,26 @@ def test_stale_baseline_fleet_severity_scales_with_fraction():
     assert fleet2[0]["severity"] == ds.QUARANTINE
 
 
+def test_suppressed_stale_baseline_warns_instead_of_quarantining():
+    # refresh_underlying_spots now withholds return_d1_so_far when the baseline
+    # is not the previous session. Nothing wrong is being served, so half a
+    # fleet of withheld returns must not quarantine the artifact -- but the
+    # stalled metrics tail behind it still has to be reported.
+    syms = _bulk_symbols()
+    for i, (s, e) in enumerate(syms.items()):
+        if i % 2:
+            e["prior_close_date"] = "2026-07-28"
+            e["return_d1_so_far"] = None
+        else:
+            e["prior_close_date"] = "2026-08-04"
+    findings = ds.check_spot_anomalies(_spot_payload(syms), _ctx_empty(), _cfg(), now=NOW)
+    assert not any(f["code"] == "stale_return_baseline" for f in findings)
+    suppressed = [f for f in findings if f["code"] == "stale_return_baseline_suppressed"]
+    assert len(suppressed) == 1
+    assert suppressed[0]["severity"] == ds.WARN
+    assert suppressed[0]["observed"] == 20
+
+
 def test_correct_baseline_still_flags_genuine_outlier():
     # Regression guard: the baseline check must not swallow real bad quotes.
     syms = _bulk_symbols()
