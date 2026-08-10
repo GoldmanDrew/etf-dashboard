@@ -375,3 +375,35 @@ test("scaleMetricsSeriesToLatestShareBasis removes SNDQ reverse-split close clif
   // No vertical spike: pre and post on same basis stay in the same order of magnitude.
   assert.ok(pre.close_plot / post.close_plot < 2.5);
 });
+
+test("restated forward split is not an adj basis switch (CRDU 4-for-1)", () => {
+  // Raw close jumps by the split ratio => the provider already restated close, so
+  // post-split rows are on the current basis and there is no adj switch to remap.
+  // Mirrors tests/test_etf_adj_split_basis.py; scaling these a second time put the
+  // whole history on the pre-split basis and made prior_close serve 4.70 vs 17.59.
+  const points = [
+    { date: "2026-07-16", close: 52.71, adj: 13.1775 },
+    { date: "2026-07-17", close: 50.0, adj: 12.5 },
+    { date: "2026-07-20", close: 55.01, adj: 13.7525 },
+    { date: "2026-07-21", close: 15.17, adj: 15.17 },
+    { date: "2026-07-23", close: 17.05, adj: 17.05 },
+    { date: "2026-07-24", close: 13.65, adj: 13.65 },
+  ];
+  const events = [{ date: "2026-07-21", mult: 0.25 }];
+  assert.deepEqual(PB.detectAdjBasisSwitchSplits(points, events), []);
+});
+
+test("continuous-close forward split still yields an adj basis switch remap", () => {
+  // The case the remap exists for: close never restated, only adj switches basis.
+  const points = [
+    { date: "2026-04-28", close: 41.6, adj: 416.0 },
+    { date: "2026-04-30", close: 40.8, adj: 408.0 },
+    { date: "2026-05-04", close: 40.0, adj: 400.0 },
+    { date: "2026-05-05", close: 39.6, adj: 39.6 },
+    { date: "2026-05-06", close: 39.2, adj: 39.2 },
+    { date: "2026-05-07", close: 38.9, adj: 38.9 },
+  ];
+  const events = [{ date: "2026-05-05", mult: 0.1 }];
+  const out = PB.detectAdjBasisSwitchSplits(points, events);
+  assert.ok(out.length > 0, "continuous close must still produce a remap variant");
+});

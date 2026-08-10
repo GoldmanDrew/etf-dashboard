@@ -2243,6 +2243,100 @@ def repair_fabricated_etf_adj_basis(
     return out, n_repaired
 
 
+PRE_SPLIT_BASIS_RATIO_TOL = 0.05
+PRE_SPLIT_BASIS_FACTOR_REL_TOL = 0.15
+
+
+def repair_pre_split_basis_etf_adj_close(
+    df: pd.DataFrame,
+    *,
+    corporate_actions_path: Path | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """Rebuild ``etf_adj_close`` when the newest basis segment is not on raw close.
+
+    A back-adjusted series is normalized to the *latest* basis: after the last
+    close-jump-verified split ``etf_adj_close`` must equal raw ``close_price``, with
+    earlier segments carrying the cumulative split factor. A normalizer that scales
+    the post-split rows a second time leaves the whole history -- newest bar included
+    -- on the pre-split basis. Daily returns still look right (a constant factor
+    cancels) so the cliff detectors stay quiet, but every *level* consumer breaks:
+    ``prior_close`` served KORU at 0.842 against a live 16.66 quote, reporting a
+    +1878% "daily" return and corrupting the LETF flow math downstream.
+
+    Only rebuilt when the post-boundary ratio is off by a declared split factor, so
+    legitimate distribution adjustment is left untouched.
+    """
+    if df.empty or "etf_adj_close" not in df.columns or "close_price" not in df.columns:
+        return df, 0
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    n_repaired = 0
+    for ticker in out["ticker"].unique():
+        declared = load_split_execution_events_for_ticker(ticker, corporate_actions_path)
+        if not declared:
+            continue
+        m = out["ticker"] == ticker
+        g = out.loc[m].sort_values("date")
+        rows = g.to_dict("records")
+        close_pts: list[tuple[date, float, float]] = []
+        for row in rows:
+            close = pd.to_numeric(row.get("close_price"), errors="coerce")
+            if math.isfinite(float(close)) and float(close) > 0:
+                close_pts.append((row["date"], float(close), float(close)))
+        verified = filter_splits_needing_close_basis_fix(
+            close_pts,
+            declared,
+            metric_rows=rows,
+        )
+        if not verified:
+            continue
+        boundary = max(d for d, _m in verified)
+        # Median over the post-boundary segment: robust to a single stale tail bar
+        # carrying its own basis artifact (anchor_lag rows are excluded outright).
+        post_ratios: list[float] = []
+        for row in rows:
+            if row["date"] < boundary or bool(row.get("stale")):
+                continue
+            close = pd.to_numeric(row.get("close_price"), errors="coerce")
+            adj = pd.to_numeric(row.get("etf_adj_close"), errors="coerce")
+            if not (math.isfinite(float(close)) and float(close) > 0):
+                continue
+            if not (math.isfinite(float(adj)) and float(adj) > 0):
+                continue
+            post_ratios.append(float(adj) / float(close))
+        if not post_ratios:
+            continue
+        observed = float(np.median(post_ratios))
+        if abs(observed - 1.0) <= PRE_SPLIT_BASIS_RATIO_TOL:
+            continue
+        # The corruption scales the newest segment by the cumulative verified factor;
+        # anything else (distributions, a genuine TR basis) is not ours to rewrite.
+        cum = 1.0
+        for _d, mult in verified:
+            cum *= float(mult)
+        if cum <= 0 or abs(observed / cum - 1.0) > PRE_SPLIT_BASIS_FACTOR_REL_TOL:
+            continue
+        for ix, row in g.iterrows():
+            close = pd.to_numeric(row.get("close_price"), errors="coerce")
+            if not (math.isfinite(float(close)) and float(close) > 0):
+                continue
+            rebuilt = float(close) * cum_split_factor_to_latest(row["date"], verified)
+            old = pd.to_numeric(row.get("etf_adj_close"), errors="coerce")
+            if not math.isfinite(float(old)) or abs(float(old) - rebuilt) > 1e-9:
+                out.loc[ix, "etf_adj_close"] = rebuilt
+                n_repaired += 1
+        LOGGER.warning(
+            "rebuilt pre-split-basis etf_adj_close for %s: post-%s ratio %.4g vs 1.0",
+            ticker,
+            boundary,
+            observed,
+        )
+    if n_repaired > 0:
+        LOGGER.info("rebuilt etf_adj_close on %d row(s) stuck on a pre-split basis", n_repaired)
+    return out, n_repaired
+
+
 def repair_underlying_adj_close_reverting_islands(
     df: pd.DataFrame,
     etf_to_underlying: dict[str, str],
@@ -3981,6 +4075,9 @@ def main() -> None:
     merged, n_fab = repair_fabricated_etf_adj_basis(merged)
     if n_fab:
         LOGGER.info("Repaired fabricated adj basis on %d row(s)", n_fab)
+    merged, n_pre_basis = repair_pre_split_basis_etf_adj_close(merged)
+    if n_pre_basis:
+        LOGGER.info("Repaired pre-split-basis adj close on %d row(s)", n_pre_basis)
     merged, n_vol_bf = backfill_shares_traded_gaps(merged)
     if n_vol_bf:
         LOGGER.info("Backfilled shares_traded on %d historical row(s)", n_vol_bf)

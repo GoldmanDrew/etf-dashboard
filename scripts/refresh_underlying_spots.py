@@ -17,9 +17,11 @@ Source priority (graceful fallback):
    ``--max-yfinance``.
 
 Prior-close comes from ``etf_metrics_daily``: ``underlying_adj_close`` for
-underlyings and ``etf_adj_close`` / ``close_price`` for fund tickers. Polygon
-``prevDay`` is not used because the batch snapshot endpoint is not entitled on
-our plan.
+underlyings and raw ``close_price`` (falling back to ``etf_adj_close``) for fund
+tickers. The raw basis is required: ``prior_close`` is differenced against a raw
+live quote, so an adjusted close would turn every split/distribution adjustment
+into fake intraday return. Polygon ``prevDay`` is not used because the batch
+snapshot endpoint is not entitled on our plan.
 
 Usage::
 
@@ -200,13 +202,19 @@ def load_etf_prior_closes_from_metrics(
     df = df.dropna(subset=["date"])
     if df.empty:
         return {}
-    if "etf_adj_close" in df.columns:
-        df["prior_close"] = pd.to_numeric(df["etf_adj_close"], errors="coerce")
+    # Raw ``close_price`` first: ``prior_close`` is differenced against a *raw* live
+    # quote, so it has to be on the raw traded basis. ``etf_adj_close`` is split- and
+    # distribution-adjusted by construction, so preferring it silently converts every
+    # adjustment into fake intraday return (AAOZ +21.5% vs a real +0.5%) and lets any
+    # adj-basis defect through as corrupt return/flow math (the 2026-07 forward-split
+    # cohort read a whole pre-split-basis series as prior_close: KORU +1878%).
+    if "close_price" in df.columns:
+        df["prior_close"] = pd.to_numeric(df["close_price"], errors="coerce")
     else:
         df["prior_close"] = pd.NA
-    if "close_price" in df.columns:
-        close_px = pd.to_numeric(df["close_price"], errors="coerce")
-        df["prior_close"] = df["prior_close"].fillna(close_px)
+    if "etf_adj_close" in df.columns:
+        adj_px = pd.to_numeric(df["etf_adj_close"], errors="coerce")
+        df["prior_close"] = df["prior_close"].fillna(adj_px)
     df = df.dropna(subset=["prior_close"])
     if df.empty:
         return {}
