@@ -53,6 +53,7 @@ import logging
 import math
 import os
 import re
+import statistics
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, timezone
 from pathlib import Path
@@ -104,6 +105,15 @@ SPOT_FRESH_SECONDS = 30 * 60  # 30 minutes
 #: by_symbol (which is how the 2026-07/08 GraniteShares staleness hid).
 ANCHOR_MAX_AGE_BDAYS_FULL = 2
 ANCHOR_MAX_AGE_BDAYS_NA = 7
+
+#: Implied vols outside this band are solver artifacts, not market views. The
+#: listed chains behind the YieldBoost wrappers are dominated by near-worthless
+#: deep-OTM contracts quoted 0.00 x 0.01, and a vendor IV solved off that mid
+#: is numerically meaningless: on 2026-08-10 the AMDL ring carried 0.063 and
+#: 4.769 on ADJACENT strikes (a 76x step), and BITX carried 0.452 across four
+#: strikes then 3.853 on the fifth.
+IV_SANITY_MIN = 0.05
+IV_SANITY_MAX = 3.00
 
 
 def _anchor_age_bdays(anchor_date: object, ts_utc: datetime) -> int | None:
@@ -516,6 +526,76 @@ def parse_occ(position_ticker: str | None) -> dict | None:
     }
 
 
+def ring_sigma(
+    sym_entry: dict,
+    target_type: str,
+    expiry_d: date,
+) -> tuple[float | None, dict]:
+    """ONE sigma for every leg of a (root, expiry, type) ring.
+
+    Deliberately NOT a per-strike interpolation. The whole reason a BS mark is
+    tolerable for these FLEX legs is that a put SPREAD carries mostly
+    offsetting vega, so surface error cancels at the spread level — but that
+    cancellation only holds if both legs are priced off the SAME sigma.
+    Interpolating per strike broke it: on 2026-08-10 XBTY's long legs drew
+    1.40/1.61 while its short legs drew 3.85 off the same ring, and the
+    spread's modelled value moved -6.2% on a +0.85% underlying day (implied
+    beta -7.3 against a stated delta of +0.47). AMYY was +5.6 against +0.21.
+    Every other wrapper that day was inside [-0.8, +0.5] — and the ones that
+    behaved were exactly the ones whose ring held a single strike, so both
+    legs happened to clamp to the same number.
+
+    A median is used rather than a mean so one 4.769 cannot drag the ring, and
+    quoted contracts are preferred because an IV solved off a 0.00 x 0.01 book
+    is a solver artifact. The fallbacks degrade rather than refuse: losing a
+    leg entirely would drop the symbol's option coverage and take the whole
+    row to ``na``, which is a worse outcome than a slightly stale vol.
+    """
+    cands: list[tuple[int, float, bool]] = []
+    for c in sym_entry.get("options") or []:
+        if str(c.get("contract_type", "")).lower() != target_type:
+            continue
+        iv = _f(c.get("iv"))
+        k = _f(c.get("strike_price"))
+        if iv is None or iv <= 0 or k is None or k <= 0:
+            continue
+        try:
+            exp_c = datetime.strptime(str(c.get("expiration_date")), "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        bid = _f(c.get("bid"))
+        cands.append((abs((exp_c - expiry_d).days), iv, bid is not None and bid > 0))
+    if not cands:
+        return None, {"reason": "no listed IV surface"}
+
+    nearest_gap = min(c[0] for c in cands)
+    ring = [(iv, quoted) for gap, iv, quoted in cands if gap == nearest_gap]
+
+    def _med(vals: list[float]) -> float:
+        return float(statistics.median(vals))
+
+    quoted_sane = [iv for iv, q in ring if q and IV_SANITY_MIN <= iv <= IV_SANITY_MAX]
+    sane = [iv for iv, _q in ring if IV_SANITY_MIN <= iv <= IV_SANITY_MAX]
+    if quoted_sane:
+        sigma, source = _med(quoted_sane), "quoted"
+        n_used = len(quoted_sane)
+    elif sane:
+        sigma, source = _med(sane), "sane_unquoted"
+        n_used = len(sane)
+    else:
+        # Whole ring is out of band (every contract a solver artifact). Clamp
+        # rather than return None: a bounded vol still cancels across the
+        # spread, where dropping the legs would take the row to ``na``.
+        sigma = min(max(_med([iv for iv, _q in ring]), IV_SANITY_MIN), IV_SANITY_MAX)
+        source, n_used = "clamped", len(ring)
+    return float(sigma), {
+        "iv_source": source,
+        "iv_ring_n": len(ring),
+        "iv_ring_used": n_used,
+        "iv_expiry_gap_days": int(nearest_gap),
+    }
+
+
 def model_option_mark(
     parsed: dict,
     options_cache: dict,
@@ -562,37 +642,12 @@ def model_option_mark(
     t_years = max(0.0, (expiry_d - now_utc.date()).days) / 365.0
 
     target_type = str(parsed.get("type") or "put").lower()
-    candidates = []
-    for c in sym_entry.get("options") or []:
-        if str(c.get("contract_type", "")).lower() != target_type:
-            continue
-        iv = _f(c.get("iv"))
-        k = _f(c.get("strike_price"))
-        if iv is None or iv <= 0 or k is None or k <= 0:
-            continue
-        try:
-            exp_c = datetime.strptime(str(c.get("expiration_date")), "%Y-%m-%d").date()
-        except (TypeError, ValueError):
-            continue
-        candidates.append((abs((exp_c - expiry_d).days), k, iv))
-    if not candidates:
-        return None, {"matched": False, "model": None, "reason": "no listed IV surface"}
-
-    nearest_gap = min(c[0] for c in candidates)
-    ring = sorted((k, iv) for gap, k, iv in candidates if gap == nearest_gap)
-    below = [(k, iv) for k, iv in ring if k <= strike]
-    above = [(k, iv) for k, iv in ring if k >= strike]
-    if below and above:
-        k_lo, iv_lo = below[-1]
-        k_hi, iv_hi = above[0]
-        sigma = iv_lo if k_hi == k_lo else (
-            iv_lo + (iv_hi - iv_lo) * (strike - k_lo) / (k_hi - k_lo)
-        )
-    else:
-        # Outside the listed grid: clamp to the nearest edge rather than
-        # extrapolating a skew we cannot see.
-        edge = below[-1] if below else above[0]
-        sigma = edge[1]
+    sigma, sigma_meta = ring_sigma(sym_entry, target_type, expiry_d)
+    if sigma is None:
+        return None, {
+            "matched": False, "model": None,
+            "reason": sigma_meta.get("reason") or "no usable IV surface",
+        }
 
     try:
         from letf_options_models import bs_put_price
@@ -609,12 +664,11 @@ def model_option_mark(
         return None, {"matched": False, "model": None, "reason": "model price not finite"}
     return float(mid), {
         "matched": False,
-        "model": "bs_iv_interp",
+        "model": "bs_ring_sigma",
         "iv": float(sigma),
         "spot": float(spot),
         "t_years": round(t_years, 5),
-        "iv_ring_n": len(ring),
-        "iv_expiry_gap_days": int(nearest_gap),
+        **sigma_meta,
     }
 
 

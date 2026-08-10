@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -514,19 +514,83 @@ def _flex_cache(spot=28.0, iv_lo=0.60, iv_hi=0.80):
 _NOW = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
 
 
-def test_model_option_mark_interpolates_iv_between_listed_strikes():
-    parsed = fn.parse_occ("AMZZ260812P00035000")   # K=35, halfway 34..36
-    mid, meta = fn.model_option_mark(parsed, _flex_cache(), now_utc=_NOW)
-    assert mid is not None and mid > 0
-    assert meta["model"] == "bs_iv_interp"
-    assert abs(meta["iv"] - 0.70) < 1e-9, "linear midpoint of 0.60/0.80"
+def test_ring_sigma_is_one_number_for_every_strike_in_the_ring():
+    """The spread-cancellation property, pinned.
+
+    A BS mark on an unquotable FLEX leg is only tolerable because a put SPREAD
+    carries offsetting vega — which requires BOTH legs to price off the SAME
+    sigma. Per-strike interpolation broke that (2026-08-10: XBTY long legs
+    drew 1.40/1.61, short legs 3.85, modelled NAV moved -6.2% on a +0.85%
+    underlier day).
+    """
+    cache = _flex_cache()
+    ivs = {
+        fn.model_option_mark(
+            fn.parse_occ(occ), cache, now_utc=_NOW,
+        )[1]["iv"]
+        for occ in ("AMZZ260812P00034000", "AMZZ260812P00035000",
+                    "AMZZ260812P00036000", "AMZZ260812P00040000")
+    }
+    assert len(ivs) == 1, f"one sigma per ring, got {ivs}"
+    assert abs(ivs.pop() - 0.70) < 1e-9, "median of 0.60/0.80"
 
 
-def test_model_option_mark_clamps_iv_outside_the_grid():
-    parsed = fn.parse_occ("AMZZ260812P00040000")   # K=40 above the 34..36 grid
-    mid, meta = fn.model_option_mark(parsed, _flex_cache(), now_utc=_NOW)
-    assert mid is not None
-    assert abs(meta["iv"] - 0.80) < 1e-9, "edge clamp, no skew extrapolation"
+def test_ring_sigma_prefers_quoted_contracts_over_zero_bid_artifacts():
+    """An IV solved off a 0.00 x 0.01 book is a solver artifact, not a view."""
+    cache = _flex_cache()
+    opts = cache["symbols"]["AMZZ"]["options"]
+    for o in opts:
+        o["bid"] = 0.0                      # both existing strikes unquoted
+    opts.append({"expiration_date": "2026-08-21", "contract_type": "put",
+                 "strike_price": 35.0, "iv": 0.55, "mid": 7.0, "bid": 6.9})
+    sigma, meta = fn.ring_sigma(cache["symbols"]["AMZZ"], "put",
+                                date(2026, 8, 12))
+    assert abs(sigma - 0.55) < 1e-9, "only the quoted contract should count"
+    assert meta["iv_source"] == "quoted"
+    assert meta["iv_ring_used"] == 1
+
+
+def test_ring_sigma_drops_out_of_band_strikes_entirely():
+    """AMDL carried 0.063 and 4.769 on ADJACENT strikes (a 76x step).
+
+    Both are outside the sanity band, so they never reach the median at all.
+    """
+    cache = _flex_cache()
+    cache["symbols"]["AMZZ"]["options"] += [
+        {"expiration_date": "2026-08-21", "contract_type": "put",
+         "strike_price": 35.0, "iv": 4.769, "mid": 9.0},
+        {"expiration_date": "2026-08-21", "contract_type": "put",
+         "strike_price": 35.5, "iv": 0.0063, "mid": 0.1},
+    ]
+    sigma, meta = fn.ring_sigma(cache["symbols"]["AMZZ"], "put",
+                                date(2026, 8, 12))
+    assert abs(sigma - 0.70) < 1e-9, "median of the two in-band strikes"
+    assert meta["iv_ring_used"] == 2 and meta["iv_ring_n"] == 4
+
+
+def test_ring_sigma_median_resists_an_in_band_outlier():
+    """Even inside the band, one high strike must not drag the ring."""
+    cache = _flex_cache()
+    cache["symbols"]["AMZZ"]["options"].append(
+        {"expiration_date": "2026-08-21", "contract_type": "put",
+         "strike_price": 35.0, "iv": 2.9, "mid": 9.0}
+    )
+    sigma, _meta = fn.ring_sigma(cache["symbols"]["AMZZ"], "put",
+                                 date(2026, 8, 12))
+    assert abs(sigma - 0.80) < 1e-9, "median of 0.60/0.80/2.90, not the 1.43 mean"
+
+
+def test_ring_sigma_clamps_an_entirely_out_of_band_ring():
+    """Every contract an artifact: clamp, don't drop the leg.
+
+    Returning None here would take option coverage to zero and push the whole
+    row to ``na`` — a bounded vol still cancels across the spread.
+    """
+    cache = _flex_cache(iv_lo=6.0, iv_hi=8.0)
+    sigma, meta = fn.ring_sigma(cache["symbols"]["AMZZ"], "put",
+                                date(2026, 8, 12))
+    assert sigma == fn.IV_SANITY_MAX
+    assert meta["iv_source"] == "clamped"
 
 
 def test_model_option_mark_expired_leg_is_intrinsic():
