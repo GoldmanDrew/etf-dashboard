@@ -1,154 +1,176 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-10T14:36:49.186143Z",
-  "mode": "sweep",
-  "task": null,
+  "build_time": "2026-08-10T15:13:25.376672Z",
+  "mode": "gate",
+  "task": "nav",
   "verdict": "quarantine",
   "stats": {
-    "checked_files": 10,
+    "checked_files": 14,
     "block": 0,
-    "quarantine": 15,
+    "quarantine": 17,
     "warn": 0
   },
   "checked": [
-    "data/dashboard_data.json",
-    "data/borrow_history.json",
-    "data/options_cache.json",
-    "data/vrp_live.json",
-    "data/vrp_health.json",
     "data/nav_forecasts/_latest.json",
+    "data/nav_forecasts/snapshots",
+    "data/ci_state.json",
     "data/underlying_intraday_spot.json",
     "data/underlying_intraday_volume.json",
     "data/letf_rebalance_flows_intraday_latest.json",
-    "data/corporate_actions.json"
+    "data/options_cache.json",
+    "data/vrp_live.json",
+    "data/vrp_health.json",
+    "data/yieldboost_put_spreads_latest.json",
+    "data/yieldboost_options_target.json",
+    "data/event_calendar_known.json",
+    "data/event_calendar_inferred.json",
+    "data/event_calendar_combined.json"
   ],
   "findings": [
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "CRDU intraday return +313.8% matches its declared 4x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "CRDU intraday return +307.5% matches its declared 4x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "CRDU",
-      "observed": 3.1381
+      "observed": 3.0747
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "GEVX intraday return +202.3% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "GEVX intraday return +204.2% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "GEVX",
-      "observed": 2.0231
+      "observed": 2.0415
+    },
+    {
+      "severity": "quarantine",
+      "code": "return_outlier",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "IONL moved +20.2% intraday (MAD z=6.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "ticker": "IONL",
+      "observed": 0.2025,
+      "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "KORU intraday return +1819.9% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "KORU intraday return +1818.2% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "KORU",
-      "observed": 18.1993
+      "observed": 18.182
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "LABX intraday return +475.4% matches its declared 6x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "LABX intraday return +462.5% matches its declared 6x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "LABX",
-      "observed": 4.7536
+      "observed": 4.6253
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MSFO moved +22.6% intraday (MAD z=8.3) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "MSFO moved +22.2% intraday (MAD z=7.2) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "MSFO",
-      "observed": 0.2259,
+      "observed": 0.2218,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MUU intraday return +1897.0% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "MUU intraday return +1874.5% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "MUU",
-      "observed": 18.9699
+      "observed": 18.7446
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "NEBX intraday return +216.3% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "NEBX intraday return +215.8% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "NEBX",
-      "observed": 2.1631
+      "observed": 2.1579
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "PLTY moved +37.0% intraday (MAD z=13.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "PLTY moved +37.7% intraday (MAD z=12.4) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "PLTY",
-      "observed": 0.3703,
+      "observed": 0.3773,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "PTIR moved +29.5% intraday (MAD z=10.8) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "PTIR moved +30.2% intraday (MAD z=9.9) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "PTIR",
-      "observed": 0.2949,
+      "observed": 0.3021,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "RBLY moved -23.4% intraday (MAD z=8.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "RBLY moved -23.3% intraday (MAD z=7.7) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "RBLY",
-      "observed": -0.2338,
+      "observed": -0.2334,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SMCL moved +23.1% intraday (MAD z=8.4) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "SMCL moved +23.1% intraday (MAD z=7.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "SMCL",
-      "observed": 0.2306,
+      "observed": 0.231,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SNK moved -34.7% intraday (MAD z=12.8) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "SNK moved -34.5% intraday (MAD z=11.4) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "SNK",
-      "observed": -0.3467,
+      "observed": -0.3454,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SNXX intraday return +752.3% matches its declared 8x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "SNXX intraday return +738.6% matches its declared 8x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "SNXX",
-      "observed": 7.5225
+      "observed": 7.3864
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SPAL moved +36.0% intraday (MAD z=13.2) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "SPAL moved +36.3% intraday (MAD z=11.9) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "SPAL",
-      "observed": 0.3603,
+      "observed": 0.3631,
+      "threshold": 0.2
+    },
+    {
+      "severity": "quarantine",
+      "code": "return_outlier",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "VIAG moved -23.4% intraday (MAD z=7.7) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "ticker": "VIAG",
+      "observed": -0.2341,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "WDCX intraday return +212.6% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "WDCX intraday return +210.1% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "WDCX",
-      "observed": 2.126
+      "observed": 2.1011
     }
   ]
 }
