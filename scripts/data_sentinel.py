@@ -258,6 +258,13 @@ def check_file_integrity(rel_path: str, cfg: dict, *,
     if not path.exists():
         findings.append(finding(BLOCK, "missing_artifact", rel_path, "expected artifact missing from disk"))
         return findings, None
+    if path.is_dir():
+        # ci_tick commits directories as well as files — notably
+        # data/nav_forecasts/snapshots, whose daily snapshot MUST be committed or
+        # score_nav_forecasts has nothing to grade (that starved all realized
+        # accuracy 2026-05-22..2026-08-07). A directory is not a single JSON
+        # artifact: pass it straight through so it can never be gated out.
+        return findings, None
     if path.stat().st_size == 0:
         findings.append(finding(BLOCK, "empty_artifact", rel_path, "artifact is zero bytes"))
         return findings, None

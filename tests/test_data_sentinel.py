@@ -75,6 +75,31 @@ def test_missing_and_empty_artifact_block(repo):
     assert findings[0]["code"] == "empty_artifact"
 
 
+def test_directory_paths_pass_through(repo, monkeypatch):
+    # config/ci.yaml's nav task commits data/nav_forecasts/snapshots (a DIRECTORY).
+    # Blocking it would re-break the realized-accuracy starvation of 2026-05-22.
+    (repo / "data" / "nav_forecasts" / "snapshots").mkdir(parents=True)
+    _write(repo, "data/nav_forecasts/_latest.json",
+           {"anchor_date": "2026-08-05", "build_time": "2026-08-05T17:00:00Z",
+            "by_symbol": {}, "confidence_count": {}})
+    findings, payload = ds.check_file_integrity("data/nav_forecasts/snapshots", _cfg(),
+                                                baseline_bytes=None)
+    assert findings == [] and payload is None
+
+    out_file = repo / "gh_output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out_file))
+    monkeypatch.setenv("SENTINEL_MODE", "enforce")
+    assert ds.main([
+        "gate", "--task", "nav",
+        "--files", "data/nav_forecasts/_latest.json data/nav_forecasts/snapshots",
+        "--report-out", str(repo / "data" / "sentinel_report.json"),
+        "--quarantine", str(repo / "data" / "quarantine.json"),
+    ]) == 0
+    outputs = dict(line.split("=", 1) for line in out_file.read_text().splitlines())
+    assert outputs["verdict"] == "pass" and outputs["blocked"] == ""
+    assert "data/nav_forecasts/snapshots" in outputs["files"].split()
+
+
 def test_record_count_regression_blocks(repo):
     old = {"symbols": {f"S{i}": [] for i in range(100)}, "meta": {}}
     new = {"symbols": {f"S{i}": [] for i in range(20)}, "meta": {}}
