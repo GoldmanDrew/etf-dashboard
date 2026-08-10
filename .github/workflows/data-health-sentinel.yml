@@ -1,0 +1,241 @@
+name: Data Health Sentinel
+
+# Closed-loop data-quality sweep over the published artifact surface.
+#
+#   [ sweep: scripts/data_sentinel.py ]
+#            |
+#     pass --+--> update quarantine/report/provider ledger, auto-close alert issue
+#            |
+#     fail --+--> deterministic self-heal (provider-failover re-fetch, Tier 0 / zero
+#            |    tokens: spot refresh with relaxed yfinance budget, volume refresh,
+#            |    corporate-actions re-ingest) --> verify sweep
+#            +--> commit quarantine.json + sentinel_report.json + healed artifacts
+#            +--> GitHub issue alert (label ops/data-sentinel, auto-closes on recovery)
+#            +--> adapter failures (schema/parse/provider drift) file an
+#                 autofix/data-adapter-repair issue; optional LLM patch job is gated
+#                 behind repo variable ENABLE_LLM_AUTOFIX=1.
+#
+# The per-commit gate lives in market-hours.yml (Data sentinel gate step) — this
+# workflow covers what a gate cannot: staleness, cross-artifact drift, recovery.
+# Runbook: docs/data-health-sentinel.md · thresholds: config/sentinel.json
+
+on:
+  schedule:
+    # Offset minutes avoid the :00/:15/:30/:45 market-hours ticks and the :07 safety net.
+    - cron: "25 13 * * 1-5"   # ~pre-open ET (9:25 EDT / 8:25 EST), after nightly
+    - cron: "25 18 * * 1-5"   # midday
+    - cron: "55 22 * * 1-5"   # post-close, after the 21:30 UTC full build
+  workflow_dispatch:
+    inputs:
+      heal:
+        description: "Attempt deterministic self-heal on failures"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: "data-health-sentinel"
+  cancel-in-progress: false
+
+jobs:
+  sentinel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      verdict: ${{ steps.final.outputs.verdict }}
+      adapter_failures: ${{ steps.sweep.outputs.adapter_failures }}
+    env:
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY || secrets.POLYGON_IO_API_KEY }}
+      TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sentinel sweep
+        id: sweep
+        run: python scripts/data_sentinel.py sweep
+
+      # ---- Deterministic self-heal (Tier 0: scripts only, zero LLM tokens). ----
+      # Each target maps a sentinel finding class to the existing failover-capable
+      # fetcher; failures here are soft — the verify sweep decides the verdict.
+      - name: "Self-heal: refresh intraday spots (provider failover ladder)"
+        if: >-
+          contains(steps.sweep.outputs.heal_targets, 'spot') &&
+          github.event.inputs.heal != 'false'
+        continue-on-error: true
+        run: python scripts/refresh_underlying_spots.py --max-yfinance 60
+
+      - name: "Self-heal: refresh intraday volume"
+        if: >-
+          contains(steps.sweep.outputs.heal_targets, 'volume') &&
+          github.event.inputs.heal != 'false'
+        continue-on-error: true
+        run: python scripts/refresh_underlying_volume.py --max-yfinance 40
+
+      - name: "Self-heal: re-ingest corporate actions if stale"
+        if: >-
+          contains(steps.sweep.outputs.heal_targets, 'corporate_actions') &&
+          github.event.inputs.heal != 'false'
+        continue-on-error: true
+        run: python scripts/ensure_corporate_actions_fresh.py --max-age-hours 6
+
+      # --verify: re-checks after a heal without advancing quarantine recovery
+      # streaks (two sweeps of one run are one observation window). Only runs
+      # when a heal actually executed — warn-only verdicts have nothing to verify.
+      - name: Verify sweep after heal
+        id: verify
+        if: >-
+          steps.sweep.outputs.verdict != 'pass' &&
+          steps.sweep.outputs.heal_targets != '' &&
+          github.event.inputs.heal != 'false'
+        run: python scripts/data_sentinel.py sweep --verify
+
+      - name: Resolve final verdict
+        id: final
+        run: |
+          VERDICT="${{ steps.verify.outputs.verdict || steps.sweep.outputs.verdict }}"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "Final sentinel verdict: $VERDICT"
+
+      # A heal that produced a BLOCK-severity artifact (e.g. a provider outage
+      # shrank the spot universe below the regression floor) must not reach main
+      # through the sentinel's own commit — restore those paths to HEAD so the
+      # commit stages a no-op for them. Mirrors the market-hours gate contract.
+      - name: Discard heal outputs the sweep blocked
+        if: steps.final.outputs.verdict == 'block'
+        run: |
+          BLOCKED="${{ steps.verify.outputs.blocked || steps.sweep.outputs.blocked }}"
+          for p in $BLOCKED; do
+            case "$p" in
+              data/*) git checkout HEAD -- "$p" 2>/dev/null || true ;;
+            esac
+          done
+          echo "Restored blocked artifacts from HEAD: ${BLOCKED:-none}"
+
+      # commit-data skips paths that don't exist and no-ops when nothing changed,
+      # so the heal artifacts can be listed optimistically.
+      - name: Commit sentinel state and healed artifacts
+        id: commit
+        uses: ./.github/actions/commit-data
+        with:
+          files: >-
+            data/quarantine.json
+            data/sentinel_report.json
+            .github/data-memory/provider_health.json
+            data/underlying_intraday_spot.json
+            data/underlying_intraday_volume.json
+            data/corporate_actions.json
+            data/etf_news.json
+            data/polygon_ticker_events_cache.json
+            data/ticker_alias_map.json
+          commit_message: "chore: data sentinel sweep (${{ steps.final.outputs.verdict }})"
+
+      # continue-on-error keeps the run green on alert-delivery failure while
+      # still showing the step amber — no '|| true', a dead alert channel must
+      # at least be visible in the run annotations.
+      - name: Alert (create/update/auto-close ops/data-sentinel issue)
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/data_sentinel.py alert
+
+      - name: Fail run on unresolved block
+        if: steps.final.outputs.verdict == 'block'
+        run: |
+          echo "::error title=data sentinel::block-severity findings persist after self-heal — see data/sentinel_report.json"
+          exit 1
+
+  # Adapter breakage (schema drift, unparseable payloads, issuer provider-mix
+  # collapse) gets a dedicated repair ticket with full diagnostic context. The
+  # optional second step hands that ticket to an LLM patch agent — Tier 2 model
+  # routing (claude-sonnet-5) — but ONLY when the repo variable
+  # ENABLE_LLM_AUTOFIX=1 and an ANTHROPIC_API_KEY secret exist. Default is off:
+  # deterministic detection always, paid tokens never without an explicit opt-in.
+  adapter-repair:
+    needs: sentinel
+    # !cancelled(): parse_error/schema_missing_keys are BLOCK-severity, which
+    # fails the sentinel job — the implicit success() would skip this job in
+    # exactly the cases it exists for.
+    if: ${{ !cancelled() && needs.sentinel.outputs.adapter_failures != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: File adapter-repair issue with diagnostics
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILURES: ${{ needs.sentinel.outputs.adapter_failures }}
+        run: |
+          set -e
+          gh label create "autofix/data-adapter-repair" --color "1D76DB" \
+            --description "Sentinel adapter-repair tickets" --force || true
+          EXISTING=$(gh issue list --label "autofix/data-adapter-repair" --state open --json number --jq '.[0].number // empty')
+          TITLE="Data adapter repair needed: ${FAILURES}"
+          BODY=$(cat <<EOF
+          ## Sentinel adapter-failure diagnostics
+
+          Failing surfaces: \`${FAILURES}\`
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Likely causes (see \`.github/data-memory/anti_patterns.md\`): issuer site HTML
+          redesign (failure mode #7), upstream schema change, or a writer emitting
+          non-browser-parseable JSON (failure mode #6).
+
+          Diagnostic context: \`data/sentinel_report.json\` on main (committed by the
+          sentinel run) and \`.github/data-memory/provider_health.json\` for the
+          provider-mix history.
+
+          Suggested repair loop: reproduce with \`python scripts/data_sentinel.py sweep --dry-run\`,
+          patch the adapter in \`scripts/etf_providers.py\` / the relevant writer, run
+          \`python -m pytest tests/test_data_sentinel.py\`, and open a PR from an
+          \`autofix/\` branch.
+          EOF
+          )
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label "autofix/data-adapter-repair"
+          fi
+
+      - name: LLM adapter patch (opt-in, Tier 2 routing)
+        if: vars.ENABLE_LLM_AUTOFIX == '1'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--model claude-sonnet-5 --max-turns 30"
+          prompt: |
+            You are repairing a broken market-data adapter in this repo. The
+            deterministic sentinel flagged: ${{ needs.sentinel.outputs.adapter_failures }}.
+            Read data/sentinel_report.json and .github/data-memory/anti_patterns.md
+            first. Reproduce with `python scripts/data_sentinel.py sweep --dry-run`.
+            Patch the smallest responsible adapter code (scripts/etf_providers.py,
+            scripts/build_data.py, or the relevant writer), never hand-edit data
+            files, add or update a unit test proving the fix, run
+            `python -m pytest tests/test_data_sentinel.py tests/test_etf_providers_valuation_date.py`,
+            then open a pull request from a branch named autofix/data-adapter-repair
+            explaining root cause and blast radius.

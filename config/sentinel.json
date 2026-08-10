@@ -1,0 +1,52 @@
+{
+  "schema_v": 1,
+  "_doc": "Thresholds for scripts/data_sentinel.py. JSON (not YAML) because requirements.txt does not ship PyYAML — see the hand-rolled fallback parser in scripts/ci_tick.py for what happens otherwise. Tune values here, not in code. docs/data-health-sentinel.md is the runbook.",
+  "return_outlier": {
+    "abs_return_max": 0.20,
+    "mad_z_max": 6.0,
+    "market_event_breaker_frac": 0.10,
+    "leverage_tolerance": 0.10,
+    "split_exemption_days": 5
+  },
+  "zombie_spot": {
+    "max_ratio": 2.5,
+    "max_metrics_lag_calendar_days": 7
+  },
+  "size_regression": {
+    "max_record_drop_frac": 0.50,
+    "max_byte_drop_frac": 0.60
+  },
+  "coverage": {
+    "dashboard_min_universe_frac": 0.90,
+    "spot_min_priced_frac_rth": 0.90,
+    "nav_max_na_frac_warn": 0.60,
+    "nav_max_na_frac_block": 0.85,
+    "dashboard_max_pct_missing": 20.0,
+    "ibkr_min_symbols_when_success": 5000
+  },
+  "critical_null": {
+    "fleet_block_frac": 0.20
+  },
+  "staleness_market_hours_warn": {
+    "data/dashboard_data.json": 24,
+    "data/nav_forecasts/_latest.json": 24,
+    "data/borrow_history.json": 30,
+    "data/underlying_intraday_spot.json": 2,
+    "data/letf_rebalance_flows_intraday_latest.json": 24,
+    "data/options_cache.json": 26,
+    "data/vrp_live.json": 26,
+    "data/corporate_actions.json": 30
+  },
+  "staleness_rth_only": [
+    "data/underlying_intraday_spot.json"
+  ],
+  "quarantine": {
+    "recovery_sweeps": 2,
+    "max_entries": 200
+  },
+  "provider_drift": {
+    "min_prev_count": 5,
+    "max_drop_frac": 0.50,
+    "ledger_max_entries": 120
+  }
+}

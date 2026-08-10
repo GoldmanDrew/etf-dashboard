@@ -1854,6 +1854,7 @@
 <script src="assets/metrics_prem_disc.js?v=mpd-v1"></script>
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
+<script src="assets/quarantine.js?v=qn-v1"></script>
 <script src="assets/fof_chart.js?v=fof-v3"></script>
 <script src="assets/vendor/babel.min.js"></script>
 
@@ -2663,7 +2664,9 @@ function Bucket1ViewsPage({ records, onNavigateToChart, onBack }) {
   );
 }
 
-function OpsPage({ data, freshnessSummary, vrpHealth, onBack }) {
+function OpsPage({ data, freshnessSummary, vrpHealth, quarantine, onBack }) {
+  const qEntries = window.Quarantine ? Quarantine.entries(quarantine) : [];
+  const qArtifacts = window.Quarantine ? Quarantine.artifactEntries(quarantine) : [];
   const fs = freshnessSummary || {};
   const ok = fs.ok !== false;
   const violations = fs.violations || [];
@@ -2716,6 +2719,50 @@ function OpsPage({ data, freshnessSummary, vrpHealth, onBack }) {
           </div>
         </details>
       )}
+      {(qEntries.length > 0 || qArtifacts.length > 0) && (
+        <details open className="decay-methodology" style={{ marginBottom: 12 }}>
+          <summary>Sentinel quarantine ({qEntries.length} ticker(s), {qArtifacts.length} artifact(s))</summary>
+          <div className="dm-body">
+            <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+              Held by <code>scripts/data_sentinel.py</code> ({quarantine?.build_time || '—'}).
+              Tickers stay listed so cross-sectional scores are unaffected; entries
+              auto-clear after consecutive clean sweeps.
+            </p>
+            {qEntries.length > 0 && (
+              <table className="scenario-table">
+                <thead><tr><th>Ticker</th><th>Since</th><th>Reason(s)</th></tr></thead>
+                <tbody>
+                  {qEntries.map(({ symbol, entry }) => (
+                    <tr key={symbol}>
+                      <td>{symbol}</td>
+                      <td>{(entry.first_seen || '').slice(0, 16)}</td>
+                      <td style={{ fontSize: 11 }}>
+                        {(entry.reasons || []).map((x, i) => <div key={i}>{x.code}: {x.detail}</div>)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {qArtifacts.length > 0 && (
+              <table className="scenario-table" style={{ marginTop: qEntries.length > 0 ? 10 : 0 }}>
+                <thead><tr><th>Artifact</th><th>Since</th><th>Reason(s)</th></tr></thead>
+                <tbody>
+                  {qArtifacts.map(({ path, entry }) => (
+                    <tr key={path}>
+                      <td><code style={{ fontSize: 11 }}>{path}</code></td>
+                      <td>{(entry.first_seen || '').slice(0, 16)}</td>
+                      <td style={{ fontSize: 11 }}>
+                        {(entry.reasons || []).map((x, i) => <div key={i}>{x.code}: {x.detail}</div>)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </details>
+      )}
       <details open className="decay-methodology">
         <summary>Raw freshness blocks</summary>
         <div className="dm-body">
@@ -2735,6 +2782,10 @@ function OpsPage({ data, freshnessSummary, vrpHealth, onBack }) {
 }
 
 const FRESHNESS_SUMMARY_URL = "data/freshness_summary.json";
+// Sentinel quarantine manifest (scripts/data_sentinel.py) — per-ticker/per-artifact
+// data-quality holds. Records are never removed from dashboard_data.json (server-side
+// cross-sectional scores depend on the full universe); the UI badges instead.
+const QUARANTINE_URL = "data/quarantine.json";
 const PRODUCT_TAXONOMY_URL = "data/product_taxonomy.json";
 const VRP_FIELD_DICT_URL = "data/vrp_field_dictionary.json";
 const YIELDBOOST_PUT_SPREADS_URL = "data/yieldboost_put_spreads_latest.json";
@@ -17010,6 +17061,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [vrpHealth, setVrpHealth] = useState(null);
   const [freshnessSummary, setFreshnessSummary] = useState(null);
   const [vrpFieldDict, setVrpFieldDict] = useState(null);
+  const [quarantine, setQuarantine] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -17023,6 +17075,10 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
         .then((r) => (r.ok ? r.json() : null))
         .then((p) => { if (!cancelled && p) setFreshnessSummary(p); })
         .catch(() => { /* best-effort */ });
+      fetch(`${QUARANTINE_URL}${cacheBust}`, { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((p) => { if (!cancelled && p) setQuarantine(p); })
+        .catch(() => { /* best-effort — absent manifest means nothing is held */ });
     };
     refetchHealth();
     const id = setInterval(refetchHealth, 5 * 60 * 1000);
@@ -17656,6 +17712,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
           data={data}
           freshnessSummary={freshnessSummary}
           vrpHealth={vrpHealth}
+          quarantine={quarantine}
           onBack={navigateBack}
         />
       ) : showViews ? (
@@ -17951,6 +18008,9 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
                             {r.symbol}
                             {r.strategy_blacklisted ? (
                               <span className="badge badge-stale" style={{ marginLeft: 6, fontSize: 9, verticalAlign: 'middle' }} title="On strategy blacklist — listed for dashboards only; not sized in trade plan / rebalancer.">BL</span>
+                            ) : null}
+                            {window.Quarantine && Quarantine.isQuarantined(quarantine, r.symbol) ? (
+                              <span className="badge badge-stale" style={{ marginLeft: 6, fontSize: 9, verticalAlign: 'middle' }} title={Quarantine.badgeTitle(quarantine, r.symbol)}>QN</span>
                             ) : null}
                           </span>
                         </td>

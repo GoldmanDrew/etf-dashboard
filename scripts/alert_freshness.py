@@ -107,6 +107,10 @@ def _create_or_update_issue(summary: dict, *, dry_run: bool) -> int:
         print(f"Commented on issue #{existing}")
         return 0
 
+    # gh hard-fails issue creation when the label is missing from the repo;
+    # create it idempotently first (--force no-ops/updates when it exists).
+    _run(["gh", "label", "create", ISSUE_LABEL, "--color", "D93F0B",
+          "--description", "Filed by scripts/alert_freshness.py", "--force"])
     proc = _run(
         [
             "gh", "issue", "create",

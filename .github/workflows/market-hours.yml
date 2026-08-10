@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: "market-hours-tick"
@@ -79,12 +80,39 @@ jobs:
           python scripts/freshness_diagnostics.py --quiet
           python scripts/alert_freshness.py || true
 
-      - name: Commit data if changed
+      # Deterministic content gate: validates exactly the files the tick wants to
+      # commit (parse strictness incl. NaN tokens, schema keys, record-count and
+      # build_time regression vs HEAD, per-ticker anomalies). BLOCK-severity
+      # artifacts are dropped from the commit list; healthy artifacts plus
+      # data/quarantine.json + data/sentinel_report.json still commit. NOT
+      # continue-on-error by design — a sentinel crash fails closed (no commit,
+      # next tick retries). Set repo variable SENTINEL_MODE=report to observe
+      # without enforcement. Runbook: docs/data-health-sentinel.md
+      - name: Data sentinel gate
+        id: sentinel
         if: steps.tick.outputs.skipped != 'true' && steps.tick.outputs.files != ''
+        env:
+          SENTINEL_MODE: ${{ vars.SENTINEL_MODE || 'enforce' }}
+        run: |
+          python scripts/data_sentinel.py gate \
+            --task "${{ steps.tick.outputs.task }}" \
+            --files "${{ steps.tick.outputs.files }}"
+
+      # Warn-only verdicts are alerted by the 3x/day sweep, not by every 15-min
+      # tick — otherwise a persistent warn would spam the ops issue ~96x/day.
+      - name: Sentinel alert (non-blocking)
+        if: steps.sentinel.outputs.verdict == 'block' || steps.sentinel.outputs.verdict == 'quarantine'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/data_sentinel.py alert
+
+      - name: Commit data if changed
+        if: steps.tick.outputs.skipped != 'true' && steps.sentinel.outputs.files != ''
         id: commit
         uses: ./.github/actions/commit-data
         with:
-          files: ${{ steps.tick.outputs.files }}
+          files: ${{ steps.sentinel.outputs.files }}
           commit_message: "chore: market tick (${{ steps.tick.outputs.task }})"
 
   deploy:
