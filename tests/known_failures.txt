@@ -1,0 +1,34 @@
+# Pre-existing test failures, deselected by .github/workflows/tests.yml so the
+# suite can gate pushes today instead of "once someone fixes everything".
+#
+# This is a DEBT LEDGER, not a dumping ground. Rules:
+#   * Never add a test here to make your own change go green — fix the test or
+#     fix the code. Entries are only for failures that predate CI enforcement.
+#   * Every line needs a dated note on why it fails and what would fix it.
+#   * The list should shrink. `python -m pytest tests/` locally shows the truth.
+#
+# Baseline captured 2026-08-10: 13 failed, 880 passed on main.
+
+# --- Bucket 4 / B4 research: assert on committed research artifacts that have
+# --- drifted from the frozen nests these tests pin. Fix = rebuild the nests or
+# --- re-freeze the expectations.
+tests/test_b4_inception_stable_nest.py::test_mstz_has_frozen_stable_optimized_nest
+tests/test_bucket4_sizing_parity.py::test_builder_production_sizing_smoke
+
+# --- Corporate-actions news parsing: headline/anchor heuristics tested against
+# --- fixtures that no longer match the current Google News shapes.
+tests/test_ingest_corporate_actions.py::test_google_news_keel_bitf_chain_still_maps_to_btfl
+tests/test_ingest_corporate_actions.py::test_google_news_trex_body_extracts_xrpk_and_solx
+tests/test_ingest_corporate_actions.py::test_title_anchor_prefers_parens_bmax_in_universe
+tests/test_ingest_corporate_actions.py::test_gnews_structured_event_id_symbol_change_ticker_only
+tests/test_ingest_corporate_actions.py::test_google_news_generic_lineup_title_fetches_body_and_emits_delistings
+tests/test_ingest_corporate_actions.py::test_issuer_press_granite_lineup_emits_delistings
+
+# --- Event calendar: Nasdaq seed/confirm flow expectations vs current seed file.
+tests/test_ingest_event_calendar.py::test_build_known_calendar_nasdaq_only_confirmed
+tests/test_ingest_event_calendar.py::test_build_known_calendar_seed_fallback_when_nasdaq_misses
+tests/test_ingest_event_calendar.py::test_refresh_seed_from_nasdaq_updates_confirmed
+
+# --- IPO unlock staircase model expectations vs committed calendar.
+tests/test_ipo_unlock.py::test_cbrs_staircase_and_past_releases
+tests/test_ipo_unlock.py::test_failed_trigger_excluded_from_model_path

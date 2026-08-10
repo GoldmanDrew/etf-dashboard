@@ -1,0 +1,125 @@
+name: Tests
+
+# The repo had ~890 tests and nothing ran them on push. That is how a change
+# authored against a stale checkout reaches production: the sentinel's own gate
+# once blocked data/nav_forecasts/snapshots (a directory) because the branch it
+# was written on had that entry removed from config/ci.yaml.
+#
+# Two jobs, deliberately separate so a red build is attributable:
+#   pytest            — code correctness (deselects tests/known_failures.txt)
+#   sentinel-selfcheck — the sentinel run against the data actually on main
+#
+# Data-only commits (chore: market tick) do NOT trigger this workflow; the
+# sweeps in data-health-sentinel.yml cover data health on their own schedule.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "backend/**"
+      - "tests/**"
+      - "config/**"
+      - "assets/**"
+      - "index.html"
+      - "requirements.txt"
+      - ".github/workflows/tests.yml"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "tests-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history: the sentinel baselines artifacts against `git show HEAD:`.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run test suite (known failures deselected)
+        run: |
+          DESELECT=""
+          while IFS= read -r line; do
+            case "$line" in ''|\#*) continue ;; esac
+            DESELECT="$DESELECT --deselect $line"
+          done < tests/known_failures.txt
+          echo "Deselecting $(grep -cvE '^\s*(#|$)' tests/known_failures.txt) known failure(s)."
+          python -m pytest tests/ -q $DESELECT
+
+  sentinel-selfcheck:
+    # Guards the failure class that motivated this workflow: sentinel logic that
+    # is correct against a stale checkout but wrong against the data and config
+    # actually on main. Separate job so "the sentinel would block real data" is
+    # never confused with "a unit test broke".
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Gate must not block any real ci_tick commit list
+        run: |
+          python - <<'PY'
+          import subprocess, sys
+          sys.path.insert(0, "scripts")
+          import ci_tick
+          cfg = ci_tick.load_config()
+          failed = []
+          for task in ["borrow", "options", "yieldboost", "intraday", "nav"]:
+              files = ci_tick.commit_paths(cfg, task)
+              if not files:
+                  continue
+              proc = subprocess.run(
+                  [sys.executable, "scripts/data_sentinel.py", "gate", "--task", task,
+                   "--files", " ".join(files), "--dry-run"],
+                  capture_output=True, text=True)
+              tail = [l for l in proc.stdout.splitlines() if l.startswith("[sentinel]")]
+              line = tail[-1] if tail else proc.stdout[-300:]
+              print(f"{task:11s} {line}")
+              if proc.returncode != 0:
+                  failed.append(f"{task}: sentinel exited {proc.returncode}")
+              elif "blocked=none" not in line:
+                  failed.append(f"{task}: {line}")
+          if failed:
+              print("::error title=sentinel selfcheck::gate would block committed data")
+              for f in failed:
+                  print("  " + f)
+              raise SystemExit(1)
+          print("OK: no task's commit list is blocked against data on main.")
+          PY
+
+      - name: Sweep must run clean against committed data
+        run: python scripts/data_sentinel.py sweep --dry-run --fail-on-block

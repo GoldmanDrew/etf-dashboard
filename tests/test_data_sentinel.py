@@ -339,6 +339,21 @@ def test_staleness_flags_old_dashboard(repo):
                for f in findings)
 
 
+def test_staleness_spot_skipped_early_in_session(repo):
+    # The 13:25 UTC pre-open sweep sees a spot file last written at the prior
+    # session's close (~15h). That is not staleness — the feed only runs during
+    # RTH — so it must not WARN until the session has run past the 2h budget.
+    _write(repo, "data/underlying_intraday_spot.json",
+           {"build_time": "2026-08-04T22:45:00Z"})
+    pre_open = datetime(2026, 8, 5, 13, 25, tzinfo=UTC)
+    assert not [f for f in ds.check_staleness(_cfg(), now=pre_open)
+                if f["artifact"] == "data/underlying_intraday_spot.json"]
+    # Well into the session with the same stale file, it is a genuine finding.
+    midday = datetime(2026, 8, 5, 18, 25, tzinfo=UTC)
+    assert [f for f in ds.check_staleness(_cfg(), now=midday)
+            if f["artifact"] == "data/underlying_intraday_spot.json"]
+
+
 def test_staleness_spot_skipped_off_hours(repo):
     _write(repo, "data/underlying_intraday_spot.json",
            {"build_time": "2026-07-30T12:00:00Z"})

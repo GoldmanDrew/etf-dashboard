@@ -112,9 +112,64 @@ SPECS: dict[str, dict] = {
         "required": ["build_time", "events"],
         "records": "events",
     },
+    "data/yieldboost_put_spreads_latest.json": {
+        "required": ["build_time", "spreads"],
+        "records": "spreads",
+    },
+    "data/yieldboost_options_target.json": {
+        "required": ["build_time", "contracts"],
+        "records": "contracts",
+    },
+    "data/event_calendar_known.json": {
+        "required": ["build_time", "items"],
+        "records": "items",
+    },
+    "data/event_calendar_inferred.json": {
+        "required": ["build_time", "items"],
+        "records": "items",
+    },
+    "data/event_calendar_combined.json": {
+        "required": ["build_time", "items"],
+        "records": "items",
+    },
     "data/ci_state.json": {"required": [], "records": None},
 }
 GENERIC_SPEC = {"required": [], "records": None}
+
+# Gated paths that intentionally have no schema/staleness entry. Keep the reason
+# with the waiver: tests/test_sentinel_coverage.py fails when a new artifact
+# enters a ci_tick commit list without either a spec or an explicit waiver, so
+# SPECS can no longer silently fall behind config/ci.yaml.
+SPEC_WAIVERS = {
+    "data/nav_forecasts/snapshots": "directory of per-tick snapshots, not a single JSON artifact",
+}
+# Which ci_tick task writes each age-gated artifact. Used by
+# tests/test_sentinel_coverage.py to assert a staleness budget can never be set
+# tighter than the cadence of the task that produces it (which would guarantee
+# permanent false positives if a cadence in config/ci.yaml is ever loosened).
+ARTIFACT_PRODUCER_TASK = {
+    "data/dashboard_data.json": "borrow",
+    "data/borrow_history.json": "borrow",
+    "data/options_cache.json": "options",
+    "data/vrp_live.json": "options",
+    "data/underlying_intraday_spot.json": "intraday",
+    "data/letf_rebalance_flows_intraday_latest.json": "intraday",
+    "data/nav_forecasts/_latest.json": "nav_forecast",
+    # data/corporate_actions.json is produced by update-corporate-actions.yml
+    # (6-hourly cron), not by ci_tick — no cadence to compare against.
+}
+
+STALENESS_WAIVERS = {
+    "data/nav_forecasts/snapshots": "directory; freshness is covered by _latest.json",
+    "data/ci_state.json": "orchestrator bookkeeping, not published market data",
+    "data/vrp_health.json": "health sidecar; freshness_diagnostics owns its clocks",
+    "data/event_calendar_known.json": "event calendar refreshes on its own weekly cadence",
+    "data/event_calendar_inferred.json": "derived from known calendar; same cadence",
+    "data/event_calendar_combined.json": "derived from known+inferred; same cadence",
+    "data/yieldboost_options_target.json": "rebuilt with vrp_live.json, which is age-gated",
+    "data/yieldboost_put_spreads_latest.json": "rebuilt with vrp_live.json, which is age-gated",
+    "data/underlying_intraday_volume.json": "dead-feed check covers it during RTH",
+}
 
 # Artifacts every sweep validates (the gate validates whatever the tick emits).
 SWEEP_ARTIFACTS = [
@@ -283,6 +338,15 @@ def check_file_integrity(rel_path: str, cfg: dict, *,
             BLOCK, "schema_missing_keys", rel_path,
             f"missing required top-level keys: {', '.join(missing)}", observed=missing))
         return findings, payload
+
+    # Visible at runtime, not just in the coverage test: an artifact entering a
+    # commit list without a spec still gets parse + regression checks, but loses
+    # schema-key validation. WARN so it surfaces in the sweep report/issue.
+    if rel_path not in SPECS and rel_path not in SPEC_WAIVERS and rel_path.endswith(".json"):
+        findings.append(finding(
+            WARN, "spec_unknown", rel_path,
+            "no schema spec — parse/regression checks only. Add an entry to SPECS in "
+            "scripts/data_sentinel.py (or SPEC_WAIVERS with a reason)."))
 
     if baseline_bytes == "unset":
         baseline_bytes = git_baseline(rel_path)
@@ -687,9 +751,17 @@ def check_staleness(cfg: dict, *, now: datetime | None = None) -> list[dict]:
     now = now or utcnow()
     rth = is_market_hours(now)
     rth_only = set(cfg.get("staleness_rth_only", []))
+    # How long the current RTH window has been open. An intraday feed only
+    # refreshes during RTH, so at the 13:25 pre-open sweep it is legitimately
+    # ~15h old (last written at the prior session's close) — age-gating it then
+    # would fire a WARN every single morning. Only judge an RTH-only artifact
+    # once the session has run at least as long as its own budget.
+    session_open = now.replace(hour=RTH_UTC_HOURS[0], minute=0, second=0, microsecond=0)
+    session_elapsed_h = max(0.0, (now - session_open).total_seconds() / 3600.0)
     for rel, max_hours in (cfg.get("staleness_market_hours_warn") or {}).items():
-        if rel in rth_only and not rth:
-            continue
+        if rel in rth_only:
+            if not rth or session_elapsed_h < float(max_hours):
+                continue
         path = REPO_ROOT / rel
         if not path.exists():
             continue  # missing artifacts are reported by integrity checks

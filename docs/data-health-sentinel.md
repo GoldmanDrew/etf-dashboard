@@ -108,6 +108,29 @@ market-hours.yml (every 15 min)                district-health-sentinel.yml (3x/
   launches a Claude patch job (Tier-2 routing, `claude-sonnet-5`) that must reproduce
   via the sentinel, patch the adapter, pass tests, and open a PR.
 
+## Keeping it from decaying
+
+Three of the sentinel's structures are hand-maintained and would silently drift.
+Each now has a forcing function instead of relying on someone remembering:
+
+| Decay risk | Guard |
+| --- | --- |
+| A new artifact enters a `ci.yaml` commit list with no schema spec | `tests/test_sentinel_coverage.py` fails until it has a `SPECS` entry or a `SPEC_WAIVERS` reason. Runtime `spec_unknown` WARN surfaces it too |
+| A new artifact has no freshness budget | Same test, against `staleness_market_hours_warn` / `STALENESS_WAIVERS` |
+| A cadence in `ci.yaml` is loosened past its artifact's age budget | `ARTIFACT_PRODUCER_TASK` maps artifact → producing task; the test asserts every budget stays ≥ 4× that task's RTH cadence |
+| Waivers accumulate for paths nobody stages anymore | The test fails on waivers whose path left every commit list, and on waivers with no real reason |
+| Sentinel logic authored against a stale checkout | `.github/workflows/tests.yml` job `sentinel-selfcheck` runs the gate over all five real task lists **and** a full sweep against the data actually on main |
+
+`tests/known_failures.txt` is the debt ledger that lets the suite gate pushes
+today: 13 pre-existing failures (baseline 2026-08-10) are deselected in CI, with
+a dated reason each. Never add an entry to make your own change go green.
+
+**Half-day sessions** remain unmodeled in `market_calendar.py` (pre-existing).
+This does not affect the sentinel: `ci_tick` keeps ticking through 22:59 UTC
+regardless of an early close, so artifact `build_time`s stay fresh, and the
+~3-hour skew is immaterial against 24–30h budgets. It would start to matter only
+if a budget were tightened below ~6h — revisit then, not before.
+
 ## Model-routing policy (cost discipline)
 
 - **Tier 0 (default, $0):** everything in this document's detection/heal loop is
