@@ -1,8 +1,217 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-10T12:33:02.432406Z",
+  "build_time": "2026-08-10T14:04:53.499909Z",
   "generated_by": "scripts/data_sentinel.py",
   "note": "Per-ticker/per-artifact data-quality holds. The UI badges/grays these; records are never removed from dashboard_data.json so cross-sectional scores stay stable. Entries auto-clear after 2 clean sweeps.",
-  "tickers": {},
+  "tickers": {
+    "CRDU": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "split_basis_prior_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "CRDU intraday return +311.8% matches its declared 4x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+          "observed": 3.1177
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "GEVX": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "split_basis_prior_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "GEVX intraday return +197.2% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+          "observed": 1.9723
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "KORU": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "split_basis_prior_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "KORU intraday return +1782.5% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+          "observed": 17.8249
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "LABX": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "split_basis_prior_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "LABX intraday return +470.7% matches its declared 6x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+          "observed": 4.7067
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "MSFO": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "MSFO moved +21.2% intraday (MAD z=8.7) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 0.2119
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "MUU": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "split_basis_prior_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "MUU intraday return +1865.4% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+          "observed": 18.6544
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "NEBX": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "split_basis_prior_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "NEBX intraday return +203.9% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+          "observed": 2.0385
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "PLTY": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "PLTY moved +36.4% intraday (MAD z=14.9) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 0.3642
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "PTIR": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "PTIR moved +27.9% intraday (MAD z=11.4) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 0.2793
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "RBLY": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "RBLY moved -22.0% intraday (MAD z=9.0) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": -0.2202
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "SMCL": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "SMCL moved +21.9% intraday (MAD z=9.0) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 0.2192
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "SNK": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "SNK moved -33.7% intraday (MAD z=13.8) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": -0.337
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "SNXX": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "split_basis_prior_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "SNXX intraday return +712.3% matches its declared 8x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+          "observed": 7.1229
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "SPAL": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "SPAL moved +34.1% intraday (MAD z=13.9) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 0.3405
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "VIAG": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "VIAG moved -23.4% intraday (MAD z=9.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": -0.2341
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    },
+    "WDCX": {
+      "first_seen": "2026-08-10T14:04:53.499909Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "split_basis_prior_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "WDCX intraday return +203.2% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+          "observed": 2.0319
+        }
+      ],
+      "last_seen": "2026-08-10T14:04:53.499909Z"
+    }
+  },
   "artifacts": {}
 }
