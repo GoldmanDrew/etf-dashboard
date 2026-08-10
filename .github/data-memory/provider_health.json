@@ -1,5 +1,47 @@
 {
   "schema_v": 1,
   "_doc": "Rolling per-provider coverage ledger, appended by scripts/data_sentinel.py sweep (one entry per day, same-day sweeps overwrite). Used for day-over-day provider_drift detection (issuer coverage collapse, anti_patterns.md #7) and as the long-horizon record of which sources actually served data. Capped at provider_drift.ledger_max_entries in config/sentinel.json.",
-  "entries": []
+  "entries": [
+    {
+      "date": "2026-08-10",
+      "ts": "2026-08-10T14:36:48.451319Z",
+      "metrics_providers": {
+        "market_backed": 209,
+        "granite_shares": 74,
+        "tradr_axs": 68,
+        "direxion": 35,
+        "rex_shares": 34,
+        "proshares": 31,
+        "polygon": 29,
+        "yieldmax": 28,
+        "merged": 26,
+        "roundhill": 24,
+        "yfinance": 5,
+        "fof_child_synthetic": 2
+      },
+      "metrics_status": {
+        "ok": 537,
+        "partial": 28,
+        "missing": 0
+      },
+      "spot_sources": {
+        "options_cache": 0,
+        "polygon_last_trade": 0,
+        "tradier_spot": 266,
+        "yfinance_fast_info": 1
+      },
+      "ibkr": {
+        "success": true,
+        "symbols": 19303
+      },
+      "options": {
+        "symbols_count": 310,
+        "errors": 0,
+        "polygon_configured": true,
+        "tradier_configured": true
+      },
+      "vrp_iv_coverage_front_pct": 0.9355
+    }
+  ],
+  "updated_at": "2026-08-10T14:36:48.451319Z"
 }

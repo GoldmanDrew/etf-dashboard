@@ -1,167 +1,154 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-10T14:04:53.500377Z",
-  "mode": "gate",
-  "task": "nav",
+  "build_time": "2026-08-10T14:36:49.186143Z",
+  "mode": "sweep",
+  "task": null,
   "verdict": "quarantine",
   "stats": {
-    "checked_files": 14,
+    "checked_files": 10,
     "block": 0,
-    "quarantine": 16,
+    "quarantine": 15,
     "warn": 0
   },
   "checked": [
-    "data/nav_forecasts/_latest.json",
-    "data/nav_forecasts/snapshots",
-    "data/ci_state.json",
-    "data/underlying_intraday_spot.json",
-    "data/underlying_intraday_volume.json",
-    "data/letf_rebalance_flows_intraday_latest.json",
+    "data/dashboard_data.json",
+    "data/borrow_history.json",
     "data/options_cache.json",
     "data/vrp_live.json",
     "data/vrp_health.json",
-    "data/yieldboost_put_spreads_latest.json",
-    "data/yieldboost_options_target.json",
-    "data/event_calendar_known.json",
-    "data/event_calendar_inferred.json",
-    "data/event_calendar_combined.json"
+    "data/nav_forecasts/_latest.json",
+    "data/underlying_intraday_spot.json",
+    "data/underlying_intraday_volume.json",
+    "data/letf_rebalance_flows_intraday_latest.json",
+    "data/corporate_actions.json"
   ],
   "findings": [
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "CRDU intraday return +311.8% matches its declared 4x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "CRDU intraday return +313.8% matches its declared 4x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "CRDU",
-      "observed": 3.1177
+      "observed": 3.1381
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "GEVX intraday return +197.2% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "GEVX intraday return +202.3% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "GEVX",
-      "observed": 1.9723
+      "observed": 2.0231
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "KORU intraday return +1782.5% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "KORU intraday return +1819.9% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "KORU",
-      "observed": 17.8249
+      "observed": 18.1993
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "LABX intraday return +470.7% matches its declared 6x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "LABX intraday return +475.4% matches its declared 6x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "LABX",
-      "observed": 4.7067
+      "observed": 4.7536
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MSFO moved +21.2% intraday (MAD z=8.7) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "MSFO moved +22.6% intraday (MAD z=8.3) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "MSFO",
-      "observed": 0.2119,
+      "observed": 0.2259,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MUU intraday return +1865.4% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "MUU intraday return +1897.0% matches its declared 20x split of 2026-07-15 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "MUU",
-      "observed": 18.6544
+      "observed": 18.9699
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "NEBX intraday return +203.9% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "NEBX intraday return +216.3% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "NEBX",
-      "observed": 2.0385
+      "observed": 2.1631
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "PLTY moved +36.4% intraday (MAD z=14.9) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "PLTY moved +37.0% intraday (MAD z=13.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "PLTY",
-      "observed": 0.3642,
+      "observed": 0.3703,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "PTIR moved +27.9% intraday (MAD z=11.4) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "PTIR moved +29.5% intraday (MAD z=10.8) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "PTIR",
-      "observed": 0.2793,
+      "observed": 0.2949,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "RBLY moved -22.0% intraday (MAD z=9.0) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "RBLY moved -23.4% intraday (MAD z=8.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "RBLY",
-      "observed": -0.2202,
+      "observed": -0.2338,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SMCL moved +21.9% intraday (MAD z=9.0) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "SMCL moved +23.1% intraday (MAD z=8.4) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "SMCL",
-      "observed": 0.2192,
+      "observed": 0.2306,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SNK moved -33.7% intraday (MAD z=13.8) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "SNK moved -34.7% intraday (MAD z=12.8) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "SNK",
-      "observed": -0.337,
+      "observed": -0.3467,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SNXX intraday return +712.3% matches its declared 8x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "SNXX intraday return +752.3% matches its declared 8x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "SNXX",
-      "observed": 7.1229
+      "observed": 7.5225
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SPAL moved +34.1% intraday (MAD z=13.9) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "SPAL moved +36.0% intraday (MAD z=13.2) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "SPAL",
-      "observed": 0.3405,
-      "threshold": 0.2
-    },
-    {
-      "severity": "quarantine",
-      "code": "return_outlier",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "VIAG moved -23.4% intraday (MAD z=9.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
-      "ticker": "VIAG",
-      "observed": -0.2341,
+      "observed": 0.3603,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "WDCX intraday return +203.2% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "detail": "WDCX intraday return +212.6% matches its declared 3x split of 2026-06-03 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
       "ticker": "WDCX",
-      "observed": 2.0319
+      "observed": 2.126
     }
   ]
 }
