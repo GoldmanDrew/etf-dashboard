@@ -1,13 +1,13 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-10T20:10:50.327934Z",
+  "build_time": "2026-08-10T20:45:47.637613Z",
   "mode": "gate",
   "task": "nav",
-  "verdict": "quarantine",
+  "verdict": "warn",
   "stats": {
-    "checked_files": 14,
+    "checked_files": 8,
     "block": 0,
-    "quarantine": 1,
+    "quarantine": 0,
     "warn": 1
   },
   "checked": [
@@ -17,14 +17,8 @@
     "data/underlying_intraday_spot.json",
     "data/underlying_intraday_volume.json",
     "data/letf_rebalance_flows_intraday_latest.json",
-    "data/options_cache.json",
-    "data/vrp_live.json",
-    "data/vrp_health.json",
-    "data/yieldboost_put_spreads_latest.json",
-    "data/yieldboost_options_target.json",
-    "data/event_calendar_known.json",
-    "data/event_calendar_inferred.json",
-    "data/event_calendar_combined.json"
+    "data/dashboard_data.json",
+    "data/borrow_history.json"
   ],
   "findings": [
     {
@@ -33,15 +27,6 @@
       "artifact": "data/underlying_intraday_spot.json",
       "detail": "44/823 symbols have no metrics row for the previous session 2026-08-07 (worst MNST 10d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
       "observed": 44
-    },
-    {
-      "severity": "quarantine",
-      "code": "return_outlier",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "VIAG moved -21.8% intraday (MAD z=6.3) with no declared split and no leverage corroboration \u2014 suspected bad quote",
-      "ticker": "VIAG",
-      "observed": -0.2176,
-      "threshold": 0.2
     }
   ]
 }
