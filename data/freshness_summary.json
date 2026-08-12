@@ -1,11 +1,11 @@
 {
-  "build_time": "2026-08-11T12:14:47.589787Z",
+  "build_time": "2026-08-12T12:28:04.885637Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-08-10T22:59:12.348905Z",
+    "build_time": "2026-08-11T22:46:11.668691Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
     "yieldboost_underlyings_refreshed_count": 12,
@@ -13,13 +13,13 @@
     "yieldboost_underlyings_skipped_fresh_count": 18,
     "yieldboost_refresh_order_head": [
       "CRWV",
-      "CRCL",
+      "ETHA",
       "IBIT",
-      "GDX",
       "AMZN",
-      "IONQ",
       "BABA",
-      "ETHA"
+      "CRCL",
+      "COIN",
+      "MARA"
     ],
     "monitored_symbols_count": 310,
     "freshness_enforced_count": 43,
@@ -28,103 +28,73 @@
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
     "oldest_symbol": "AMD",
-    "oldest_symbol_age_minutes": 795,
+    "oldest_symbol_age_minutes": 821,
     "oldest_enforced_symbol": "AMD",
-    "oldest_enforced_symbol_age_minutes": 795
+    "oldest_enforced_symbol_age_minutes": 821
   },
   "vrp": {
     "worst_underlying_symbol": "XBI",
-    "worst_underlying_options_age_minutes": 842,
-    "underlying_options_as_of_min": "2026-08-10T22:12:15.306595Z",
+    "worst_underlying_options_age_minutes": 930,
+    "underlying_options_as_of_min": "2026-08-11T20:57:54.220304Z",
     "iv_coverage_front_pct": 0.9355
   },
   "flow": {
-    "latest_date": "2026-08-10",
-    "build_time": "2026-08-11T12:14:44.166700Z",
+    "latest_date": "2026-08-11",
+    "build_time": "2026-08-12T12:28:00.770413Z",
     "underlyings_total": 252,
-    "underlyings_stale": 4,
-    "underlyings_stale_pct": 1.59,
+    "underlyings_stale": 0,
+    "underlyings_stale_pct": 0.0,
     "underlyings_issuer_publish_lag": 0,
-    "underlyings_actionable_stale": 4,
-    "underlyings_actionable_stale_pct": 1.59,
-    "underlyings_stale_by_reason": {
-      "quality_excluded": 4
-    },
+    "underlyings_actionable_stale": 0,
+    "underlyings_actionable_stale_pct": 0.0,
+    "underlyings_stale_by_reason": {},
     "fund_rows_on_latest_date": 559,
     "fund_quality_counts": {
       "income_overlay": 31,
       "missing_leverage": 2,
       "missing_prior_aum": 33,
-      "ok": 401,
-      "product_class:passive_low_delta": 64,
-      "stale_aum": 28
+      "ok": 429,
+      "product_class:passive_low_delta": 64
     },
-    "stale_aum_by_prior_kind": {
-      "proshares_fallback": 28
-    },
-    "top_stale_by_abs_net_moc": [
-      {
-        "underlying": "QQQ",
-        "date": "2026-08-07",
-        "abs_net_moc_dollars": 2793154363.45,
-        "reason": "quality_excluded"
-      },
-      {
-        "underlying": "USO",
-        "date": "2026-08-07",
-        "abs_net_moc_dollars": 24068806.07,
-        "reason": "quality_excluded"
-      },
-      {
-        "underlying": "DIA",
-        "date": "2026-08-07",
-        "abs_net_moc_dollars": 6534056.7,
-        "reason": "quality_excluded"
-      },
-      {
-        "underlying": "EWJ",
-        "date": "2026-08-07",
-        "abs_net_moc_dollars": 578202.06,
-        "reason": "quality_excluded"
-      }
-    ]
+    "stale_aum_by_prior_kind": {},
+    "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-08-10",
+    "latest_date": "2026-08-11",
     "latest_ok": 529,
-    "latest_stale_ok": 290,
+    "latest_stale_ok": 185,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "market_backed_no_issuer_nav": 253,
+      "market_backed_no_issuer_nav": 150,
       "issuer_lag": 34,
-      "anchor_lag": 3
+      "anchor_lag": 1
     },
-    "flow_blockers_prior_stale": 3,
+    "flow_blockers_prior_stale": 1,
     "prem_disc": {
       "rows_with_close": 565,
-      "rows_with_nav_and_close": 274,
-      "rows_suppressed_asof_mismatch": 291,
-      "median_prem_disc_bps": 0.7274084258900513,
-      "lockstep_nav_close_count": 25,
-      "lockstep_nav_close_pct": 9.12,
+      "rows_with_nav_and_close": 367,
+      "rows_suppressed_asof_mismatch": 198,
+      "median_prem_disc_bps": -0.34564581095839797,
+      "lockstep_nav_close_count": 48,
+      "lockstep_nav_close_pct": 13.08,
       "rex_nav_vs_implied_div_bps_gt5": 0,
       "rex_nav_vs_implied_div_bps_gt50": 0,
       "rex_nav_vs_implied_div_bps_max": null,
       "by_provider": {
         "polygon": {
-          "rows": 5,
-          "median_prem_disc_bps": 0.00015197997017586234,
-          "lockstep_count": 5
+          "rows": 16,
+          "median_prem_disc_bps": -7.145783721551468e-05,
+          "lockstep_count": 16
         },
         "tradr_axs": {
           "rows": 68,
-          "median_prem_disc_bps": 8.296718638947596,
-          "lockstep_count": 0
+          "median_prem_disc_bps": -2.899632719642475,
+          "lockstep_count": 1
         },
         "granite_shares": {
           "rows": 74,
-          "median_prem_disc_bps": -1.0352938377687326,
-          "lockstep_count": 7
+          "median_prem_disc_bps": -3.4879459696593513,
+          "lockstep_count": 2
         },
         "direxion": {
           "rows": 35,
@@ -133,23 +103,33 @@
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 2.2013762261840544,
+          "median_prem_disc_bps": 0.1183436323643344,
+          "lockstep_count": 3
+        },
+        "yieldmax": {
+          "rows": 28,
+          "median_prem_disc_bps": 7.174868196009062,
           "lockstep_count": 0
         },
+        "defiance": {
+          "rows": 64,
+          "median_prem_disc_bps": -12.102203829667706,
+          "lockstep_count": 13
+        },
         "merged": {
-          "rows": 30,
-          "median_prem_disc_bps": 0.7274084258900513,
-          "lockstep_count": 8
+          "rows": 21,
+          "median_prem_disc_bps": 0.0,
+          "lockstep_count": 3
         },
         "yfinance": {
-          "rows": 5,
-          "median_prem_disc_bps": 0.0,
+          "rows": 4,
+          "median_prem_disc_bps": 58.57278067548489,
           "lockstep_count": 2
         },
         "proshares": {
           "rows": 31,
-          "median_prem_disc_bps": 1.3873599510514638,
-          "lockstep_count": 1
+          "median_prem_disc_bps": -0.8555876373070967,
+          "lockstep_count": 6
         },
         "fof_child_synthetic": {
           "rows": 2,
@@ -160,114 +140,114 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-08-11",
+    "global_max": "2026-08-12",
     "universe_stale": 34,
     "severe_tail_count": 0,
     "worst": [
       {
         "ticker": "AAPX",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "AFRU",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "APHU",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "BMNU",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "BTCL",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "BTCZ",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "CCUP",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "CIFU",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "CORD",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "CRCD",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       }
     ],
     "stale_tickers_sample": [
       {
         "ticker": "AAPX",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "AFRU",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "APHU",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "BMNU",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "BTCL",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "BTCZ",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "CCUP",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "CIFU",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "CORD",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       },
       {
         "ticker": "CRCD",
-        "last_date": "2026-08-07",
-        "days_behind": 4
+        "last_date": "2026-08-10",
+        "days_behind": 2
       }
     ],
-    "build_time": "2026-08-11T12:05:33.854556+00:00"
+    "build_time": "2026-08-12T12:18:09.091926+00:00"
   },
   "violations": [],
   "ok": true
