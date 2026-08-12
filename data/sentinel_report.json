@@ -1,13 +1,13 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-12T19:52:28.579899Z",
+  "build_time": "2026-08-12T20:27:15.102990Z",
   "mode": "gate",
   "task": "nav",
   "verdict": "quarantine",
   "stats": {
     "checked_files": 14,
     "block": 0,
-    "quarantine": 3,
+    "quarantine": 2,
     "warn": 1
   },
   "checked": [
@@ -36,29 +36,19 @@
     },
     {
       "severity": "quarantine",
-      "code": "return_outlier",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "QNT moved +27.1% intraday (MAD z=6.7) with no declared split and no leverage corroboration \u2014 suspected bad quote",
-      "ticker": "QNT",
-      "observed": 0.271,
-      "threshold": 0.2
-    },
-    {
-      "severity": "quarantine",
-      "code": "return_outlier",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "QNTU moved +41.2% intraday (MAD z=10.2) with no declared split and no leverage corroboration \u2014 suspected bad quote",
-      "ticker": "QNTU",
-      "observed": 0.4119,
-      "threshold": 0.2
-    },
-    {
-      "severity": "quarantine",
       "code": "split_basis_prior_close",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "SMCZ intraday return -41.4% matches its declared 2x split of 2026-09-10 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
-      "ticker": "SMCZ",
-      "observed": -0.4139
+      "detail": "NBIZ intraday return -67.8% matches its declared 3x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+      "ticker": "NBIZ",
+      "observed": -0.6776
+    },
+    {
+      "severity": "quarantine",
+      "code": "split_basis_metrics_close",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "NBIZ spot 5.31 vs metrics close 16.469999313354492 (x0.32) matches its declared 3x split of 2026-07-21 \u2014 the metrics store still carries the pre-split basis for this ticker",
+      "ticker": "NBIZ",
+      "observed": 0.322
     }
   ]
 }

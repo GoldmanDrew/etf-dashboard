@@ -1,6 +1,6 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-12T19:52:28.579609Z",
+  "build_time": "2026-08-12T20:27:15.102759Z",
   "generated_by": "scripts/data_sentinel.py",
   "note": "Per-ticker/per-artifact data-quality holds. The UI badges/grays these; records are never removed from dashboard_data.json so cross-sectional scores stay stable. Entries auto-clear after 2 clean sweeps.",
   "tickers": {
@@ -55,6 +55,25 @@
         }
       ],
       "last_seen": "2026-08-12T19:52:28.579609Z"
+    },
+    "NBIZ": {
+      "first_seen": "2026-08-12T20:27:15.102759Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "split_basis_prior_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "NBIZ intraday return -67.8% matches its declared 3x split of 2026-07-21 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+          "observed": -0.6776
+        },
+        {
+          "code": "split_basis_metrics_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "NBIZ spot 5.31 vs metrics close 16.469999313354492 (x0.32) matches its declared 3x split of 2026-07-21 \u2014 the metrics store still carries the pre-split basis for this ticker",
+          "observed": 0.322
+        }
+      ],
+      "last_seen": "2026-08-12T20:27:15.102759Z"
     }
   },
   "artifacts": {}
