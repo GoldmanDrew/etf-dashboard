@@ -1,12 +1,51 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-13T19:32:02.407320Z",
+  "build_time": "2026-08-13T19:41:17.326790Z",
   "generated_by": "scripts/data_sentinel.py",
   "note": "Per-ticker/per-artifact data-quality holds. The UI badges/grays these; records are never removed from dashboard_data.json so cross-sectional scores stay stable. Entries auto-clear after 2 clean sweeps.",
   "tickers": {
+    "QNT": {
+      "first_seen": "2026-08-12T19:52:28.579609Z",
+      "clean_streak": 1,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "QNT moved +27.1% intraday (MAD z=6.7) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 0.271
+        }
+      ],
+      "last_seen": "2026-08-12T19:52:28.579609Z"
+    },
+    "QNTU": {
+      "first_seen": "2026-08-12T19:52:28.579609Z",
+      "clean_streak": 1,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "QNTU moved +41.2% intraday (MAD z=10.2) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 0.4119
+        }
+      ],
+      "last_seen": "2026-08-12T19:52:28.579609Z"
+    },
+    "SMCZ": {
+      "first_seen": "2026-08-12T19:52:28.579609Z",
+      "clean_streak": 1,
+      "reasons": [
+        {
+          "code": "split_basis_prior_close",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "SMCZ intraday return -41.4% matches its declared 2x split of 2026-09-10 \u2014 prior_close is on the pre-split basis; return/flow math for this ticker is corrupt",
+          "observed": -0.4139
+        }
+      ],
+      "last_seen": "2026-08-12T19:52:28.579609Z"
+    },
     "NBIZ": {
       "first_seen": "2026-08-12T20:27:15.102759Z",
-      "clean_streak": 1,
+      "clean_streak": 0,
       "reasons": [
         {
           "code": "split_basis_prior_close",
