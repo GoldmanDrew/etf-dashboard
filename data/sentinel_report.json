@@ -1,26 +1,30 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-14T14:30:42.821789Z",
-  "mode": "sweep",
-  "task": null,
+  "build_time": "2026-08-14T14:58:53.228190Z",
+  "mode": "gate",
+  "task": "nav",
   "verdict": "warn",
   "stats": {
-    "checked_files": 10,
+    "checked_files": 14,
     "block": 0,
     "quarantine": 0,
-    "warn": 3
+    "warn": 1
   },
   "checked": [
-    "data/dashboard_data.json",
-    "data/borrow_history.json",
-    "data/options_cache.json",
-    "data/vrp_live.json",
-    "data/vrp_health.json",
     "data/nav_forecasts/_latest.json",
+    "data/nav_forecasts/snapshots",
+    "data/ci_state.json",
     "data/underlying_intraday_spot.json",
     "data/underlying_intraday_volume.json",
     "data/letf_rebalance_flows_intraday_latest.json",
-    "data/corporate_actions.json"
+    "data/options_cache.json",
+    "data/vrp_live.json",
+    "data/vrp_health.json",
+    "data/yieldboost_put_spreads_latest.json",
+    "data/yieldboost_options_target.json",
+    "data/event_calendar_known.json",
+    "data/event_calendar_inferred.json",
+    "data/event_calendar_combined.json"
   ],
   "findings": [
     {
@@ -29,22 +33,6 @@
       "artifact": "data/underlying_intraday_spot.json",
       "detail": "42/823 symbols have no metrics row for the previous session 2026-08-13 (worst AAPX 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
       "observed": 42
-    },
-    {
-      "severity": "warn",
-      "code": "provider_drift",
-      "artifact": "data/etf_metrics_health.json",
-      "detail": "issuer provider 'defiance' covered 64 tickers previously but only 0 now \u2014 possible issuer-site drift silently rerouting to market fallback (Defiance-class incident, anti_patterns.md #7)",
-      "observed": 0,
-      "threshold": 32
-    },
-    {
-      "severity": "warn",
-      "code": "provider_drift",
-      "artifact": "data/etf_metrics_health.json",
-      "detail": "issuer provider 'yieldmax' covered 28 tickers previously but only 0 now \u2014 possible issuer-site drift silently rerouting to market fallback (Defiance-class incident, anti_patterns.md #7)",
-      "observed": 0,
-      "threshold": 14
     }
   ]
 }
