@@ -1,11 +1,11 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-19T15:07:49.789739Z",
+  "build_time": "2026-08-19T15:41:25.265455Z",
   "mode": "gate",
   "task": "nav",
   "verdict": "quarantine",
   "stats": {
-    "checked_files": 8,
+    "checked_files": 14,
     "block": 0,
     "quarantine": 3,
     "warn": 1
@@ -17,8 +17,14 @@
     "data/underlying_intraday_spot.json",
     "data/underlying_intraday_volume.json",
     "data/letf_rebalance_flows_intraday_latest.json",
-    "data/dashboard_data.json",
-    "data/borrow_history.json"
+    "data/options_cache.json",
+    "data/vrp_live.json",
+    "data/vrp_health.json",
+    "data/yieldboost_put_spreads_latest.json",
+    "data/yieldboost_options_target.json",
+    "data/event_calendar_known.json",
+    "data/event_calendar_inferred.json",
+    "data/event_calendar_combined.json"
   ],
   "findings": [
     {
@@ -32,27 +38,27 @@
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MRNA moved +136.8% intraday (MAD z=32.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "MRNA moved +119.7% intraday (MAD z=25.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "MRNA",
-      "observed": 1.3685,
+      "observed": 1.1971,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MRNY moved +128.5% intraday (MAD z=30.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "MRNY moved +111.5% intraday (MAD z=23.9) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "MRNY",
-      "observed": 1.2853,
+      "observed": 1.1154,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "zombie_spot",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MRNX spot 116.52 vs last metrics close 32.880001068115234 (x3.54) with no declared split \u2014 suspected stale/zombie quote",
+      "detail": "MRNX spot 106.2 vs last metrics close 32.880001068115234 (x3.23) with no declared split \u2014 suspected stale/zombie quote",
       "ticker": "MRNX",
-      "observed": 3.544,
+      "observed": 3.23,
       "threshold": 2.5
     }
   ]
