@@ -1,6 +1,6 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-19T19:09:46.250368Z",
+  "build_time": "2026-08-19T20:19:33.172906Z",
   "generated_by": "scripts/data_sentinel.py",
   "note": "Per-ticker/per-artifact data-quality holds. The UI badges/grays these; records are never removed from dashboard_data.json so cross-sectional scores stay stable. Entries auto-clear after 2 clean sweeps.",
   "tickers": {
@@ -11,11 +11,11 @@
         {
           "code": "return_outlier",
           "artifact": "data/underlying_intraday_spot.json",
-          "detail": "MRNA moved +147.4% intraday (MAD z=27.5) with no declared split and no leverage corroboration \u2014 suspected bad quote",
-          "observed": 1.4744
+          "detail": "MRNA moved +178.0% intraday (MAD z=33.1) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 1.7802
         }
       ],
-      "last_seen": "2026-08-19T19:09:46.250368Z"
+      "last_seen": "2026-08-19T20:19:33.172906Z"
     },
     "MRNY": {
       "first_seen": "2026-08-19T14:17:32.818717Z",
@@ -24,11 +24,17 @@
         {
           "code": "return_outlier",
           "artifact": "data/underlying_intraday_spot.json",
-          "detail": "MRNY moved +138.8% intraday (MAD z=25.9) with no declared split and no leverage corroboration \u2014 suspected bad quote",
-          "observed": 1.3878
+          "detail": "MRNY moved +168.8% intraday (MAD z=31.4) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 1.6878
+        },
+        {
+          "code": "zombie_spot",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "MRNY spot 41.93 vs last metrics close 15.600000381469727 (x2.69) with no declared split \u2014 suspected stale/zombie quote",
+          "observed": 2.688
         }
       ],
-      "last_seen": "2026-08-19T19:09:46.250368Z"
+      "last_seen": "2026-08-19T20:19:33.172906Z"
     },
     "MRNX": {
       "first_seen": "2026-08-19T14:17:32.818717Z",
@@ -37,11 +43,11 @@
         {
           "code": "zombie_spot",
           "artifact": "data/underlying_intraday_spot.json",
-          "detail": "MRNX spot 123.29 vs last metrics close 32.880001068115234 (x3.75) with no declared split \u2014 suspected stale/zombie quote",
-          "observed": 3.75
+          "detail": "MRNX spot 142.0 vs last metrics close 32.880001068115234 (x4.32) with no declared split \u2014 suspected stale/zombie quote",
+          "observed": 4.319
         }
       ],
-      "last_seen": "2026-08-19T19:09:46.250368Z"
+      "last_seen": "2026-08-19T20:19:33.172906Z"
     }
   },
   "artifacts": {}
