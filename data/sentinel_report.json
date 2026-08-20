@@ -1,13 +1,13 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-20T14:20:07.198078Z",
+  "build_time": "2026-08-20T15:22:31.850798Z",
   "mode": "gate",
   "task": "nav",
   "verdict": "quarantine",
   "stats": {
     "checked_files": 14,
     "block": 0,
-    "quarantine": 2,
+    "quarantine": 1,
     "warn": 1
   },
   "checked": [
@@ -36,20 +36,11 @@
     },
     {
       "severity": "quarantine",
-      "code": "return_outlier",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "VIAG moved -21.0% intraday (MAD z=9.0) with no declared split and no leverage corroboration \u2014 suspected bad quote",
-      "ticker": "VIAG",
-      "observed": -0.2097,
-      "threshold": 0.2
-    },
-    {
-      "severity": "quarantine",
       "code": "zombie_spot",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MRNX spot 91.19 vs last metrics close 31.33 (x2.91) with no declared split \u2014 suspected stale/zombie quote",
+      "detail": "MRNX spot 86.79 vs last metrics close 31.33 (x2.77) with no declared split \u2014 suspected stale/zombie quote",
       "ticker": "MRNX",
-      "observed": 2.911,
+      "observed": 2.77,
       "threshold": 2.5
     }
   ]
