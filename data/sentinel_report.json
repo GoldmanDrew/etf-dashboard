@@ -1,39 +1,52 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-20T18:19:03.529926Z",
-  "mode": "gate",
-  "task": "intraday",
+  "build_time": "2026-08-20T19:08:29.778004Z",
+  "mode": "sweep",
+  "task": null,
   "verdict": "quarantine",
   "stats": {
-    "checked_files": 6,
+    "checked_files": 10,
     "block": 0,
-    "quarantine": 1,
+    "quarantine": 2,
     "warn": 1
   },
   "checked": [
+    "data/dashboard_data.json",
+    "data/borrow_history.json",
+    "data/options_cache.json",
+    "data/vrp_live.json",
+    "data/vrp_health.json",
+    "data/nav_forecasts/_latest.json",
     "data/underlying_intraday_spot.json",
     "data/underlying_intraday_volume.json",
     "data/letf_rebalance_flows_intraday_latest.json",
-    "data/ci_state.json",
-    "data/dashboard_data.json",
-    "data/borrow_history.json"
+    "data/corporate_actions.json"
   ],
   "findings": [
     {
       "severity": "warn",
       "code": "stale_return_baseline_suppressed",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "166/838 symbols have no metrics row for the previous session 2026-08-19 (worst AAPX 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
+      "detail": "166/839 symbols have no metrics row for the previous session 2026-08-19 (worst AAPX 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
       "observed": 166
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "VIAG moved -21.3% intraday (MAD z=6.7) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "detail": "VIAG moved -21.3% intraday (MAD z=6.6) with no declared split and no leverage corroboration \u2014 suspected bad quote",
       "ticker": "VIAG",
       "observed": -0.2126,
       "threshold": 0.2
+    },
+    {
+      "severity": "quarantine",
+      "code": "zombie_spot",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "MRNX spot 79.0 vs last metrics close 31.33 (x2.52) with no declared split \u2014 suspected stale/zombie quote",
+      "ticker": "MRNX",
+      "observed": 2.522,
+      "threshold": 2.5
     }
   ]
 }
