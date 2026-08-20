@@ -1,33 +1,29 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-20T23:13:30.001364Z",
-  "mode": "sweep",
-  "task": null,
+  "build_time": "2026-08-20T23:23:02.943895Z",
+  "mode": "gate",
+  "task": "intraday",
   "verdict": "quarantine",
   "stats": {
-    "checked_files": 10,
+    "checked_files": 6,
     "block": 0,
     "quarantine": 1,
     "warn": 1
   },
   "checked": [
-    "data/dashboard_data.json",
-    "data/borrow_history.json",
-    "data/options_cache.json",
-    "data/vrp_live.json",
-    "data/vrp_health.json",
-    "data/nav_forecasts/_latest.json",
     "data/underlying_intraday_spot.json",
     "data/underlying_intraday_volume.json",
     "data/letf_rebalance_flows_intraday_latest.json",
-    "data/corporate_actions.json"
+    "data/ci_state.json",
+    "data/dashboard_data.json",
+    "data/borrow_history.json"
   ],
   "findings": [
     {
       "severity": "warn",
       "code": "stale_return_baseline_suppressed",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "166/839 symbols have no metrics row for the previous session 2026-08-19 (worst AAPX 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
+      "detail": "166/838 symbols have no metrics row for the previous session 2026-08-19 (worst AAPX 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
       "observed": 166
     },
     {
