@@ -1,55 +1,69 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-20T13:44:18.225207Z",
-  "mode": "gate",
-  "task": "nav",
+  "build_time": "2026-08-20T14:12:07.808786Z",
+  "mode": "sweep",
+  "task": null,
   "verdict": "quarantine",
   "stats": {
-    "checked_files": 14,
+    "checked_files": 10,
     "block": 0,
-    "quarantine": 2,
+    "quarantine": 4,
     "warn": 1
   },
   "checked": [
-    "data/nav_forecasts/_latest.json",
-    "data/nav_forecasts/snapshots",
-    "data/ci_state.json",
-    "data/underlying_intraday_spot.json",
-    "data/underlying_intraday_volume.json",
-    "data/letf_rebalance_flows_intraday_latest.json",
+    "data/dashboard_data.json",
+    "data/borrow_history.json",
     "data/options_cache.json",
     "data/vrp_live.json",
     "data/vrp_health.json",
-    "data/yieldboost_put_spreads_latest.json",
-    "data/yieldboost_options_target.json",
-    "data/event_calendar_known.json",
-    "data/event_calendar_inferred.json",
-    "data/event_calendar_combined.json"
+    "data/nav_forecasts/_latest.json",
+    "data/underlying_intraday_spot.json",
+    "data/underlying_intraday_volume.json",
+    "data/letf_rebalance_flows_intraday_latest.json",
+    "data/corporate_actions.json"
   ],
   "findings": [
     {
       "severity": "warn",
       "code": "stale_return_baseline_suppressed",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "166/838 symbols have no metrics row for the previous session 2026-08-19 (worst AAPX 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
-      "observed": 166
+      "detail": "152/815 symbols have no metrics row for the previous session 2026-08-19 (worst AAPX 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
+      "observed": 152
     },
     {
       "severity": "quarantine",
       "code": "return_outlier",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "VIAG moved -21.9% intraday (MAD z=5122058.9) with no declared split and no leverage corroboration \u2014 suspected bad quote",
-      "ticker": "VIAG",
-      "observed": -0.2189,
+      "detail": "UXRP moved +30.0% intraday (MAD z=15.7) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "ticker": "UXRP",
+      "observed": 0.2998,
+      "threshold": 0.2
+    },
+    {
+      "severity": "quarantine",
+      "code": "return_outlier",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "XRPT moved +29.5% intraday (MAD z=15.4) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "ticker": "XRPT",
+      "observed": 0.2951,
+      "threshold": 0.2
+    },
+    {
+      "severity": "quarantine",
+      "code": "return_outlier",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "XXRP moved +28.3% intraday (MAD z=14.8) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+      "ticker": "XXRP",
+      "observed": 0.283,
       "threshold": 0.2
     },
     {
       "severity": "quarantine",
       "code": "zombie_spot",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "MRNX spot 141.64 vs last metrics close 31.33 (x4.52) with no declared split \u2014 suspected stale/zombie quote",
+      "detail": "MRNX spot 81.2401 vs last metrics close 31.33 (x2.59) with no declared split \u2014 suspected stale/zombie quote",
       "ticker": "MRNX",
-      "observed": 4.521,
+      "observed": 2.593,
       "threshold": 2.5
     }
   ]
