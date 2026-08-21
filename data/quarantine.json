@@ -1,8 +1,67 @@
 {
   "schema_v": 1,
-  "build_time": "2026-08-21T23:05:31.606405Z",
+  "build_time": "2026-08-21T23:17:20.305130Z",
   "generated_by": "scripts/data_sentinel.py",
   "note": "Per-ticker/per-artifact data-quality holds. The UI badges/grays these; records are never removed from dashboard_data.json so cross-sectional scores stay stable. Entries auto-clear after 2 clean sweeps.",
-  "tickers": {},
+  "tickers": {
+    "MRNA": {
+      "first_seen": "2026-08-19T14:17:32.818717Z",
+      "clean_streak": 1,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "MRNA moved +177.0% intraday (MAD z=31.7) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 1.7697
+        }
+      ],
+      "last_seen": "2026-08-19T23:14:11.814269Z"
+    },
+    "MRNY": {
+      "first_seen": "2026-08-19T14:17:32.818717Z",
+      "clean_streak": 1,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "MRNY moved +169.2% intraday (MAD z=30.3) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 1.6923
+        },
+        {
+          "code": "zombie_spot",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "MRNY spot 42.0 vs last metrics close 15.600000381469727 (x2.69) with no declared split \u2014 suspected stale/zombie quote",
+          "observed": 2.692
+        }
+      ],
+      "last_seen": "2026-08-19T23:14:11.814269Z"
+    },
+    "MRNX": {
+      "first_seen": "2026-08-19T14:17:32.818717Z",
+      "clean_streak": 1,
+      "reasons": [
+        {
+          "code": "zombie_spot",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "MRNX spot 85.2 vs last metrics close 31.33 (x2.72) with no declared split \u2014 suspected stale/zombie quote",
+          "observed": 2.719
+        }
+      ],
+      "last_seen": "2026-08-20T16:21:48.628589Z"
+    },
+    "VIAG": {
+      "first_seen": "2026-08-20T13:44:18.224870Z",
+      "clean_streak": 1,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "VIAG moved -22.1% intraday (MAD z=6.8) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": -0.2215
+        }
+      ],
+      "last_seen": "2026-08-20T23:23:02.943564Z"
+    }
+  },
   "artifacts": {}
 }
