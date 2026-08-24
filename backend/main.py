@@ -127,6 +127,30 @@ def sync_github_universe() -> dict:
         github_token=token,
     )
 
+    # Additional artifacts on the same repo/branch/schedule (github.extra_files).
+    # These are side-car JSON panels, not the universe: a failure here must never
+    # block or invalidate the universe sync above, so each is caught individually.
+    extras = {}
+    for spec in (gh_cfg.get("extra_files") or []):
+        remote = spec.get("remote_path")
+        if not remote:
+            continue
+        local = spec.get("local_path", remote)
+        try:
+            extras[remote] = sync_universe_from_github(
+                repo=gh_cfg.get("repo", "magis-capital-partners/ls-algo"),
+                branch=gh_cfg.get("branch", "main"),
+                remote_path=remote,
+                local_path=local,
+                backup_dir=gh_cfg.get("backup_dir", "data/universe_history"),
+                github_token=token,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"extra_files sync failed for {remote}: {e}")
+            extras[remote] = {"success": False, "updated": False, "error": str(e)}
+    if extras:
+        result["extra_files"] = extras
+
     # Try to get last commit info (when was the screener last run?)
     commit_info = get_last_commit_info(
         repo=gh_cfg.get("repo", "magis-capital-partners/ls-algo"),
@@ -782,6 +806,36 @@ def get_status() -> dict:
         "github_sync": GITHUB_SYNC_STATUS or None,
     }
     return status
+
+
+@app.get("/api/bucket6-watch")
+def get_bucket6_watch() -> dict:
+    """Bucket 6 watch panel — single-stock autocallable ETFs (watch-only).
+
+    Serves the artifact written by ls-algo ``scripts/bucket6_watch.py`` and
+    pulled by ``github.extra_files``. These funds are deliberately NOT tradable
+    from this system: only a fraction are borrowable at all, and every one of
+    their underlyings already carries B1/B2/B4 exposure. The panel exists to
+    watch two gates, not to size anything.
+
+    Returns ``{"available": false, ...}`` rather than raising when the artifact
+    has not been synced yet, so the panel degrades quietly instead of erroring.
+    """
+    import json  # module-level name is bound as _json; match the local-import convention
+
+    path = Path("data/bucket6_watch.json")
+    if not path.is_file():
+        return {"available": False,
+                "reason": "artifact not synced yet (github.extra_files)",
+                "funds": [], "alerts": []}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 - a corrupt artifact must not 500 the app
+        logger.warning(f"bucket6_watch.json unreadable: {e}")
+        return {"available": False, "reason": f"unreadable: {e}",
+                "funds": [], "alerts": []}
+    payload["available"] = True
+    return payload
 
 
 @app.get("/api/history/{symbol}")

@@ -17,6 +17,8 @@ github:
   sync_on_startup: true    # pull latest on server start
   sync_interval_seconds: 3600   # re-sync every hour (0 = disabled)
   backup_dir: "data/universe_history"  # keep dated backups of old CSVs
+  # !! NOTE: a second `github:` block further down this file overrides this one
+  # !! entirely (YAML duplicate key — last wins). Edit that block, not this one.
 
 # ── IBKR connection ─────────────────────────
 ibkr:
@@ -62,6 +64,15 @@ github:
   sync_interval_seconds: 3600   # re-pull every hour
   # token: null                 # set for private repos or higher rate limits
                                 # or use GITHUB_TOKEN env var
+  # Additional artifacts pulled from the same repo/branch on the same schedule.
+  # Each failure is caught independently so a side-car panel can never block or
+  # invalidate the universe sync above.
+  #   Bucket 6 watch panel — single-stock autocallable ETFs, watch-only telemetry
+  #   written by ls-algo scripts/bucket6_watch.py. Field contract:
+  #   that repo's docs/Bucket6_Dashboard_Data_Spec.pdf
+  extra_files:
+    - remote_path: "data/bucket6_watch.json"
+      local_path: "data/bucket6_watch.json"
 
 # ── Blacklist (symbols to exclude) ───────────
 blacklist: []

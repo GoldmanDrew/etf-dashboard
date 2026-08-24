@@ -1,0 +1,71 @@
+/* Bucket 6 watch panel — single-stock autocallable ETFs (watch only).
+   Paired with assets/bucket6_watch.js. Mounts into #bucket6-watch. */
+
+#bucket6-watch { font-size: 12px; }
+
+.b6-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; margin: 0 0 8px 0; flex-wrap: wrap;
+}
+.b6-title { font-weight: 700; font-size: 14px; }
+.b6-sub {
+  margin-left: 8px; font-size: 11px; opacity: .65;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.b6-counts { display: flex; gap: 14px; font-size: 11.5px; opacity: .85; }
+
+.b6-alerts { margin: 6px 0 10px 0; display: flex; flex-direction: column; gap: 3px; }
+.b6-alert-hi {
+  padding: 5px 8px; border-left: 3px solid #a4243b;
+  background: rgba(164, 36, 59, .10); border-radius: 2px;
+}
+.b6-alert-lo {
+  padding: 4px 8px; border-left: 3px solid #8a8f95;
+  background: rgba(138, 143, 149, .08); border-radius: 2px; opacity: .9;
+}
+.b6-quiet { padding: 10px 4px; opacity: .6; font-style: italic; }
+
+/* Wide table: scroll inside the panel rather than pushing the page sideways. */
+.b6-scroll { overflow-x: auto; }
+.b6-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.b6-table th {
+  text-align: left; font-weight: 600; font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: .03em;
+  padding: 4px 7px; border-bottom: 1.5px solid currentColor; opacity: .7;
+  white-space: nowrap;
+}
+.b6-table td {
+  padding: 4px 7px; border-bottom: 1px solid rgba(128, 128, 128, .22);
+  white-space: nowrap;
+}
+.b6-table tbody tr:hover { background: rgba(128, 128, 128, .07); }
+.b6-r { text-align: right; }
+.b6-tick { font-weight: 700; }
+
+.b6-badge {
+  display: inline-block; padding: 1px 6px; border-radius: 3px;
+  font-size: 10px; font-weight: 700; letter-spacing: .03em; white-space: nowrap;
+}
+.b6-both   { background: #a4243b; color: #fff; }
+.b6-g2     { background: #e0c15a; color: #3a2f00; }
+.b6-g1     { background: #1f4e79; color: #fff; }
+.b6-asleep { background: rgba(128, 128, 128, .22); }
+
+.b6-good { color: #2e6640; font-weight: 600; }
+.b6-bad  { color: #a4243b; }
+.b6-warn { color: #8a6d1f; font-weight: 600; }
+
+.b6-flag {
+  font-size: 9.5px; padding: 0 4px; border-radius: 2px;
+  background: rgba(164, 36, 59, .15); color: #a4243b;
+  cursor: help; vertical-align: middle;
+}
+
+.b6-foot { margin-top: 8px; font-size: 10.5px; opacity: .62; line-height: 1.5; }
+
+@media (prefers-color-scheme: dark) {
+  .b6-asleep { background: rgba(200, 200, 200, .18); }
+  .b6-good { color: #6cc08a; }
+  .b6-bad  { color: #e08a99; }
+  .b6-warn { color: #e0c15a; }
+}
