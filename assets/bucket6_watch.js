@@ -71,6 +71,15 @@
     const convexCls = f.convexity_gap === null || f.convexity_gap === undefined
       ? '' : (f.convexity_gap > 0 ? 'b6-good' : 'b6-bad');
     const bookCls = f.shared_underlying_flag ? 'b6-warn' : '';
+    // Both barrier sides matter, for opposite reasons: the KI (put) side is where
+    // the convexity goes live; the KO (call) side is where a tranche autocalls and
+    // resets a live position out from under us.
+    const ko = f.nearest_ko_distance === null || f.nearest_ko_distance === undefined
+      ? '—' : pct(f.nearest_ko_distance) + (f.autocall_imminent ? ' !' : '');
+    const ki = f.nearest_ki_distance === null || f.nearest_ki_distance === undefined
+      ? '—' : pct(f.nearest_ki_distance);
+    const koCls = f.autocall_imminent ? 'b6-warn' : '';
+    const kiCls = f.gate2_live ? 'b6-bad' : '';
     const carryWarn = f.hedged_carry_confidence === 'low'
       ? ` <span class="b6-flag" title="${escapeHtml(f.hedged_carry_caveat || '')}">low-conf</span>` : '';
     return `<tr>
@@ -79,8 +88,9 @@
       <td><span class="b6-badge ${cls}">${escapeHtml(f.status)}</span></td>
       <td class="b6-r">${int(f.shares_available)}</td>
       <td class="b6-r">${pct(f.borrow_fee_annual, 2)}</td>
-      <td class="b6-r">${pct(f.und_vs_inception)}</td>
-      <td class="b6-r">${pct(f.und_max_drawdown_since_inception)}</td>
+      <td class="b6-r ${koCls}">${ko}</td>
+      <td class="b6-r ${kiCls}">${ki}</td>
+      <td>${escapeHtml(f.nearest_barrier_side || '—')}</td>
       <td class="b6-r"><b>${num(f.delta_40d)}</b></td>
       <td class="b6-r">${num(f.delta_peak_to_date)}</td>
       <td class="b6-r ${convexCls}">${num(f.convexity_gap)}</td>
@@ -107,6 +117,7 @@
         <div class="b6-counts">
           <span>${c.gate1_open ?? 0}/${c.funds ?? 0} tradeable</span>
           <span>${c.gate2_open ?? 0}/${c.funds ?? 0} live</span>
+          <span class="${(c.autocall_imminent ?? 0) > 0 ? 'b6-warn' : ''}">${c.autocall_imminent ?? 0} autocall imminent</span>
           <span class="${(c.actionable ?? 0) > 0 ? 'b6-good' : ''}">${c.actionable ?? 0} actionable</span>
         </div>
       </div>
@@ -115,7 +126,7 @@
         <thead><tr>
           <th>ETF</th><th>Stock</th><th>Status</th>
           <th class="b6-r">Shares</th><th class="b6-r">Borrow</th>
-          <th class="b6-r">Stock/inc</th><th class="b6-r">Worst</th>
+          <th class="b6-r">&rarr;KO call</th><th class="b6-r">&rarr;KI put</th><th>Near</th>
           <th class="b6-r">Delta</th><th class="b6-r">Peak</th>
           <th class="b6-r">Convex</th><th class="b6-r">Carry</th>
           <th class="b6-r">ADV</th><th class="b6-r">In book</th>
@@ -124,22 +135,43 @@
       </table></div>
       <div class="b6-foot">
         GATE 1 &ge; ${int(g.gate1_min_shares)} shares and borrow &le; ${pct(g.gate1_max_borrow_annual, 0)} ·
-        GATE 2 stock &le; ${pct(g.gate2_max_und_return, 0)} vs inception and delta &ge; ${num(g.gate2_min_delta)} ·
+        GATE 2 within ${pct(g.gate2_max_ki_distance, 0)} of a published knock-in ·
+        <b>&rarr;KO</b> move up to the nearest autocall (<b>!</b> = inside ${pct(g.autocall_imminent_distance, 0)}, a live position gets reset) ·
+        <b>&rarr;KI</b> move down to the nearest knock-in — the trade we want ·
         <b>In book</b> = gross we already hold in that underlying across every sleeve ·
         generated ${escapeHtml(panel.generated_utc || '')}
       </div>`;
   }
 
-  async function mount() {
-    const el = document.getElementById('bucket6-watch');
-    if (!el) return;
+  async function mount(target) {
+    const el = target || document.getElementById('bucket6-watch');
+    if (!el) return false;
     render(el, await load());
+    return true;
+  }
+
+  // The container is rendered by React, which mounts after DOMContentLoaded and
+  // re-renders on tab changes. Watch for the node instead of racing it, and
+  // re-fill it if React replaces it.
+  function autoMount() {
+    let filled = null;
+    const tryMount = () => {
+      const el = document.getElementById('bucket6-watch');
+      if (el && el !== filled && !el.dataset.b6Filled) {
+        el.dataset.b6Filled = '1';
+        filled = el;
+        mount(el);
+      }
+    };
+    tryMount();
+    const obs = new MutationObserver(tryMount);
+    obs.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', mount);
+    document.addEventListener('DOMContentLoaded', autoMount);
   } else {
-    mount();
+    autoMount();
   }
 
   window.Bucket6Watch = { load, render, mount };
