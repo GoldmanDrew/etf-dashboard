@@ -1855,6 +1855,8 @@
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="assets/quarantine.js?v=qn-v1"></script>
+<link rel="stylesheet" href="assets/bucket6_watch.css?v=b6w-v1">
+<script src="assets/bucket6_watch.js?v=b6w-v1"></script>
 <script src="assets/fof_chart.js?v=fof-v3"></script>
 <script src="assets/vendor/babel.min.js"></script>
 
@@ -14106,6 +14108,12 @@ function InfoPage({ data }) {
         Headline decay / scenarios use log-space models (HARQ, Itô, put-spread); some legacy CSV fields may still quote linear annualized figures — see Decay math for the live definitions.
       </div>
       <BorrowResearchSection />
+      {/* Bucket 6 watch panel — single-stock autocallable ETFs (watch only, never
+          sized). Populated by assets/bucket6_watch.js, which waits for this node
+          to exist and then fills it from data/bucket6_watch.json. Deliberately a
+          plain mount point: the panel is vanilla JS shared with the Pages build,
+          same pattern as the bucket5 product panel. */}
+      <div id="bucket6-watch" style={{ marginTop: 28 }} />
     </div>
   );
 }
