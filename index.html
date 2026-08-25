@@ -14075,6 +14075,13 @@ function InfoPage({ data }) {
   const c = data.last_commit;
   return (
     <div className="info-page">
+      {/* Bucket 6 watch panel — single-stock autocallable ETFs (watch only, never
+          sized). Populated by assets/bucket6_watch.js, which waits for this node
+          to exist and then fills it from data/bucket6_watch.json. Deliberately a
+          plain mount point: the panel is vanilla JS shared with the Pages build,
+          same pattern as the bucket5 product panel. Kept at the top of the page:
+          buried under the build-info rows it was effectively invisible. */}
+      <div id="bucket6-watch" style={{ marginBottom: 28 }} />
       <div className="info-section"><span style={{ color: 'var(--accent-cyan)' }}>◈</span> Build Info</div>
       <div className="info-row"><span className="info-key">Data Built</span><span className="info-val">{fmtTime(data.build_time)}</span></div>
       <div className="info-row"><span className="info-key">Source Repo</span><span className="info-val"><a href={`https://github.com/${data.source_repo}`} target="_blank" style={{ color: 'var(--accent-purple)' }}>{data.source_repo}</a></span></div>
@@ -14108,12 +14115,6 @@ function InfoPage({ data }) {
         Headline decay / scenarios use log-space models (HARQ, Itô, put-spread); some legacy CSV fields may still quote linear annualized figures — see Decay math for the live definitions.
       </div>
       <BorrowResearchSection />
-      {/* Bucket 6 watch panel — single-stock autocallable ETFs (watch only, never
-          sized). Populated by assets/bucket6_watch.js, which waits for this node
-          to exist and then fills it from data/bucket6_watch.json. Deliberately a
-          plain mount point: the panel is vanilla JS shared with the Pages build,
-          same pattern as the bucket5 product panel. */}
-      <div id="bucket6-watch" style={{ marginTop: 28 }} />
     </div>
   );
 }

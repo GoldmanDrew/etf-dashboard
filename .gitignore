@@ -12,3 +12,10 @@ data/vol_shape_history.json.gz
 # blocked `git pull --rebase` on every local EOD publish (2026-08-11).
 __pycache__/
 *.pyc
+
+# Bucket 6 watch artifact — carries existing_book_gross_usd / existing_sleeves
+# per underlying. This repo is PUBLIC; ls-algo's data/private_boundary_manifest.json
+# allowlists only etf_screened_today.csv and public_screener_manifest.json for
+# publication here. The backend's github.extra_files sync writes this file into
+# the working tree on every local run, so ignore it rather than trust `git add -A`.
+data/bucket6_watch.json

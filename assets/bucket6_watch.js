@@ -101,11 +101,29 @@
   }
 
   function render(el, panel) {
-    if (!panel || panel.available === false) {
-      const why = (panel && panel.reason) || 'artifact not available';
+    // Two different absences, deliberately handled differently.
+    //
+    // panel === null means neither source answered: no backend AND no artifact
+    // on disk. That is the public Pages build, where this panel is never meant
+    // to appear — data/bucket6_watch.json carries per-underlying book exposure
+    // and is not on ls-algo's public allowlist. Render nothing at all; a note
+    // reading "unavailable" would advertise a panel the public site will never
+    // have. The reason still goes to the console for anyone debugging locally.
+    if (!panel) {
+      el.innerHTML = '';
+      el.style.display = 'none';
+      console.debug('[bucket6] no panel source responded; hiding mount');
+      return;
+    }
+    // available === false means the backend IS running and answered, it just has
+    // no artifact synced yet. That is a real local diagnostic — keep the note.
+    if (panel.available === false) {
+      const why = panel.reason || 'artifact not available';
+      el.style.display = '';
       el.innerHTML = `<div class="b6-quiet">Bucket 6 watch panel unavailable — ${escapeHtml(why)}.</div>`;
       return;
     }
+    el.style.display = '';
     const c = panel.counts || {};
     const g = panel.gates || {};
     el.innerHTML = `
