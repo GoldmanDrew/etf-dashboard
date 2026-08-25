@@ -20,6 +20,10 @@ _FALLBACK_YB_PAIRS = {
     ("TMYY", "TSM"), ("TQQY", "QQQ"), ("TSYY", "TSLA"), ("XBTY", "IBIT"), ("YSPY", "SPY"),
 }
 _FALLBACK_FOF = {"YBTY", "YBST"}
+_FALLBACK_AUTOCALL_PAIRS = {
+    ("TLA", "TSLA"), ("ANV", "NVDA"), ("ATC", "COIN"), ("MSR", "MSTR"),
+    ("PLA", "PLTR"), ("AHD", "HOOD"), ("MRA", "MARA"), ("SCA", "SMCI"),
+}
 
 
 def _load_raw() -> dict:
@@ -48,11 +52,20 @@ def load_taxonomy() -> dict:
         str(s).upper()
         for s in (raw.get("bucket_3_inverse_symbols") or [])
     }
+    ac_raw = raw.get("autocallable_single_stock_pairs") or [
+        [a, b] for a, b in sorted(_FALLBACK_AUTOCALL_PAIRS)
+    ]
+    autocall = {
+        (str(p[0]).upper(), str(p[1]).upper())
+        for p in ac_raw
+        if isinstance(p, (list, tuple)) and len(p) >= 2
+    }
     return {
         "volatility_etp_symbols": vol,
         "yieldboost_fof_symbols": fof,
         "yieldboost_income_pairs": pairs,
         "bucket_3_inverse_symbols": inverse,
+        "autocallable_single_stock_pairs": autocall,
     }
 
 
@@ -66,6 +79,10 @@ def yieldboost_income_pairs() -> set[tuple[str, str]]:
 
 def yieldboost_fof_symbols() -> set[str]:
     return set(load_taxonomy()["yieldboost_fof_symbols"])
+
+
+def autocallable_single_stock_pairs() -> set[tuple[str, str]]:
+    return set(load_taxonomy()["autocallable_single_stock_pairs"])
 
 
 def export_for_spa() -> dict:

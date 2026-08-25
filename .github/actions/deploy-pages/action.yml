@@ -21,7 +21,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        pip install -q pyarrow pandas numpy
+        pip install -q pyarrow pandas numpy requests
+        # Bucket 6 autocallable watch panel — gitignored (book exposure); fetch from
+        # ls-algo at deploy time. fail-soft: skip panel when artifact is missing or
+        # degraded (barrier_sourced gate), never block Pages deploy.
+        python scripts/fetch_bucket6_watch.py --fail-soft
         if [ -f data/etf_metrics_daily.parquet ]; then
           # Ship gzip only — plain JSON (~164 MB) exceeds Cloudflare's ~25 MiB file limit.
           python scripts/export_etf_metrics_daily_json.py --skip-plain-json
