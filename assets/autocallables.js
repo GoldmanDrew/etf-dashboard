@@ -104,8 +104,14 @@
       }
       case 'weighted_coupon_rate': return pct(f.weighted_coupon_rate, 1);
       case 'delta_40d': return h('b', null, num(f.delta_40d));
-      case 'borrow_fee_annual': return pct(f.borrow_fee_annual, 2);
-      case 'shares_available': return int(f.shares_available);
+      case 'borrow_fee_annual':
+        return f.in_borrow_feed === false
+          ? h('span', { className: 'ac-mute', title: 'Not listed in the IBKR short-stock file — cannot be borrowed, which is why Gate 1 is shut.' }, 'not in feed')
+          : pct(f.borrow_fee_annual, 2);
+      case 'shares_available':
+        return f.in_borrow_feed === false
+          ? h('span', { className: 'ac-mute' }, '—')
+          : int(f.shares_available);
       default: return txt(f[key]);
     }
   }
@@ -167,7 +173,7 @@
     const lo = Math.min.apply(null, prices) * 0.92;
     const hi = Math.max.apply(null, prices) * 1.06;
 
-    const W = 680, H = 300, padL = 62, padR = 16, padT = 16, padB = 30;
+    const W = 880, H = 380, padL = 96, padR = 20, padT = 18, padB = 32;
     const y = (p) => padT + (hi - p) / (hi - lo) * (H - padT - padB);
     const colW = (W - padL - padR) / rows.length;
     const cx = (i) => padL + colW * (i + 0.5);

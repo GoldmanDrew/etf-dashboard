@@ -4,7 +4,9 @@
 .ac-wrap { margin-top: 4px; }
 
 /* ── list ─────────────────────────────────────────────────────── */
-.ac-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ac-table {
+  width: 100%; max-width: 1180px; border-collapse: collapse; font-size: 12.5px;
+}
 .ac-table th {
   text-align: left; padding: 9px 10px; white-space: nowrap;
   font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
@@ -19,6 +21,10 @@
 .ac-table tbody tr:hover { background: var(--bg-card-hover); }
 .ac-table tbody tr:focus-visible { outline: 2px solid var(--border-active); outline-offset: -2px; }
 .ac-r { text-align: right; font-family: 'JetBrains Mono', monospace; }
+/* `.ac-table th` is (0,1,1) and out-specifies a bare `.ac-r` (0,1,0), which left
+   every right-aligned header sitting at the left edge of its own column while the
+   values below it sat at the right. Match the specificity rather than !important. */
+.ac-table th.ac-r, .ac-table td.ac-r { text-align: right; }
 .ac-tick {
   font-family: 'JetBrains Mono', monospace; font-weight: 700;
   color: var(--text-primary);
@@ -99,7 +105,7 @@
 .ac-docs a { color: var(--accent-blue); font-size: 12px; text-decoration: none; }
 .ac-docs a:hover { text-decoration: underline; }
 
-.ac-ladder { width: 100%; height: auto; display: block; }
+.ac-ladder { width: 100%; max-width: 880px; height: auto; display: block; }
 .ac-legend {
   display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px;
   font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;
