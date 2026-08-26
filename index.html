@@ -1855,6 +1855,8 @@
 <script src="assets/options_data.js?v=tl-v1"></script>
 <script src="assets/vrp_ui.js?v=vrp-ui-2"></script>
 <script src="assets/quarantine.js?v=qn-v1"></script>
+<link rel="stylesheet" href="assets/autocallables.css?v=ac-v1">
+<script src="assets/autocallables.js?v=ac-v1"></script>
 <link rel="stylesheet" href="assets/bucket6_watch.css?v=b6w-v1">
 <script src="assets/bucket6_watch.js?v=b6w-v1"></script>
 <script src="assets/fof_chart.js?v=fof-v3"></script>
@@ -17037,6 +17039,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   const [borrowStressFilter, setBorrowStressFilter] = useState('all');
   const userPickedSortRef = React.useRef(false);
   const [expandedSym, setExpandedSym] = useState(null);
+  const [autocallableSel, setAutocallableSel] = useState(null);
+  const [autocallableCount, setAutocallableCount] = useState(null);
   const [showInfo, setShowInfo] = useState(false);
   const [showNews, setShowNews] = useState(false);
   const [showFlow, setShowFlow] = useState(false);
@@ -17585,14 +17589,18 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
   }, [records, activeTab, search, sortKey, sortDesc, chartVolLookbackRange, borrowStressFilter]);
 
   const tabCounts = useMemo(() => {
-    const c = { all: records.length, bucket_1: 0, bucket_2: 0, bucket_3: 0 };
+    // Autocallables are absent from `records`: watch-only funds carrying none of
+    // the borrow/decay columns this table is built from. The tab loads its own
+    // artifact and reports its count back, so it stays blank until then.
+    const c = { all: records.length, bucket_1: 0, bucket_2: 0, bucket_3: 0,
+                autocallables: autocallableCount };
     records.forEach(r => {
       if (r.bucket === 'bucket_1_high_beta') c.bucket_1++;
       if (r.bucket === 'bucket_2_low_beta' && isBucket2UiVisible(r)) c.bucket_2++;
       if (r.bucket === 'bucket_3_inverse') c.bucket_3++;
     });
     return c;
-  }, [records]);
+  }, [records, autocallableCount]);
 
   const handleSort = key => {
     userPickedSortRef.current = true;
@@ -17835,6 +17843,7 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               { key: 'bucket_1', label: 'Bucket 1 — High β' },
               { key: 'bucket_2', label: 'Bucket 2 — YieldBOOST' },
               { key: 'bucket_3', label: 'Bucket 3 — Inverse' },
+              { key: 'autocallables', label: 'Autocallables' },
             ].map(t => (
               <div key={t.key} className={cls('tab', activeTab === t.key && 'active')}
                 onClick={() => setActiveTab(t.key)}>
@@ -17842,6 +17851,28 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               </div>
             ))}
           </div>
+
+          {/* The Autocallables tab renders its own artifact instead of the shared
+              records table: these funds are watch-only and carry none of the
+              borrow/decay columns below, so every one of them would be an
+              em-dash. Everything above the tab bar stays put. */}
+          {activeTab === 'autocallables' ? (
+            <div style={{ padding: '0 24px' }}>
+              {window.Autocallables ? (
+                React.createElement(window.Autocallables.AutocallablesPage, {
+                  selected: autocallableSel,
+                  onSelect: setAutocallableSel,
+                  onBack: () => setAutocallableSel(null),
+                  onCount: setAutocallableCount,
+                })
+              ) : (
+                <p style={{ padding: 24, color: 'var(--text-muted)' }}>
+                  Autocallables module not loaded — check assets/autocallables.js
+                </p>
+              )}
+            </div>
+          ) : (
+          <>
 
           {/* ── Controls ──────── */}
           <div className="controls-bar">
@@ -18103,6 +18134,8 @@ function App({ authUser = null, onLogout = null, authEnabled = false } = {}) {
               </tbody>
             </table>
           </div>
+          </>
+          )}
         </>
       )}
     </div>

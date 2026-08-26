@@ -365,6 +365,39 @@ jobs:
             python scripts/build_bucket5_product.py --quick
           fi
 
+      # Autocallables tab data. ls-algo writes data/autocallables.json via
+      # scripts/export_autocallables_public.py, which projects a field allowlist
+      # out of its private watch panel -- the watch artifact itself carries the
+      # book and is never published here. The backend's github.extra_files sync
+      # only runs inside FastAPI; production is a static Pages build, so copying
+      # it out of the checkout above is what actually puts the tab on the site.
+      # Side-car: never fail the dashboard build over it.
+      - name: Copy autocallables panel
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          src=ls-algo/data/autocallables.json
+          if [ ! -f "$src" ]; then
+            echo "::warning::$src missing - keeping the previous artifact"
+            exit 0
+          fi
+          # Refuse to publish it if a private field ever reaches this repo.
+          python - "$src" <<'EOF'
+          import json, sys
+          BANNED = ("existing_book_gross_usd", "existing_rows", "existing_sleeves",
+                    "shared_underlying_flag", "ssi_mirror_status",
+                    "worst10_pair_pnl_bp", "wash_sale_risk_flag",
+                    "days_to_cover_target", "pct_of_borrowable_float_cap_usd")
+          blob = open(sys.argv[1], encoding="utf-8").read()
+          hits = [b for b in BANNED if f'"{b}"' in blob]
+          if hits:
+              sys.exit(f"private fields in public artifact: {hits}")
+          json.loads(blob)
+          print("autocallables artifact clean")
+          EOF
+          cp "$src" data/autocallables.json
+
       - name: Build Bucket 4 inverse-decay backtest artifact
         if: steps.build_data.outcome == 'success'
         env:
@@ -500,6 +533,7 @@ jobs:
             data/bucket4_backtest_policy_hash.txt
             data/bucket4_pairs
             data/bucket5_insurance_backtest.json
+            data/autocallables.json
           commit_message: "${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday dashboard catch-up build' || 'chore: nightly dashboard build' }}"
 
   # Read-only, non-gating diagnostics run in parallel with the Pages deploy so
