@@ -10,8 +10,14 @@ on:
     # resolve-slot keeps only the slot matching the current DST offset (delivery
     # can be hours late, so never gate on wall-clock hour); cancel-in-progress
     # MUST stay false or the 11 UTC placeholder run kills the in-flight ingest.
-    - cron: "0 10 * * 1-6"
-    - cron: "0 11 * * 1-6"
+    #
+    # Minute 41, not 00: GitHub queues scheduled workflows hardest on the hour, and
+    # this one was landing 4-11 h late (2026-08-27 20:10, 08-28 21:07, 08-29 14:56
+    # for a 10:00 cron). A late run ingests issuer pages before the fund admins have
+    # posted that session's NAV, which is what shows up downstream as issuer_lag.
+    # Keep these strings in sync with the SCHED comparisons in resolve-slot below.
+    - cron: "41 10 * * 1-6"
+    - cron: "41 11 * * 1-6"
   workflow_dispatch:
 
 permissions:
@@ -51,16 +57,23 @@ jobs:
           ET_DST=$(echo "$SLOT" | awk '{print $3}')
           SCHED="${{ github.event.schedule }}"
           echo "Current ET hour=$ET_HOUR weekday(0=Mon)=$ET_DOW dst=$ET_DST cron=$SCHED"
+          # The DST gate below matches SCHED literally. If the cron strings above are
+          # edited without updating those comparisons, neither gate fires and BOTH
+          # slots run the full 4.5 h pipeline against the same session. Fail loudly.
+          if [ "$SCHED" != "41 10 * * 1-6" ] && [ "$SCHED" != "41 11 * * 1-6" ]; then
+            echo "::error::Unrecognised schedule '$SCHED'; keep the cron list and the DST gate in sync."
+            exit 1
+          fi
           # Pick the cron slot that maps to 6 AM ET under the current UTC offset.
           # GitHub frequently delivers scheduled runs hours late, so gating on the
           # wall-clock hour silently skipped the entire ingest (no metrics for days).
-          if [ "$SCHED" = "0 10 * * 1-6" ] && [ "$ET_DST" != "1" ]; then
+          if [ "$SCHED" = "41 10 * * 1-6" ] && [ "$ET_DST" != "1" ]; then
             echo "10 UTC slot but EST in effect; the 11 UTC slot owns today."
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "monday_catchup=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ "$SCHED" = "0 11 * * 1-6" ] && [ "$ET_DST" = "1" ]; then
+          if [ "$SCHED" = "41 11 * * 1-6" ] && [ "$ET_DST" = "1" ]; then
             echo "11 UTC slot but EDT in effect; the 10 UTC slot owns today."
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "monday_catchup=false" >> "$GITHUB_OUTPUT"

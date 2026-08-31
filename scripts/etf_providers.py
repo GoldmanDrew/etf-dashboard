@@ -159,6 +159,11 @@ STALE_KIND_ANCHOR_LAG = "anchor_lag"
 STALE_KIND_PROSHARES_FALLBACK = "proshares_fallback"
 STALE_KIND_ISSUER_SESSION_EXTEND = "issuer_session_extend"
 
+# Yahoo ``Ticker.info`` is the only NAV source for funds with no issuer scraper.
+# It is rate-limited aggressively, so retry before falling back to the close.
+_YF_INFO_RETRIES = int(os.getenv("ETF_METRICS_YF_INFO_RETRIES", "3"))
+_YF_INFO_BACKOFF_SEC = float(os.getenv("ETF_METRICS_YF_INFO_BACKOFF_SEC", "0.75"))
+
 _ISSUER_SESSION_PROVIDERS: frozenset[str] = frozenset({
     "rex_shares",
     "yieldmax",
@@ -411,14 +416,22 @@ def merge_provider_attempts(
     if len(source_url) > 4000:
         source_url = source_url[:3997] + "..."
 
-    stale = any(r.stale for r in attempts)
+    # yfinance/polygon now flag their close-as-NAV rows stale. That must not leak
+    # onto a row whose NAV actually came from an issuer: the fallback attempt is
+    # still in ``attempts`` even when its value was discarded.
+    stale_sources = (
+        [r for r in attempts if r.source_provider not in _MARKET_FALLBACK_PROVIDERS]
+        if issuer_row is not None
+        else list(attempts)
+    )
+    stale = any(r.stale for r in stale_sources)
     stale_age: int | None = None
     stale_kind: str | None = None
-    for r in attempts:
+    for r in stale_sources:
         if r.stale_age_bdays is not None:
             stale_age = max(stale_age or 0, int(r.stale_age_bdays))
     if stale:
-        stale_attempts = [r for r in attempts if r.stale]
+        stale_attempts = [r for r in stale_sources if r.stale]
         if stale_attempts:
             worst = max(stale_attempts, key=lambda r: int(r.stale_age_bdays or 0))
             stale_kind = worst.stale_kind or infer_stale_kind(
@@ -487,9 +500,43 @@ def _build_session(timeout_sec: int = 15) -> requests.Session:
     return s
 
 
+# Full navigation header profile, used ONLY to retry a 403. Direxion and Defiance
+# bot-score the whole header set (they 403 CI runner IPs while returning 200 to a
+# desktop). This is deliberately not the default: rexshares.com serves a slim ~51KB
+# shell to this profile and the full ~305KB fund page to the plain session UA.
+_BROWSER_RETRY_HEADERS: dict[str, str] = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Connection": "keep-alive",
+}
+
+
 def _get(session: requests.Session, url: str, *, extra_headers: dict | None = None):
     h = dict(extra_headers or {})
-    return session.get(url, timeout=getattr(session, "timeout_sec", 15), headers=h or None)
+    r = session.get(url, timeout=getattr(session, "timeout_sec", 15), headers=h or None)
+    if r.status_code == 403:
+        retry_h = dict(_BROWSER_RETRY_HEADERS)
+        retry_h.update(h)
+        try:
+            host = url.split("/", 3)[2]
+            retry_h.setdefault("Referer", f"https://{host}/")
+        except IndexError:
+            pass
+        r2 = session.get(url, timeout=getattr(session, "timeout_sec", 15), headers=retry_h)
+        if r2.status_code != 403:
+            LOGGER.info("403 cleared with browser header profile: %s -> %s", url, r2.status_code)
+            return r2
+        LOGGER.warning("403 persists after browser header retry: %s", url)
+        return r2
+    return r
 
 
 def _read_csv_url(session: requests.Session, url: str, **read_kw) -> pd.DataFrame | None:
@@ -1067,16 +1114,19 @@ class REXSharesProvider:
     # a missing symbol here meant ``supports_ticker`` returned False even when
     # the live site had full top-10 swap rows (e.g. XRPK / SOLX).
     KNOWN_TICKERS: set[str] = {
+        # Same rule as GraniteShares: a symbol listed here claims the ticker for
+        # REX before any fallback, so a dead slug pins the fund on a pseudo-NAV.
+        # A 2026-08-30 sweep of all 74 entries found 27 returning 404 (BITX/ETHZ
+        # etc. are Volatility Shares funds that were never REX-listed); removed.
         # T-REX 2x / -2x single names (subset; issuer page lists many more)
-        "MSTU", "MSTZ", "NVDX", "NVDQ", "AAPX", "TSLT", "TSLZ", "AMZX", "AMZZ",
-        "BITX", "BITZ", "BRKX", "BRKZ", "ETH2", "ETHZ", "CONG",
-        "DJTU", "RBLU", "GMEU", "SNOU", "SMUP", "SOLX", "EOSU", "APHU", "SNDU",
+        "MSTU", "MSTZ", "NVDX", "NVDQ", "AAPX", "TSLT", "TSLZ",
+        "DJTU", "RBLU", "GMEU", "SNOU", "SMUP", "EOSU", "APHU", "SNDU",
         "BTCL", "CCUP", "CRWU", "CRCD", "CORD", "GOOX", "MSFX", "NFLU", "ROBN",
         "ETU", "GLXU", "SBTU", "FGRU", "AFRU", "KTUP", "TTDU", "BMNU", "CIFU",
-        "XRPK", "RDWU", "PAAU", "XRPT", "XXRP", "UXRP", "XRPR", "DOJE", "SSK", "ESK",
+        "RDWU", "XRPR", "DOJE", "SSK",
         # Income / thematic / other REX-listed
-        "FEPI", "AIPI", "CEPI", "BMAX", "SIXJ", "BKCH", "BITC", "BTCZ",
-        "COII", "MSII", "NVII", "TSII", "HOII", "PLTI", "CWII", "LLII", "WMTI", "GIF",
+        "FEPI", "AIPI", "CEPI", "BTCZ",
+        "NVII", "TSII", "WMTI",
         "ULTI", "DRNZ", "ATCL",
     }
 
@@ -1194,14 +1244,16 @@ class GraniteSharesProvider:
         "MAAY", "MTYY", "MUYY", "NUGY", "NVYY", "PLYY", "QBY", "RGYY", "RTYY",
         "SEMY", "SMYY", "TMYY", "TQQY", "TSYY", "XBTY", "YBTY", "YBST", "YSPY",
         # Newer Granite single-stock / thematic leveraged tickers observed in the
-        # dashboard universe. If a symbol is not actually live on Granite, fetch
-        # returns missing and the stack falls through to market-data providers.
-        "ADBU", "APHG", "ASTG", "AVAZ", "AXPG", "AXTL", "BAIG",
-        "BULG", "CDNG", "CIEG", "CIFG", "COTG", "CRCG", "CRY", "ELIL", "ENTL",
-        "FCXG", "FOMG", "FPSX", "GFSG", "GLGG", "HODU", "HONG", "HPEL", "HUTG",
-        "IREG", "KLAG", "LACG", "LMTL", "LOFF", "MCHG", "MSOO", "MUZ",
-        "ONDG", "OSCG", "PBRG", "PLTG", "SMTG", "SPOG", "STLU",
-        "SUIL", "TECY", "TSDD", "TSEG", "TSLO", "TTXD",
+        # dashboard universe.
+        #
+        # KEEP THIS LIST TRUE. ``supports_ticker`` short-circuits on it *before*
+        # consulting the live catalog, so a symbol listed here claims the ticker
+        # for GraniteShares even when /etfs/{slug}/ 404s — the fetch fails, the
+        # stack silently falls through to the yfinance/polygon close, and the fund
+        # shows a market-backed pseudo-NAV forever. A 2026-08-30 sweep of all 73
+        # entries found 43 returning 404; they are removed below. Anything Granite
+        # actually launches is still picked up by ``_load_catalog``.
+        "CRY", "TECY", "TSDD",
         # Removed Defiance product collisions (issuer pages live on defianceetfs.com):
         # ASTN, AVXX, NVOX, OSCX, QSU, STSM.
     }
@@ -1796,33 +1848,79 @@ class YFinanceProvider:
         except Exception:
             return None
 
+    def _info_with_retry(self, tk) -> dict:
+        """``Ticker.info`` with backoff.
+
+        This call is the only source of a *real* NAV (``navPrice``) for the funds
+        with no issuer scraper. It is also the first thing Yahoo rate-limits, and
+        a swallowed failure used to degrade silently into "NAV = close" — which
+        reads downstream as a fund trading at a flat 0% premium. Retry it, and
+        say so in the log when it still fails.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(max(1, _YF_INFO_RETRIES)):
+            try:
+                self._throttle()
+                info = tk.info or {}
+                if info:
+                    return info
+            except Exception as e:  # rate limit, auth wall, transient 5xx
+                last_exc = e
+            if attempt + 1 < _YF_INFO_RETRIES:
+                time.sleep(_YF_INFO_BACKOFF_SEC * (2 ** attempt))
+        LOGGER.warning(
+            "yfinance .info empty after %d attempt(s)%s — no navPrice, row falls back to market close",
+            _YF_INFO_RETRIES,
+            f" ({type(last_exc).__name__})" if last_exc else "",
+        )
+        return {}
+
     def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
         src = f"yfinance://{ticker}"
         if not self._enabled:
             return ProviderResult(as_of, ticker, None, None, None, self.name, src + "?disabled=1", "missing")
         nav = aum = shares = None
         try:
-            self._throttle()
             tk = self._yf.Ticker(ticker)
-            nav = self._fetch_close_on(ticker, as_of)
+            close = self._fetch_close_on(ticker, as_of)
+            info = self._info_with_retry(tk)
+            nav_px = info.get("navPrice")
+            issuer_nav = None
             try:
-                self._throttle()
-                info = tk.info or {}
-                nav_px = info.get("navPrice")
                 if nav_px is not None and float(nav_px) > 0:
-                    nav = float(nav_px)
-                elif nav is None:
-                    for key in ("regularMarketPrice", "previousClose"):
-                        p = info.get(key)
+                    issuer_nav = float(nav_px)
+            except (TypeError, ValueError):
+                issuer_nav = None
+            nav = issuer_nav if issuer_nav is not None else close
+            if nav is None:
+                for key in ("regularMarketPrice", "previousClose"):
+                    p = info.get(key)
+                    try:
                         if p is not None and float(p) > 0:
                             nav = float(p)
                             break
-                if shares is None:
-                    so = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
-                    if so and so > 0:
+                    except (TypeError, ValueError):
+                        continue
+            if close is None:
+                close = nav if issuer_nav is None else None
+            # ``netAssets``/``totalAssets`` is the fund's own AUM. Without it the
+            # triple stays incomplete and the row can never classify as "ok",
+            # which is why real navPrice days still landed as market-backed.
+            for key in ("netAssets", "totalAssets"):
+                v = info.get(key)
+                try:
+                    if v is not None and float(v) > 0:
+                        aum = float(v)
+                        break
+                except (TypeError, ValueError):
+                    continue
+            if shares is None:
+                so = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+                try:
+                    if so and float(so) > 0:
                         shares = float(so)
-            except Exception:
-                pass
+                except (TypeError, ValueError):
+                    shares = None
             try:
                 fi = tk.fast_info
                 if shares is None:
@@ -1839,7 +1937,18 @@ class YFinanceProvider:
                 if err is not None and err > _MERGE_IDENTITY_MAX_REL_ERR:
                     aum = float(nav * shares)
             status = _classify_status(nav, aum, shares)
-            return ProviderResult(as_of, ticker.upper(), nav, aum, shares, self.name, src, status)
+            # No navPrice means the "NAV" above is really the market close. Mark it
+            # so the merge/prem-disc gate treats it as market-backed instead of
+            # publishing a fictitious flat 0% premium.
+            synthetic = issuer_nav is None and nav is not None
+            return ProviderResult(
+                as_of, ticker.upper(), nav, aum, shares, self.name,
+                src + ("#nav=close" if synthetic else ""), status,
+                stale=synthetic,
+                stale_age_bdays=0 if synthetic else None,
+                stale_kind=STALE_KIND_MARKET_BACKED if synthetic else None,
+                market_close=close,
+            )
         except Exception as e:
             return ProviderResult(as_of, ticker, None, None, None, self.name, src + f"?exc={type(e).__name__}", "missing")
 
@@ -1928,8 +2037,15 @@ class PolygonProvider:
         if (aum is None or aum <= 0) and close and shares:
             aum = close * shares
         status = _classify_status(close, aum, shares)
+        # Polygon has no NAV concept: this "nav" is the exchange close. Keep it as
+        # the last-resort level (dropping it would delete rows) but flag it so the
+        # prem/disc gate never reports close-vs-close as a real 0% premium.
         return ProviderResult(as_of, ticker.upper(), close, aum, shares, self.name,
-                               f"polygon://{ticker}", status)
+                               f"polygon://{ticker}" + ("#nav=close" if close else ""), status,
+                               stale=close is not None,
+                               stale_age_bdays=0 if close is not None else None,
+                               stale_kind=STALE_KIND_MARKET_BACKED if close is not None else None,
+                               market_close=close)
 
 
 # ---------------------------------------------------------------------------

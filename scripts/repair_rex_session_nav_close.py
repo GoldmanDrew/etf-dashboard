@@ -58,6 +58,7 @@ def repair_rex_rows(
 
     prov = REXSharesProvider()
     n_fixed = 0
+    n_skipped_asof = 0
     for (sym, d), _ in sub.groupby(["ticker", "date"]):
         sym_s = str(sym).upper()
         d_val = d if isinstance(d, date) else pd.Timestamp(d).date()
@@ -67,6 +68,18 @@ def repair_rex_rows(
             LOGGER.warning("%s %s fetch failed: %s", sym_s, d_val, exc)
             continue
         if res.status not in ("ok", "partial") or res.nav is None:
+            continue
+        # rexshares.com/{ticker}/ has no history: it serves one live NAV whatever
+        # ``as_of`` we ask for. Writing that onto every date in the window flattened
+        # 45 days of REX history to a single constant (33/34 REX funds showed one
+        # unique NAV across August 2026) and back-stamped today's issuer close onto
+        # older rows. Only patch the session the page itself is stamped "As Of".
+        res_date = res.date if isinstance(res.date, date) else pd.Timestamp(res.date).date()
+        if res_date != d_val:
+            n_skipped_asof += 1
+            LOGGER.debug(
+                "%s %s skipped: issuer page is as-of %s, not this session", sym_s, d_val, res_date
+            )
             continue
         ix = (out["ticker"].astype(str).str.upper() == sym_s) & (out["date"] == d_val)
         if not ix.any():
@@ -93,6 +106,11 @@ def repair_rex_rows(
                 res.issuer_prem_disc_pct,
             )
 
+    if n_skipped_asof:
+        LOGGER.info(
+            "Skipped %d row(s) whose session does not match the issuer page as-of date",
+            n_skipped_asof,
+        )
     if apply and n_fixed:
         validate_df(out)
         save_outputs(out)

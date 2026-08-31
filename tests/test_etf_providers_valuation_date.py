@@ -66,8 +66,12 @@ def test_granite_supports_static_new_ticker_fallback(monkeypatch):
 
     assert provider.supports_ticker("CWY", date(2026, 6, 26)) is True
     assert provider.supports_ticker("BBYY", date(2026, 6, 26)) is True
-    assert provider.supports_ticker("BAIG", date(2026, 6, 26)) is True
+    assert provider.supports_ticker("TECY", date(2026, 6, 26)) is True
     assert provider.supports_ticker("NOTA", date(2026, 6, 26)) is False
+    # BAIG was a static entry whose /etfs/baig/ page 404s. The static list must
+    # not claim a ticker the issuer does not serve — that pinned the fund on a
+    # yfinance/polygon pseudo-NAV instead of letting the catalog decide.
+    assert provider.supports_ticker("BAIG", date(2026, 6, 26)) is False
 
 
 def test_granite_does_not_claim_defiance_collisions(monkeypatch):
