@@ -1,19 +1,34 @@
 {
   "schema_v": 1,
-  "build_time": "2026-09-02T23:49:50.065248Z",
-  "mode": "gate",
-  "task": "borrow",
-  "verdict": "pass",
+  "build_time": "2026-09-03T00:46:57.305368Z",
+  "mode": "sweep",
+  "task": null,
+  "verdict": "warn",
   "stats": {
-    "checked_files": 3,
+    "checked_files": 10,
     "block": 0,
     "quarantine": 0,
-    "warn": 0
+    "warn": 1
   },
   "checked": [
     "data/dashboard_data.json",
     "data/borrow_history.json",
-    "data/ci_state.json"
+    "data/options_cache.json",
+    "data/vrp_live.json",
+    "data/vrp_health.json",
+    "data/nav_forecasts/_latest.json",
+    "data/underlying_intraday_spot.json",
+    "data/underlying_intraday_volume.json",
+    "data/letf_rebalance_flows_intraday_latest.json",
+    "data/corporate_actions.json"
   ],
-  "findings": []
+  "findings": [
+    {
+      "severity": "warn",
+      "code": "stale_return_baseline_suppressed",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "3/850 symbols have no metrics row for the previous session 2026-09-01 (worst APH 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
+      "observed": 3
+    }
+  ]
 }
