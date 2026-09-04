@@ -1,37 +1,33 @@
 {
   "schema_v": 1,
-  "build_time": "2026-09-04T18:43:58.232512Z",
-  "mode": "gate",
-  "task": "nav",
+  "build_time": "2026-09-04T20:53:03.750021Z",
+  "mode": "sweep",
+  "task": null,
   "verdict": "warn",
   "stats": {
-    "checked_files": 14,
+    "checked_files": 10,
     "block": 0,
     "quarantine": 0,
     "warn": 1
   },
   "checked": [
-    "data/nav_forecasts/_latest.json",
-    "data/nav_forecasts/snapshots",
-    "data/ci_state.json",
-    "data/underlying_intraday_spot.json",
-    "data/underlying_intraday_volume.json",
-    "data/letf_rebalance_flows_intraday_latest.json",
+    "data/dashboard_data.json",
+    "data/borrow_history.json",
     "data/options_cache.json",
     "data/vrp_live.json",
     "data/vrp_health.json",
-    "data/yieldboost_put_spreads_latest.json",
-    "data/yieldboost_options_target.json",
-    "data/event_calendar_known.json",
-    "data/event_calendar_inferred.json",
-    "data/event_calendar_combined.json"
+    "data/nav_forecasts/_latest.json",
+    "data/underlying_intraday_spot.json",
+    "data/underlying_intraday_volume.json",
+    "data/letf_rebalance_flows_intraday_latest.json",
+    "data/corporate_actions.json"
   ],
   "findings": [
     {
       "severity": "warn",
       "code": "stale_return_baseline_suppressed",
       "artifact": "data/underlying_intraday_spot.json",
-      "detail": "1/841 symbols have no metrics row for the previous session 2026-09-03 (worst APH 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
+      "detail": "1/842 symbols have no metrics row for the previous session 2026-09-03 (worst APH 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
       "observed": 1
     }
   ]
