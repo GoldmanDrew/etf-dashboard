@@ -827,6 +827,51 @@ class DirexionProvider:
             self._cache[t] = (0, None, None, None, url + f"?exc={type(e).__name__}")
             return None, None, None, url + f"?exc={type(e).__name__}"
 
+    def _resolve_valuation(self, trade_date, as_of: date):
+        """Which session does this file's NAV actually describe?
+
+        Direxion publishes the holdings file for trade date T valued at the T-1
+        close, so its ``TradeDate`` is the session the basket is *for*, not the
+        session the NAV describes. Every other issuer here stamps the session it
+        valued. Measured over 1575 rows / 35 funds: Direxion NAV matches the
+        prior close within 0.5% on 74.7% of rows and the same-day close on only
+        10.1% (median error 0.13% vs 2.77%); for proshares/roundhill/polygon the
+        comparison runs the other way by an order of magnitude.
+
+        Taking TradeDate at face value cost us twice. The nightly run fires
+        pre-open, by which time the file has rolled to today, so the row landed a
+        session ahead of its own NAV, got flagged ``issuer_early``, and was
+        dropped from the browser bundle -- which is why the 35 Direxion funds
+        appeared only on Mondays and Fridays. Worse, the ~1/3 of rows that *were*
+        published carried the same one-session lag while marked
+        ``premium_discount_eligible``, so their premium/discount was measuring a
+        date mismatch: a -52.7 bps median against ~0 for every other provider.
+
+        When the file has rolled exactly one session past the one we are
+        ingesting, its NAV *is* that session's close, so the row belongs on
+        ``as_of`` and is not stale. Trust that one session only: the URL always
+        serves the current file, so a backfill for an older date must never have
+        today's NAV stamped onto it.
+        """
+        if trade_date is None:
+            return as_of, False, None, None
+        if not isinstance(trade_date, date):
+            return as_of, False, None, None
+        if trade_date == as_of:
+            return as_of, False, None, None
+        if trade_date > as_of:
+            try:
+                sessions_ahead = nyse_busday_count(as_of, trade_date)
+            except Exception:
+                sessions_ahead = None
+            if sessions_ahead == 1:
+                # Pre-open read of the next session's file: NAV is as_of's close.
+                return as_of, False, None, None
+        # Anything else (a lagging file, or one more than a session ahead) keeps
+        # the old behaviour so the staleness flags stay honest.
+        stale, age_b, stale_kind = issuer_valuation_stale_flags(trade_date, as_of)
+        return trade_date, stale, age_b, stale_kind
+
     def fetch_for_date(self, ticker: str, as_of: date) -> ProviderResult:
         df, shares, trade_date, src = self._fetch_holdings(ticker)
         if df is None or shares is None or shares <= 0:
@@ -839,11 +884,7 @@ class DirexionProvider:
         # Bear-fund swaps have negative MV paired with negative HP, so impliedAUM stays positive.
         aum = float(abs(aum_val)) if aum_val is not None and not pd.isna(aum_val) else None
         nav = float(aum / shares) if aum and shares > 0 else None
-        valuation_date = trade_date if trade_date is not None else as_of
-        stale, age_b, stale_kind = issuer_valuation_stale_flags(
-            valuation_date if isinstance(valuation_date, date) else None,
-            as_of,
-        )
+        valuation_date, stale, age_b, stale_kind = self._resolve_valuation(trade_date, as_of)
         status = _classify_status(nav, aum, shares)
         return ProviderResult(
             date=valuation_date, ticker=ticker.upper(),
