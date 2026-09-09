@@ -1,5 +1,5 @@
 {
-  "build_time": "2026-09-09T00:37:10.166345Z",
+  "build_time": "2026-09-09T16:30:43.707839Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
@@ -28,19 +28,19 @@
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
     "oldest_symbol": "AMDL",
-    "oldest_symbol_age_minutes": 38,
+    "oldest_symbol_age_minutes": 991,
     "oldest_enforced_symbol": "AMDL",
-    "oldest_enforced_symbol_age_minutes": 38
+    "oldest_enforced_symbol_age_minutes": 991
   },
   "vrp": {
     "worst_underlying_symbol": "AMD",
-    "worst_underlying_options_age_minutes": 32,
+    "worst_underlying_options_age_minutes": 985,
     "underlying_options_as_of_min": "2026-09-09T00:05:09.305537Z",
     "iv_coverage_front_pct": 0.9032
   },
   "flow": {
-    "latest_date": "2026-09-04",
-    "build_time": "2026-09-09T00:37:06.263290Z",
+    "latest_date": "2026-09-08",
+    "build_time": "2026-09-09T16:30:40.016689Z",
     "underlyings_total": 266,
     "underlyings_stale": 0,
     "underlyings_stale_pct": 0.0,
@@ -48,11 +48,11 @@
     "underlyings_actionable_stale": 0,
     "underlyings_actionable_stale_pct": 0.0,
     "underlyings_stale_by_reason": {},
-    "fund_rows_on_latest_date": 573,
+    "fund_rows_on_latest_date": 588,
     "fund_quality_counts": {
       "income_overlay": 31,
       "missing_leverage": 2,
-      "missing_prior_aum": 2,
+      "missing_prior_aum": 17,
       "ok": 466,
       "product_class:autocallable": 8,
       "product_class:passive_low_delta": 64
@@ -61,40 +61,39 @@
     "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-09-04",
-    "latest_ok": 574,
-    "latest_stale_ok": 12,
+    "latest_date": "2026-09-08",
+    "latest_ok": 588,
+    "latest_stale_ok": 11,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "market_backed_no_issuer_nav": 11,
-      "anchor_lag": 1
+      "market_backed_no_issuer_nav": 11
     },
-    "flow_blockers_prior_stale": 1,
+    "flow_blockers_prior_stale": 0,
     "prem_disc": {
-      "rows_with_close": 579,
-      "rows_with_nav_and_close": 564,
-      "rows_suppressed_asof_mismatch": 15,
-      "median_prem_disc_bps": 0.0,
-      "lockstep_nav_close_count": 51,
-      "lockstep_nav_close_pct": 9.04,
-      "rex_nav_vs_implied_div_bps_gt5": 26,
+      "rows_with_close": 594,
+      "rows_with_nav_and_close": 439,
+      "rows_suppressed_asof_mismatch": 155,
+      "median_prem_disc_bps": -1.4820546891854736,
+      "lockstep_nav_close_count": 29,
+      "lockstep_nav_close_pct": 6.61,
+      "rex_nav_vs_implied_div_bps_gt5": 28,
       "rex_nav_vs_implied_div_bps_gt50": 2,
-      "rex_nav_vs_implied_div_bps_max": 57.096247960848515,
+      "rex_nav_vs_implied_div_bps_max": 70.53291536050146,
       "by_provider": {
-        "yfinance": {
-          "rows": 199,
-          "median_prem_disc_bps": 0.00033243549186733886,
-          "lockstep_count": 15
-        },
         "tradr_axs": {
           "rows": 75,
-          "median_prem_disc_bps": -4.369119665014822,
+          "median_prem_disc_bps": 1.06382701207539,
           "lockstep_count": 4
         },
         "granite_shares": {
           "rows": 82,
-          "median_prem_disc_bps": 1.3105057218193719,
-          "lockstep_count": 10
+          "median_prem_disc_bps": 0.5879422514884971,
+          "lockstep_count": 5
+        },
+        "yfinance": {
+          "rows": 76,
+          "median_prem_disc_bps": -28.045224164529785,
+          "lockstep_count": 1
         },
         "direxion": {
           "rows": 32,
@@ -103,37 +102,37 @@
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 3.9822526098384547,
-          "lockstep_count": 0
+          "median_prem_disc_bps": 1.1556264345038483,
+          "lockstep_count": 2
         },
         "rex_shares": {
           "rows": 34,
-          "median_prem_disc_bps": 2.5568908207623533,
-          "lockstep_count": 8
+          "median_prem_disc_bps": -12.57683215130102,
+          "lockstep_count": 3
         },
         "yieldmax": {
-          "rows": 28,
-          "median_prem_disc_bps": -12.05185579909206,
-          "lockstep_count": 1
+          "rows": 24,
+          "median_prem_disc_bps": -26.218280854928878,
+          "lockstep_count": 4
         },
         "defiance": {
           "rows": 55,
-          "median_prem_disc_bps": -10.58802885167739,
-          "lockstep_count": 7
+          "median_prem_disc_bps": -0.00031276021679140875,
+          "lockstep_count": 5
         },
         "proshares": {
           "rows": 31,
-          "median_prem_disc_bps": 3.066633566494954,
-          "lockstep_count": 2
+          "median_prem_disc_bps": 3.982807502143765,
+          "lockstep_count": 1
+        },
+        "merged": {
+          "rows": 3,
+          "median_prem_disc_bps": -345.07605784245845,
+          "lockstep_count": 1
         },
         "polygon": {
           "rows": 1,
           "median_prem_disc_bps": 0.00038083500191458036,
-          "lockstep_count": 1
-        },
-        "merged": {
-          "rows": 1,
-          "median_prem_disc_bps": 0.0,
           "lockstep_count": 1
         },
         "fof_child_synthetic": {
@@ -145,114 +144,12 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-09-08",
-    "universe_stale": 538,
+    "global_max": "2026-09-09",
+    "universe_stale": 0,
     "severe_tail_count": 0,
-    "worst": [
-      {
-        "ticker": "AALG",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAOG",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAOX",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAOZ",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAPB",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAPE",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAPW",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAPX",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "ACLZ",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "ACMM",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      }
-    ],
-    "stale_tickers_sample": [
-      {
-        "ticker": "AALG",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAOG",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAOX",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAOZ",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAPB",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAPE",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAPW",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "AAPX",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "ACLZ",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      },
-      {
-        "ticker": "ACMM",
-        "last_date": "2026-09-04",
-        "days_behind": 4
-      }
-    ],
-    "build_time": "2026-09-08T16:17:42.383710+00:00"
+    "worst": [],
+    "stale_tickers_sample": [],
+    "build_time": "2026-09-09T16:20:01.389400+00:00"
   },
   "violations": [],
   "ok": true
