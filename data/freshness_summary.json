@@ -1,25 +1,25 @@
 {
-  "build_time": "2026-09-10T00:45:38.426718Z",
+  "build_time": "2026-09-10T16:06:04.504113Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-09-10T00:07:43.279534Z",
+    "build_time": "2026-09-10T13:12:59.876607Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
     "yieldboost_underlyings_refreshed_count": 30,
     "yieldboost_underlyings_prefetched_count": 30,
     "yieldboost_underlyings_skipped_fresh_count": 0,
     "yieldboost_refresh_order_head": [
+      "CONL",
       "CRWV",
-      "XBI",
-      "TSM",
+      "SMCX",
       "XLF",
-      "META",
+      "CRCL",
       "MU",
-      "SOXX",
-      "QQQ"
+      "HOOD",
+      "IBIT"
     ],
     "monitored_symbols_count": 350,
     "freshness_enforced_count": 61,
@@ -27,33 +27,33 @@
     "missing_monitored_symbols": [],
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
-    "oldest_symbol": "AMZZ",
-    "oldest_symbol_age_minutes": 44,
-    "oldest_enforced_symbol": "AMZZ",
-    "oldest_enforced_symbol_age_minutes": 44
+    "oldest_symbol": "MSTU",
+    "oldest_symbol_age_minutes": 181,
+    "oldest_enforced_symbol": "MSTU",
+    "oldest_enforced_symbol_age_minutes": 181
   },
   "vrp": {
     "worst_underlying_symbol": "AMD",
-    "worst_underlying_options_age_minutes": 37,
-    "underlying_options_as_of_min": "2026-09-10T00:07:43.279534Z",
+    "worst_underlying_options_age_minutes": 173,
+    "underlying_options_as_of_min": "2026-09-10T13:12:59.876607Z",
     "iv_coverage_front_pct": 0.9032
   },
   "flow": {
-    "latest_date": "2026-09-08",
-    "build_time": "2026-09-10T00:45:32.789674Z",
-    "underlyings_total": 266,
+    "latest_date": "2026-09-09",
+    "build_time": "2026-09-10T16:06:01.182880Z",
+    "underlyings_total": 273,
     "underlyings_stale": 0,
     "underlyings_stale_pct": 0.0,
     "underlyings_issuer_publish_lag": 0,
     "underlyings_actionable_stale": 0,
     "underlyings_actionable_stale_pct": 0.0,
     "underlyings_stale_by_reason": {},
-    "fund_rows_on_latest_date": 588,
+    "fund_rows_on_latest_date": 589,
     "fund_quality_counts": {
       "income_overlay": 31,
       "missing_leverage": 2,
-      "missing_prior_aum": 17,
-      "ok": 466,
+      "missing_prior_aum": 4,
+      "ok": 480,
       "product_class:autocallable": 8,
       "product_class:passive_low_delta": 64
     },
@@ -61,73 +61,73 @@
     "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-09-08",
+    "latest_date": "2026-09-09",
     "latest_ok": 588,
-    "latest_stale_ok": 11,
+    "latest_stale_ok": 14,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "market_backed_no_issuer_nav": 11
+      "market_backed_no_issuer_nav": 14
     },
     "flow_blockers_prior_stale": 0,
     "prem_disc": {
-      "rows_with_close": 594,
-      "rows_with_nav_and_close": 439,
-      "rows_suppressed_asof_mismatch": 155,
-      "median_prem_disc_bps": -1.4820546891854736,
-      "lockstep_nav_close_count": 29,
-      "lockstep_nav_close_pct": 6.61,
-      "rex_nav_vs_implied_div_bps_gt5": 28,
-      "rex_nav_vs_implied_div_bps_gt50": 2,
-      "rex_nav_vs_implied_div_bps_max": 70.53291536050146,
+      "rows_with_close": 595,
+      "rows_with_nav_and_close": 557,
+      "rows_suppressed_asof_mismatch": 38,
+      "median_prem_disc_bps": -7.215724940866808,
+      "lockstep_nav_close_count": 30,
+      "lockstep_nav_close_pct": 5.39,
+      "rex_nav_vs_implied_div_bps_gt5": 29,
+      "rex_nav_vs_implied_div_bps_gt50": 6,
+      "rex_nav_vs_implied_div_bps_max": 94.82129832239298,
       "by_provider": {
+        "yfinance": {
+          "rows": 189,
+          "median_prem_disc_bps": -161.19737127095107,
+          "lockstep_count": 1
+        },
         "tradr_axs": {
           "rows": 75,
-          "median_prem_disc_bps": 1.06382701207539,
-          "lockstep_count": 4
+          "median_prem_disc_bps": -3.475720377292458,
+          "lockstep_count": 1
         },
         "granite_shares": {
           "rows": 82,
-          "median_prem_disc_bps": 0.5879422514884971,
-          "lockstep_count": 5
-        },
-        "yfinance": {
-          "rows": 76,
-          "median_prem_disc_bps": -28.045224164529785,
-          "lockstep_count": 1
+          "median_prem_disc_bps": -0.22157604654371238,
+          "lockstep_count": 3
         },
         "direxion": {
-          "rows": 32,
-          "median_prem_disc_bps": -52.73722081887363,
-          "lockstep_count": 0
+          "rows": 35,
+          "median_prem_disc_bps": 1.942728209102863,
+          "lockstep_count": 4
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 1.1556264345038483,
+          "median_prem_disc_bps": -0.08778656344106173,
           "lockstep_count": 2
         },
         "rex_shares": {
           "rows": 34,
-          "median_prem_disc_bps": -12.57683215130102,
+          "median_prem_disc_bps": 2.3087578882562054,
           "lockstep_count": 3
         },
         "yieldmax": {
-          "rows": 24,
-          "median_prem_disc_bps": -26.218280854928878,
-          "lockstep_count": 4
+          "rows": 27,
+          "median_prem_disc_bps": -54.26323593805844,
+          "lockstep_count": 1
         },
         "defiance": {
           "rows": 55,
-          "median_prem_disc_bps": -0.00031276021679140875,
-          "lockstep_count": 5
+          "median_prem_disc_bps": -3.9840029530321894,
+          "lockstep_count": 10
         },
         "proshares": {
           "rows": 31,
-          "median_prem_disc_bps": 3.982807502143765,
+          "median_prem_disc_bps": 4.186870158445335,
           "lockstep_count": 1
         },
         "merged": {
-          "rows": 3,
-          "median_prem_disc_bps": -345.07605784245845,
+          "rows": 2,
+          "median_prem_disc_bps": 256.3246512667965,
           "lockstep_count": 1
         },
         "polygon": {
@@ -149,8 +149,10 @@
     "severe_tail_count": 0,
     "worst": [],
     "stale_tickers_sample": [],
-    "build_time": "2026-09-09T16:20:01.389400+00:00"
+    "build_time": "2026-09-10T15:59:45.659521+00:00"
   },
-  "violations": [],
-  "ok": true
+  "violations": [
+    "metrics: 6 rex row(s) with published NAV vs AUM/shares divergence >50bp (29 >5bp)"
+  ],
+  "ok": false
 }
