@@ -1,59 +1,58 @@
 {
-  "build_time": "2026-09-11T16:02:42.595565Z",
+  "build_time": "2026-09-12T15:19:46.187053Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-09-10T19:45:15.144707Z",
+    "build_time": "2026-09-11T22:01:00.114848Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
-    "yieldboost_underlyings_refreshed_count": 30,
-    "yieldboost_underlyings_prefetched_count": 30,
-    "yieldboost_underlyings_skipped_fresh_count": 0,
+    "yieldboost_underlyings_refreshed_count": 12,
+    "yieldboost_underlyings_prefetched_count": 12,
+    "yieldboost_underlyings_skipped_fresh_count": 18,
     "yieldboost_refresh_order_head": [
       "CONL",
       "CRWV",
-      "TSM",
-      "SPY",
-      "TLT",
-      "MSTR",
-      "XLF",
-      "META"
+      "IONQ",
+      "BABA",
+      "HOOD",
+      "AMZN",
+      "IBIT",
+      "HIMS"
     ],
     "monitored_symbols_count": 350,
-    "freshness_enforced_count": 61,
+    "freshness_enforced_count": 43,
     "cached_monitored_count": 350,
     "missing_monitored_symbols": [],
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
-    "oldest_symbol": "MSTU",
-    "oldest_symbol_age_minutes": 1225,
-    "oldest_enforced_symbol": "MSTU",
-    "oldest_enforced_symbol_age_minutes": 1225
+    "oldest_symbol": "AMD",
+    "oldest_symbol_age_minutes": 118,
+    "oldest_enforced_symbol": "AMD",
+    "oldest_enforced_symbol_age_minutes": 118
   },
   "vrp": {
-    "worst_underlying_symbol": "AMD",
-    "worst_underlying_options_age_minutes": 1217,
-    "underlying_options_as_of_min": "2026-09-10T19:45:15.144707Z",
+    "worst_underlying_symbol": "XBI",
+    "worst_underlying_options_age_minutes": 255,
+    "underlying_options_as_of_min": "2026-09-11T19:44:57.240457Z",
     "iv_coverage_front_pct": 0.9032
   },
   "flow": {
-    "latest_date": "2026-09-10",
-    "build_time": "2026-09-11T16:02:38.817759Z",
-    "underlyings_total": 273,
+    "latest_date": "2026-09-11",
+    "build_time": "2026-09-12T15:19:42.403118Z",
+    "underlyings_total": 274,
     "underlyings_stale": 0,
     "underlyings_stale_pct": 0.0,
     "underlyings_issuer_publish_lag": 0,
     "underlyings_actionable_stale": 0,
     "underlyings_actionable_stale_pct": 0.0,
     "underlyings_stale_by_reason": {},
-    "fund_rows_on_latest_date": 589,
+    "fund_rows_on_latest_date": 587,
     "fund_quality_counts": {
       "income_overlay": 31,
-      "missing_leverage": 2,
-      "missing_prior_aum": 4,
-      "ok": 480,
+      "missing_prior_aum": 3,
+      "ok": 481,
       "product_class:autocallable": 8,
       "product_class:passive_low_delta": 64
     },
@@ -61,74 +60,65 @@
     "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-09-10",
+    "latest_date": "2026-09-11",
     "latest_ok": 589,
-    "latest_stale_ok": 13,
+    "latest_stale_ok": 130,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "market_backed_no_issuer_nav": 12,
+      "issuer_lag": 116,
+      "market_backed_no_issuer_nav": 13,
       "anchor_lag": 1
     },
     "flow_blockers_prior_stale": 1,
     "prem_disc": {
       "rows_with_close": 595,
-      "rows_with_nav_and_close": 552,
-      "rows_suppressed_asof_mismatch": 43,
-      "median_prem_disc_bps": -5.919433631786568,
-      "lockstep_nav_close_count": 33,
-      "lockstep_nav_close_pct": 5.98,
-      "rex_nav_vs_implied_div_bps_gt5": 29,
-      "rex_nav_vs_implied_div_bps_gt50": 5,
-      "rex_nav_vs_implied_div_bps_max": 79.4281175536137,
+      "rows_with_nav_and_close": 425,
+      "rows_suppressed_asof_mismatch": 170,
+      "median_prem_disc_bps": 9.930410830242705,
+      "lockstep_nav_close_count": 18,
+      "lockstep_nav_close_pct": 4.24,
+      "rex_nav_vs_implied_div_bps_gt5": 0,
+      "rex_nav_vs_implied_div_bps_gt50": 0,
+      "rex_nav_vs_implied_div_bps_max": null,
       "by_provider": {
         "yfinance": {
-          "rows": 184,
-          "median_prem_disc_bps": -290.97390338420075,
+          "rows": 186,
+          "median_prem_disc_bps": 118.30361874353457,
           "lockstep_count": 1
         },
         "tradr_axs": {
           "rows": 75,
-          "median_prem_disc_bps": 10.907474169506514,
+          "median_prem_disc_bps": -3.9637474482641415,
           "lockstep_count": 1
-        },
-        "granite_shares": {
-          "rows": 82,
-          "median_prem_disc_bps": 0.5920449752320098,
-          "lockstep_count": 5
-        },
-        "direxion": {
-          "rows": 35,
-          "median_prem_disc_bps": -0.028631348817511264,
-          "lockstep_count": 3
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 0.8308464474669635,
-          "lockstep_count": 4
-        },
-        "rex_shares": {
-          "rows": 34,
-          "median_prem_disc_bps": 2.5819777949913667,
+          "median_prem_disc_bps": 0.00010333644291589522,
           "lockstep_count": 5
         },
         "yieldmax": {
-          "rows": 27,
-          "median_prem_disc_bps": -107.38270394754113,
-          "lockstep_count": 0
+          "rows": 26,
+          "median_prem_disc_bps": 92.0744244037059,
+          "lockstep_count": 2
         },
         "defiance": {
           "rows": 55,
-          "median_prem_disc_bps": -5.81898296860335,
-          "lockstep_count": 8
+          "median_prem_disc_bps": -7.363994974802151,
+          "lockstep_count": 5
+        },
+        "direxion": {
+          "rows": 23,
+          "median_prem_disc_bps": 93.84186009701622,
+          "lockstep_count": 0
         },
         "proshares": {
           "rows": 31,
-          "median_prem_disc_bps": -0.8123637446919484,
-          "lockstep_count": 2
+          "median_prem_disc_bps": 1.1127969587351447,
+          "lockstep_count": 0
         },
         "merged": {
           "rows": 2,
-          "median_prem_disc_bps": -482.34827204251275,
+          "median_prem_disc_bps": -99.64994716767785,
           "lockstep_count": 1
         },
         "polygon": {
@@ -145,15 +135,13 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-09-10",
+    "global_max": "2026-09-11",
     "universe_stale": 0,
     "severe_tail_count": 0,
     "worst": [],
     "stale_tickers_sample": [],
-    "build_time": "2026-09-11T15:52:39.808568+00:00"
+    "build_time": "2026-09-12T15:06:54.151006+00:00"
   },
-  "violations": [
-    "metrics: 5 rex row(s) with published NAV vs AUM/shares divergence >50bp (29 >5bp)"
-  ],
-  "ok": false
+  "violations": [],
+  "ok": true
 }
