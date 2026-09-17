@@ -1,46 +1,46 @@
 {
-  "build_time": "2026-09-16T16:44:45.812439Z",
+  "build_time": "2026-09-17T16:45:28.765314Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-09-15T20:30:38.224576Z",
+    "build_time": "2026-09-16T22:55:22.648829Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
-    "yieldboost_underlyings_refreshed_count": 12,
-    "yieldboost_underlyings_prefetched_count": 12,
-    "yieldboost_underlyings_skipped_fresh_count": 18,
+    "yieldboost_underlyings_refreshed_count": 30,
+    "yieldboost_underlyings_prefetched_count": 30,
+    "yieldboost_underlyings_skipped_fresh_count": 0,
     "yieldboost_refresh_order_head": [
       "CRWV",
-      "HIMS",
-      "MARA",
-      "ETHA",
-      "IBIT",
-      "CRCL",
-      "AMD",
-      "AMZN"
+      "META",
+      "RGTI",
+      "XLF",
+      "QBTS",
+      "NVDA",
+      "TLT",
+      "QQQ"
     ],
     "monitored_symbols_count": 350,
-    "freshness_enforced_count": 43,
+    "freshness_enforced_count": 61,
     "cached_monitored_count": 350,
     "missing_monitored_symbols": [],
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
-    "oldest_symbol": "AMD",
-    "oldest_symbol_age_minutes": 1214,
-    "oldest_enforced_symbol": "AMD",
-    "oldest_enforced_symbol_age_minutes": 1214
+    "oldest_symbol": "IONL",
+    "oldest_symbol_age_minutes": 1078,
+    "oldest_enforced_symbol": "IONL",
+    "oldest_enforced_symbol_age_minutes": 1078
   },
   "vrp": {
-    "worst_underlying_symbol": "XBI",
-    "worst_underlying_options_age_minutes": 1383,
-    "underlying_options_as_of_min": "2026-09-15T17:41:38.458779Z",
+    "worst_underlying_symbol": "AMD",
+    "worst_underlying_options_age_minutes": 1070,
+    "underlying_options_as_of_min": "2026-09-16T22:55:22.648829Z",
     "iv_coverage_front_pct": 0.9355
   },
   "flow": {
-    "latest_date": "2026-09-15",
-    "build_time": "2026-09-16T16:44:42.046400Z",
+    "latest_date": "2026-09-16",
+    "build_time": "2026-09-17T16:45:24.645608Z",
     "underlyings_total": 274,
     "underlyings_stale": 0,
     "underlyings_stale_pct": 0.0,
@@ -61,74 +61,73 @@
     "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-09-15",
+    "latest_date": "2026-09-16",
     "latest_ok": 589,
-    "latest_stale_ok": 21,
+    "latest_stale_ok": 14,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "market_backed_no_issuer_nav": 19,
-      "issuer_lag": 2
+      "market_backed_no_issuer_nav": 14
     },
     "flow_blockers_prior_stale": 0,
     "prem_disc": {
       "rows_with_close": 595,
-      "rows_with_nav_and_close": 545,
-      "rows_suppressed_asof_mismatch": 50,
-      "median_prem_disc_bps": -4.210748676742705,
-      "lockstep_nav_close_count": 33,
-      "lockstep_nav_close_pct": 6.06,
-      "rex_nav_vs_implied_div_bps_gt5": 28,
-      "rex_nav_vs_implied_div_bps_gt50": 6,
-      "rex_nav_vs_implied_div_bps_max": 96.96969696969705,
+      "rows_with_nav_and_close": 477,
+      "rows_suppressed_asof_mismatch": 118,
+      "median_prem_disc_bps": -0.4690576689414579,
+      "lockstep_nav_close_count": 40,
+      "lockstep_nav_close_pct": 8.39,
+      "rex_nav_vs_implied_div_bps_gt5": 25,
+      "rex_nav_vs_implied_div_bps_gt50": 2,
+      "rex_nav_vs_implied_div_bps_max": 143.790849673203,
       "by_provider": {
         "yfinance": {
-          "rows": 206,
-          "median_prem_disc_bps": -80.89919591317039,
-          "lockstep_count": 3
+          "rows": 107,
+          "median_prem_disc_bps": -54.44044156640777,
+          "lockstep_count": 1
         },
         "tradr_axs": {
           "rows": 75,
-          "median_prem_disc_bps": -0.05162714365954666,
-          "lockstep_count": 5
+          "median_prem_disc_bps": -0.5306764036465448,
+          "lockstep_count": 6
         },
         "granite_shares": {
-          "rows": 80,
-          "median_prem_disc_bps": -3.936390821173915,
-          "lockstep_count": 3
+          "rows": 82,
+          "median_prem_disc_bps": 1.004803394836694,
+          "lockstep_count": 4
         },
         "direxion": {
           "rows": 35,
-          "median_prem_disc_bps": 0.6610757779946222,
-          "lockstep_count": 3
+          "median_prem_disc_bps": -1.776437561862721,
+          "lockstep_count": 4
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": -0.879513109327238,
-          "lockstep_count": 3
+          "median_prem_disc_bps": 4.243704106587614,
+          "lockstep_count": 2
         },
         "rex_shares": {
           "rows": 34,
           "median_prem_disc_bps": 0.0,
-          "lockstep_count": 6
+          "lockstep_count": 7
         },
         "yieldmax": {
           "rows": 28,
-          "median_prem_disc_bps": -2.2715907415299115,
-          "lockstep_count": 2
+          "median_prem_disc_bps": -7.891140350426791,
+          "lockstep_count": 1
         },
         "defiance": {
           "rows": 55,
-          "median_prem_disc_bps": -6.830522922870628,
-          "lockstep_count": 4
+          "median_prem_disc_bps": -0.00036679781434401093,
+          "lockstep_count": 8
         },
         "proshares": {
-          "rows": 3,
-          "median_prem_disc_bps": -13.125149098011502,
-          "lockstep_count": 0
+          "rows": 31,
+          "median_prem_disc_bps": -1.3615203576193577,
+          "lockstep_count": 3
         },
         "merged": {
-          "rows": 2,
-          "median_prem_disc_bps": 47.13519082228238,
+          "rows": 3,
+          "median_prem_disc_bps": 2.6284774451062245,
           "lockstep_count": 1
         },
         "polygon": {
@@ -145,15 +144,13 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-09-15",
+    "global_max": "2026-09-16",
     "universe_stale": 0,
     "severe_tail_count": 0,
     "worst": [],
     "stale_tickers_sample": [],
-    "build_time": "2026-09-16T16:32:53.579274+00:00"
+    "build_time": "2026-09-17T16:36:39.687296+00:00"
   },
-  "violations": [
-    "metrics: 6 rex row(s) with published NAV vs AUM/shares divergence >50bp (28 >5bp)"
-  ],
-  "ok": false
+  "violations": [],
+  "ok": true
 }
