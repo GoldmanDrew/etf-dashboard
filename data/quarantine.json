@@ -1,6 +1,6 @@
 {
   "schema_v": 1,
-  "build_time": "2026-09-22T12:14:05.996697Z",
+  "build_time": "2026-09-22T16:57:26.192966Z",
   "generated_by": "scripts/data_sentinel.py",
   "note": "Per-ticker/per-artifact data-quality holds. The UI badges/grays these; records are never removed from dashboard_data.json so cross-sectional scores stay stable. Entries auto-clear after 2 clean sweeps.",
   "tickers": {
@@ -29,6 +29,32 @@
         }
       ],
       "last_seen": "2026-09-21T18:50:08.100798Z"
+    },
+    "FBX": {
+      "first_seen": "2026-09-22T16:57:26.192966Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "FBX moved +23.3% intraday (MAD z=11.0) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 0.2327
+        }
+      ],
+      "last_seen": "2026-09-22T16:57:26.192966Z"
+    },
+    "RMBC": {
+      "first_seen": "2026-09-22T16:57:26.192966Z",
+      "clean_streak": 0,
+      "reasons": [
+        {
+          "code": "return_outlier",
+          "artifact": "data/underlying_intraday_spot.json",
+          "detail": "RMBC moved +24.4% intraday (MAD z=11.5) with no declared split and no leverage corroboration \u2014 suspected bad quote",
+          "observed": 0.2438
+        }
+      ],
+      "last_seen": "2026-09-22T16:57:26.192966Z"
     }
   },
   "artifacts": {}
