@@ -4,7 +4,11 @@
 Updates ``nav`` from issuer-published NAV (not AUM/shares implied) and ``close_price``
 from issuer Closing Price for historical rows still sourced from ``rex_shares``.
 
+After a NAV write, AUM is reset to NAV x shares. Leaving the old AUM in place
+makes ``|NAV - AUM/shares| / NAV`` exceed the freshness gate (50bp, 3 rows).
+
 Default: last 45 calendar days, dry-run unless ``--apply``.
+``--reconcile-only`` skips the issuer fetch and only repairs the identity.
 """
 from __future__ import annotations
 
@@ -27,6 +31,46 @@ from ingest_etf_metrics import (  # noqa: E402
 )
 
 LOGGER = logging.getLogger("repair_rex_session_nav_close")
+
+_REX_PROVIDERS = frozenset({"rex", "rex_shares", "rex_shares_history"})
+# Health warns above 5bp and fails at 3 rows above 50bp.
+_IDENTITY_BPS = 5.0
+
+
+def reconcile_rex_nav_identity(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Set AUM = NAV x shares on REX rows whose triple diverges by >= 5bp.
+
+    Published NAV and the share count stay. Freshness measures
+    ``|NAV - AUM/shares| / NAV``.
+    """
+    if df.empty or "nav" not in df.columns or "aum" not in df.columns:
+        return df, 0
+    if "shares_outstanding" not in df.columns or "source_provider" not in df.columns:
+        return df, 0
+    out = df.copy()
+    prov = out["source_provider"].astype(str).str.lower()
+    nav = pd.to_numeric(out["nav"], errors="coerce")
+    aum = pd.to_numeric(out["aum"], errors="coerce")
+    shares = pd.to_numeric(out["shares_outstanding"], errors="coerce")
+    ok = (
+        prov.isin(_REX_PROVIDERS)
+        & nav.notna()
+        & (nav > 0)
+        & aum.notna()
+        & (aum > 0)
+        & shares.notna()
+        & (shares > 0)
+    )
+    if not bool(ok.any()):
+        return out, 0
+    implied = aum / shares
+    div_bps = ((nav - implied) / nav * 10000.0).abs()
+    fix = ok & div_bps.ge(_IDENTITY_BPS)
+    n = int(fix.sum())
+    if n:
+        out.loc[fix, "aum"] = (nav.loc[fix] * shares.loc[fix]).astype(float)
+        LOGGER.info("Reconciled AUM = NAV x shares on %d REX row(s)", n)
+    return out, n
 
 
 def repair_rex_rows(
@@ -111,13 +155,24 @@ def repair_rex_rows(
             "Skipped %d row(s) whose session does not match the issuer page as-of date",
             n_skipped_asof,
         )
-    if apply and n_fixed:
+    out, n_identity = reconcile_rex_nav_identity(out)
+    n_total = int(n_fixed) + int(n_identity)
+    if apply and n_total:
         validate_df(out)
         save_outputs(out)
-        LOGGER.info("Saved %d row patch(es) to %s", n_fixed, PARQUET_PATH)
-    elif n_fixed:
-        LOGGER.info("Dry-run: would patch %d row(s); re-run with --apply", n_fixed)
-    return out, n_fixed
+        LOGGER.info(
+            "Saved %d NAV/close patch(es) and %d AUM identity fix(es) to %s",
+            n_fixed,
+            n_identity,
+            PARQUET_PATH,
+        )
+    elif n_total:
+        LOGGER.info(
+            "Dry-run: would patch %d NAV/close row(s) and %d AUM identity row(s); re-run with --apply",
+            n_fixed,
+            n_identity,
+        )
+    return out, n_total
 
 
 def main() -> int:
@@ -126,11 +181,27 @@ def main() -> int:
     parser.add_argument("--lookback-days", type=int, default=45)
     parser.add_argument("--tickers", type=str, default="", help="Comma-separated tickers (default: all REX in window)")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--reconcile-only",
+        action="store_true",
+        help="Rewrite REX AUM to NAV x shares. No issuer fetch.",
+    )
     args = parser.parse_args()
     if not PARQUET_PATH.exists():
         LOGGER.error("Missing %s", PARQUET_PATH)
         return 1
     df = pd.read_parquet(PARQUET_PATH)
+    if args.reconcile_only:
+        out, n = reconcile_rex_nav_identity(df)
+        if args.apply and n:
+            validate_df(out)
+            save_outputs(out)
+            LOGGER.info("Saved %d AUM identity fix(es) to %s", n, PARQUET_PATH)
+        elif n:
+            LOGGER.info("Dry-run: would fix %d AUM identity row(s); re-run with --apply", n)
+        else:
+            LOGGER.info("REX NAV/AUM/shares identity already within %.0fbp", _IDENTITY_BPS)
+        return 0
     tickers = [t.strip() for t in args.tickers.split(",") if t.strip()] or None
     _, n = repair_rex_rows(
         df,

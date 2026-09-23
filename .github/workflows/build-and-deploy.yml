@@ -46,7 +46,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-research.txt
 
       - name: Validate Polygon key
         run: |
@@ -168,6 +168,11 @@ jobs:
         if: steps.build_data.outcome == 'success'
         continue-on-error: true
         run: python scripts/vrp_pipeline_diagnostics.py --require-vrp-file --fail-on-missing-vrp-when-spreads
+
+      - name: Reconcile REX NAV identity
+        if: steps.build_data.outcome == 'success'
+        continue-on-error: true
+        run: python scripts/repair_rex_session_nav_close.py --reconcile-only --apply
 
       - name: Build freshness summary
         if: steps.build_data.outcome == 'success'

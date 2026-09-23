@@ -137,7 +137,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-research.txt
 
       - name: Validate Polygon key
         run: |
@@ -236,6 +236,10 @@ jobs:
 
       - name: Build LETF rebalance flows
         run: python scripts/build_letf_rebalance_flows.py
+
+      - name: Reconcile REX NAV identity
+        continue-on-error: true
+        run: python scripts/repair_rex_session_nav_close.py --reconcile-only --apply
 
       - name: Freshness diagnostics
         continue-on-error: true
@@ -365,7 +369,7 @@ jobs:
 
       - name: Install ls-algo deps (Bucket 4/5)
         if: steps.build_data.outcome == 'success'
-        run: pip install -r ls-algo/requirements.txt
+        run: pip install -r ls-algo/requirements.txt -r requirements-research.txt
 
       - name: Build Bucket 5 product dashboard
         if: steps.build_data.outcome == 'success'
@@ -411,8 +415,14 @@ jobs:
           EOF
           cp "$src" data/autocallables.json
 
+      # Fail-closed for data/bucket4_*: this step does not publish a simulated
+      # fallback. continue-on-error lets the split-TR audit and the dashboard
+      # commit run anyway. The job is failed again after that commit so the
+      # export error stays visible, and deploy does not require a green job.
       - name: Build Bucket 4 inverse-decay backtest artifact
+        id: b4_export
         if: steps.build_data.outcome == 'success'
+        continue-on-error: true
         env:
           LS_ALGO_ROOT: ${{ github.workspace }}/ls-algo
         run: |
@@ -549,6 +559,12 @@ jobs:
             data/autocallables.json
           commit_message: "${{ needs.resolve-slot.outputs.monday_catchup == 'true' && 'chore: monday dashboard catch-up build' || 'chore: nightly dashboard build' }}"
 
+      - name: Fail job if Bucket 4 export failed
+        if: always() && steps.b4_export.outcome == 'failure'
+        run: |
+          echo "::error::Bucket 4 export failed. Dashboard artifacts were still committed when the build succeeded. Bucket 4 files stay on the last good export."
+          exit 1
+
   # Read-only, non-gating diagnostics run in parallel with the Pages deploy so
   # they no longer sit on the critical path before publishing. Hard quality
   # gates (Split TR + Dashboard data quality) stay inside the compute job.
@@ -587,7 +603,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-research.txt
 
       - name: Pull latest main
         run: git pull --ff-only origin main
@@ -604,7 +620,7 @@ jobs:
   # and fail-soft leaves the hourly net (deploy-pages-data.yml) as backstop.
   deploy:
     needs: nightly
-    if: needs.nightly.result == 'success' && (needs.nightly.outputs.metrics_changed == '1' || needs.nightly.outputs.dashboard_changed == '1')
+    if: always() && needs.nightly.result != 'cancelled' && (needs.nightly.outputs.metrics_changed == '1' || needs.nightly.outputs.dashboard_changed == '1')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
