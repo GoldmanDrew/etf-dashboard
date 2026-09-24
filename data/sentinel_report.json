@@ -1,35 +1,30 @@
 {
   "schema_v": 1,
-  "build_time": "2026-09-24T17:55:13.293238Z",
-  "mode": "sweep",
-  "task": null,
-  "verdict": "warn",
+  "build_time": "2026-09-24T20:29:58.251061Z",
+  "mode": "gate",
+  "task": "nav",
+  "verdict": "pass",
   "stats": {
-    "checked_files": 10,
+    "checked_files": 14,
     "block": 0,
     "quarantine": 0,
-    "warn": 1
+    "warn": 0
   },
   "checked": [
-    "data/dashboard_data.json",
-    "data/borrow_history.json",
-    "data/options_cache.json",
-    "data/vrp_live.json",
-    "data/vrp_health.json",
     "data/nav_forecasts/_latest.json",
+    "data/nav_forecasts/snapshots",
+    "data/ci_state.json",
     "data/underlying_intraday_spot.json",
     "data/underlying_intraday_volume.json",
     "data/letf_rebalance_flows_intraday_latest.json",
-    "data/corporate_actions.json"
+    "data/options_cache.json",
+    "data/vrp_live.json",
+    "data/vrp_health.json",
+    "data/yieldboost_put_spreads_latest.json",
+    "data/yieldboost_options_target.json",
+    "data/event_calendar_known.json",
+    "data/event_calendar_inferred.json",
+    "data/event_calendar_combined.json"
   ],
-  "findings": [
-    {
-      "severity": "warn",
-      "code": "artifact_stale",
-      "artifact": "data/letf_rebalance_flows_intraday_latest.json",
-      "detail": "build_time 2026-09-22T22:49:28.852097Z is 43.1 market-hours old (max 24h)",
-      "observed": 43.1,
-      "threshold": 24
-    }
-  ]
+  "findings": []
 }
