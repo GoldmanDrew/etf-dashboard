@@ -416,9 +416,11 @@ jobs:
           cp "$src" data/autocallables.json
 
       # Fail-closed for data/bucket4_*: this step does not publish a simulated
-      # fallback. continue-on-error lets the split-TR audit and the dashboard
-      # commit run anyway. The job is failed again after that commit so the
-      # export error stays visible, and deploy does not require a green job.
+      # fallback. An empty inverse sleeve (replay rows are only core_leveraged /
+      # yieldboost) keeps the last good export and does not fail the job — that
+      # result is stable and was reddening every nightly. Any other export
+      # failure still fails the step; the job is failed again after the commit
+      # so that error stays visible. Deploy does not require a green job.
       - name: Build Bucket 4 inverse-decay backtest artifact
         id: b4_export
         if: steps.build_data.outcome == 'success'
@@ -436,7 +438,19 @@ jobs:
           print(day.isoformat())
           PY
           )"
-          python ls-algo/scripts/export_b4_dashboard.py --run-production --run-date "$RUN_DATE" --start 2026-02-27
+          LOG="${RUNNER_TEMP}/b4_export.log"
+          set +e
+          python ls-algo/scripts/export_b4_dashboard.py --run-production --run-date "$RUN_DATE" --start 2026-02-27 >"$LOG" 2>&1
+          code=$?
+          set -e
+          cat "$LOG"
+          if [ "$code" -ne 0 ]; then
+            if grep -q "contains no Bucket 4 rows" "$LOG"; then
+              echo "::warning::Production replay has no inverse_decay_bucket4 rows. Keeping the last good Bucket 4 export."
+              exit 0
+            fi
+            exit "$code"
+          fi
           python scripts/build_bucket4_backtest.py --mode production --max-age-days 4
 
       - name: Bucket 4 Layer A twin unit tests

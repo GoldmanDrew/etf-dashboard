@@ -16,6 +16,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from price_basis import (  # noqa: E402
+    _jump_explained_by_companion,
     build_tr_series_from_metrics,
     find_underlying_adj_cliffs,
     max_abs_log_return,
@@ -57,6 +58,56 @@ def _is_split_sized_jump(lr_abs: float, multipliers: list[float], *, rel_tol: fl
         return False
     jump = math.exp(lr_abs)
     return any(abs(jump / mult - 1.0) <= rel_tol for mult in multipliers)
+
+
+def _multipliers_near_date(
+    split_events: list[tuple[dt.date, float]],
+    day: dt.date,
+    *,
+    window_days: int,
+) -> list[float]:
+    """Split ratios whose own ex-date is inside the window.
+
+    A later 4-for-1 must not unlock an older 2-for-1 ratio. KEEX 2026-08-11
+    sits near the September 4-for-1 and was flagged forever because a 1.68x
+    print happened to resemble the March 2-for-1.
+    """
+    out: list[float] = []
+    for eff, mult in split_events or []:
+        if not isinstance(eff, dt.date):
+            continue
+        if abs((day - eff).days) > window_days:
+            continue
+        try:
+            m = float(mult)
+        except (TypeError, ValueError):
+            continue
+        if m <= 0:
+            continue
+        cand = m if m >= 1 else 1.0 / m
+        if cand > 1.05 and not any(abs(cand / x - 1.0) <= 1e-6 for x in out):
+            out.append(cand)
+    return out
+
+
+def _is_unexplained_split_basis_jump(
+    lr_e: float,
+    lr_u_signed: float,
+    *,
+    day: dt.date,
+    split_events: list[tuple[dt.date, float]],
+    window_days: int = SPLIT_SIZED_CLIFF_EVENT_WINDOW_DAYS,
+    max_underlying_log_move: float = MAX_UNDERLYING_LOG_MOVE_FOR_CLIFF,
+) -> bool:
+    """True when the ETF leg looks like a nearby declared split the underlying cannot explain."""
+    if not (math.isfinite(lr_e) and lr_e > 0 and math.isfinite(lr_u_signed)):
+        return False
+    if abs(lr_u_signed) >= max_underlying_log_move:
+        return False
+    nearby = _multipliers_near_date(split_events, day, window_days=window_days)
+    if not _is_split_sized_jump(lr_e, nearby):
+        return False
+    return not _jump_explained_by_companion(lr_e, lr_u_signed)
 
 
 def _load_corp_payload(path: Path) -> dict:
@@ -115,16 +166,13 @@ def audit_ticker(
             d_cur = dt.date.fromisoformat(str(tr[i].get("date") or "")[:10])
         except ValueError:
             continue
-        if not any(
-            abs((d_cur - eff).days) <= SPLIT_SIZED_CLIFF_EVENT_WINDOW_DAYS
-            for eff, _mult in split_events
-        ):
-            continue
-        lr_u = abs(math.log(u1 / u0))
-        if lr_u >= MAX_UNDERLYING_LOG_MOVE_FOR_CLIFF:
-            continue
         lr_e = abs(math.log(e1 / e0))
-        if not _is_split_sized_jump(lr_e, multipliers):
+        if not _is_unexplained_split_basis_jump(
+            lr_e,
+            math.log(u1 / u0),
+            day=d_cur,
+            split_events=split_events,
+        ):
             continue
         if lr_e > max_any:
             max_any = lr_e
