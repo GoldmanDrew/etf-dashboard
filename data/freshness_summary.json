@@ -1,46 +1,46 @@
 {
-  "build_time": "2026-10-02T02:24:29.136620Z",
+  "build_time": "2026-10-02T17:48:52.496378Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-10-02T01:43:16.832944Z",
+    "build_time": "2026-10-02T14:03:22.756257Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
-    "yieldboost_underlyings_refreshed_count": 30,
-    "yieldboost_underlyings_prefetched_count": 30,
-    "yieldboost_underlyings_skipped_fresh_count": 0,
+    "yieldboost_underlyings_refreshed_count": 12,
+    "yieldboost_underlyings_prefetched_count": 12,
+    "yieldboost_underlyings_skipped_fresh_count": 18,
     "yieldboost_refresh_order_head": [
       "CRWV",
-      "XLF",
-      "QQQ",
-      "AMD",
+      "IONQ",
+      "COIN",
+      "ETHA",
+      "GDX",
+      "BABA",
       "CRCL",
-      "QBTS",
-      "MU",
-      "XBI"
+      "MARA"
     ],
     "monitored_symbols_count": 350,
-    "freshness_enforced_count": 61,
+    "freshness_enforced_count": 43,
     "cached_monitored_count": 350,
     "missing_monitored_symbols": [],
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
-    "oldest_symbol": "IONL",
-    "oldest_symbol_age_minutes": 47,
-    "oldest_enforced_symbol": "IONL",
-    "oldest_enforced_symbol_age_minutes": 47
+    "oldest_symbol": "AMD",
+    "oldest_symbol_age_minutes": 225,
+    "oldest_enforced_symbol": "AMD",
+    "oldest_enforced_symbol_age_minutes": 225
   },
   "vrp": {
-    "worst_underlying_symbol": "AMD",
-    "worst_underlying_options_age_minutes": 41,
+    "worst_underlying_symbol": "XBI",
+    "worst_underlying_options_age_minutes": 965,
     "underlying_options_as_of_min": "2026-10-02T01:43:16.832944Z",
     "iv_coverage_front_pct": 0.9677
   },
   "flow": {
-    "latest_date": "2026-09-30",
-    "build_time": "2026-10-02T02:24:22.648561Z",
+    "latest_date": "2026-10-01",
+    "build_time": "2026-10-02T17:48:46.950196Z",
     "underlyings_total": 274,
     "underlyings_stale": 0,
     "underlyings_stale_pct": 0.0,
@@ -61,79 +61,78 @@
     "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-09-30",
+    "latest_date": "2026-10-01",
     "latest_ok": 589,
     "latest_stale_ok": 14,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "market_backed_no_issuer_nav": 13,
-      "anchor_lag": 1
+      "market_backed_no_issuer_nav": 14
     },
-    "flow_blockers_prior_stale": 1,
+    "flow_blockers_prior_stale": 0,
     "prem_disc": {
       "rows_with_close": 596,
-      "rows_with_nav_and_close": 576,
-      "rows_suppressed_asof_mismatch": 20,
-      "median_prem_disc_bps": 2.4957946953081662,
-      "lockstep_nav_close_count": 29,
-      "lockstep_nav_close_pct": 5.03,
+      "rows_with_nav_and_close": 566,
+      "rows_suppressed_asof_mismatch": 30,
+      "median_prem_disc_bps": 0.4360728765427154,
+      "lockstep_nav_close_count": 33,
+      "lockstep_nav_close_pct": 5.83,
       "rex_nav_vs_implied_div_bps_gt5": 0,
       "rex_nav_vs_implied_div_bps_gt50": 0,
-      "rex_nav_vs_implied_div_bps_max": 4.835589941971959,
+      "rex_nav_vs_implied_div_bps_max": 3.9729837107674064,
       "by_provider": {
         "yfinance": {
-          "rows": 206,
-          "median_prem_disc_bps": -40.459542978929974,
+          "rows": 198,
+          "median_prem_disc_bps": 111.30309198147626,
           "lockstep_count": 3
         },
         "tradr_axs": {
           "rows": 75,
-          "median_prem_disc_bps": 8.414111258388104,
+          "median_prem_disc_bps": 4.193533234396215,
           "lockstep_count": 2
         },
         "granite_shares": {
           "rows": 82,
-          "median_prem_disc_bps": 8.320739150817166,
-          "lockstep_count": 4
+          "median_prem_disc_bps": -1.397746293407427,
+          "lockstep_count": 2
         },
         "direxion": {
           "rows": 35,
-          "median_prem_disc_bps": -4.068140419594755,
-          "lockstep_count": 1
+          "median_prem_disc_bps": 2.6755216806332167,
+          "lockstep_count": 2
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 17.071541309803656,
-          "lockstep_count": 0
+          "median_prem_disc_bps": -0.9525424966390328,
+          "lockstep_count": 1
         },
         "rex_shares": {
           "rows": 34,
           "median_prem_disc_bps": 0.0,
-          "lockstep_count": 6
+          "lockstep_count": 7
         },
         "yieldmax": {
           "rows": 28,
-          "median_prem_disc_bps": 8.812146288895919,
-          "lockstep_count": 2
+          "median_prem_disc_bps": -0.00015187017156238682,
+          "lockstep_count": 5
         },
         "defiance": {
           "rows": 55,
-          "median_prem_disc_bps": -7.484744408886878,
-          "lockstep_count": 4
+          "median_prem_disc_bps": -5.6605227027972465,
+          "lockstep_count": 6
         },
         "proshares": {
           "rows": 31,
-          "median_prem_disc_bps": -0.910567008423232,
-          "lockstep_count": 3
-        },
-        "merged": {
-          "rows": 3,
-          "median_prem_disc_bps": 142.81339010747848,
+          "median_prem_disc_bps": -7.158590934745484,
           "lockstep_count": 1
         },
         "polygon": {
           "rows": 1,
           "median_prem_disc_bps": 0.00038083500191458036,
+          "lockstep_count": 1
+        },
+        "merged": {
+          "rows": 1,
+          "median_prem_disc_bps": 0.0,
           "lockstep_count": 1
         },
         "fof_child_synthetic": {
@@ -145,12 +144,12 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-09-30",
+    "global_max": "2026-10-01",
     "universe_stale": 0,
     "severe_tail_count": 0,
     "worst": [],
     "stale_tickers_sample": [],
-    "build_time": "2026-10-01T18:43:31.050205+00:00"
+    "build_time": "2026-10-02T17:38:00.219187+00:00"
   },
   "violations": [],
   "ok": true
