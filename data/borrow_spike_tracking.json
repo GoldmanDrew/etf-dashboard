@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-06T03:04:15.929339Z",
+  "as_of": "2026-10-06T21:40:45.108377Z",
   "program_phase": "v2_shipped_monitoring",
   "milestones": [
     {
@@ -26,14 +26,14 @@
     {
       "id": "utilization_coverage_0p8",
       "description": "Supply feature coverage for logistic_v2",
-      "current": 0.9984,
+      "current": 0.9991,
       "target": 0.8,
       "status": "done"
     },
     {
       "id": "l2_elevated_band_hit_rate",
       "description": "Calibrated elevated tier realized rate > 0",
-      "current": 0.183469,
+      "current": 0.185141,
       "target": 0.05,
       "status": "done"
     },
@@ -67,12 +67,12 @@
   },
   "model_comparison": {
     "v1_l0_auroc": 0.436828,
-    "v2_l2_auroc": 0.792643,
-    "v2_auroc_delta": 0.355815,
+    "v2_l2_auroc": 0.793209,
+    "v2_auroc_delta": 0.356381,
     "v1_l0_positives": 1,
     "v2_l2_positives": 1871,
-    "v2_ece": 0.007876,
-    "v2_elevated_realized": 0.183469,
+    "v2_ece": 0.00806,
+    "v2_elevated_realized": 0.185141,
     "recommendation": "Use v2 calibrated L2 for alert tiers; keep v1 L0 p_spike_5d as legacy headline."
   },
   "live_track": {
