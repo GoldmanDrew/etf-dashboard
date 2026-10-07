@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-07T02:08:49.793116Z",
+  "as_of": "2026-10-07T22:29:27.841432Z",
   "program_phase": "v2_shipped_monitoring",
   "milestones": [
     {
@@ -12,7 +12,7 @@
     {
       "id": "l2_replay_positives_100",
       "description": "L2 relative-stress label positives for model dev gates",
-      "current": 1882,
+      "current": 1885,
       "target": 100,
       "status": "done"
     },
@@ -33,7 +33,7 @@
     {
       "id": "l2_elevated_band_hit_rate",
       "description": "Calibrated elevated tier realized rate > 0",
-      "current": 0.184753,
+      "current": 0.18412,
       "target": 0.05,
       "status": "done"
     },
@@ -66,13 +66,13 @@
     "trader_headline_label": "L0"
   },
   "model_comparison": {
-    "v1_l0_auroc": 0.436801,
-    "v2_l2_auroc": 0.792003,
-    "v2_auroc_delta": 0.355202,
+    "v1_l0_auroc": 0.436783,
+    "v2_l2_auroc": 0.792488,
+    "v2_auroc_delta": 0.355705,
     "v1_l0_positives": 1,
-    "v2_l2_positives": 1882,
-    "v2_ece": 0.007868,
-    "v2_elevated_realized": 0.184753,
+    "v2_l2_positives": 1885,
+    "v2_ece": 0.007898,
+    "v2_elevated_realized": 0.18412,
     "recommendation": "Use v2 calibrated L2 for alert tiers; keep v1 L0 p_spike_5d as legacy headline."
   },
   "live_track": {
@@ -105,8 +105,8 @@
   ],
   "findings_summary": {
     "best_estimate_borrow": "Combine (1) current borrow level, (2) v2 calibrated L2 stress score for spike risk, and (3) delta_borrow_5d_p50 OLS forecast for directional drift. Level/momentum features explain ~5% of forward borrow change; spike L0 remains too rare for calibrated probabilities.",
-    "spike_headline": "L0 catastrophic spikes: 1 in 71869 replay rows \u2014 use rank/decile, not raw P\u226530%.",
-    "stress_headline": "L2 relative stress: 1882 events \u2014 v2+calibration for watch/elevated/high tiers.",
+    "spike_headline": "L0 catastrophic spikes: 1 in 71872 replay rows \u2014 use rank/decile, not raw P\u226530%.",
+    "stress_headline": "L2 relative stress: 1885 events \u2014 v2+calibration for watch/elevated/high tiers.",
     "forecast_headline": "Positive delta_borrow_5d_p50 means expected increase in annual borrow fee over the next 5 IBKR/git observations. Low R\u00b2 (~5%) \u2014 use as directional stress, not point forecast.",
     "model_choice": "Use v2 calibrated L2 for alert tiers; keep v1 L0 p_spike_5d as legacy headline."
   }
