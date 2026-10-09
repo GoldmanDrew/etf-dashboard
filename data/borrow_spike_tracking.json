@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-08T23:04:56.260681Z",
+  "as_of": "2026-10-09T03:00:43.084082Z",
   "program_phase": "v2_shipped_monitoring",
   "milestones": [
     {
@@ -12,14 +12,14 @@
     {
       "id": "l2_replay_positives_100",
       "description": "L2 relative-stress label positives for model dev gates",
-      "current": 1894,
+      "current": 1910,
       "target": 100,
       "status": "done"
     },
     {
       "id": "live_prediction_days_60",
       "description": "Daily prediction archive depth",
-      "current": 111,
+      "current": 112,
       "target": 60,
       "status": "done"
     },
@@ -33,7 +33,7 @@
     {
       "id": "l2_elevated_band_hit_rate",
       "description": "Calibrated elevated tier realized rate > 0",
-      "current": 0.184272,
+      "current": 0.184221,
       "target": 0.05,
       "status": "done"
     },
@@ -54,7 +54,7 @@
     {
       "id": "live_elevated_hit_rate_60d",
       "description": "Rolling 60d elevated/high tier L2 realized rate",
-      "current": 0.181416,
+      "current": 0.180085,
       "target": 0.05,
       "status": "done"
     }
@@ -66,19 +66,19 @@
     "trader_headline_label": "L0"
   },
   "model_comparison": {
-    "v1_l0_auroc": 0.436536,
-    "v2_l2_auroc": 0.791674,
-    "v2_auroc_delta": 0.355138,
+    "v1_l0_auroc": 0.436318,
+    "v2_l2_auroc": 0.791804,
+    "v2_auroc_delta": 0.355486,
     "v1_l0_positives": 1,
-    "v2_l2_positives": 1894,
-    "v2_ece": 0.007781,
-    "v2_elevated_realized": 0.184272,
+    "v2_l2_positives": 1910,
+    "v2_ece": 0.007825,
+    "v2_elevated_realized": 0.184221,
     "recommendation": "Use v2 calibrated L2 for alert tiers; keep v1 L0 p_spike_5d as legacy headline."
   },
   "live_track": {
-    "n_rows": 43459,
+    "n_rows": 44003,
     "positives": 1,
-    "prediction_snapshot_days": 111
+    "prediction_snapshot_days": 112
   },
   "forecast_lane": {
     "n_symbols": 588,
@@ -89,13 +89,13 @@
   "live_calibration_monitor": {
     "status": "ok",
     "window_days": 60,
-    "as_of": "2026-10-08",
-    "cutoff_date": "2026-08-09",
-    "n_rows": 12100,
-    "n_elevated_tier": 1055,
-    "n_elevated_strict": 452,
-    "elevated_tier_hit_rate": 0.119431,
-    "elevated_strict_hit_rate": 0.181416,
+    "as_of": "2026-10-09",
+    "cutoff_date": "2026-08-10",
+    "n_rows": 12644,
+    "n_elevated_tier": 1098,
+    "n_elevated_strict": 472,
+    "elevated_tier_hit_rate": 0.118397,
+    "elevated_strict_hit_rate": 0.180085,
     "elevated_floor": 0.05,
     "alert": null,
     "label_column": "y_spike_l2"
@@ -105,8 +105,8 @@
   ],
   "findings_summary": {
     "best_estimate_borrow": "Combine (1) current borrow level, (2) v2 calibrated L2 stress score for spike risk, and (3) delta_borrow_5d_p50 OLS forecast for directional drift. Level/momentum features explain ~5% of forward borrow change; spike L0 remains too rare for calibrated probabilities.",
-    "spike_headline": "L0 catastrophic spikes: 1 in 72389 replay rows \u2014 use rank/decile, not raw P\u226530%.",
-    "stress_headline": "L2 relative stress: 1894 events \u2014 v2+calibration for watch/elevated/high tiers.",
+    "spike_headline": "L0 catastrophic spikes: 1 in 72918 replay rows \u2014 use rank/decile, not raw P\u226530%.",
+    "stress_headline": "L2 relative stress: 1910 events \u2014 v2+calibration for watch/elevated/high tiers.",
     "forecast_headline": "Positive delta_borrow_5d_p50 means expected increase in annual borrow fee over the next 5 IBKR/git observations. Low R\u00b2 (~5%) \u2014 use as directional stress, not point forecast.",
     "model_choice": "Use v2 calibrated L2 for alert tiers; keep v1 L0 p_spike_5d as legacy headline."
   }
