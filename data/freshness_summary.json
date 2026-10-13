@@ -1,28 +1,28 @@
 {
-  "build_time": "2026-10-13T04:14:20.748351Z",
+  "build_time": "2026-10-13T19:25:44.754747Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-10-13T03:29:00.101665Z",
+    "build_time": "2026-10-13T15:01:08.281898Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
-    "yieldboost_underlyings_refreshed_count": 30,
-    "yieldboost_underlyings_prefetched_count": 30,
-    "yieldboost_underlyings_skipped_fresh_count": 0,
+    "yieldboost_underlyings_refreshed_count": 12,
+    "yieldboost_underlyings_prefetched_count": 11,
+    "yieldboost_underlyings_skipped_fresh_count": 18,
     "yieldboost_refresh_order_head": [
       "CRWV",
-      "XBI",
-      "TSM",
-      "NVDA",
-      "XLK",
-      "TLT",
-      "QQQ",
-      "CRCL"
+      "ETHA",
+      "IBIT",
+      "CRCL",
+      "GDX",
+      "MARA",
+      "IONQ",
+      "COIN"
     ],
     "monitored_symbols_count": 375,
-    "freshness_enforced_count": 61,
+    "freshness_enforced_count": 43,
     "cached_monitored_count": 369,
     "missing_monitored_symbols": [
       "UBR",
@@ -34,20 +34,20 @@
     ],
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
-    "oldest_symbol": "AMZZ",
-    "oldest_symbol_age_minutes": 51,
-    "oldest_enforced_symbol": "AMZZ",
-    "oldest_enforced_symbol_age_minutes": 51
+    "oldest_symbol": "AMD",
+    "oldest_symbol_age_minutes": 264,
+    "oldest_enforced_symbol": "AMD",
+    "oldest_enforced_symbol_age_minutes": 264
   },
   "vrp": {
-    "worst_underlying_symbol": "AMD",
-    "worst_underlying_options_age_minutes": 45,
+    "worst_underlying_symbol": "XBI",
+    "worst_underlying_options_age_minutes": 956,
     "underlying_options_as_of_min": "2026-10-13T03:29:00.101665Z",
-    "iv_coverage_front_pct": 0.9677
+    "iv_coverage_front_pct": 0.9355
   },
   "flow": {
     "latest_date": "2026-10-12",
-    "build_time": "2026-10-13T04:14:13.442900Z",
+    "build_time": "2026-10-13T19:25:37.978786Z",
     "underlyings_total": 282,
     "underlyings_stale": 4,
     "underlyings_stale_pct": 1.42,
@@ -57,9 +57,10 @@
     "underlyings_stale_by_reason": {
       "quality_excluded": 4
     },
-    "fund_rows_on_latest_date": 615,
+    "fund_rows_on_latest_date": 617,
     "fund_quality_counts": {
       "income_overlay": 31,
+      "missing_leverage": 2,
       "missing_prior_aum": 1,
       "ok": 472,
       "product_class:autocallable": 8,
@@ -99,45 +100,67 @@
   "metrics": {
     "latest_date": "2026-10-12",
     "latest_ok": 620,
-    "latest_stale_ok": 312,
+    "latest_stale_ok": 3,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "issuer_lag": 195,
-      "anchor_lag": 76,
-      "proshares_fallback": 39,
-      "market_backed_no_issuer_nav": 2
+      "market_backed_no_issuer_nav": 3
     },
-    "flow_blockers_prior_stale": 115,
+    "flow_blockers_prior_stale": 0,
     "prem_disc": {
-      "rows_with_close": 621,
-      "rows_with_nav_and_close": 220,
-      "rows_suppressed_asof_mismatch": 401,
-      "median_prem_disc_bps": -1.9167309526727025,
-      "lockstep_nav_close_count": 8,
-      "lockstep_nav_close_pct": 3.64,
+      "rows_with_close": 623,
+      "rows_with_nav_and_close": 504,
+      "rows_suppressed_asof_mismatch": 119,
+      "median_prem_disc_bps": -0.00029987795077505123,
+      "lockstep_nav_close_count": 30,
+      "lockstep_nav_close_pct": 5.95,
       "rex_nav_vs_implied_div_bps_gt5": 0,
       "rex_nav_vs_implied_div_bps_gt50": 0,
-      "rex_nav_vs_implied_div_bps_max": null,
+      "rex_nav_vs_implied_div_bps_max": 0.0,
       "by_provider": {
         "yfinance": {
-          "rows": 121,
-          "median_prem_disc_bps": 0.0,
+          "rows": 119,
+          "median_prem_disc_bps": -25.815294212127295,
+          "lockstep_count": 1
+        },
+        "tradr_axs": {
+          "rows": 75,
+          "median_prem_disc_bps": 6.269771389116068,
+          "lockstep_count": 4
+        },
+        "granite_shares": {
+          "rows": 82,
+          "median_prem_disc_bps": 2.881997833825966,
           "lockstep_count": 2
         },
         "direxion": {
-          "rows": 29,
-          "median_prem_disc_bps": -15.245250241263664,
-          "lockstep_count": 0
+          "rows": 41,
+          "median_prem_disc_bps": -5.150407960540664,
+          "lockstep_count": 2
+        },
+        "roundhill": {
+          "rows": 24,
+          "median_prem_disc_bps": 1.301646029438484,
+          "lockstep_count": 1
+        },
+        "rex_shares": {
+          "rows": 34,
+          "median_prem_disc_bps": -7.908472991388553e-06,
+          "lockstep_count": 5
         },
         "yieldmax": {
-          "rows": 24,
-          "median_prem_disc_bps": -13.424054388279579,
-          "lockstep_count": 1
+          "rows": 28,
+          "median_prem_disc_bps": -7.3105285505181845,
+          "lockstep_count": 3
+        },
+        "defiance": {
+          "rows": 55,
+          "median_prem_disc_bps": 7.867780595884295,
+          "lockstep_count": 4
         },
         "proshares": {
           "rows": 42,
-          "median_prem_disc_bps": -1.8876197380136062,
-          "lockstep_count": 1
+          "median_prem_disc_bps": -1.4685218614058246,
+          "lockstep_count": 4
         },
         "polygon": {
           "rows": 1,
@@ -159,113 +182,11 @@
   },
   "metrics_staleness": {
     "global_max": "2026-10-12",
-    "universe_stale": 236,
+    "universe_stale": 0,
     "severe_tail_count": 0,
-    "worst": [
-      {
-        "ticker": "AAPB",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AAPW",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AAPX",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AFRU",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AHD",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AMA",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AMDL",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AMDW",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AMKL",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AMPU",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      }
-    ],
-    "stale_tickers_sample": [
-      {
-        "ticker": "AAPB",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AAPW",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AAPX",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AFRU",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AHD",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AMA",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AMDL",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AMDW",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AMKL",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      },
-      {
-        "ticker": "AMPU",
-        "last_date": "2026-10-09",
-        "days_behind": 3
-      }
-    ],
-    "build_time": "2026-10-13T00:00:36.376026+00:00"
+    "worst": [],
+    "stale_tickers_sample": [],
+    "build_time": "2026-10-13T19:09:52.170554+00:00"
   },
   "violations": [],
   "ok": true
