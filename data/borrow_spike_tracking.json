@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-15T20:23:09.708366Z",
+  "as_of": "2026-10-16T01:06:18.870545Z",
   "program_phase": "v2_shipped_monitoring",
   "milestones": [
     {
@@ -33,7 +33,7 @@
     {
       "id": "l2_elevated_band_hit_rate",
       "description": "Calibrated elevated tier realized rate > 0",
-      "current": 0.186128,
+      "current": 0.184435,
       "target": 0.05,
       "status": "done"
     },
@@ -54,7 +54,7 @@
     {
       "id": "live_elevated_hit_rate_60d",
       "description": "Rolling 60d elevated/high tier L2 realized rate",
-      "current": 0.173042,
+      "current": 0.171378,
       "target": 0.05,
       "status": "done"
     }
@@ -67,16 +67,16 @@
   },
   "model_comparison": {
     "v1_l0_auroc": 0.436772,
-    "v2_l2_auroc": 0.792364,
-    "v2_auroc_delta": 0.355592,
+    "v2_l2_auroc": 0.792347,
+    "v2_auroc_delta": 0.355575,
     "v1_l0_positives": 1,
     "v2_l2_positives": 1980,
     "v2_ece": 0.007672,
-    "v2_elevated_realized": 0.186128,
+    "v2_elevated_realized": 0.184435,
     "recommendation": "Use v2 calibrated L2 for alert tiers; keep v1 L0 p_spike_5d as legacy headline."
   },
   "live_track": {
-    "n_rows": 46191,
+    "n_rows": 46738,
     "positives": 1,
     "prediction_snapshot_days": 116
   },
@@ -89,13 +89,13 @@
   "live_calibration_monitor": {
     "status": "ok",
     "window_days": 60,
-    "as_of": "2026-10-15",
-    "cutoff_date": "2026-08-16",
-    "n_rows": 14832,
-    "n_elevated_tier": 1262,
-    "n_elevated_strict": 549,
-    "elevated_tier_hit_rate": 0.117274,
-    "elevated_strict_hit_rate": 0.173042,
+    "as_of": "2026-10-16",
+    "cutoff_date": "2026-08-17",
+    "n_rows": 15379,
+    "n_elevated_tier": 1303,
+    "n_elevated_strict": 566,
+    "elevated_tier_hit_rate": 0.117421,
+    "elevated_strict_hit_rate": 0.171378,
     "elevated_floor": 0.05,
     "alert": null,
     "label_column": "y_spike_l2"
