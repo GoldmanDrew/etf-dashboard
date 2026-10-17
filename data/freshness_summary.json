@@ -1,5 +1,5 @@
 {
-  "build_time": "2026-10-17T00:59:57.635620Z",
+  "build_time": "2026-10-17T16:03:45.248625Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
@@ -46,8 +46,8 @@
     "iv_coverage_front_pct": 0.9677
   },
   "flow": {
-    "latest_date": "2026-10-15",
-    "build_time": "2026-10-17T00:59:51.328596Z",
+    "latest_date": "2026-10-16",
+    "build_time": "2026-10-17T16:03:39.246492Z",
     "underlyings_total": 282,
     "underlyings_stale": 0,
     "underlyings_stale_pct": 0.0,
@@ -55,10 +55,9 @@
     "underlyings_actionable_stale": 0,
     "underlyings_actionable_stale_pct": 0.0,
     "underlyings_stale_by_reason": {},
-    "fund_rows_on_latest_date": 617,
+    "fund_rows_on_latest_date": 615,
     "fund_quality_counts": {
       "income_overlay": 31,
-      "missing_leverage": 2,
       "missing_prior_aum": 1,
       "ok": 511,
       "product_class:autocallable": 8,
@@ -68,69 +67,60 @@
     "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-10-15",
+    "latest_date": "2026-10-16",
     "latest_ok": 620,
-    "latest_stale_ok": 2,
+    "latest_stale_ok": 118,
     "latest_missing": 0,
     "latest_stale_by_kind": {
+      "issuer_lag": 116,
       "market_backed_no_issuer_nav": 2
     },
     "flow_blockers_prior_stale": 0,
     "prem_disc": {
       "rows_with_close": 623,
-      "rows_with_nav_and_close": 588,
-      "rows_suppressed_asof_mismatch": 35,
-      "median_prem_disc_bps": -1.2896204125624989e-05,
-      "lockstep_nav_close_count": 43,
-      "lockstep_nav_close_pct": 7.31,
+      "rows_with_nav_and_close": 378,
+      "rows_suppressed_asof_mismatch": 245,
+      "median_prem_disc_bps": -15.266281295905383,
+      "lockstep_nav_close_count": 27,
+      "lockstep_nav_close_pct": 7.14,
       "rex_nav_vs_implied_div_bps_gt5": 0,
       "rex_nav_vs_implied_div_bps_gt50": 0,
-      "rex_nav_vs_implied_div_bps_max": 4.084967320262076,
+      "rex_nav_vs_implied_div_bps_max": null,
       "by_provider": {
         "yfinance": {
-          "rows": 203,
-          "median_prem_disc_bps": 20.41062174649765,
+          "rows": 147,
+          "median_prem_disc_bps": -332.4806883308688,
           "lockstep_count": 1
         },
         "tradr_axs": {
           "rows": 75,
-          "median_prem_disc_bps": -9.184551360514554,
-          "lockstep_count": 1
-        },
-        "granite_shares": {
-          "rows": 82,
-          "median_prem_disc_bps": 3.771430195855574,
-          "lockstep_count": 4
+          "median_prem_disc_bps": -0.4680345833151114,
+          "lockstep_count": 3
         },
         "direxion": {
-          "rows": 41,
-          "median_prem_disc_bps": -2.8116353831674314,
-          "lockstep_count": 6
+          "rows": 14,
+          "median_prem_disc_bps": 6.652421898560524,
+          "lockstep_count": 0
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 3.3005341503887817,
+          "median_prem_disc_bps": 4.080110488098508,
           "lockstep_count": 3
-        },
-        "rex_shares": {
-          "rows": 34,
-          "median_prem_disc_bps": 0.0,
-          "lockstep_count": 8
-        },
-        "yieldmax": {
-          "rows": 28,
-          "median_prem_disc_bps": 20.018365162665145,
-          "lockstep_count": 2
         },
         "defiance": {
           "rows": 55,
-          "median_prem_disc_bps": -10.789616847790171,
+          "median_prem_disc_bps": -5.0592801978484265e-05,
           "lockstep_count": 11
+        },
+        "yieldmax": {
+          "rows": 17,
+          "median_prem_disc_bps": -151.64315047742076,
+          "lockstep_count": 1
         },
         "proshares": {
           "rows": 42,
-          "median_prem_disc_bps": -0.6337839853967285,
-          "lockstep_count": 3
+          "median_prem_disc_bps": 0.9840673212783395,
+          "lockstep_count": 4
         },
         "polygon": {
           "rows": 1,
@@ -151,12 +141,12 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-10-15",
+    "global_max": "2026-10-16",
     "universe_stale": 0,
     "severe_tail_count": 0,
     "worst": [],
     "stale_tickers_sample": [],
-    "build_time": "2026-10-16T16:56:11.777657+00:00"
+    "build_time": "2026-10-17T15:44:15.059204+00:00"
   },
   "violations": [],
   "ok": true
