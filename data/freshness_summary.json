@@ -1,5 +1,5 @@
 {
-  "build_time": "2026-10-24T01:06:00.539584Z",
+  "build_time": "2026-10-24T15:52:04.282471Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
@@ -47,8 +47,8 @@
     "iv_coverage_front_pct": 0.9667
   },
   "flow": {
-    "latest_date": "2026-10-22",
-    "build_time": "2026-10-24T01:05:55.395773Z",
+    "latest_date": "2026-10-23",
+    "build_time": "2026-10-24T15:52:00.592254Z",
     "underlyings_total": 270,
     "underlyings_stale": 0,
     "underlyings_stale_pct": 0.0,
@@ -56,10 +56,9 @@
     "underlyings_actionable_stale": 0,
     "underlyings_actionable_stale_pct": 0.0,
     "underlyings_stale_by_reason": {},
-    "fund_rows_on_latest_date": 599,
+    "fund_rows_on_latest_date": 597,
     "fund_quality_counts": {
       "income_overlay": 31,
-      "missing_leverage": 2,
       "missing_prior_aum": 1,
       "ok": 493,
       "product_class:autocallable": 8,
@@ -69,69 +68,55 @@
     "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-10-22",
+    "latest_date": "2026-10-23",
     "latest_ok": 602,
-    "latest_stale_ok": 2,
+    "latest_stale_ok": 173,
     "latest_missing": 0,
     "latest_stale_by_kind": {
+      "issuer_lag": 171,
       "market_backed_no_issuer_nav": 2
     },
     "flow_blockers_prior_stale": 0,
     "prem_disc": {
       "rows_with_close": 605,
-      "rows_with_nav_and_close": 599,
-      "rows_suppressed_asof_mismatch": 6,
-      "median_prem_disc_bps": -0.0004445092147472141,
-      "lockstep_nav_close_count": 44,
-      "lockstep_nav_close_pct": 7.35,
+      "rows_with_nav_and_close": 373,
+      "rows_suppressed_asof_mismatch": 232,
+      "median_prem_disc_bps": -1.7988200375212267,
+      "lockstep_nav_close_count": 20,
+      "lockstep_nav_close_pct": 5.36,
       "rex_nav_vs_implied_div_bps_gt5": 0,
       "rex_nav_vs_implied_div_bps_gt50": 0,
-      "rex_nav_vs_implied_div_bps_max": 1.3559975873284354e-12,
+      "rex_nav_vs_implied_div_bps_max": null,
       "by_provider": {
         "yfinance": {
-          "rows": 219,
-          "median_prem_disc_bps": -1.252855063944299,
-          "lockstep_count": 9
+          "rows": 179,
+          "median_prem_disc_bps": -1.2514282537246524,
+          "lockstep_count": 8
         },
         "tradr_axs": {
           "rows": 70,
-          "median_prem_disc_bps": -5.013035037795717,
+          "median_prem_disc_bps": -2.4775188924164437,
           "lockstep_count": 2
         },
-        "granite_shares": {
-          "rows": 82,
-          "median_prem_disc_bps": 4.729145905099914,
-          "lockstep_count": 1
-        },
         "direxion": {
-          "rows": 41,
-          "median_prem_disc_bps": -1.366514915251231,
-          "lockstep_count": 1
+          "rows": 26,
+          "median_prem_disc_bps": -49.51762310271181,
+          "lockstep_count": 0
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 0.00018508751499074944,
-          "lockstep_count": 6
-        },
-        "rex_shares": {
-          "rows": 34,
-          "median_prem_disc_bps": -9.739316341009872,
-          "lockstep_count": 4
+          "median_prem_disc_bps": 2.8197329306621532,
+          "lockstep_count": 3
         },
         "yieldmax": {
           "rows": 28,
-          "median_prem_disc_bps": 15.756752870372289,
-          "lockstep_count": 5
-        },
-        "defiance": {
-          "rows": 55,
-          "median_prem_disc_bps": -9.940168255603593,
-          "lockstep_count": 8
+          "median_prem_disc_bps": -77.5908580998865,
+          "lockstep_count": 0
         },
         "proshares": {
           "rows": 42,
-          "median_prem_disc_bps": 0.4681964629988137,
-          "lockstep_count": 4
+          "median_prem_disc_bps": -1.7307587298703018,
+          "lockstep_count": 3
         },
         "polygon": {
           "rows": 1,
@@ -152,12 +137,12 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-10-22",
+    "global_max": "2026-10-23",
     "universe_stale": 0,
     "severe_tail_count": 0,
     "worst": [],
     "stale_tickers_sample": [],
-    "build_time": "2026-10-23T16:47:57.002057+00:00"
+    "build_time": "2026-10-24T15:41:39.978724+00:00"
   },
   "violations": [],
   "ok": true
