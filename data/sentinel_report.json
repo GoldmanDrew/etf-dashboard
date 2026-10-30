@@ -1,27 +1,61 @@
 {
   "schema_v": 1,
-  "build_time": "2026-10-30T13:48:21.098690Z",
-  "mode": "gate",
-  "task": "nav",
-  "verdict": "pass",
+  "build_time": "2026-10-30T18:43:35.965612Z",
+  "mode": "sweep",
+  "task": null,
+  "verdict": "quarantine",
   "stats": {
-    "checked_files": 11,
+    "checked_files": 10,
     "block": 0,
-    "quarantine": 0,
-    "warn": 0
+    "quarantine": 3,
+    "warn": 1
   },
   "checked": [
-    "data/nav_forecasts/_latest.json",
-    "data/nav_forecasts/snapshots",
-    "data/ci_state.json",
+    "data/dashboard_data.json",
+    "data/borrow_history.json",
     "data/options_cache.json",
     "data/vrp_live.json",
     "data/vrp_health.json",
-    "data/yieldboost_put_spreads_latest.json",
-    "data/yieldboost_options_target.json",
-    "data/event_calendar_known.json",
-    "data/event_calendar_inferred.json",
-    "data/event_calendar_combined.json"
+    "data/nav_forecasts/_latest.json",
+    "data/underlying_intraday_spot.json",
+    "data/underlying_intraday_volume.json",
+    "data/letf_rebalance_flows_intraday_latest.json",
+    "data/corporate_actions.json"
   ],
-  "findings": []
+  "findings": [
+    {
+      "severity": "warn",
+      "code": "stale_return_baseline_suppressed",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "870/871 symbols have no metrics row for the previous session 2026-10-29 (worst AAL 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
+      "observed": 870
+    },
+    {
+      "severity": "quarantine",
+      "code": "zombie_spot",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "INTW spot 6.77 vs last metrics close 19.040000915527344 (x0.36) with no declared split \u2014 suspected stale/zombie quote",
+      "ticker": "INTW",
+      "observed": 0.356,
+      "threshold": 2.5
+    },
+    {
+      "severity": "quarantine",
+      "code": "zombie_spot",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "LINT spot 34.755 vs last metrics close 97.98999786376953 (x0.35) with no declared split \u2014 suspected stale/zombie quote",
+      "ticker": "LINT",
+      "observed": 0.355,
+      "threshold": 2.5
+    },
+    {
+      "severity": "quarantine",
+      "code": "zombie_spot",
+      "artifact": "data/underlying_intraday_spot.json",
+      "detail": "RDTL spot 3.48 vs last metrics close 9.479999542236328 (x0.37) with no declared split \u2014 suspected stale/zombie quote",
+      "ticker": "RDTL",
+      "observed": 0.367,
+      "threshold": 2.5
+    }
+  ]
 }
