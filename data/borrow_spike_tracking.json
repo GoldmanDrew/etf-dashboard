@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-30T02:37:01.089102Z",
+  "as_of": "2026-10-30T21:25:31.257813Z",
   "program_phase": "v2_shipped_monitoring",
   "milestones": [
     {
@@ -12,7 +12,7 @@
     {
       "id": "l2_replay_positives_100",
       "description": "L2 relative-stress label positives for model dev gates",
-      "current": 2050,
+      "current": 2051,
       "target": 100,
       "status": "done"
     },
@@ -33,7 +33,7 @@
     {
       "id": "l2_elevated_band_hit_rate",
       "description": "Calibrated elevated tier realized rate > 0",
-      "current": 0.177083,
+      "current": 0.180492,
       "target": 0.05,
       "status": "done"
     },
@@ -67,12 +67,12 @@
   },
   "model_comparison": {
     "v1_l0_auroc": 0.671213,
-    "v2_l2_auroc": 0.78871,
-    "v2_auroc_delta": 0.117497,
+    "v2_l2_auroc": 0.787701,
+    "v2_auroc_delta": 0.116488,
     "v1_l0_positives": 4,
-    "v2_l2_positives": 2050,
-    "v2_ece": 0.008016,
-    "v2_elevated_realized": 0.177083,
+    "v2_l2_positives": 2051,
+    "v2_ece": 0.007941,
+    "v2_elevated_realized": 0.180492,
     "recommendation": "Use v2 calibrated L2 for alert tiers; keep v1 L0 p_spike_5d as legacy headline."
   },
   "live_track": {
@@ -106,7 +106,7 @@
   "findings_summary": {
     "best_estimate_borrow": "Combine (1) current borrow level, (2) v2 calibrated L2 stress score for spike risk, and (3) delta_borrow_5d_p50 OLS forecast for directional drift. Level/momentum features explain ~5% of forward borrow change; spike L0 remains too rare for calibrated probabilities.",
     "spike_headline": "L0 catastrophic spikes: 4 in 80412 replay rows \u2014 use rank/decile, not raw P\u226530%.",
-    "stress_headline": "L2 relative stress: 2050 events \u2014 v2+calibration for watch/elevated/high tiers.",
+    "stress_headline": "L2 relative stress: 2051 events \u2014 v2+calibration for watch/elevated/high tiers.",
     "forecast_headline": "Positive delta_borrow_5d_p50 means expected increase in annual borrow fee over the next 5 IBKR/git observations. Low R\u00b2 (~5%) \u2014 use as directional stress, not point forecast.",
     "model_choice": "Use v2 calibrated L2 for alert tiers; keep v1 L0 p_spike_5d as legacy headline."
   }
