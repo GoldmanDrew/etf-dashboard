@@ -1,5 +1,5 @@
 {
-  "build_time": "2026-10-31T02:51:05.732178Z",
+  "build_time": "2026-10-31T17:40:16.360567Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
@@ -48,8 +48,8 @@
     "iv_coverage_front_pct": 0.9355
   },
   "flow": {
-    "latest_date": "2026-10-29",
-    "build_time": "2026-10-31T02:50:58.971873Z",
+    "latest_date": "2026-10-30",
+    "build_time": "2026-10-31T17:40:11.724092Z",
     "underlyings_total": 269,
     "underlyings_stale": 0,
     "underlyings_stale_pct": 0.0,
@@ -57,10 +57,9 @@
     "underlyings_actionable_stale": 0,
     "underlyings_actionable_stale_pct": 0.0,
     "underlyings_stale_by_reason": {},
-    "fund_rows_on_latest_date": 599,
+    "fund_rows_on_latest_date": 597,
     "fund_quality_counts": {
       "income_overlay": 31,
-      "missing_leverage": 2,
       "missing_prior_aum": 1,
       "ok": 492,
       "product_class:autocallable": 8,
@@ -70,69 +69,60 @@
     "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-10-29",
+    "latest_date": "2026-10-30",
     "latest_ok": 601,
-    "latest_stale_ok": 3,
+    "latest_stale_ok": 119,
     "latest_missing": 0,
     "latest_stale_by_kind": {
+      "issuer_lag": 116,
       "market_backed_no_issuer_nav": 3
     },
     "flow_blockers_prior_stale": 0,
     "prem_disc": {
       "rows_with_close": 605,
-      "rows_with_nav_and_close": 600,
-      "rows_suppressed_asof_mismatch": 5,
-      "median_prem_disc_bps": -1.8535234177155884,
-      "lockstep_nav_close_count": 47,
-      "lockstep_nav_close_pct": 7.83,
+      "rows_with_nav_and_close": 347,
+      "rows_suppressed_asof_mismatch": 258,
+      "median_prem_disc_bps": -4.661310539579797,
+      "lockstep_nav_close_count": 19,
+      "lockstep_nav_close_pct": 5.48,
       "rex_nav_vs_implied_div_bps_gt5": 0,
       "rex_nav_vs_implied_div_bps_gt50": 0,
-      "rex_nav_vs_implied_div_bps_max": 3.6284470246740073,
+      "rex_nav_vs_implied_div_bps_max": null,
       "by_provider": {
         "yfinance": {
-          "rows": 220,
-          "median_prem_disc_bps": -0.1311735381130242,
-          "lockstep_count": 12
+          "rows": 125,
+          "median_prem_disc_bps": -3.6369114505395688,
+          "lockstep_count": 3
         },
         "tradr_axs": {
           "rows": 70,
-          "median_prem_disc_bps": -6.410157769247726,
-          "lockstep_count": 2
-        },
-        "granite_shares": {
-          "rows": 82,
-          "median_prem_disc_bps": -1.570546137998264,
-          "lockstep_count": 3
+          "median_prem_disc_bps": -5.8344874085670435,
+          "lockstep_count": 0
         },
         "direxion": {
-          "rows": 41,
-          "median_prem_disc_bps": 1.9345624094313671,
-          "lockstep_count": 2
+          "rows": 12,
+          "median_prem_disc_bps": -139.70779003268518,
+          "lockstep_count": 0
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 0.5632493970095087,
-          "lockstep_count": 1
-        },
-        "rex_shares": {
-          "rows": 34,
-          "median_prem_disc_bps": 0.0,
-          "lockstep_count": 10
+          "median_prem_disc_bps": 2.359005065887018,
+          "lockstep_count": 3
         },
         "yieldmax": {
-          "rows": 28,
-          "median_prem_disc_bps": -11.683334726027308,
+          "rows": 15,
+          "median_prem_disc_bps": -71.06626094295252,
           "lockstep_count": 0
         },
         "defiance": {
           "rows": 55,
-          "median_prem_disc_bps": -10.235180264241185,
-          "lockstep_count": 11
+          "median_prem_disc_bps": -12.919871998079955,
+          "lockstep_count": 5
         },
         "proshares": {
           "rows": 42,
-          "median_prem_disc_bps": -8.172572860134405,
-          "lockstep_count": 2
+          "median_prem_disc_bps": 1.5055163343692701,
+          "lockstep_count": 4
         },
         "polygon": {
           "rows": 1,
@@ -153,12 +143,12 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-10-29",
+    "global_max": "2026-10-30",
     "universe_stale": 0,
     "severe_tail_count": 0,
     "worst": [],
     "stale_tickers_sample": [],
-    "build_time": "2026-10-30T18:28:10.277028+00:00"
+    "build_time": "2026-10-31T17:29:12.754645+00:00"
   },
   "violations": [],
   "ok": true
