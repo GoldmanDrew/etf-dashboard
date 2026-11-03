@@ -1,4 +1,6 @@
 import sys
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 import importlib.util
 
@@ -575,7 +577,8 @@ def test_google_news_launch_headline_emits_listing_not_delisting(monkeypatch):
                 ),
                 "description": "",
                 "link": "https://example.com/granite-launches-bbul-pul",
-                "pub_date": "Tue, 07 Jul 2026 14:00:00 GMT",
+                # Relative to now so the item stays inside GOOGLE_NEWS_WINDOW_DAYS.
+                "pub_date": format_datetime(datetime.now(UTC) - timedelta(days=7), usegmt=True),
                 "source": "Yahoo Finance",
             }
         ],
