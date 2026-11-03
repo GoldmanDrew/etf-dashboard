@@ -1,28 +1,28 @@
 {
-  "build_time": "2026-11-03T19:55:02.120406Z",
+  "build_time": "2026-11-03T20:25:33.752511Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-11-03T19:24:59.401880Z",
+    "build_time": "2026-11-03T17:47:24.482097Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
-    "yieldboost_underlyings_refreshed_count": 30,
-    "yieldboost_underlyings_prefetched_count": 30,
-    "yieldboost_underlyings_skipped_fresh_count": 0,
+    "yieldboost_underlyings_refreshed_count": 12,
+    "yieldboost_underlyings_prefetched_count": 12,
+    "yieldboost_underlyings_skipped_fresh_count": 18,
     "yieldboost_refresh_order_head": [
-      "NVDA",
-      "QBTS",
-      "RGTI",
-      "SMCI",
-      "XLK",
-      "XBI",
-      "MSTR",
-      "RIOT"
+      "IONL",
+      "IBIT",
+      "CRCL",
+      "GDX",
+      "MARA",
+      "BABA",
+      "HIMS",
+      "AMD"
     ],
     "monitored_symbols_count": 372,
-    "freshness_enforced_count": 61,
+    "freshness_enforced_count": 43,
     "cached_monitored_count": 364,
     "missing_monitored_symbols": [
       "TSLY",
@@ -36,20 +36,20 @@
     ],
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
-    "oldest_symbol": "BITX",
-    "oldest_symbol_age_minutes": 36,
-    "oldest_enforced_symbol": "BITX",
-    "oldest_enforced_symbol_age_minutes": 36
+    "oldest_symbol": "AMD",
+    "oldest_symbol_age_minutes": 158,
+    "oldest_enforced_symbol": "AMD",
+    "oldest_enforced_symbol_age_minutes": 158
   },
   "vrp": {
-    "worst_underlying_symbol": "CRWV",
-    "worst_underlying_options_age_minutes": 36,
-    "underlying_options_as_of_min": "2026-11-03T19:18:52.441517Z",
+    "worst_underlying_symbol": "XBI",
+    "worst_underlying_options_age_minutes": 1013,
+    "underlying_options_as_of_min": "2026-11-03T03:32:11.251989Z",
     "iv_coverage_front_pct": 0.9677
   },
   "flow": {
-    "latest_date": "2026-10-30",
-    "build_time": "2026-11-03T19:54:58.216656Z",
+    "latest_date": "2026-11-02",
+    "build_time": "2026-11-03T20:25:27.042150Z",
     "underlyings_total": 269,
     "underlyings_stale": 0,
     "underlyings_stale_pct": 0.0,
@@ -57,9 +57,10 @@
     "underlyings_actionable_stale": 0,
     "underlyings_actionable_stale_pct": 0.0,
     "underlyings_stale_by_reason": {},
-    "fund_rows_on_latest_date": 597,
+    "fund_rows_on_latest_date": 599,
     "fund_quality_counts": {
       "income_overlay": 31,
+      "missing_leverage": 2,
       "missing_prior_aum": 1,
       "ok": 492,
       "product_class:autocallable": 8,
@@ -69,60 +70,69 @@
     "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-10-30",
+    "latest_date": "2026-11-02",
     "latest_ok": 601,
-    "latest_stale_ok": 119,
+    "latest_stale_ok": 3,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "issuer_lag": 116,
       "market_backed_no_issuer_nav": 3
     },
     "flow_blockers_prior_stale": 0,
     "prem_disc": {
       "rows_with_close": 605,
-      "rows_with_nav_and_close": 347,
-      "rows_suppressed_asof_mismatch": 258,
-      "median_prem_disc_bps": -4.661310539579797,
-      "lockstep_nav_close_count": 19,
-      "lockstep_nav_close_pct": 5.48,
+      "rows_with_nav_and_close": 601,
+      "rows_suppressed_asof_mismatch": 4,
+      "median_prem_disc_bps": -1.625596866474005,
+      "lockstep_nav_close_count": 46,
+      "lockstep_nav_close_pct": 7.65,
       "rex_nav_vs_implied_div_bps_gt5": 0,
       "rex_nav_vs_implied_div_bps_gt50": 0,
-      "rex_nav_vs_implied_div_bps_max": null,
+      "rex_nav_vs_implied_div_bps_max": 4.906771344454373,
       "by_provider": {
         "yfinance": {
-          "rows": 125,
-          "median_prem_disc_bps": -3.6369114505395688,
-          "lockstep_count": 3
+          "rows": 222,
+          "median_prem_disc_bps": -2.9839446259647358,
+          "lockstep_count": 12
         },
         "tradr_axs": {
           "rows": 70,
-          "median_prem_disc_bps": -5.8344874085670435,
-          "lockstep_count": 0
+          "median_prem_disc_bps": -3.173726043513269,
+          "lockstep_count": 3
+        },
+        "granite_shares": {
+          "rows": 82,
+          "median_prem_disc_bps": 1.6447650058272099,
+          "lockstep_count": 4
         },
         "direxion": {
-          "rows": 12,
-          "median_prem_disc_bps": -139.70779003268518,
-          "lockstep_count": 0
+          "rows": 41,
+          "median_prem_disc_bps": 4.656468545640838,
+          "lockstep_count": 1
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": 2.359005065887018,
-          "lockstep_count": 3
+          "median_prem_disc_bps": -2.763900913736653,
+          "lockstep_count": 2
+        },
+        "rex_shares": {
+          "rows": 34,
+          "median_prem_disc_bps": -2.198285337437143,
+          "lockstep_count": 7
         },
         "yieldmax": {
-          "rows": 15,
-          "median_prem_disc_bps": -71.06626094295252,
-          "lockstep_count": 0
+          "rows": 27,
+          "median_prem_disc_bps": -4.4018114116824885,
+          "lockstep_count": 4
         },
         "defiance": {
           "rows": 55,
-          "median_prem_disc_bps": -12.919871998079955,
-          "lockstep_count": 5
+          "median_prem_disc_bps": -0.9143643262901016,
+          "lockstep_count": 6
         },
         "proshares": {
           "rows": 42,
-          "median_prem_disc_bps": 1.5055163343692701,
-          "lockstep_count": 4
+          "median_prem_disc_bps": -0.43103208362245937,
+          "lockstep_count": 3
         },
         "polygon": {
           "rows": 1,
@@ -143,12 +153,12 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-10-30",
+    "global_max": "2026-11-02",
     "universe_stale": 0,
     "severe_tail_count": 0,
     "worst": [],
     "stale_tickers_sample": [],
-    "build_time": "2026-10-31T17:29:12.754645+00:00"
+    "build_time": "2026-11-03T20:10:04.843657+00:00"
   },
   "violations": [],
   "ok": true
