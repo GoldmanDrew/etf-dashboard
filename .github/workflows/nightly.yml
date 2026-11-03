@@ -47,8 +47,8 @@ jobs:
           fi
           SLOT=$(python - <<'PY'
           from datetime import datetime
-          import pytz
-          now_et = datetime.now(pytz.timezone("America/New_York"))
+          from zoneinfo import ZoneInfo
+          now_et = datetime.now(ZoneInfo("America/New_York"))
           print(f"{now_et.hour} {now_et.weekday()} {int(bool(now_et.dst()))}")
           PY
           )
