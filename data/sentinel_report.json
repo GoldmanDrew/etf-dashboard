@@ -1,13 +1,13 @@
 {
   "schema_v": 1,
-  "build_time": "2026-11-05T20:47:35.120089Z",
+  "build_time": "2026-11-05T23:45:05.622865Z",
   "mode": "sweep",
   "task": null,
-  "verdict": "quarantine",
+  "verdict": "warn",
   "stats": {
     "checked_files": 10,
     "block": 0,
-    "quarantine": 1,
+    "quarantine": 0,
     "warn": 2
   },
   "checked": [
@@ -31,20 +31,11 @@
       "observed": 870
     },
     {
-      "severity": "quarantine",
-      "code": "zombie_spot",
-      "artifact": "data/underlying_intraday_spot.json",
-      "detail": "DJTU spot 1.81 vs last metrics close 4.53 (x0.40) with no declared split \u2014 suspected stale/zombie quote",
-      "ticker": "DJTU",
-      "observed": 0.4,
-      "threshold": 2.5
-    },
-    {
       "severity": "warn",
       "code": "artifact_stale",
       "artifact": "data/letf_rebalance_flows_intraday_latest.json",
-      "detail": "build_time 2026-11-03T22:35:08.657306Z is 46.2 market-hours old (max 24h)",
-      "observed": 46.2,
+      "detail": "build_time 2026-11-03T22:35:08.657306Z is 49.2 market-hours old (max 24h)",
+      "observed": 49.2,
       "threshold": 24
     }
   ]
