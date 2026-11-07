@@ -1,29 +1,29 @@
 {
-  "build_time": "2026-11-06T20:01:17.025713Z",
+  "build_time": "2026-11-07T18:57:28.154820Z",
   "thresholds": {
     "max_underlying_hours": 48.0,
     "max_flow_stale_pct": 25.0
   },
   "options": {
-    "build_time": "2026-11-06T15:00:11.015499Z",
+    "build_time": "2026-11-06T22:44:59.493061Z",
     "yieldboost_targeted": true,
     "yieldboost_sleeves_only": false,
-    "yieldboost_underlyings_refreshed_count": 30,
-    "yieldboost_underlyings_prefetched_count": 30,
-    "yieldboost_underlyings_skipped_fresh_count": 0,
+    "yieldboost_underlyings_refreshed_count": 12,
+    "yieldboost_underlyings_prefetched_count": 12,
+    "yieldboost_underlyings_skipped_fresh_count": 18,
     "yieldboost_refresh_order_head": [
-      "AMZN",
-      "BABA",
-      "MU",
-      "TLT",
-      "TSLA",
-      "NVDA",
-      "SOXX",
-      "MSTR"
+      "COIN",
+      "HIMS",
+      "IBIT",
+      "GDX",
+      "MARA",
+      "CRCL",
+      "HOOD",
+      "ETHA"
     ],
-    "monitored_symbols_count": 372,
-    "freshness_enforced_count": 61,
-    "cached_monitored_count": 364,
+    "monitored_symbols_count": 370,
+    "freshness_enforced_count": 43,
+    "cached_monitored_count": 362,
     "missing_monitored_symbols": [
       "TSLY",
       "TSMY",
@@ -36,20 +36,20 @@
     ],
     "stale_enforced_symbols": [],
     "pruned_unmonitored_count": null,
-    "oldest_symbol": "NUGT",
-    "oldest_symbol_age_minutes": 309,
-    "oldest_enforced_symbol": "NUGT",
-    "oldest_enforced_symbol_age_minutes": 309
+    "oldest_symbol": "AMD",
+    "oldest_symbol_age_minutes": 75,
+    "oldest_enforced_symbol": "AMD",
+    "oldest_enforced_symbol_age_minutes": 75
   },
   "vrp": {
-    "worst_underlying_symbol": "AMD",
-    "worst_underlying_options_age_minutes": 301,
-    "underlying_options_as_of_min": "2026-11-06T15:00:11.015499Z",
+    "worst_underlying_symbol": "XBI",
+    "worst_underlying_options_age_minutes": 183,
+    "underlying_options_as_of_min": "2026-11-06T20:56:09.589020Z",
     "iv_coverage_front_pct": 0.9355
   },
   "flow": {
-    "latest_date": "2026-11-05",
-    "build_time": "2026-11-06T20:01:12.543556Z",
+    "latest_date": "2026-11-06",
+    "build_time": "2026-11-07T18:57:23.428252Z",
     "underlyings_total": 269,
     "underlyings_stale": 0,
     "underlyings_stale_pct": 0.0,
@@ -57,12 +57,11 @@
     "underlyings_actionable_stale": 0,
     "underlyings_actionable_stale_pct": 0.0,
     "underlyings_stale_by_reason": {},
-    "fund_rows_on_latest_date": 599,
+    "fund_rows_on_latest_date": 595,
     "fund_quality_counts": {
       "income_overlay": 31,
-      "missing_leverage": 2,
       "missing_prior_aum": 1,
-      "ok": 492,
+      "ok": 490,
       "product_class:autocallable": 8,
       "product_class:passive_low_delta": 65
     },
@@ -70,64 +69,59 @@
     "top_stale_by_abs_net_moc": []
   },
   "metrics": {
-    "latest_date": "2026-11-05",
-    "latest_ok": 602,
-    "latest_stale_ok": 34,
+    "latest_date": "2026-11-06",
+    "latest_ok": 600,
+    "latest_stale_ok": 116,
     "latest_missing": 0,
     "latest_stale_by_kind": {
-      "issuer_lag": 32,
+      "issuer_lag": 114,
       "market_backed_no_issuer_nav": 2
     },
     "flow_blockers_prior_stale": 0,
     "prem_disc": {
-      "rows_with_close": 605,
-      "rows_with_nav_and_close": 522,
-      "rows_suppressed_asof_mismatch": 83,
-      "median_prem_disc_bps": -4.229674220333551,
-      "lockstep_nav_close_count": 31,
-      "lockstep_nav_close_pct": 5.94,
+      "rows_with_close": 603,
+      "rows_with_nav_and_close": 396,
+      "rows_suppressed_asof_mismatch": 207,
+      "median_prem_disc_bps": -0.5995681428246713,
+      "lockstep_nav_close_count": 24,
+      "lockstep_nav_close_pct": 6.06,
       "rex_nav_vs_implied_div_bps_gt5": 0,
       "rex_nav_vs_implied_div_bps_gt50": 0,
       "rex_nav_vs_implied_div_bps_max": null,
       "by_provider": {
         "yfinance": {
-          "rows": 178,
-          "median_prem_disc_bps": -0.00024858809165957945,
-          "lockstep_count": 7
+          "rows": 162,
+          "median_prem_disc_bps": 0.0002660840632730278,
+          "lockstep_count": 5
         },
         "tradr_axs": {
           "rows": 69,
-          "median_prem_disc_bps": -13.148709472818716,
-          "lockstep_count": 0
-        },
-        "granite_shares": {
-          "rows": 82,
-          "median_prem_disc_bps": -4.4978302434548825,
-          "lockstep_count": 2
+          "median_prem_disc_bps": -5.577202290047074,
+          "lockstep_count": 3
         },
         "direxion": {
-          "rows": 41,
-          "median_prem_disc_bps": 0.1267366636218115,
-          "lockstep_count": 4
+          "rows": 22,
+          "median_prem_disc_bps": -0.30917369407400486,
+          "lockstep_count": 0
         },
         "roundhill": {
           "rows": 24,
-          "median_prem_disc_bps": -7.170388841034162,
-          "lockstep_count": 1
-        },
-        "yieldmax": {
-          "rows": 28,
-          "median_prem_disc_bps": -24.5218234954116,
+          "median_prem_disc_bps": 0.00016521687462792953,
           "lockstep_count": 3
         },
+        "yieldmax": {
+          "rows": 18,
+          "median_prem_disc_bps": 69.40235814004366,
+          "lockstep_count": 0
+        },
         "defiance": {
-          "rows": 54,
-          "median_prem_disc_bps": -15.136734875422864,
-          "lockstep_count": 8
+          "rows": 55,
+          "median_prem_disc_bps": -14.306124358388962,
+          "lockstep_count": 7
         },
         "proshares": {
           "rows": 42,
-          "median_prem_disc_bps": -3.4640868238102644,
+          "median_prem_disc_bps": -1.047964114138692,
           "lockstep_count": 2
         },
         "polygon": {
@@ -149,12 +143,12 @@
     }
   },
   "metrics_staleness": {
-    "global_max": "2026-11-05",
+    "global_max": "2026-11-06",
     "universe_stale": 0,
     "severe_tail_count": 0,
     "worst": [],
     "stale_tickers_sample": [],
-    "build_time": "2026-11-06T19:50:58.698631+00:00"
+    "build_time": "2026-11-07T18:39:50.374590+00:00"
   },
   "violations": [],
   "ok": true
