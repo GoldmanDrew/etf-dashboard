@@ -1,25 +1,25 @@
 {
-  "as_of": "2026-11-06T23:09:09.986044Z",
+  "as_of": "2026-11-07T22:10:05.444778Z",
   "program_phase": "v2_shipped_monitoring",
   "milestones": [
     {
       "id": "l0_replay_positives_20",
       "description": "Enough L0 catastrophic spikes for stable eval",
-      "current": 4,
+      "current": 6,
       "target": 20,
       "status": "blocked"
     },
     {
       "id": "l2_replay_positives_100",
       "description": "L2 relative-stress label positives for model dev gates",
-      "current": 2087,
+      "current": 2130,
       "target": 100,
       "status": "done"
     },
     {
       "id": "live_prediction_days_60",
       "description": "Daily prediction archive depth",
-      "current": 132,
+      "current": 133,
       "target": 60,
       "status": "done"
     },
@@ -33,7 +33,7 @@
     {
       "id": "l2_elevated_band_hit_rate",
       "description": "Calibrated elevated tier realized rate > 0",
-      "current": 0.181955,
+      "current": 0.182864,
       "target": 0.05,
       "status": "done"
     },
@@ -54,7 +54,7 @@
     {
       "id": "live_elevated_hit_rate_60d",
       "description": "Rolling 60d elevated/high tier L2 realized rate",
-      "current": 0.135088,
+      "current": 0.136286,
       "target": 0.05,
       "status": "done"
     }
@@ -66,22 +66,22 @@
     "trader_headline_label": "L0"
   },
   "model_comparison": {
-    "v1_l0_auroc": 0.663833,
-    "v2_l2_auroc": 0.790635,
-    "v2_auroc_delta": 0.126802,
-    "v1_l0_positives": 4,
-    "v2_l2_positives": 2087,
-    "v2_ece": 0.007273,
-    "v2_elevated_realized": 0.181955,
+    "v1_l0_auroc": 0.774151,
+    "v2_l2_auroc": 0.788867,
+    "v2_auroc_delta": 0.014716,
+    "v1_l0_positives": 6,
+    "v2_l2_positives": 2130,
+    "v2_ece": 0.00766,
+    "v2_elevated_realized": 0.182864,
     "recommendation": "Use v2 calibrated L2 for alert tiers; keep v1 L0 p_spike_5d as legacy headline."
   },
   "live_track": {
-    "n_rows": 52848,
+    "n_rows": 53075,
     "positives": 2,
-    "prediction_snapshot_days": 132
+    "prediction_snapshot_days": 133
   },
   "forecast_lane": {
-    "n_symbols": 594,
+    "n_symbols": 591,
     "method": "boosting_drift_lightgbm",
     "registry_winner": "boosting"
   },
@@ -89,24 +89,24 @@
   "live_calibration_monitor": {
     "status": "ok",
     "window_days": 60,
-    "as_of": "2026-11-06",
-    "cutoff_date": "2026-09-07",
-    "n_rows": 17384,
-    "n_elevated_tier": 1308,
-    "n_elevated_strict": 570,
-    "elevated_tier_hit_rate": 0.103976,
-    "elevated_strict_hit_rate": 0.135088,
+    "as_of": "2026-11-07",
+    "cutoff_date": "2026-09-08",
+    "n_rows": 17826,
+    "n_elevated_tier": 1374,
+    "n_elevated_strict": 587,
+    "elevated_tier_hit_rate": 0.101892,
+    "elevated_strict_hit_rate": 0.136286,
     "elevated_floor": 0.05,
     "alert": null,
     "label_column": "y_spike_l2"
   },
   "next_actions": [
-    "Unblock l0_replay_positives_20: 4 vs target 20"
+    "Unblock l0_replay_positives_20: 6 vs target 20"
   ],
   "findings_summary": {
     "best_estimate_borrow": "Combine (1) current borrow level, (2) v2 calibrated L2 stress score for spike risk, and (3) delta_borrow_5d_p50 OLS forecast for directional drift. Level/momentum features explain ~5% of forward borrow change; spike L0 remains too rare for calibrated probabilities.",
-    "spike_headline": "L0 catastrophic spikes: 4 in 84147 replay rows \u2014 use rank/decile, not raw P\u226530%.",
-    "stress_headline": "L2 relative stress: 2087 events \u2014 v2+calibration for watch/elevated/high tiers.",
+    "spike_headline": "L0 catastrophic spikes: 6 in 84199 replay rows \u2014 use rank/decile, not raw P\u226530%.",
+    "stress_headline": "L2 relative stress: 2130 events \u2014 v2+calibration for watch/elevated/high tiers.",
     "forecast_headline": "Positive delta_borrow_5d_p50 means expected increase in annual borrow fee over the next 5 IBKR/git observations. Low R\u00b2 (~5%) \u2014 use as directional stress, not point forecast.",
     "model_choice": "Use v2 calibrated L2 for alert tiers; keep v1 L0 p_spike_5d as legacy headline."
   }
