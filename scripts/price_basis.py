@@ -241,6 +241,49 @@ def find_underlying_adj_cliffs(
     return cliffs
 
 
+def underlying_split_events_needing_scale(
+    rows: list[dict[str, Any]],
+    split_events: list[tuple[dt.date, float]] | None,
+) -> list[tuple[dt.date, float]]:
+    """Declared underlying splits whose stored ``underlying_adj_close`` still jumps at the event.
+
+    Mirror of the ETF-leg rule: mechanical pre-split scaling only applies when the
+    stored series actually carries the split-sized jump. A series Yahoo already
+    restated onto the post-split basis is continuous through the event and must
+    not be scaled again (SOXX 3-for-1, 2026-11-05).
+    """
+    events = [(d, float(m)) for d, m in (split_events or []) if m and float(m) > 0]
+    if not events:
+        return []
+    pts: list[tuple[dt.date, float]] = []
+    for row in rows or []:
+        ds = str(row.get("date") or "")[:10]
+        if len(ds) != 10:
+            continue
+        try:
+            d0 = dt.date.fromisoformat(ds)
+            und = float(row.get("underlying_adj_close"))
+        except (ValueError, TypeError):
+            continue
+        if math.isfinite(und) and und > 0:
+            pts.append((d0, und))
+    pts.sort()
+    keep: list[tuple[dt.date, float]] = []
+    for eff, mult in events:
+        for i in range(1, len(pts)):
+            d_prev, u_prev = pts[i - 1]
+            d_cur, u_cur = pts[i]
+            if abs((d_cur - eff).days) > UNDERLYING_CLIFF_EVENT_WINDOW_DAYS:
+                continue
+            jump = u_cur / u_prev
+            if abs(math.log(jump)) < UNDERLYING_CLIFF_MIN_LOG:
+                continue
+            if abs(jump / mult - 1.0) <= UNDERLYING_CLIFF_MULT_REL_TOL:
+                keep.append((eff, mult))
+                break
+    return keep
+
+
 def infer_underlying_split_events_from_rows(
     rows: list[dict[str, Any]],
     declared: list[tuple[dt.date, float]] | None = None,
@@ -793,10 +836,11 @@ def build_tr_series_from_metrics(
     ctx = resolve_split_context(close_pts, split_events, metric_rows=sorted_rows, adj_by_date=adj_by_date)
     if ctx.get("mode") == "adj_basis_switch":
         ctx["_flat_close_tr"] = _adj_basis_switch_uses_flat_close(sorted_rows, ctx)
+    und_scale_events = underlying_split_events_needing_scale(sorted_rows, underlying_split_events)
     out: list[dict[str, Any]] = []
     for row in sorted_rows:
         tr_etf = etf_tr_price_for_row(row, ctx)
-        tr_und = underlying_tr_price_for_row(row, underlying_split_events)
+        tr_und = underlying_tr_price_for_row(row, und_scale_events)
         if tr_etf and tr_etf > 0 and tr_und > 0:
             out.append(
                 {
