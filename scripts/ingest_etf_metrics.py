@@ -2337,6 +2337,315 @@ def repair_pre_split_basis_etf_adj_close(
     return out, n_repaired
 
 
+UND_SPLIT_BASIS_MIN_LOG = math.log(1.8)
+UND_SPLIT_BASIS_JUMP_TOL = 0.18
+# A basis change moves the underlying print but not the ETF; a real crash moves both.
+UND_SPLIT_BASIS_MAX_ETF_SHARE = 0.35
+
+
+def _und_series_for_mask(
+    out: pd.DataFrame,
+    mask: pd.Series,
+) -> tuple[list[tuple[date, float]], dict[date, dict[str, float]]]:
+    """Shared-underlying series (one print per date) plus ETF closes per date."""
+    und_by_date: dict[date, float] = {}
+    etf_by_date: dict[date, dict[str, float]] = {}
+    has_close = "close_price" in out.columns
+    for _, row in out.loc[mask].sort_values(["date", "ticker"]).iterrows():
+        d0 = row["date"]
+        if not isinstance(d0, date):
+            continue
+        uadj = pd.to_numeric(row.get("underlying_adj_close"), errors="coerce")
+        if math.isfinite(float(uadj)) and float(uadj) > 0:
+            und_by_date.setdefault(d0, float(uadj))
+        if has_close:
+            cpx = pd.to_numeric(row.get("close_price"), errors="coerce")
+            if math.isfinite(float(cpx)) and float(cpx) > 0:
+                etf_by_date.setdefault(d0, {})[str(row["ticker"])] = float(cpx)
+    return sorted(und_by_date.items()), etf_by_date
+
+
+def _und_series_by_ticker(
+    out: pd.DataFrame,
+    mask: pd.Series,
+) -> dict[str, list[tuple[date, float]]]:
+    """Each ETF's own stored underlying series; legs of one underlying can disagree."""
+    series: dict[str, dict[date, float]] = {}
+    for _, row in out.loc[mask].iterrows():
+        d0 = row["date"]
+        if not isinstance(d0, date):
+            continue
+        uadj = pd.to_numeric(row.get("underlying_adj_close"), errors="coerce")
+        if math.isfinite(float(uadj)) and float(uadj) > 0:
+            series.setdefault(str(row["ticker"]), {})[d0] = float(uadj)
+    return {t: sorted(v.items()) for t, v in sorted(series.items())}
+
+
+def _etf_leg_calm_across(
+    etf_by_date: dict[date, dict[str, float]],
+    d_prev: date,
+    d_cur: date,
+    und_log_jump: float,
+) -> bool:
+    prev = etf_by_date.get(d_prev) or {}
+    cur = etf_by_date.get(d_cur) or {}
+    moves = [
+        abs(math.log(cur[t] / prev[t]))
+        for t in sorted(set(prev) & set(cur))
+        if prev[t] > 0 and cur[t] > 0
+    ]
+    if not moves:
+        return False
+    return float(np.median(moves)) <= UND_SPLIT_BASIS_MAX_ETF_SHARE * abs(und_log_jump)
+
+
+def und_split_basis_levels(
+    pts: list[tuple[date, float]],
+    mult: float,
+    etf_by_date: dict[date, dict[str, float]],
+) -> dict[date, int]:
+    """Split-basis level of each ``underlying_adj_close`` print for one declared split.
+
+    Walks backwards from the newest print (level 0 = latest, post-split basis). A
+    jump matching ``mult`` into a later print steps one basis back (level 1 = still
+    on the pre-split basis); its inverse steps forward again. Jumps only count when
+    the ETF leg stayed calm across them, so a real crash is never read as a basis
+    change. Levels other than 0/1 are not split-basis artifacts (e.g. LCID-style
+    garbage islands sit at level -1 for a reverse split).
+    """
+    if not pts or not (math.isfinite(mult) and mult > 0):
+        return {}
+    if abs(math.log(mult)) < UND_SPLIT_BASIS_MIN_LOG:
+        return {}
+    level = 0
+    levels: dict[date, int] = {pts[-1][0]: 0}
+    for k in range(len(pts) - 1, 0, -1):
+        d_prev, u_prev = pts[k - 1]
+        d_cur, u_cur = pts[k]
+        jump = u_cur / u_prev
+        lj = math.log(jump)
+        if abs(lj) >= UND_SPLIT_BASIS_MIN_LOG and _etf_leg_calm_across(etf_by_date, d_prev, d_cur, lj):
+            if abs(jump / mult - 1.0) <= UND_SPLIT_BASIS_JUMP_TOL:
+                level += 1
+            elif abs(jump * mult - 1.0) <= UND_SPLIT_BASIS_JUMP_TOL:
+                level -= 1
+        levels[d_prev] = level
+    return levels
+
+
+def und_pre_split_remnant_dates(
+    pts: list[tuple[date, float]],
+    eff: date,
+    mult: float,
+    etf_by_date: dict[date, dict[str, float]],
+) -> set[date]:
+    """Dates before ``eff`` whose print is still on the pre-split basis."""
+    levels = und_split_basis_levels(pts, mult, etf_by_date)
+    if any(lvl == 1 for d, lvl in levels.items() if d >= eff):
+        return set()
+    return {d for d, lvl in levels.items() if lvl == 1 and d < eff}
+
+
+def _und_split_restate_window_days() -> int:
+    return int(os.getenv("ETF_METRICS_UND_SPLIT_RESTATE_DAYS", "30"))
+
+
+def _und_split_events_to_normalize(
+    series: list[list[tuple[date, float]]],
+    declared: list[tuple[date, float]],
+    as_of: date,
+    window_days: int,
+) -> list[tuple[date, float]]:
+    """Declared splits whose stored prints need basis normalization.
+
+    All of them when any ETF's stored series has split-sized cliffs no declared
+    split explains (mixed basis); otherwise only splits young enough that Yahoo's
+    restatement may not have been folded into the store yet.
+    """
+    from price_basis import find_underlying_adj_cliffs
+
+    live = [(eff, m) for eff, m in declared if eff <= as_of]
+    if not live:
+        return []
+    if any(
+        find_underlying_adj_cliffs([{"date": d, "underlying_adj_close": px} for d, px in pts], live)
+        for pts in series
+    ):
+        return live
+    return [(eff, m) for eff, m in live if (as_of - eff).days <= window_days]
+
+
+def _scale_und_pre_split_remnants(
+    out: pd.DataFrame,
+    mask: pd.Series,
+    und_sym: str,
+    declared: list[tuple[date, float]],
+    as_of: date | None = None,
+) -> tuple[set[tuple[date, float]], int]:
+    """Scale pre-split-basis remnants by the exact declared factor (newest split first)."""
+    handled: set[tuple[date, float]] = set()
+    n_scaled = 0
+    by_ticker = _und_series_by_ticker(out, mask)
+    if not by_ticker:
+        return handled, 0
+    ref = as_of or max(pts[-1][0] for pts in by_ticker.values())
+    eligible = _und_split_events_to_normalize(
+        list(by_ticker.values()), declared, ref, _und_split_restate_window_days()
+    )
+    if not eligible:
+        return handled, 0
+    _pts, etf_by_date = _und_series_for_mask(out, mask)
+    for eff, mult in sorted(eligible, reverse=True):
+        rows_scaled = 0
+        sessions: set[date] = set()
+        for ticker, pts in _und_series_by_ticker(out, mask).items():
+            remnants = und_pre_split_remnant_dates(pts, eff, mult, etf_by_date)
+            if not remnants:
+                continue
+            sessions |= remnants
+            for ix in out.index[mask & (out["ticker"] == ticker) & out["date"].isin(remnants)]:
+                uadj = pd.to_numeric(out.at[ix, "underlying_adj_close"], errors="coerce")
+                if math.isfinite(float(uadj)) and float(uadj) > 0:
+                    out.at[ix, "underlying_adj_close"] = float(uadj) * float(mult)
+                    rows_scaled += 1
+        if not rows_scaled:
+            continue
+        handled.add((eff, mult))
+        n_scaled += rows_scaled
+        LOGGER.warning(
+            "scaled %d pre-split-basis underlying_adj_close row(s) for %s by declared "
+            "x%g split of %s (%d session(s), %s..%s)",
+            rows_scaled,
+            und_sym,
+            mult,
+            eff,
+            len(sessions),
+            min(sessions),
+            max(sessions),
+        )
+    return handled, n_scaled
+
+
+def restate_underlying_adj_close_after_split(
+    df: pd.DataFrame,
+    etf_to_underlying: dict[str, str],
+    *,
+    corporate_actions_path: Path | None = None,
+    as_of: date | None = None,
+    restate_window_days: int | None = None,
+    fetcher=None,
+) -> tuple[pd.DataFrame, int]:
+    """Re-pull pre-split ``underlying_adj_close`` from Yahoo after an underlying split.
+
+    Yahoo restates the whole history onto the post-split basis, but the store holds
+    prints fetched day by day before that restatement. Mixing the two leaves
+    split-sized cliffs that no heuristic can place reliably (SOXX 3-for-1,
+    2026-11-05). Runs for splits inside the restatement window, or whenever the
+    store has split-sized cliffs no declared split explains. The fresh pull is only
+    used when it is itself free of split-sized cliffs; otherwise the store is left
+    for the exact-factor repair and the cliff audit.
+    """
+    if df.empty or "underlying_adj_close" not in df.columns or not etf_to_underlying:
+        return df, 0
+    from price_basis import find_underlying_adj_cliffs
+
+    fetch = fetcher or fetch_underlying_adj_close_batch
+    window = (
+        restate_window_days
+        if restate_window_days is not None
+        else _und_split_restate_window_days()
+    )
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    ref = as_of or out["date"].dropna().max()
+    if not isinstance(ref, date):
+        return df, 0
+
+    und_to_etfs: dict[str, set[str]] = {}
+    for etf, und in etf_to_underlying.items():
+        u = _normalize_symbol(und) if und is not None and str(und).strip() else ""
+        if u:
+            und_to_etfs.setdefault(u, set()).add(_normalize_symbol(etf))
+
+    n_restated = 0
+    for und_sym in sorted(und_to_etfs):
+        declared = [
+            (eff, mult)
+            for eff, mult in load_split_execution_events_for_ticker(und_sym, corporate_actions_path)
+            if eff <= ref
+        ]
+        if not declared:
+            continue
+        mask = out["ticker"].isin(und_to_etfs[und_sym])
+        if not bool(mask.any()):
+            continue
+        triggers = _und_split_events_to_normalize(
+            list(_und_series_by_ticker(out, mask).values()), declared, ref, window
+        )
+        if not triggers:
+            continue
+        boundary = max(eff for eff, _m in triggers)
+        sub_idx = out.index[mask & out["date"].notna() & (out["date"] < boundary)]
+        if len(sub_idx) == 0:
+            continue
+        d_min = min(out.loc[sub_idx, "date"])
+        fresh = fetch([und_sym], d_min, ref)
+        if fresh is None or fresh.empty:
+            LOGGER.warning(
+                "underlying split restatement for %s (split %s): Yahoo pull empty; "
+                "leaving store for exact-factor repair",
+                und_sym,
+                boundary,
+            )
+            continue
+        fresh = fresh.copy()
+        fresh["date"] = pd.to_datetime(fresh["date"], errors="coerce").dt.date
+        fresh["ticker"] = fresh["ticker"].astype(str).map(_normalize_symbol)
+        fresh = fresh[fresh["ticker"] == und_sym].drop_duplicates("date", keep="last")
+        fresh_rows = [
+            {"date": d, "underlying_adj_close": px}
+            for d, px in zip(fresh["date"], pd.to_numeric(fresh["underlying_adj_close"], errors="coerce"))
+            if isinstance(d, date) and math.isfinite(float(px)) and float(px) > 0
+        ]
+        if not fresh_rows or not any(r["date"] < boundary for r in fresh_rows):
+            continue
+        fresh_cliffs = find_underlying_adj_cliffs(fresh_rows, [])
+        if fresh_cliffs:
+            LOGGER.warning(
+                "underlying split restatement for %s (split %s): Yahoo pull has its own "
+                "split-sized cliff(s) %s; not restating",
+                und_sym,
+                boundary,
+                ", ".join(str(c["date"]) for c in fresh_cliffs[:3]),
+            )
+            continue
+        fresh_px = {r["date"]: float(r["underlying_adj_close"]) for r in fresh_rows}
+        session = yahoo_join_dates_series(
+            out.loc[sub_idx, "date"],
+            out.loc[sub_idx, "source_url"] if "source_url" in out.columns else None,
+        )
+        n_und = 0
+        for ix, sd in session.items():
+            px = fresh_px.get(sd)
+            if px is None:
+                continue
+            old = pd.to_numeric(out.at[ix, "underlying_adj_close"], errors="coerce")
+            if not math.isfinite(float(old)) or abs(float(old) - px) > 1e-6 * max(1.0, px):
+                out.at[ix, "underlying_adj_close"] = px
+                n_und += 1
+        if n_und:
+            LOGGER.warning(
+                "restated %d pre-split underlying_adj_close row(s) for %s from Yahoo "
+                "after declared split %s",
+                n_und,
+                und_sym,
+                boundary,
+            )
+        n_restated += n_und
+    return out, n_restated
+
+
 def repair_underlying_adj_close_reverting_islands(
     df: pd.DataFrame,
     etf_to_underlying: dict[str, str],
@@ -2345,6 +2654,7 @@ def repair_underlying_adj_close_reverting_islands(
     max_island_days: int = 40,
     flank_rel_tol: float = 0.30,
     max_etf_log_jump: float = 0.20,
+    corporate_actions_path: Path | None = None,
 ) -> tuple[pd.DataFrame, int]:
     """Null/rescale multi-day Yahoo ``underlying_adj_close`` garbage islands.
 
@@ -2392,6 +2702,33 @@ def repair_underlying_adj_close_reverting_islands(
 
         unds = [meta["und"] for _, meta in pts]
         dates = [d for d, _ in pts]
+        # Pre-split-basis segments look exactly like reverting islands, but flank
+        # rescaling would overwrite real moves; they belong to the exact-factor repair.
+        declared = load_split_execution_events_for_ticker(und_sym, corporate_actions_path)
+        basis_levels: list[tuple[date, dict[date, int]]] = []
+        if declared:
+            und_pts, etf_by_date = _und_series_for_mask(out, mask)
+            for eff, mult in declared:
+                levels = und_split_basis_levels(und_pts, mult, etf_by_date)
+                if levels:
+                    basis_levels.append((eff, levels))
+
+        def _is_split_basis_segment(start: int, end: int) -> bool:
+            for eff, levels in basis_levels:
+                l_flank = levels.get(dates[start - 1])
+                l_seg = {levels.get(dates[k]) for k in range(start, end + 1)}
+                if len(l_seg) != 1:
+                    continue
+                (l_isl,) = l_seg
+                if l_flank not in (0, 1) or l_isl not in (0, 1) or l_isl == l_flank:
+                    continue
+                pre_dates = (
+                    [dates[k] for k in range(start, end + 1)] if l_isl == 1 else [dates[start - 1]]
+                )
+                if all(d < eff for d in pre_dates):
+                    return True
+            return False
+
         i = 1
         while i < len(pts):
             u_prev, u_cur = unds[i - 1], unds[i]
@@ -2416,6 +2753,9 @@ def repair_underlying_adj_close_reverting_islands(
                     island_end = j - 1  # last elevated day is j-1
                     break
             if island_end is None or island_end < i:
+                i += 1
+                continue
+            if _is_split_basis_segment(i, island_end):
                 i += 1
                 continue
 
@@ -2482,6 +2822,7 @@ def repair_underlying_adj_close_split_basis(
     etf_to_underlying: dict[str, str],
     *,
     corporate_actions_path: Path | None = None,
+    as_of: date | None = None,
 ) -> tuple[pd.DataFrame, int]:
     """Scale pre-split ``underlying_adj_close`` onto the latest basis per underlying.
 
@@ -2510,6 +2851,15 @@ def repair_underlying_adj_close_split_basis(
         mask = out["ticker"].isin(etf_syms)
         if not bool(mask.any()):
             continue
+
+        if declared:
+            handled, n_exact = _scale_und_pre_split_remnants(
+                out, mask, und_sym, declared, as_of=as_of,
+            )
+            n_scaled += n_exact
+            declared = [ev for ev in declared if ev not in handled]
+            if handled and not declared:
+                continue
 
         by_date: dict[date, float] = {}
         for _, row in out.loc[mask].sort_values("date").iterrows():
@@ -4052,6 +4402,11 @@ def main() -> None:
     # Must run on full merged history: ``incoming`` is usually one trading day,
     # so an earlier backfill never saw legacy null rows in the parquet store.
     merged = backfill_underlying_adj_close_gaps(merged, underlying_map)
+    merged, n_und_restated = restate_underlying_adj_close_after_split(
+        merged, underlying_map, as_of=resolved_end_date,
+    )
+    if n_und_restated:
+        LOGGER.info("Restated pre-split underlying_adj_close on %d row(s)", n_und_restated)
     n_und_island_total = 0
     for _pass in range(5):
         merged, n_und_island = repair_underlying_adj_close_reverting_islands(merged, underlying_map)
@@ -4060,7 +4415,9 @@ def main() -> None:
             break
     if n_und_island_total:
         LOGGER.info("Repaired reverting underlying_adj_close islands on %d row(s)", n_und_island_total)
-    merged, n_und_split = repair_underlying_adj_close_split_basis(merged, underlying_map)
+    merged, n_und_split = repair_underlying_adj_close_split_basis(
+        merged, underlying_map, as_of=resolved_end_date,
+    )
     if n_und_split:
         LOGGER.info("Repaired underlying_adj_close split basis on %d row(s)", n_und_split)
     merged, n_und_spike = repair_underlying_adj_close_orphan_spikes(merged, underlying_map)
