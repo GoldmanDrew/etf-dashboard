@@ -407,3 +407,31 @@ test("continuous-close forward split still yields an adj basis switch remap", ()
   const out = PB.detectAdjBasisSwitchSplits(points, events);
   assert.ok(out.length > 0, "continuous close must still produce a remap variant");
 });
+
+test("SOXX 3-for-1: restated underlying is not double-scaled in TR", () => {
+  const dates = [
+    "2026-03-05", "2026-03-06", "2026-03-09", "2026-11-03",
+    "2026-11-04", "2026-11-05", "2026-11-06",
+  ];
+  let und = 109.0;
+  let etf = 54.0;
+  const rows = dates.map((date, i) => {
+    const step = i % 2 === 0 ? 0.004 : -0.003;
+    und *= 1 + step;
+    etf *= 1 + 3 * step;
+    return { date, close_price: etf, etf_adj_close: etf, underlying_adj_close: und };
+  });
+  const events = [{ date: "2026-11-05", mult: 1 / 3 }];
+  assert.deepEqual(PB.underlyingSplitEventsNeedingScale(rows, events), []);
+  const tr = PB.buildTrSeriesFromMetrics(rows, [], events);
+  assert.equal(tr.length, rows.length);
+  for (let i = 1; i < tr.length; i++) {
+    assert.ok(Math.abs(Math.log(tr[i].trUndPx / tr[i - 1].trUndPx)) < 0.05, tr[i].date);
+  }
+
+  const raw = rows.map((r) => ({
+    ...r,
+    underlying_adj_close: r.date < "2026-11-05" ? r.underlying_adj_close * 3 : r.underlying_adj_close,
+  }));
+  assert.equal(PB.underlyingSplitEventsNeedingScale(raw, events).length, 1);
+});
