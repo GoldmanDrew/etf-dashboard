@@ -926,6 +926,32 @@
     return cliffs;
   }
 
+  // Mirror of price_basis.underlying_split_events_needing_scale: only scale the
+  // underlying leg for a declared split when the stored series still jumps there.
+  function underlyingSplitEventsNeedingScale(rows, splitEvents) {
+    const events = Array.isArray(splitEvents) ? splitEvents : [];
+    if (!events.length) return [];
+    const pts = (Array.isArray(rows) ? rows : [])
+      .map((row) => ({
+        date: parseDate(row && row.date),
+        und: toNum(row && row.underlying_adj_close),
+      }))
+      .filter((p) => p.date && p.und > 0)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    return events.filter((ev) => {
+      const effDate = parseDate(ev && ev.date);
+      const mult = toNum(ev && ev.mult);
+      if (!effDate || !(mult > 0)) return false;
+      for (let i = 1; i < pts.length; i += 1) {
+        if (daysBetween(pts[i].date, effDate) > UNDERLYING_CLIFF_EVENT_WINDOW_DAYS) continue;
+        const jump = pts[i].und / pts[i - 1].und;
+        if (Math.abs(Math.log(jump)) < UNDERLYING_CLIFF_MIN_LOG) continue;
+        if (Math.abs(jump / mult - 1) <= UNDERLYING_CLIFF_MULT_REL_TOL) return true;
+      }
+      return false;
+    });
+  }
+
   function cumSplitFactorToLatest(rowDate, events) {
     const d = parseDate(rowDate);
     if (!d || !Array.isArray(events) || !events.length) return 1;
@@ -1206,9 +1232,10 @@
     if (ctx.mode === "adj_basis_switch") {
       ctx._flatCloseTr = adjBasisSwitchUsesFlatClose(sorted, ctx);
     }
+    const undScaleEvents = underlyingSplitEventsNeedingScale(sorted, undEvents);
     const built = points.map((p, index) => {
       const trEtfPx = etfTrPriceForPoint(p, ctx);
-      const trUndPx = underlyingTrPriceForPoint(p, undEvents);
+      const trUndPx = underlyingTrPriceForPoint(p, undScaleEvents);
       const tradeClose = sanitizedTradeClose(points, index, etfEvents);
       return {
         date: p.date,
@@ -1401,6 +1428,7 @@
     normalizeUnderlyingSplitSizedBasisJumps,
     findFabricatedAdjCliffs,
     findUnderlyingAdjCliffs,
+    underlyingSplitEventsNeedingScale,
     underlyingTrPriceForPoint,
     cumSplitFactorToLatest,
     scaleMetricsSeriesToLatestShareBasis,
