@@ -1,6 +1,6 @@
 {
   "schema_v": 1,
-  "build_time": "2026-11-13T20:35:17.475603Z",
+  "build_time": "2026-11-13T23:44:54.999897Z",
   "mode": "sweep",
   "task": null,
   "verdict": "warn",
@@ -8,7 +8,7 @@
     "checked_files": 10,
     "block": 0,
     "quarantine": 0,
-    "warn": 1
+    "warn": 2
   },
   "checked": [
     "data/dashboard_data.json",
@@ -29,6 +29,14 @@
       "artifact": "data/underlying_intraday_spot.json",
       "detail": "863/864 symbols have no metrics row for the previous session 2026-11-12 (worst AAL 1d behind); their return was correctly withheld, but the metrics tail for them is not advancing",
       "observed": 863
+    },
+    {
+      "severity": "warn",
+      "code": "artifact_stale",
+      "artifact": "data/letf_rebalance_flows_intraday_latest.json",
+      "detail": "build_time 2026-11-12T22:43:08.429548Z is 25.0 market-hours old (max 24h)",
+      "observed": 25.0,
+      "threshold": 24
     }
   ]
 }
